@@ -14,7 +14,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AxAIService } from '@ax-llm/ax'
-import { buildDefaultAnalystRegistry } from '@tangle-network/agent-eval/analyst'
+import { type AnalystRegistry, buildDefaultAnalystRegistry } from '@tangle-network/agent-eval/analyst'
 import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans } from './otlp.js'
@@ -25,6 +25,13 @@ export interface AnalyzeOptions {
   model?: string
   /** USD cap across agentic analysts. */
   budgetUsd?: number
+  /**
+   * Bring your own analyst suite. When set, this registry runs over the trace
+   * store INSTEAD of the built-in deterministic suite — the seam for running
+   * your own agents/detectors over sessions. Register custom `Analyst`s with
+   * `@tangle-network/agent-eval`'s `AnalystRegistry`.
+   */
+  registry?: AnalystRegistry
   /** Where to write the OTLP-JSONL artifact. Defaults to a temp file. */
   otlpOutPath?: string
   runId?: string
@@ -39,7 +46,7 @@ export interface AnalyzeResult {
 
 /** Write spans to an OTLP-JSONL file and return its path. */
 export async function writeOtlp(spans: readonly OtlpSpan[], outPath?: string): Promise<string> {
-  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'cli-bridge-traces-')), 'spans.otlp.jsonl')
+  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'traces-')), 'spans.otlp.jsonl')
   await writeFile(path, serializeSpans(spans), 'utf8')
   return path
 }
@@ -56,13 +63,14 @@ const DETERMINISTIC_VIEW_CEILING = 256 * 1024 * 1024
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   const otlpPath = await writeOtlp(spans, opts.otlpOutPath)
-  const runId = opts.runId ?? `cli-bridge-${Date.now()}`
+  const runId = opts.runId ?? `traces-${Date.now()}`
 
-  // Deterministic pass — high ceiling so the behavioral analyst sees the
-  // whole trace. No LLM context to protect here.
+  // Deterministic pass — high ceiling so the behavioral analyst sees the whole
+  // trace. No LLM context to protect here. A caller-supplied registry (custom
+  // analysts / their own agents) runs here instead of the built-in suite.
   const detStore = new OtlpFileTraceStore({ path: otlpPath, perCallByteCeiling: DETERMINISTIC_VIEW_CEILING })
   await detStore.ensureIndexed()
-  const detRegistry = buildDefaultAnalystRegistry({ registry: { log: opts.log } })
+  const detRegistry = opts.registry ?? buildDefaultAnalystRegistry({ registry: { log: opts.log } })
   const result = await detRegistry.run(runId, { traceStore: detStore })
 
   // Agentic pass — default ceiling so each tool call stays context-bounded;

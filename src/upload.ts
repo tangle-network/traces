@@ -16,7 +16,7 @@ import { createRequire } from 'node:module'
 import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
 import { hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
-import type { HostedClient, TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
+import type { TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
 import { REDACTION_VERSION } from '@tangle-network/agent-eval/traces'
 import type { RedactionReport } from '@tangle-network/agent-eval/traces'
 import type { OtlpSpan } from './otlp.js'
@@ -168,10 +168,18 @@ export interface UploadResult {
   otlpPath?: string
 }
 
+/** A trace sink. The hosted client satisfies this; pass your own to route
+ *  redacted+deduped traces into a different system. */
+export interface UploadBackend {
+  ingestTraces(spans: TraceSpanEvent[], idempotencyKey?: string): Promise<{ accepted: number }>
+}
+
 export interface ExecuteOptions {
   dryRun?: boolean
   /** Where to write the redacted OTLP-JSONL on a dry run. */
   otlpOut?: string
+  /** Custom sink. Defaults to the hosted Tangle Intelligence client from env. */
+  backend?: UploadBackend
   log?: (msg: string) => void
 }
 
@@ -195,11 +203,12 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
     }
   }
 
-  const client: HostedClient | undefined = hostedClientFromEnv()
+  const client: UploadBackend | undefined = opts.backend ?? hostedClientFromEnv()
   if (!client) {
     throw new Error(
-      'upload: Tangle Intelligence Platform is not configured. Set TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), ' +
-        'TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), and TANGLE_TENANT_ID. Use --dry-run to preview without uploading.',
+      'upload: no backend. Pass opts.backend, or configure the hosted Tangle Intelligence client via ' +
+        'TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), and ' +
+        'TANGLE_TENANT_ID. Use --dry-run to preview without uploading.',
     )
   }
 

@@ -18,6 +18,7 @@ import { stat, writeFile } from 'node:fs/promises'
 import { analyzeSpans, writeOtlp } from './analyze.js'
 import type { OtlpSpan } from './otlp.js'
 import { runPipelines } from './pipelines.js'
+import { watchSessions } from './observer.js'
 import { knownHarnesses, listAdapters, resolveAdapter } from './registry.js'
 import { renderPipelines, renderReport } from './report.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -207,57 +208,31 @@ async function cmdAnalyze(args: Args): Promise<void> {
   }
 }
 
-/** A loop signal worth alerting on — keyed so we only notify on growth. */
-function loopKey(sessionId: string, toolName: string, argHash: string): string {
-  return `${sessionId}|${toolName}|${argHash}`
-}
-
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
-
 async function cmdWatch(args: Args): Promise<void> {
-  if (!args.all && !args.cwd) args.all = true // default: observe everything active
-  const seen = new Map<string, number>() // loopKey → max occurrences alerted
-  const intervalMs = Math.max(1, args.interval) * 1000
+  const all = args.all || (!args.harnessExplicit && !args.cwd)
+  const controller = new AbortController()
+  process.once('SIGINT', () => controller.abort())
   process.stderr.write(
-    `traces watch — observing ${args.all ? 'all harnesses' : args.harness}, ` +
+    `traces watch — observing ${all ? 'all harnesses' : args.harness}, ` +
       `sessions active in the last ${args.window}m, every ${args.interval}s. Read-only; Ctrl-C to stop.\n`,
   )
-
-  for (;;) {
-    const sinceMs = Date.now() - args.window * 60_000
-    for (const adapter of adaptersFor(args)) {
-      let refs: SessionRef[]
-      try {
-        refs = await adapter.locate({ cwd: args.cwd, sinceMs })
-      } catch {
-        continue
-      }
-      for (const ref of refs) {
-        let report: Awaited<ReturnType<typeof runPipelines>>
-        try {
-          const spans = await adapter.parse(ref)
-          if (spans.length === 0) continue
-          report = await runPipelines(spans, { minLoopOccurrences: args.minLoop })
-        } catch {
-          continue
-        }
-        for (const f of report.stuckLoops.findings) {
-          const key = loopKey(ref.sessionId, f.toolName, f.argHash)
-          const prior = seen.get(key) ?? 0
-          if (f.occurrences > prior) {
-            seen.set(key, f.occurrences)
-            const ts = new Date().toISOString().slice(11, 19)
-            process.stdout.write(
-              `⚠️  ${ts} [${adapter.harness}] ${ref.sessionId.slice(0, 8)} — ` +
-                `\`${f.toolName}\` repeated ×${f.occurrences} with identical args ` +
-                `(${(f.windowMs / 1000).toFixed(0)}s)${ref.cwd ? ` · ${ref.cwd}` : ''}\n`,
-            )
-          }
-        }
-      }
-    }
-    await sleep(intervalMs)
-  }
+  await watchSessions({
+    all,
+    harnesses: all ? undefined : [args.harness],
+    cwd: args.cwd,
+    windowMs: args.window * 60_000,
+    intervalMs: args.interval * 1000,
+    minLoopOccurrences: args.minLoop,
+    signal: controller.signal,
+    onLoop: (l) => {
+      const ts = new Date().toISOString().slice(11, 19)
+      process.stdout.write(
+        `⚠️  ${ts} [${l.harness}] ${l.sessionId.slice(0, 8)} — ` +
+          `\`${l.toolName}\` repeated ×${l.occurrences} with identical args ` +
+          `(${(l.windowMs / 1000).toFixed(0)}s)${l.cwd ? ` · ${l.cwd}` : ''}\n`,
+      )
+    },
+  })
 }
 
 async function cmdUpload(args: Args): Promise<void> {

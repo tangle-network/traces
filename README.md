@@ -45,6 +45,9 @@ traces analyze  --harness codex --last 1             # $0 deterministic report
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only → HALO
 traces analyze  --harness claude-code --last 1 --llm  # +agentic (needs OPENAI_API_KEY)
+traces watch    --all                                 # live observer: notify on stuck loops (read-only)
+traces upload   --since 1h --dry-run                  # redact + dedup + preview, no network
+traces upload   --since 24h                           # upload last day to the Intelligence Platform
 ```
 
 ### Options
@@ -56,11 +59,69 @@ traces analyze  --harness claude-code --last 1 --llm  # +agentic (needs OPENAI_A
 | `--last <n>` | Most-recent N sessions |
 | `--session <path>` | Analyze one explicit session file |
 | `--cwd <dir>` | Filter sessions by working directory |
-| `--since <iso>` | Only sessions modified since this time |
+| `--since <t>` | `upload`: window — `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write report to a file |
-| `--otlp <path>` | OTLP artifact path |
+| `--otlp <path>` | OTLP artifact path (also the dry-run upload preview) |
 | `--llm` | Enable agentic RLM analysts (needs `OPENAI_API_KEY`) |
 | `--budget <usd>` | USD cap for agentic analysts |
+| `--dry-run` | `upload`: redact + dedup + preview, do not send |
+| `--yes`, `-y` | `upload`: skip the confirmation prompt |
+| `--interval <s>` / `--window <m>` | `watch`: poll interval / active-session window |
+| `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
+
+**Upload** redacts PII/secrets *before anything leaves the machine*, dedups against already-uploaded sessions, and tags each session with metadata (harness, cwd, git branch, host). It needs the platform env: `TANGLE_INGEST_URL` (or `TANGLE_ORCHESTRATOR_URL`), `TANGLE_INGEST_API_KEY` (or `TANGLE_API_KEY`), `TANGLE_TENANT_ID`. Without them, `--dry-run` still works fully.
+
+## Use as a library
+
+The CLI is a thin layer over an exported SDK — build your own tooling on top:
+
+```ts
+import {
+  watchSessions, collectSessions, analyzeSpans, executeUpload,
+  AnalystRegistry, makeFinding, listAdapters,
+} from '@tangle-network/traces'
+```
+
+**Observe live sessions** and feed findings into your own system (read-only, cancellable):
+
+```ts
+const controller = new AbortController()
+await watchSessions({
+  all: true,
+  signal: controller.signal,
+  onLoop: (loop) => alertSlack(`stuck loop: ${loop.toolName} ×${loop.occurrences} in ${loop.sessionId}`),
+  onReport: (ref, report) => metrics.record(ref.harness, report.toolUse),
+})
+```
+
+**Run your OWN analysts** (any agent/detector) instead of the built-ins — register against the
+[`@tangle-network/agent-eval`](https://www.npmjs.com/package/@tangle-network/agent-eval) `AnalystRegistry`:
+
+```ts
+const registry = new AnalystRegistry()
+registry.register({
+  id: 'my-detector', description: '…', inputKind: 'trace-store',
+  cost: { kind: 'deterministic' }, version: '1.0.0',
+  async analyze(store, ctx) { /* your logic */ return [makeFinding({ /* … */ })] },
+})
+const { result } = await analyzeSpans(spans, { registry })
+```
+
+**Collect redacted batches** to feed a vector store / fine-tune corpus / another pipeline:
+
+```ts
+const batches = await collectSessions({ all: true, sinceMs: Date.now() - 3_600_000 })
+//        → [{ ref, spans /* redacted */, redaction }]
+```
+
+**Upload to your own backend** (anything implementing `ingestTraces`), not just Tangle:
+
+```ts
+await executeUpload(plan, { backend: { async ingestTraces(spans, key) { /* POST anywhere */ return { accepted: spans.length } } } })
+```
+
+**Register a new harness** — implement `HarnessTraceAdapter` (`locate` + `parse`) and pass it via
+`adapters: [...]` to `watchSessions`/`collectSessions`, or drop a file in `src/adapters/`.
 
 ## Develop
 
@@ -69,5 +130,5 @@ pnpm install
 pnpm dev analyze --harness claude-code --last 1   # run from source via tsx
 pnpm test
 pnpm typecheck
-pnpm build        # → dist/cli.js (the published bin)
+pnpm build        # → dist/index.js (SDK) + dist/cli.js (bin) + .d.ts
 ```
