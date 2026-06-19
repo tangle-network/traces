@@ -10,14 +10,11 @@
  * (`halo <file> -p "diagnose"`), so analysis is never locked to one engine.
  */
 
-import { mkdtemp, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import type { AxAIService } from '@ax-llm/ax'
 import { type AnalystRegistry, buildDefaultAnalystRegistry } from '@tangle-network/agent-eval/analyst'
 import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
 import type { OtlpSpan } from './otlp.js'
-import { serializeSpans } from './otlp.js'
+import { writeOtlpFile } from './otlp.js'
 
 export interface AnalyzeOptions {
   /** Ax service enabling the agentic RLM kinds. Omit → deterministic only. */
@@ -44,13 +41,6 @@ export interface AnalyzeResult {
   result: Awaited<ReturnType<ReturnType<typeof buildDefaultAnalystRegistry>['run']>>
 }
 
-/** Write spans to an OTLP-JSONL file and return its path. */
-export async function writeOtlp(spans: readonly OtlpSpan[], outPath?: string): Promise<string> {
-  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'traces-')), 'spans.otlp.jsonl')
-  await writeFile(path, serializeSpans(spans), 'utf8')
-  return path
-}
-
 /**
  * `viewTrace` ceiling for the deterministic pass. The default 150KB cap
  * exists to protect an LLM's context window — the deterministic behavioral
@@ -62,7 +52,7 @@ const DETERMINISTIC_VIEW_CEILING = 256 * 1024 * 1024
 
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
-  const otlpPath = await writeOtlp(spans, opts.otlpOutPath)
+  const otlpPath = await writeOtlpFile(spans, opts.otlpOutPath)
   const runId = opts.runId ?? `traces-${Date.now()}`
 
   // Deterministic pass — high ceiling so the behavioral analyst sees the whole

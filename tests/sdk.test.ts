@@ -72,6 +72,22 @@ describe('watchSessions (observer event API)', () => {
     expect(loops[0]!.toolName).toBe('bash')
     expect(loops[0]!.occurrences).toBeGreaterThanOrEqual(3)
   })
+
+  it('routes a throwing onLoop to onError instead of crashing the loop', async () => {
+    const controller = new AbortController()
+    const errors: unknown[] = []
+    await watchSessions({
+      adapters: [adapterOf(loopSpans(4))],
+      intervalMs: 250,
+      minLoopOccurrences: 3,
+      signal: controller.signal,
+      onLoop: () => { throw new Error('boom') },
+      onError: (e) => errors.push(e),
+      onTick: () => controller.abort(),
+    })
+    expect(errors).toHaveLength(1)
+    expect((errors[0] as Error).message).toBe('boom')
+  })
 })
 
 describe('collectSessions (batch seam)', () => {

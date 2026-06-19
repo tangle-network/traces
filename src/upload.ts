@@ -49,6 +49,8 @@ export interface PlanOptions {
   all?: boolean
   cwd?: string
   sinceMs?: number
+  /** Called on a per-adapter locate/parse failure (planning continues). */
+  onError?: (error: unknown, ref?: SessionRef) => void
 }
 
 function adaptersFor(opts: PlanOptions): HarnessTraceAdapter[] {
@@ -66,14 +68,16 @@ export async function planUpload(opts: PlanOptions): Promise<UploadPlan> {
     let refs: SessionRef[]
     try {
       refs = await adapter.locate({ cwd: opts.cwd, sinceMs: opts.sinceMs })
-    } catch {
+    } catch (err) {
+      opts.onError?.(err)
       continue
     }
     for (const ref of refs) {
       let raw: OtlpSpan[]
       try {
         raw = await adapter.parse(ref)
-      } catch {
+      } catch (err) {
+        opts.onError?.(err, ref)
         continue
       }
       if (raw.length === 0) continue
@@ -128,6 +132,10 @@ function epochMs(ts: string): number {
   return Number.isNaN(n) ? 0 : n
 }
 
+// TraceSpanEvent.*UnixNano is typed `number`, and our source resolution is
+// milliseconds. ms × 1e6 exceeds MAX_SAFE_INTEGER, so the low ~256ns are not
+// representable — but that's below our input resolution, and since both ends
+// are integer-ms × 1e6 the rounding preserves ordering (start ≤ end always).
 const msToNano = (iso: string): number => epochMs(iso) * 1_000_000
 
 /** Map redacted OtlpSpan[] → the hosted TraceSpanEvent[] wire shape, attaching

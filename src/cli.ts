@@ -15,10 +15,11 @@
  */
 
 import { stat, writeFile } from 'node:fs/promises'
-import { analyzeSpans, writeOtlp } from './analyze.js'
+import { analyzeSpans } from './analyze.js'
 import type { OtlpSpan } from './otlp.js'
-import { runPipelines } from './pipelines.js'
+import { writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
+import { runPipelines } from './pipelines.js'
 import { knownHarnesses, listAdapters, resolveAdapter } from './registry.js'
 import { renderPipelines, renderReport } from './report.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -184,7 +185,7 @@ async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: s
 async function cmdConvert(args: Args): Promise<void> {
   const { spans } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const path = await writeOtlp(spans, args.otlp)
+  const path = await writeOtlpFile(spans, args.otlp)
   console.log(`wrote ${spans.length} spans → ${path}`)
 }
 

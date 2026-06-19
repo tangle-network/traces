@@ -27,6 +27,8 @@ export interface CollectOptions {
   last?: number
   /** Redact PII/secrets (default true). Set false to get raw spans. */
   redact?: boolean
+  /** Called on a per-adapter locate/parse failure (collection continues). */
+  onError?: (error: unknown, ref?: SessionRef) => void
 }
 
 export interface SessionBatch {
@@ -54,7 +56,8 @@ export async function collectSessions(opts: CollectOptions = {}): Promise<Sessio
     let refs: SessionRef[]
     try {
       refs = await adapter.locate({ cwd: opts.cwd, sinceMs: opts.sinceMs })
-    } catch {
+    } catch (err) {
+      opts.onError?.(err)
       continue
     }
     if (opts.last && opts.last > 0) refs = refs.slice(0, opts.last)
@@ -62,7 +65,8 @@ export async function collectSessions(opts: CollectOptions = {}): Promise<Sessio
       let spans: OtlpSpan[]
       try {
         spans = await adapter.parse(ref)
-      } catch {
+      } catch (err) {
+        opts.onError?.(err, ref)
         continue
       }
       if (spans.length === 0) continue

@@ -102,7 +102,7 @@ export async function writeOtlpFile(spans: readonly OtlpSpan[], outPath?: string
   const { mkdtemp, writeFile } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
-  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'tangle-traces-')), 'spans.otlp.jsonl')
+  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'traces-')), 'spans.otlp.jsonl')
   await writeFile(path, serializeSpans(spans), 'utf8')
   return path
 }
