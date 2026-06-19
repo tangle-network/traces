@@ -150,6 +150,10 @@ export function toTraceSpanEvents(
       if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') attributes[k] = v
       else if (v != null) attributes[k] = JSON.stringify(v)
     }
+    // Session identity (= the trace id) + provenance on every span, so the
+    // platform can dedup a CLI re-upload of a session that also streamed live.
+    attributes['tangle.sessionId'] = s.trace_id
+    attributes['tangle.ingest_source'] = 'cli'
     if (s.parent_span_id === null) Object.assign(attributes, rootMeta)
     const startNano = msToNano(s.start_time)
     return {

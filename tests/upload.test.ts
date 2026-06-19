@@ -52,6 +52,11 @@ describe('toTraceSpanEvents', () => {
     expect(t.attributes['tangle.harness']).toBeUndefined()
     expect(t.parentSpanId).toBe('root')
     expect(t.attributes['tool.name']).toBe('bash')
+    // every span carries session id (= trace id) + provenance for server dedup
+    for (const e of events) {
+      expect(e.attributes['tangle.sessionId']).toBe('t')
+      expect(e.attributes['tangle.ingest_source']).toBe('cli')
+    }
   })
 })
 
