@@ -4,6 +4,7 @@
   "description": "Point it at your coding-agent session traces (Claude Code, Codex, OpenCode, Gemini, Pi, …) and get failure-mode + efficiency findings. Standalone CLI over the @tangle-network/agent-eval analyst suite.",
   "type": "module",
   "license": "MIT",
+  "packageManager": "pnpm@10.33.4",
   "bin": {
     "traces": "dist/cli.js"
   },
