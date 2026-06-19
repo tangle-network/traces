@@ -1,11 +1,11 @@
 {
-  "name": "tangle-traces",
+  "name": "@tangle-network/traces",
   "version": "0.1.0",
   "description": "Point it at your coding-agent session traces (Claude Code, Codex, OpenCode, Gemini, Pi, …) and get failure-mode + efficiency findings. Standalone CLI over the @tangle-network/agent-eval analyst suite.",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "tangle-traces": "dist/cli.js"
+    "traces": "dist/cli.js"
   },
   "files": [
     "dist",

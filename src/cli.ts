@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * `tangle-traces` — analyze your own coding-agent sessions.
+ * `traces` — analyze your own coding-agent sessions.
  *
- *   tangle-traces list    [--harness claude-code] [--last 20] [--all]
- *   tangle-traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
- *   tangle-traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
- *   tangle-traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
+ *   traces list    [--harness claude-code] [--last 20] [--all]
+ *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
+ *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
+ *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
  *
  * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
  * loop/waste pipelines; +agentic RLM kinds with `--llm`). `watch` is the
@@ -180,7 +180,7 @@ async function cmdWatch(args: Args): Promise<void> {
   const seen = new Map<string, number>() // loopKey → max occurrences alerted
   const intervalMs = Math.max(1, args.interval) * 1000
   process.stderr.write(
-    `tangle-traces watch — observing ${args.all ? 'all harnesses' : args.harness}, ` +
+    `traces watch — observing ${args.all ? 'all harnesses' : args.harness}, ` +
       `sessions active in the last ${args.window}m, every ${args.interval}s. Read-only; Ctrl-C to stop.\n`,
   )
 
@@ -222,7 +222,7 @@ async function cmdWatch(args: Args): Promise<void> {
 }
 
 function usage(): void {
-  console.log(`tangle-traces — analyze & observe coding-agent sessions
+  console.log(`traces — analyze & observe coding-agent sessions
 
 Commands:
   list      List discovered sessions

@@ -5,7 +5,7 @@
  * loop/waste pipelines (`stuckLoopView`, `toolWasteView`) and tool-use
  * metrics consume the runtime `TraceStore` (`Span` with `toolName`/`args`/
  * `startedAt`). This converter is the single bridge — one function, every
- * harness — so tangle-traces reuses those shipped detectors instead of
+ * harness — so traces reuses those shipped detectors instead of
  * reimplementing loop/stall detection.
  *
  * Tool `args` is the verbatim tool input we stored on the span's `content`;

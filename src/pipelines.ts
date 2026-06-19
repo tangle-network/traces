@@ -7,13 +7,13 @@
  *   - computeToolUseMetrics — duplicate-call / retry / error rates per run
  *
  * `toolWasteView` is intentionally NOT used: its default heuristic needs
- * verbatim tool *results* + per-turn LLM `messages`, which tangle-traces
+ * verbatim tool *results* + per-turn LLM `messages`, which traces
  * doesn't capture from harness logs (we store tool args + error status). Its
  * signal — repeated/failed calls — is already covered by the duplicate/retry/
  * error rates above, so adding it would only emit a misleading waste %.
  *
  * Both are cheap ($0, deterministic), so they're safe to run continuously in
- * `watch` mode, over the OTLP spans tangle-traces already produces.
+ * `watch` mode, over the OTLP spans traces already produces.
  */
 
 import { computeToolUseMetrics } from '@tangle-network/agent-eval'

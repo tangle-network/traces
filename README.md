@@ -1,11 +1,11 @@
-# tangle-traces
+# traces
 
 Point it at your coding-agent session traces and get **failure-mode + efficiency findings** — without instrumenting anything. It reads the logs your harness already writes to disk.
 
-Built for the recurring problem: agents loop, re-send their whole history, stop verifying their own work, and get stuck. `tangle-traces` surfaces that from the trace, deterministically.
+Built for the recurring problem: agents loop, re-send their whole history, stop verifying their own work, and get stuck. `traces` surfaces that from the trace, deterministically.
 
 ```bash
-npx tangle-traces analyze --harness claude-code --last 1
+npx @tangle-network/traces analyze --harness claude-code --last 1
 ```
 
 ## What it does
@@ -40,11 +40,11 @@ Adding a harness is one file implementing `HarnessTraceAdapter` (`locate` + `par
 ## Commands
 
 ```bash
-tangle-traces list     --harness claude-code --last 20      # discover sessions
-tangle-traces analyze  --harness codex --last 1             # $0 deterministic report
-tangle-traces analyze  --all --since 2026-06-18 --out report.md
-tangle-traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only → HALO
-tangle-traces analyze  --harness claude-code --last 1 --llm  # +agentic (needs OPENAI_API_KEY)
+traces list     --harness claude-code --last 20      # discover sessions
+traces analyze  --harness codex --last 1             # $0 deterministic report
+traces analyze  --all --since 2026-06-18 --out report.md
+traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only → HALO
+traces analyze  --harness claude-code --last 1 --llm  # +agentic (needs OPENAI_API_KEY)
 ```
 
 ### Options
