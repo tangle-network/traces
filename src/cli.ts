@@ -21,10 +21,12 @@ import { runPipelines } from './pipelines.js'
 import { knownHarnesses, listAdapters, resolveAdapter } from './registry.js'
 import { renderPipelines, renderReport } from './report.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
+import { executeUpload, planUpload } from './upload.js'
 
 interface Args {
   command: string
   harness: string
+  harnessExplicit: boolean
   all: boolean
   last: number
   session?: string
@@ -37,24 +39,29 @@ interface Args {
   interval: number
   window: number
   minLoop: number
+  dryRun: boolean
+  yes: boolean
 }
 
 function parseArgs(argv: string[]): Args {
   const a: Args = {
     command: argv[0] ?? 'help',
     harness: 'claude-code',
+    harnessExplicit: false,
     all: false,
     last: 0,
     llm: false,
     interval: 5,
     window: 30,
     minLoop: 3,
+    dryRun: false,
+    yes: false,
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
     const next = () => argv[++i]
     switch (arg) {
-      case '--harness': a.harness = next() ?? a.harness; break
+      case '--harness': a.harness = next() ?? a.harness; a.harnessExplicit = true; break
       case '--all': a.all = true; break
       case '--last': a.last = Number(next()); break
       case '--session': a.session = next(); break
@@ -67,11 +74,43 @@ function parseArgs(argv: string[]): Args {
       case '--interval': a.interval = Number(next()); break
       case '--window': a.window = Number(next()); break
       case '--min-loop': a.minLoop = Number(next()); break
+      case '--dry-run': a.dryRun = true; break
+      case '--yes':
+      case '-y': a.yes = true; break
       default:
         if (arg?.startsWith('--')) throw new Error(`unknown flag: ${arg}`)
     }
   }
   return a
+}
+
+/** Parse `--since`: `30m` / `2h` / `7d` (relative) or an ISO date; default 24h. */
+function parseSince(s: string | undefined): number {
+  if (!s) return Date.now() - 24 * 60 * 60 * 1000
+  const m = s.match(/^(\d+)\s*([mhd])$/i)
+  if (m) {
+    const unit = m[2]!.toLowerCase()
+    const ms = unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000
+    return Date.now() - Number(m[1]) * ms
+  }
+  const t = Date.parse(s)
+  if (Number.isNaN(t)) throw new Error(`--since: expected 30m / 2h / 7d or an ISO date, got "${s}"`)
+  return t
+}
+
+/** Y/N confirm on a TTY (prompt to stderr so stdout stays clean). Non-TTY → false. */
+async function confirm(question: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return false
+  const rl = (await import('node:readline/promises')).createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  })
+  try {
+    const ans = (await rl.question(`${question} [y/N] `)).trim().toLowerCase()
+    return ans === 'y' || ans === 'yes'
+  } finally {
+    rl.close()
+  }
 }
 
 function adaptersFor(args: Args): HarnessTraceAdapter[] {
@@ -221,14 +260,65 @@ async function cmdWatch(args: Args): Promise<void> {
   }
 }
 
+async function cmdUpload(args: Args): Promise<void> {
+  const sinceMs = parseSince(args.since)
+  // Default to ALL harnesses unless a specific --harness was given.
+  const all = args.all || !args.harnessExplicit
+  const plan = await planUpload({ all, harness: args.harness, cwd: args.cwd, sinceMs })
+
+  const newItems = plan.items.filter((i) => i.isNew)
+  const byRule: Record<string, number> = {}
+  let totalRedactions = 0
+  for (const i of newItems) {
+    totalRedactions += i.redaction.redactionCount
+    for (const [r, n] of Object.entries(i.redaction.byRule)) byRule[r] = (byRule[r] ?? 0) + n
+  }
+
+  const w = (s: string) => process.stderr.write(s)
+  w(`\nWindow: since ${new Date(sinceMs).toISOString()}\n`)
+  w(`Sessions found: ${plan.items.length}  ·  new: ${newItems.length}  ·  already uploaded: ${plan.items.length - newItems.length}\n`)
+  w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byRule).length ? ` (${Object.entries(byRule).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
+  for (const i of newItems.slice(0, 25)) {
+    w(`  + [${i.ref.harness}] ${i.ref.sessionId.slice(0, 8)}  ${i.spans.length} spans  ${i.redaction.redactionCount} redacted  ${i.ref.cwd ?? ''}\n`)
+  }
+  if (newItems.length > 25) w(`  … and ${newItems.length - 25} more\n`)
+
+  if (newItems.length === 0) {
+    console.log('Nothing new to upload.')
+    return
+  }
+
+  if (args.dryRun) {
+    const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlp })
+    console.log(`dry run — ${newItems.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP → ${res.otlpPath}`)
+    console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
+    return
+  }
+
+  if (!args.yes) {
+    const ok = await confirm(`Upload ${newItems.length} redacted session(s) to the Tangle Intelligence Platform?`)
+    if (!ok) {
+      console.log('Aborted (use --yes to skip the prompt, or --dry-run to preview).')
+      return
+    }
+  }
+
+  const res = await executeUpload(plan, { log: (m) => w(`${m}\n`) })
+  console.log(
+    `Uploaded ${res.uploadedSessions} session(s), ${res.acceptedSpans} spans accepted, ` +
+      `${res.redactionCount} redaction(s); ${res.skippedSessions} already-uploaded skipped.`,
+  )
+}
+
 function usage(): void {
-  console.log(`traces — analyze & observe coding-agent sessions
+  console.log(`traces — analyze, observe & upload coding-agent sessions
 
 Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines, write a markdown report
   convert   Emit OTLP-JSONL only (also feeds HALO)
   watch     Online observer: tail active sessions, notify on stuck loops (read-only)
+  upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
 Options:
   --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
@@ -236,14 +326,18 @@ Options:
   --last <n>       Most-recent N sessions
   --session <path> Analyze one explicit session file
   --cwd <dir>      Filter sessions by working directory
-  --since <iso>    Only sessions modified since this time
+  --since <t>      upload: window — 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
-  --otlp <path>    OTLP artifact path
+  --otlp <path>    OTLP artifact path (also the dry-run upload preview path)
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY)
   --budget <usd>   USD cap for agentic analysts
   --interval <s>   watch: poll interval seconds (default 5)
   --window <m>     watch: only sessions active in the last N minutes (default 30)
-  --min-loop <n>   Min identical repeated calls to flag a loop (default 3)`)
+  --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
+  --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
+  --yes, -y        upload: skip the confirmation prompt
+
+Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)
 }
 
 async function main(): Promise<void> {
@@ -253,6 +347,7 @@ async function main(): Promise<void> {
     case 'analyze': await cmdAnalyze(args); break
     case 'convert': await cmdConvert(args); break
     case 'watch': await cmdWatch(args); break
+    case 'upload': await cmdUpload(args); break
     default: usage()
   }
 }

@@ -96,3 +96,13 @@ export function serializeSpans(spans: readonly OtlpSpan[]): string {
   if (spans.length === 0) return ''
   return `${spans.map((s) => JSON.stringify(s)).join('\n')}\n`
 }
+
+/** Write spans to an OTLP-JSONL file (a temp file when no path is given). */
+export async function writeOtlpFile(spans: readonly OtlpSpan[], outPath?: string): Promise<string> {
+  const { mkdtemp, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'tangle-traces-')), 'spans.otlp.jsonl')
+  await writeFile(path, serializeSpans(spans), 'utf8')
+  return path
+}
