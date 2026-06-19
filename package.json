@@ -1,0 +1,36 @@
+{
+  "name": "tangle-traces",
+  "version": "0.1.0",
+  "description": "Point it at your coding-agent session traces (Claude Code, Codex, OpenCode, Gemini, Pi, …) and get failure-mode + efficiency findings. Standalone CLI over the @tangle-network/agent-eval analyst suite.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "tangle-traces": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsup src/cli.ts --format esm --target node22 --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@ax-llm/ax": "^19.0.45",
+    "@tangle-network/agent-eval": "0.93.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0"
+  }
+}
