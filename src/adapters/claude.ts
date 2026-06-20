@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
+import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'claude-code'
@@ -86,20 +87,16 @@ function asBlocks(content: unknown): BlockText[] {
   return Array.isArray(content) ? (content as BlockText[]) : []
 }
 
-/** Max chars of conversation text kept per span — enough for analysis, bounded
- *  for storage + redaction cost. */
-const CONTENT_CAP = 8000
-
 /** Join a message's `text` blocks (the human's prompt or the assistant's prose)
  *  into one capped string. A string body (some events) is taken verbatim. */
 function textOf(content: unknown): string {
-  if (typeof content === 'string') return content.slice(0, CONTENT_CAP)
-  return asBlocks(content)
-    .filter((b) => b.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text)
-    .join('\n')
-    .trim()
-    .slice(0, CONTENT_CAP)
+  if (typeof content === 'string') return capText(content)
+  return capText(
+    asBlocks(content)
+      .filter((b) => b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n'),
+  )
 }
 
 function stringifyToolResult(content: unknown): string {
@@ -184,12 +181,10 @@ export function parseClaudeStream(
       const prompt = textOf(ev.message.content)
       if (prompt) {
         spans.push(
-          span({
+          userPromptSpan({
             traceId: ctx.traceId,
             spanId: `${ctx.idPrefix}${uid}:user`,
             parentSpanId: ctx.rootParent,
-            name: 'user.prompt',
-            kind: 'CHAIN',
             startTime: ts,
             service: SERVICE,
             agent: ctx.agent,

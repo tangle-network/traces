@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { span } from '../src/otlp.js'
 import { redactSpans } from '../src/redact.js'
-import { toTraceSpanEvents } from '../src/upload.js'
+import { executeUpload, toTraceSpanEvents } from '../src/upload.js'
 import { alreadyUploaded, sessionHash, uploadKey } from '../src/upload-state.js'
 
 const root = () =>
@@ -38,6 +41,36 @@ describe('redactSpans', () => {
     const { spans, report } = redactSpans([toolSpan('ls -la && npm test')])
     expect(spans[0]!.attributes.content).toBe('ls -la && npm test')
     expect(report.redactionCount).toBe(0)
+  })
+
+  it('scrubs credentials embedded in URLs (userinfo + secret query params)', () => {
+    const { spans } = redactSpans([
+      toolSpan('git clone https://bob:p4ssw0rd-secret@github.com/x/y.git; curl "https://api.x.com/v1?api_key=ABCDEF123456&page=2"'),
+    ])
+    const c = String(spans[0]!.attributes.content)
+    expect(c).not.toContain('p4ssw0rd-secret')
+    expect(c).not.toContain('ABCDEF123456')
+    expect(c).toContain('page=2') // non-secret params survive
+  })
+})
+
+describe('executeUpload --no-content', () => {
+  const item = (content: string) => ({
+    ref: { harness: 'claude-code', sessionId: 'sess1', path: '/x', cwd: null, mtimeMs: 0 },
+    spans: [span({ traceId: 't', spanId: 'u', name: 'user.prompt', kind: 'CHAIN' as const, startTime: '2026-01-01T00:00:00.000Z', content })],
+    redaction: { redactionCount: 0, byRule: {} },
+    hash: 'h1',
+    isNew: true,
+  })
+
+  it('strips prompt/response content from the OTLP that would be sent', async () => {
+    const plan = { items: [item('my secret prompt text')], state: {} }
+    const kept = join(tmpdir(), `tt-keep-${process.pid}.jsonl`)
+    const stripped = join(tmpdir(), `tt-strip-${process.pid}.jsonl`)
+    await executeUpload(plan, { dryRun: true, otlpOut: kept })
+    await executeUpload(plan, { dryRun: true, otlpOut: stripped, stripContent: true })
+    expect(readFileSync(kept, 'utf8')).toContain('my secret prompt text')
+    expect(readFileSync(stripped, 'utf8')).not.toContain('my secret prompt text')
   })
 })
 

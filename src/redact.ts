@@ -4,9 +4,15 @@
  * Reuses agent-eval's `redactValue` + `DEFAULT_REDACTION_RULES` (email, IPs,
  * generic secret keys, …) and layers on coding-session-specific rules that the
  * defaults miss — GitHub tokens, cloud keys, JWTs, bearer headers, private-key
- * blocks, and `key=secret` assignments common in shell/tool output. Redaction
- * runs over every span attribute + status message, so what leaves the machine
- * is already scrubbed.
+ * blocks, `key=secret` assignments, and credentials embedded in URLs. Redaction
+ * runs over every span attribute + status message (including captured prompt /
+ * response `content`), so what leaves the machine is already scrubbed.
+ *
+ * Scope, stated honestly: this is **best-effort regex** for *structured* secrets
+ * and credentials. It does NOT catch free-form PII — names, postal addresses,
+ * phone numbers, account numbers in prose — which need a context-aware model.
+ * For that assurance, run an ML PII scrubber (e.g. openai/privacy-filter) on the
+ * ingest side of the platform, or upload metadata-only with `--no-content`.
  */
 
 import { DEFAULT_REDACTION_RULES, redactValue } from '@tangle-network/agent-eval/traces'
@@ -28,6 +34,13 @@ export const CODING_REDACTION_RULES: RedactionRule[] = [
     id: 'assigned-secret',
     pattern:
       /\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)\b\s*[:=]\s*["']?[A-Za-z0-9._\-]{12,}["']?/gi,
+  },
+  // Credentials embedded in URLs — common when a prompt pastes a curl/clone line.
+  { id: 'url-userinfo', pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi },
+  {
+    id: 'url-secret-param',
+    pattern:
+      /[?&](?:access[_-]?token|api[_-]?key|apikey|auth|token|secret|password|sig|signature)=[^&\s"'#)]+/gi,
   },
 ]
 

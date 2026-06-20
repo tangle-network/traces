@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
+import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 interface GeminiToolCall {
@@ -50,15 +51,11 @@ function toolStatusError(status: string | undefined): boolean {
   return status != null && /error|fail|cancel/i.test(status)
 }
 
-/** Max chars of conversation text kept per span — enough for analysis, bounded
- *  for storage + redaction cost. */
-const CONTENT_CAP = 8000
-
 /** A Gemini message body is a plain string (the prompt or the model's prose);
  *  some events carry a structured body, which we stringify. Either way capped. */
 function textOf(content: unknown): string {
   const s = typeof content === 'string' ? content : JSON.stringify(content ?? '')
-  return s.trim().slice(0, CONTENT_CAP)
+  return capText(s)
 }
 
 interface GeminiFamilyConfig {
@@ -158,17 +155,15 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
         const prompt = textOf(m.content)
         if (prompt) {
           spans.push(
-            span({
+            userPromptSpan({
               traceId,
               spanId: `${llmId}:user`,
               parentSpanId: rootId,
-              name: 'user.prompt',
-              kind: 'CHAIN',
               startTime: ts,
+              content: prompt,
               service: this.service,
               agent: this.service,
               step,
-              content: prompt,
             }),
           )
           step += 1

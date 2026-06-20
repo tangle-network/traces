@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
+import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'codex'
@@ -64,13 +65,9 @@ function contentToString(content: unknown): string {
   return ''
 }
 
-/** Max chars of conversation text kept per span — enough for analysis, bounded
- *  for storage + redaction cost. */
-const CONTENT_CAP = 8000
-
 /** A message's text (verbatim string body or joined text blocks), trimmed and capped. */
 function textOf(content: unknown): string {
-  return contentToString(content).trim().slice(0, CONTENT_CAP)
+  return capText(contentToString(content))
 }
 
 /** function_call_output is an error when it clearly reports a non-zero exit / failure. */
@@ -239,17 +236,15 @@ export class CodexAdapter implements HarnessTraceAdapter {
         const prompt = textOf(l.payload.content)
         if (prompt) {
           spans.push(
-            span({
+            userPromptSpan({
               traceId,
               spanId: `msg:${step}:user`,
               parentSpanId: rootId,
-              name: 'user.prompt',
-              kind: 'CHAIN',
               startTime: ts,
+              content: prompt,
               service: SERVICE,
               agent: SERVICE,
               step,
-              content: prompt,
             }),
           )
           step += 1

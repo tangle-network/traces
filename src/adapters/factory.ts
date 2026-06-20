@@ -17,6 +17,7 @@ import { basename, join } from 'node:path'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import { capText, userPromptSpan } from './conversation.js'
 
 const SERVICE = 'factory'
 
@@ -43,19 +44,15 @@ interface FactorySettings {
   tokenUsage?: { inputTokens?: number; outputTokens?: number }
 }
 
-/** Max chars of conversation text kept per span — enough for analysis, bounded
- *  for storage + redaction cost. */
-const CONTENT_CAP = 8000
-
 /** Join a message's `text` blocks (the human's prompt or the assistant's prose)
  *  into one capped string. A string body is taken verbatim. */
 function textOf(content: FactoryBlock[] | undefined): string {
-  return (content ?? [])
-    .filter((b) => b.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text)
-    .join('')
-    .trim()
-    .slice(0, CONTENT_CAP)
+  return capText(
+    (content ?? [])
+      .filter((b) => b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join(''),
+  )
 }
 
 function parseLines(raw: string): FactoryLine[] {
@@ -163,17 +160,15 @@ export class FactoryAdapter implements HarnessTraceAdapter {
         // tool_result blocks → no text → no user.prompt span.)
         if (text) {
           spans.push(
-            span({
+            userPromptSpan({
               traceId,
               spanId: `user:${l.id ?? step}`,
               parentSpanId: rootId,
-              name: 'user.prompt',
-              kind: 'CHAIN',
               startTime: ts,
+              content: text,
               service: SERVICE,
               agent: SERVICE,
               step,
-              content: text,
             }),
           )
           step += 1

@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import { capText, userPromptSpan } from './conversation.js'
 
 const SERVICE = 'opencode'
 
@@ -37,19 +38,15 @@ function isoOf(ms: number | undefined): string {
   return new Date(ms ?? 0).toISOString()
 }
 
-/** Max chars of conversation text kept per span — enough for analysis, bounded
- *  for storage + redaction cost. */
-const CONTENT_CAP = 8000
-
 /** Join a turn's `text` parts (the human's prompt or the assistant's prose)
  *  into one capped string. Tool/reasoning/step parts are skipped. */
 function textOf(parts: readonly OcPart[]): string {
-  return parts
-    .filter((p) => p.type === 'text' && typeof p.text === 'string')
-    .map((p) => p.text)
-    .join('\n')
-    .trim()
-    .slice(0, CONTENT_CAP)
+  return capText(
+    parts
+      .filter((p) => p.type === 'text' && typeof p.text === 'string')
+      .map((p) => p.text)
+      .join('\n'),
+  )
 }
 
 export class OpencodeAdapter implements HarnessTraceAdapter {
@@ -169,12 +166,10 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
       // no user.prompt span.)
       if (msg.role === 'user' && turnText) {
         spans.push(
-          span({
+          userPromptSpan({
             traceId,
             spanId: `${llmId}:user`,
             parentSpanId: rootId,
-            name: 'user.prompt',
-            kind: 'CHAIN',
             startTime: isoOf(msg.time?.created),
             service: SERVICE,
             agent: SERVICE,

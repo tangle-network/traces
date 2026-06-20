@@ -15,6 +15,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { capText, userPromptSpan } from './conversation.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
@@ -143,7 +144,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
             inputTokens: r.usageMetadata?.promptTokenCount ?? null,
             outputTokens: r.usageMetadata?.candidatesTokenCount ?? null,
             step,
-            content: textOf(r.message?.parts).slice(0, 8000) || null,
+            content: capText(textOf(r.message?.parts)) || null,
           }),
         )
         lastLlm = llmId
@@ -176,15 +177,13 @@ export class QwenAdapter implements HarnessTraceAdapter {
         // carry `message.role === 'user'` (functionResponse rides a user Content),
         // so a `role === 'user'` fallback would swallow them. A text-less user
         // turn (e.g. functionResponse-only) yields no user.prompt span.
-        const prompt = textOf(r.message?.parts).slice(0, 8000)
+        const prompt = capText(textOf(r.message?.parts))
         if (prompt) {
           spans.push(
-            span({
+            userPromptSpan({
               traceId,
               spanId: `user:${r.uuid ?? step}`,
               parentSpanId: rootId,
-              name: 'user.prompt',
-              kind: 'CHAIN',
               startTime: ts,
               service: SERVICE,
               agent: SERVICE,

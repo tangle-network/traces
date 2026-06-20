@@ -102,18 +102,32 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
 | `--interval <s>` / `--window <m>` | `watch`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
+| `--no-content` | `upload`: send metadata only — strip all prompt/response text |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
 
 ## Upload to the Intelligence Platform
 
-`upload` **redacts PII/secrets locally before anything leaves the machine**, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host).
+`upload` **redacts locally before anything leaves the machine**, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host).
 
 ```bash
-traces upload --since 24h --dry-run   # see exactly what would be sent — no network
-traces upload --since 24h             # send it
+traces upload --since 24h --dry-run     # see exactly what would be sent — no network
+traces upload --since 24h --no-content  # send metadata only — drop all prompt/response text
+traces upload --since 24h               # send it
 ```
 
 It needs `TANGLE_INGEST_URL` (or `TANGLE_ORCHESTRATOR_URL`), `TANGLE_INGEST_API_KEY` (or `TANGLE_API_KEY`), and `TANGLE_TENANT_ID`. Without them, `--dry-run` still works fully.
+
+### Redaction scope — read this before uploading prose
+
+Redaction is **best-effort regex** for *structured* secrets and credentials: API keys, GitHub/cloud tokens, JWTs, bearer headers, private-key blocks, `KEY=secret` assignments, and credentials embedded in URLs. It runs over every span attribute, including the captured prompt/response text.
+
+It does **not** catch free-form PII — names, postal addresses, phone numbers in prose — which needs a context-aware model. Three postures, strongest first:
+
+1. **`--no-content`** — upload metadata only (tool calls, tokens, timing, loop signal); no prose leaves the machine.
+2. Run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) on the platform ingest side as defense-in-depth.
+3. Default — regex redaction of structured secrets.
+
+Always `--dry-run` first to see exactly what would be sent.
 
 ## Library (SDK)
 

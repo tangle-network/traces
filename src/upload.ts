@@ -155,12 +155,27 @@ export interface ExecuteOptions {
   otlpOut?: string
   /** Custom sink. Defaults to the hosted Tangle Intelligence client from env. */
   backend?: UploadBackend
+  /** Metadata-only upload: drop captured prompt/response `content` from every
+   *  span before it leaves the machine (still keeps tool calls, tokens, timing,
+   *  loop signal). The strongest privacy posture when prose can't leave. */
+  stripContent?: boolean
   log?: (msg: string) => void
+}
+
+/** Drop captured conversation `content` from spans (metadata-only upload). */
+function stripSpanContent(spans: readonly OtlpSpan[]): OtlpSpan[] {
+  return spans.map((s) => {
+    if (s.attributes['content'] == null) return s
+    const { content: _drop, ...attributes } = s.attributes
+    return { ...s, attributes }
+  })
 }
 
 /** Send the NEW items (or, on dryRun, write the redacted OTLP that would send). */
 export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {}): Promise<UploadResult> {
-  const newItems = plan.items.filter((i) => i.isNew)
+  const newItems = plan.items
+    .filter((i) => i.isNew)
+    .map((i) => (opts.stripContent ? { ...i, spans: stripSpanContent(i.spans) } : i))
   const skipped = plan.items.length - newItems.length
   const redactionCount = newItems.reduce((n, i) => n + i.redaction.redactionCount, 0)
   const uploadedAt = new Date().toISOString()

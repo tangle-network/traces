@@ -17,6 +17,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
+import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'forge'
@@ -58,13 +59,9 @@ function tokens(t: TokenCount | undefined): number | null {
   return t.actual ?? t.approx ?? null
 }
 
-/** Max chars of conversation text kept per span — enough for analysis, bounded
- *  for storage + redaction cost. */
-const CONTENT_CAP = 8000
-
 /** Forge bodies are plain strings; trim and cap. */
 function textOf(content: string | undefined): string {
-  return (content ?? '').trim().slice(0, CONTENT_CAP)
+  return capText(content ?? '')
 }
 
 export class ForgeAdapter implements HarnessTraceAdapter {
@@ -130,17 +127,15 @@ export class ForgeAdapter implements HarnessTraceAdapter {
         const prompt = textOf(entry.text.content)
         if (prompt) {
           spans.push(
-            span({
+            userPromptSpan({
               traceId,
               spanId: `user:${step}`,
               parentSpanId: rootId,
-              name: 'user.prompt',
-              kind: 'CHAIN',
               startTime: ts,
+              content: prompt,
               service: SERVICE,
               agent: SERVICE,
               step,
-              content: prompt,
             }),
           )
           step += 1

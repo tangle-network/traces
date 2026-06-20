@@ -44,6 +44,7 @@ interface Args {
   minLoop: number
   dryRun: boolean
   yes: boolean
+  noContent: boolean
 }
 
 function parseArgs(argv: string[]): Args {
@@ -59,6 +60,7 @@ function parseArgs(argv: string[]): Args {
     minLoop: 3,
     dryRun: false,
     yes: false,
+    noContent: false,
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -78,6 +80,7 @@ function parseArgs(argv: string[]): Args {
       case '--window': a.window = Number(next()); break
       case '--min-loop': a.minLoop = Number(next()); break
       case '--dry-run': a.dryRun = true; break
+      case '--no-content': a.noContent = true; break
       case '--yes':
       case '-y': a.yes = true; break
       default:
@@ -252,7 +255,7 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   if (args.dryRun) {
-    const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlp })
+    const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlp, stripContent: args.noContent })
     console.log(`dry run — ${newItems.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP → ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
@@ -266,7 +269,7 @@ async function cmdUpload(args: Args): Promise<void> {
     }
   }
 
-  const res = await executeUpload(plan, { log: (m) => w(`${m}\n`) })
+  const res = await executeUpload(plan, { log: (m) => w(`${m}\n`), stripContent: args.noContent })
   console.log(
     `Uploaded ${res.uploadedSessions} session(s), ${res.acceptedSpans} spans accepted, ` +
       `${res.redactionCount} redaction(s); ${res.skippedSessions} already-uploaded skipped.`,
@@ -298,6 +301,7 @@ Options:
   --window <m>     watch: only sessions active in the last N minutes (default 30)
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
+  --no-content     upload: strip prompt/response text — send metadata only
   --yes, -y        upload: skip the confirmation prompt
 
 Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)

@@ -27,6 +27,9 @@ export { PiAdapter } from './adapters/pi.js'
 export { AmpAdapter } from './adapters/amp.js'
 export { CopilotAdapter } from './adapters/copilot.js'
 export { ForgeAdapter } from './adapters/forge.js'
+// Conversation-capture helpers for custom adapters — emit the human's turn the
+// same way every built-in adapter does.
+export { CONTENT_CAP, capText, userPromptSpan } from './adapters/conversation.js'
 
 // ── Detection / analysis (built-in, or bring your own analysts) ───────────
 export * from './pipelines.js' // runPipelines() — stuck-loop + tool-use
