@@ -22,7 +22,8 @@ import type { RedactionReport } from '@tangle-network/agent-eval/traces'
 import { ATTR, INGEST_SOURCE_CLI } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
-import { redactSpans } from './redact.js'
+import type { Redactor } from './external.js'
+import { applyRedactor, redactSpans } from './redact.js'
 import { type ScanOptions, scanSessions } from './session-source.js'
 import { parseIsoToEpochMs } from './time.js'
 import type { SessionRef } from './types.js'
@@ -159,6 +160,9 @@ export interface ExecuteOptions {
    *  span before it leaves the machine (still keeps tool calls, tokens, timing,
    *  loop signal). The strongest privacy posture when prose can't leave. */
   stripContent?: boolean
+  /** External PII scrubber applied to `content` AFTER the regex pass — catches
+   *  free-form PII (names, addresses) the rules miss. Ignored if stripContent. */
+  redactor?: Redactor
   log?: (msg: string) => void
 }
 
@@ -173,9 +177,12 @@ function stripSpanContent(spans: readonly OtlpSpan[]): OtlpSpan[] {
 
 /** Send the NEW items (or, on dryRun, write the redacted OTLP that would send). */
 export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {}): Promise<UploadResult> {
-  const newItems = plan.items
-    .filter((i) => i.isNew)
-    .map((i) => (opts.stripContent ? { ...i, spans: stripSpanContent(i.spans) } : i))
+  let newItems = plan.items.filter((i) => i.isNew)
+  if (opts.redactor && !opts.stripContent) {
+    const r = opts.redactor
+    newItems = await Promise.all(newItems.map(async (i) => ({ ...i, spans: (await applyRedactor(i.spans, r)).spans })))
+  }
+  if (opts.stripContent) newItems = newItems.map((i) => ({ ...i, spans: stripSpanContent(i.spans) }))
   const skipped = plan.items.length - newItems.length
   const redactionCount = newItems.reduce((n, i) => n + i.redaction.redactionCount, 0)
   const uploadedAt = new Date().toISOString()

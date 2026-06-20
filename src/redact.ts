@@ -17,6 +17,7 @@
 
 import { DEFAULT_REDACTION_RULES, redactValue } from '@tangle-network/agent-eval/traces'
 import type { RedactionReport, RedactionRule } from '@tangle-network/agent-eval/traces'
+import type { Redactor } from './external.js'
 import type { OtlpSpan } from './otlp.js'
 
 /** Secrets common in coding-agent traces that the substrate defaults don't cover. */
@@ -69,4 +70,34 @@ export function redactSpans(
     return { ...s, attributes, status }
   })
   return { spans: out, report }
+}
+
+/** Defense-in-depth: run an external {@link Redactor} (e.g. an ML PII model) over
+ *  every span's captured `content` (prompt/response prose), catching free-form
+ *  PII the regex pass misses. Compose AFTER `redactSpans`. Returns scrubbed spans
+ *  and the number of `content` fields the model changed. */
+export async function applyRedactor(
+  spans: readonly OtlpSpan[],
+  redactor: Redactor,
+): Promise<{ spans: OtlpSpan[]; changed: number }> {
+  const idx: number[] = []
+  const texts: string[] = []
+  spans.forEach((s, i) => {
+    const c = s.attributes['content']
+    if (typeof c === 'string' && c.length > 0) {
+      idx.push(i)
+      texts.push(c)
+    }
+  })
+  const out = spans.map((s) => ({ ...s, attributes: { ...s.attributes } }))
+  if (texts.length === 0) return { spans: out, changed: 0 }
+  const scrubbed = await redactor.redactText(texts)
+  let changed = 0
+  idx.forEach((spanI, k) => {
+    if (scrubbed[k] !== texts[k]) {
+      out[spanI]!.attributes['content'] = scrubbed[k]
+      changed += 1
+    }
+  })
+  return { spans: out, changed }
 }

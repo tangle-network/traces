@@ -18,6 +18,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [Supported harnesses](#supported-harnesses)
 - [CLI reference](#cli-reference)
 - [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
+- [External engines (bring your own)](#external-engines-bring-your-own)
 - [Library (SDK)](#library-sdk)
 - [Examples](#examples)
 - [Develop](#develop)
@@ -129,6 +130,29 @@ It does **not** catch free-form PII — names, postal addresses, phone numbers i
 
 Always `--dry-run` first to see exactly what would be sent.
 
+## External engines (bring your own)
+
+`traces` hosts analysis engines and PII scrubbers it does **not** bundle — you install the tool, `traces` drives it over a thin command adapter. Same pattern for any future engine or model.
+
+**Analyzers** run over the emitted OTLP artifact as peers to the built-in analysts:
+
+```bash
+traces analyze --last 1 --analyzer halo                         # run HALO too
+traces analyze --last 1 --analyzer halo --analyzer-prompt "find token waste"
+traces analyze --last 1 --analyzer halo --analyzer my-engine    # repeatable
+```
+
+**Redactors** scrub prompt/response prose with an external PII model (catching names/addresses the regex pass can't), running *after* the built-in redaction:
+
+```bash
+# the command reads a JSON array of strings on stdin, writes the scrubbed array on stdout
+traces upload --since 24h --dry-run --redactor "my-pii-scrubber"
+```
+
+In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnalyzer`, `commandAnalyzer`, `commandRedactor`, `applyRedactor`, `runExternalAnalyzers`). See [`examples/external-engines.ts`](./examples/external-engines.ts).
+
+> For the built-in agentic analysts (`--llm`), set `OPENAI_API_KEY` — or point at any OpenAI-compatible gateway with `OPENAI_BASE_URL` (e.g. an internal router) to use a non-OpenAI key.
+
 ## Library (SDK)
 
 The CLI is a thin consumer of these exports.
@@ -143,6 +167,7 @@ The CLI is a thin consumer of these exports.
 | `planUpload` / `executeUpload` | `(…, { backend? }) → …` | redact + dedup + send to any sink |
 | `selectAdapters` / `listAdapters` / `resolveAdapter` | adapter selection + the harness registry |
 | `HarnessTraceAdapter` | interface (`locate` + `parse`) | implement to add a harness |
+| `ExternalAnalyzer` / `Redactor` | `haloAnalyzer` / `commandAnalyzer` / `commandRedactor` | drive engines/models you install (not bundled) |
 
 ```ts
 import { watchSessions, analyzeSpans, AnalystRegistry, makeFinding } from '@tangle-network/traces'
@@ -172,6 +197,7 @@ Runnable, in [`examples/`](./examples):
 | [`custom-analyst.ts`](./examples/custom-analyst.ts) | register and run your own analyst |
 | [`custom-backend.ts`](./examples/custom-backend.ts) | redact + dedup + upload to your own sink |
 | [`register-harness.ts`](./examples/register-harness.ts) | add a new harness by implementing `HarnessTraceAdapter` |
+| [`external-engines.ts`](./examples/external-engines.ts) | drive HALO + an external PII scrubber you install yourself |
 
 ## Develop
 

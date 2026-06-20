@@ -36,6 +36,9 @@ export * from './pipelines.js' // runPipelines() — stuck-loop + tool-use
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
 
+// ── External engines (NOT bundled — shell out to tools you install) ────────
+export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor
+
 // ── Live observation (event-driven; feed any system) ──────────────────────
 export * from './observer.js' // watchSessions({ onLoop, onReport, signal })
 
