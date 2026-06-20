@@ -37,6 +37,21 @@ function isoOf(ms: number | undefined): string {
   return new Date(ms ?? 0).toISOString()
 }
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
+/** Join a turn's `text` parts (the human's prompt or the assistant's prose)
+ *  into one capped string. Tool/reasoning/step parts are skipped. */
+function textOf(parts: readonly OcPart[]): string {
+  return parts
+    .filter((p) => p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text)
+    .join('\n')
+    .trim()
+    .slice(0, CONTENT_CAP)
+}
+
 export class OpencodeAdapter implements HarnessTraceAdapter {
   readonly harness = 'opencode'
 
@@ -111,6 +126,25 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
     for (const { msg } of messages) {
       const mid = msg.id ?? `m${step}`
       const llmId = `llm:${mid}`
+
+      // Parts live under part/<messageID>/. Read them up front so the turn's
+      // text can ride on the LLM span (assistant prose) or a user.prompt span.
+      const pdir = join(partRoot, mid)
+      const parts: OcPart[] = []
+      try {
+        const partFiles = (await readdir(pdir)).filter((f) => f.endsWith('.json'))
+        for (const pf of partFiles) {
+          try {
+            parts.push(JSON.parse(await readFile(join(pdir, pf), 'utf8')) as OcPart)
+          } catch {
+            // skip
+          }
+        }
+      } catch {
+        // No parts dir → still emit the message span.
+      }
+
+      const turnText = textOf(parts)
       spans.push(
         span({
           traceId,
@@ -126,25 +160,32 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
           inputTokens: msg.tokens?.input ?? null,
           outputTokens: msg.tokens?.output ?? null,
           step,
+          content: turnText || null,
         }),
       )
       step += 1
 
-      // Parts live under part/<messageID>/.
-      const pdir = join(partRoot, mid)
-      let partFiles: string[]
-      try {
-        partFiles = (await readdir(pdir)).filter((f) => f.endsWith('.json'))
-      } catch {
-        continue
+      // The human's prompt text. (A tool-result-only user turn yields no text →
+      // no user.prompt span.)
+      if (msg.role === 'user' && turnText) {
+        spans.push(
+          span({
+            traceId,
+            spanId: `${llmId}:user`,
+            parentSpanId: rootId,
+            name: 'user.prompt',
+            kind: 'CHAIN',
+            startTime: isoOf(msg.time?.created),
+            service: SERVICE,
+            agent: SERVICE,
+            step,
+            content: turnText,
+          }),
+        )
+        step += 1
       }
-      for (const pf of partFiles) {
-        let part: OcPart
-        try {
-          part = JSON.parse(await readFile(join(pdir, pf), 'utf8')) as OcPart
-        } catch {
-          continue
-        }
+
+      for (const part of parts) {
         if (part.type !== 'tool' || !part.tool) continue
         const err = part.state?.status === 'error'
         spans.push(

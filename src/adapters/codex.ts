@@ -64,6 +64,15 @@ function contentToString(content: unknown): string {
   return ''
 }
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
+/** A message's text (verbatim string body or joined text blocks), trimmed and capped. */
+function textOf(content: unknown): string {
+  return contentToString(content).trim().slice(0, CONTENT_CAP)
+}
+
 /** function_call_output is an error when it clearly reports a non-zero exit / failure. */
 function outputIsError(output: unknown): { error: boolean; message: string } {
   const s = typeof output === 'string' ? output : JSON.stringify(output ?? '')
@@ -224,8 +233,29 @@ export class CodexAdapter implements HarnessTraceAdapter {
           t.end_time = ts
           t.status = error ? { code: 'ERROR', message } : { code: 'OK' }
         }
+      } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
+        // The human's prompt text. Codex drops the user turn from token events,
+        // so capture it here as its own CHAIN span (no text → no span).
+        const prompt = textOf(l.payload.content)
+        if (prompt) {
+          spans.push(
+            span({
+              traceId,
+              spanId: `msg:${step}:user`,
+              parentSpanId: rootId,
+              name: 'user.prompt',
+              kind: 'CHAIN',
+              startTime: ts,
+              service: SERVICE,
+              agent: SERVICE,
+              step,
+              content: prompt,
+            }),
+          )
+          step += 1
+        }
       } else if (l.type === 'response_item' && l.payload?.type === 'message') {
-        const text = contentToString(l.payload.content)
+        const text = textOf(l.payload.content)
         if (text) {
           spans.push(
             span({
@@ -238,7 +268,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
               service: SERVICE,
               agent: SERVICE,
               step,
-              content: text.slice(0, 8000),
+              content: text,
             }),
           )
           step += 1

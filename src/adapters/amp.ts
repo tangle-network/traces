@@ -20,6 +20,22 @@ import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js
 
 const SERVICE = 'amp'
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
+/** Join a message's `text` blocks (the human's prompt or the assistant's prose)
+ *  into one capped string. A string body is taken verbatim. */
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content.slice(0, CONTENT_CAP)
+  return (Array.isArray(content) ? (content as AmpBlock[]) : [])
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+    .trim()
+    .slice(0, CONTENT_CAP)
+}
+
 interface AmpBlock {
   type?: string
   text?: string
@@ -102,27 +118,53 @@ export class AmpAdapter implements HarnessTraceAdapter {
     for (const m of messages) {
       const mid = m.messageId ?? step
       const llmId = `llm:${mid}`
-      const u = m.usage
-      const inputTokens = u
-        ? (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0) || null
-        : null
-      spans.push(
-        span({
-          traceId,
-          spanId: llmId,
-          parentSpanId: rootId,
-          name: `message.${m.role ?? 'unknown'}`,
-          kind: 'LLM',
-          startTime: start,
-          service: SERVICE,
-          agent: SERVICE,
-          model: u?.model ?? null,
-          inputTokens,
-          outputTokens: u?.outputTokens ?? null,
-          step,
-        }),
-      )
-      step += 1
+      // The human's prompt text. (A user turn may instead/also carry tool_result
+      // blocks; a tool-result-only turn yields no text → no user.prompt span.)
+      if (m.role === 'user') {
+        // A user turn is the human, not an LLM call → emit only a user.prompt
+        // span (and skip it for a tool-result-only turn with no text).
+        const prompt = textOf(m.content)
+        if (prompt) {
+          spans.push(
+            span({
+              traceId,
+              spanId: `${llmId}:user`,
+              parentSpanId: rootId,
+              name: 'user.prompt',
+              kind: 'CHAIN',
+              startTime: start,
+              service: SERVICE,
+              agent: SERVICE,
+              step,
+              content: prompt,
+            }),
+          )
+          step += 1
+        }
+      } else {
+        const u = m.usage
+        const inputTokens = u
+          ? (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0) || null
+          : null
+        spans.push(
+          span({
+            traceId,
+            spanId: llmId,
+            parentSpanId: rootId,
+            name: `message.${m.role ?? 'unknown'}`,
+            kind: 'LLM',
+            startTime: start,
+            service: SERVICE,
+            agent: SERVICE,
+            model: u?.model ?? null,
+            inputTokens,
+            outputTokens: u?.outputTokens ?? null,
+            step,
+            content: textOf(m.content) || null,
+          }),
+        )
+        step += 1
+      }
 
       for (const b of m.content ?? []) {
         if (b.type === 'tool_use' && b.name) {

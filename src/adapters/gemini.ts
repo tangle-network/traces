@@ -50,6 +50,17 @@ function toolStatusError(status: string | undefined): boolean {
   return status != null && /error|fail|cancel/i.test(status)
 }
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
+/** A Gemini message body is a plain string (the prompt or the model's prose);
+ *  some events carry a structured body, which we stringify. Either way capped. */
+function textOf(content: unknown): string {
+  const s = typeof content === 'string' ? content : JSON.stringify(content ?? '')
+  return s.trim().slice(0, CONTENT_CAP)
+}
+
 interface GeminiFamilyConfig {
   harness: string
   service: string
@@ -142,7 +153,27 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
       const mid = m.id ?? `m${step}`
       const ts = iso(m.timestamp, start)
       const llmId = `llm:${mid}`
-      const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')
+      // The human's prompt text — emit a CHAIN span only when non-empty.
+      if (m.type === 'user') {
+        const prompt = textOf(m.content)
+        if (prompt) {
+          spans.push(
+            span({
+              traceId,
+              spanId: `${llmId}:user`,
+              parentSpanId: rootId,
+              name: 'user.prompt',
+              kind: 'CHAIN',
+              startTime: ts,
+              service: this.service,
+              agent: this.service,
+              step,
+              content: prompt,
+            }),
+          )
+          step += 1
+        }
+      }
       spans.push(
         span({
           traceId,
@@ -157,7 +188,7 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
           inputTokens: m.tokens?.input ?? null,
           outputTokens: m.tokens?.output ?? null,
           step,
-          content: content ? content.slice(0, 8000) : null,
+          content: textOf(m.content) || null,
         }),
       )
       step += 1

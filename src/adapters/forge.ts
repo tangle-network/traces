@@ -58,6 +58,15 @@ function tokens(t: TokenCount | undefined): number | null {
   return t.actual ?? t.approx ?? null
 }
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
+/** Forge bodies are plain strings; trim and cap. */
+function textOf(content: string | undefined): string {
+  return (content ?? '').trim().slice(0, CONTENT_CAP)
+}
+
 export class ForgeAdapter implements HarnessTraceAdapter {
   readonly harness = 'forge'
   readonly aliases = ['forgecode'] as const
@@ -115,7 +124,28 @@ export class ForgeAdapter implements HarnessTraceAdapter {
     for (const raw of messages) {
       const entry = raw.message ?? raw // unwrap DB nesting
       const ts = new Date(0).toISOString()
-      if (entry.text) {
+      if (entry.text && entry.text.role === 'user') {
+        // The human's prompt text. Emit a CHAIN span only when non-empty
+        // (a tool-result-only turn rides as `entry.tool`, not here).
+        const prompt = textOf(entry.text.content)
+        if (prompt) {
+          spans.push(
+            span({
+              traceId,
+              spanId: `user:${step}`,
+              parentSpanId: rootId,
+              name: 'user.prompt',
+              kind: 'CHAIN',
+              startTime: ts,
+              service: SERVICE,
+              agent: SERVICE,
+              step,
+              content: prompt,
+            }),
+          )
+          step += 1
+        }
+      } else if (entry.text) {
         const llmId = `llm:${step}`
         spans.push(
           span({
@@ -131,7 +161,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
             inputTokens: tokens(raw.usage?.prompt_tokens),
             outputTokens: tokens(raw.usage?.completion_tokens),
             step,
-            content: entry.text.content ? entry.text.content.slice(0, 8000) : null,
+            content: textOf(entry.text.content) || null,
           }),
         )
         lastLlm = llmId

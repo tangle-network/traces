@@ -86,6 +86,22 @@ function asBlocks(content: unknown): BlockText[] {
   return Array.isArray(content) ? (content as BlockText[]) : []
 }
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
+/** Join a message's `text` blocks (the human's prompt or the assistant's prose)
+ *  into one capped string. A string body (some events) is taken verbatim. */
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content.slice(0, CONTENT_CAP)
+  return asBlocks(content)
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+    .trim()
+    .slice(0, CONTENT_CAP)
+}
+
 function stringifyToolResult(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
@@ -136,6 +152,7 @@ export function parseClaudeStream(
           inputTokens: inputTokens(ev.message.usage),
           outputTokens: ev.message.usage?.output_tokens ?? null,
           step,
+          content: textOf(ev.message.content) || null,
         }),
       )
       step += 1
@@ -162,6 +179,26 @@ export function parseClaudeStream(
         step += 1
       }
     } else if (ev.type === 'user' && ev.message) {
+      // The human's prompt text. (A user turn may instead/also carry tool_result
+      // blocks; a tool-result-only turn yields no text → no user.prompt span.)
+      const prompt = textOf(ev.message.content)
+      if (prompt) {
+        spans.push(
+          span({
+            traceId: ctx.traceId,
+            spanId: `${ctx.idPrefix}${uid}:user`,
+            parentSpanId: ctx.rootParent,
+            name: 'user.prompt',
+            kind: 'CHAIN',
+            startTime: ts,
+            service: SERVICE,
+            agent: ctx.agent,
+            step,
+            content: prompt,
+          }),
+        )
+        step += 1
+      }
       // Tool results ride as tool_result blocks in the user turn.
       for (const block of asBlocks(ev.message.content)) {
         if (block.type !== 'tool_result' || !block.tool_use_id) continue

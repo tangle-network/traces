@@ -67,12 +67,18 @@ function isToolResultBlock(b: PiContentBlock): boolean {
   return typeof b.type === 'string' && /tool[_-]?result|tool[_-]?output/i.test(b.type)
 }
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
 function textOf(content: PiContentBlock[] | undefined): string {
   if (!content) return ''
   return content
     .filter((b) => b.type === 'text' && typeof b.text === 'string')
     .map((b) => b.text)
     .join('')
+    .trim()
+    .slice(0, CONTENT_CAP)
 }
 
 export class PiAdapter implements HarnessTraceAdapter {
@@ -148,27 +154,50 @@ export class PiAdapter implements HarnessTraceAdapter {
       const mid = l.id ?? `m${step}`
       const msg = l.message
       const llmId = `llm:${mid}`
-      const errored = !!msg.errorMessage
-      spans.push(
-        span({
-          traceId,
-          spanId: llmId,
-          parentSpanId: rootId,
-          name: `message.${msg.role ?? 'unknown'}`,
-          kind: 'LLM',
-          startTime: ts,
-          status: errored ? 'ERROR' : 'OK',
-          statusMessage: errored ? msg.errorMessage!.slice(0, 500) : undefined,
-          service: SERVICE,
-          agent: SERVICE,
-          model: msg.model ?? null,
-          inputTokens: msg.usage?.input ?? null,
-          outputTokens: msg.usage?.output ?? null,
-          step,
-          content: textOf(msg.content).slice(0, 8000) || null,
-        }),
-      )
-      step += 1
+      if (msg.role === 'user') {
+        // The human's prompt text. (A tool-result-only user turn yields no
+        // text → no user.prompt span.)
+        const prompt = textOf(msg.content)
+        if (prompt) {
+          spans.push(
+            span({
+              traceId,
+              spanId: `${mid}:user`,
+              parentSpanId: rootId,
+              name: 'user.prompt',
+              kind: 'CHAIN',
+              startTime: ts,
+              service: SERVICE,
+              agent: SERVICE,
+              step,
+              content: prompt,
+            }),
+          )
+          step += 1
+        }
+      } else {
+        const errored = !!msg.errorMessage
+        spans.push(
+          span({
+            traceId,
+            spanId: llmId,
+            parentSpanId: rootId,
+            name: `message.${msg.role ?? 'unknown'}`,
+            kind: 'LLM',
+            startTime: ts,
+            status: errored ? 'ERROR' : 'OK',
+            statusMessage: errored ? msg.errorMessage!.slice(0, 500) : undefined,
+            service: SERVICE,
+            agent: SERVICE,
+            model: msg.model ?? null,
+            inputTokens: msg.usage?.input ?? null,
+            outputTokens: msg.usage?.output ?? null,
+            step,
+            content: textOf(msg.content) || null,
+          }),
+        )
+        step += 1
+      }
 
       for (const b of msg.content ?? []) {
         if (isToolBlock(b)) {

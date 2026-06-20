@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { AmpAdapter } from '../src/adapters/amp.js'
+import { ClaudeAdapter } from '../src/adapters/claude.js'
 import { CopilotAdapter } from '../src/adapters/copilot.js'
 import { FactoryAdapter } from '../src/adapters/factory.js'
 import { QwenAdapter } from '../src/adapters/qwen.js'
@@ -16,6 +17,7 @@ function refFor(path: string, harness: string): SessionRef {
 }
 const llm = (s: OtlpSpan[]) => s.find((x) => x.attributes['openinference.span.kind'] === 'LLM')
 const tool = (s: OtlpSpan[]) => s.find((x) => x.attributes['openinference.span.kind'] === 'TOOL')
+const userPrompt = (s: OtlpSpan[]) => s.find((x) => x.name === 'user.prompt')
 
 describe('amp adapter (thread JSON, camelCase usage)', () => {
   it('sums cache+fresh input tokens and flags tool errors', async () => {
@@ -26,6 +28,7 @@ describe('amp adapter (thread JSON, camelCase usage)', () => {
         id: 'T-x',
         created: 1000,
         messages: [
+          { role: 'user', content: [{ type: 'text', text: 'please run ls' }] },
           {
             role: 'assistant',
             messageId: 1,
@@ -40,6 +43,9 @@ describe('amp adapter (thread JSON, camelCase usage)', () => {
     expect(llm(spans)?.attributes['llm.input_tokens']).toBe(175)
     expect(llm(spans)?.attributes['llm.output_tokens']).toBe(10)
     expect(tool(spans)?.status.code).toBe('ERROR')
+    // The human's prompt is captured; the tool-result-only user turn is not.
+    expect(userPrompt(spans)?.attributes['content']).toContain('please run ls')
+    expect(spans.filter((x) => x.name === 'user.prompt')).toHaveLength(1)
   })
 })
 
@@ -62,6 +68,9 @@ describe('copilot adapter (event envelope, toolCallId join)', () => {
     expect(llm(spans)?.attributes['llm.output_tokens']).toBe(30)
     expect(tool(spans)?.status.code).toBe('ERROR')
     expect(tool(spans)?.status.message).toContain('boom')
+    // Assistant text is captured; Copilot's log format carries no user prompt.
+    expect(llm(spans)?.attributes['content']).toBe('hi')
+    expect(userPrompt(spans)).toBeUndefined()
   })
 })
 
@@ -89,6 +98,9 @@ describe('qwen adapter (flat ChatRecord, genai parts)', () => {
     expect(llm(spans)?.attributes['llm.output_tokens']).toBe(40)
     expect(tool(spans)?.attributes['tool.name']).toBe('read_file')
     expect(tool(spans)?.status.code).toBe('ERROR')
+    // The user turn becomes a user.prompt span; the functionResponse (role:user) turn does not.
+    expect(userPrompt(spans)?.attributes['content']).toBe('go')
+    expect(spans.filter((x) => x.name === 'user.prompt')).toHaveLength(1)
   })
 })
 
@@ -112,5 +124,31 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
     expect(tool(spans)?.status.code).toBe('ERROR')
     const root = spans.find((s) => s.attributes['openinference.span.kind'] === 'AGENT')
     expect(root?.attributes['session.input_tokens']).toBe(1234)
+  })
+})
+
+describe('claude adapter (conversation capture)', () => {
+  it('captures the user prompt + assistant text, but not a tool-result-only turn', async () => {
+    const path = join(dir, 'claude.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'user', uuid: 'u1', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: [{ type: 'text', text: 'do the thing' }] } },
+        {
+          type: 'assistant',
+          uuid: 'a1',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: { role: 'assistant', model: 'claude-opus', usage: { input_tokens: 100, output_tokens: 10 }, content: [{ type: 'text', text: 'on it' }, { type: 'tool_use', id: 'c1', name: 'bash', input: { cmd: 'ls' } }] },
+        },
+        { type: 'user', uuid: 'u2', timestamp: '2026-01-01T00:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', is_error: false, content: 'files' }] } },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join('\n'),
+    )
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+    expect(userPrompt(spans)?.attributes['content']).toBe('do the thing')
+    expect(spans.filter((x) => x.name === 'user.prompt')).toHaveLength(1)
+    expect(llm(spans)?.attributes['content']).toBe('on it')
+    expect(tool(spans)?.attributes['tool.name']).toBe('bash')
   })
 })

@@ -43,6 +43,21 @@ interface FactorySettings {
   tokenUsage?: { inputTokens?: number; outputTokens?: number }
 }
 
+/** Max chars of conversation text kept per span — enough for analysis, bounded
+ *  for storage + redaction cost. */
+const CONTENT_CAP = 8000
+
+/** Join a message's `text` blocks (the human's prompt or the assistant's prose)
+ *  into one capped string. A string body is taken verbatim. */
+function textOf(content: FactoryBlock[] | undefined): string {
+  return (content ?? [])
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('')
+    .trim()
+    .slice(0, CONTENT_CAP)
+}
+
 function parseLines(raw: string): FactoryLine[] {
   const out: FactoryLine[] = []
   for (const line of raw.split('\n')) {
@@ -142,28 +157,47 @@ export class FactoryAdapter implements HarnessTraceAdapter {
       if (l.type !== 'message' || !l.message) continue
       const ts = l.timestamp ?? new Date(0).toISOString()
       const role = l.message.role
-      const llmId = `llm:${l.id ?? step}`
-      const text = (l.message.content ?? [])
-        .filter((b) => b.type === 'text' && typeof b.text === 'string')
-        .map((b) => b.text)
-        .join('')
-      spans.push(
-        span({
-          traceId,
-          spanId: llmId,
-          parentSpanId: rootId,
-          name: `message.${role ?? 'unknown'}`,
-          kind: 'LLM',
-          startTime: ts,
-          service: SERVICE,
-          agent: SERVICE,
-          model: settings.model ?? null,
-          step,
-          content: text ? text.slice(0, 8000) : null,
-        }),
-      )
-      lastLlm = llmId
-      step += 1
+      const text = textOf(l.message.content)
+      if (role === 'user') {
+        // The human's prompt text. (A user turn may instead carry only
+        // tool_result blocks → no text → no user.prompt span.)
+        if (text) {
+          spans.push(
+            span({
+              traceId,
+              spanId: `user:${l.id ?? step}`,
+              parentSpanId: rootId,
+              name: 'user.prompt',
+              kind: 'CHAIN',
+              startTime: ts,
+              service: SERVICE,
+              agent: SERVICE,
+              step,
+              content: text,
+            }),
+          )
+          step += 1
+        }
+      } else {
+        const llmId = `llm:${l.id ?? step}`
+        spans.push(
+          span({
+            traceId,
+            spanId: llmId,
+            parentSpanId: rootId,
+            name: `message.${role ?? 'unknown'}`,
+            kind: 'LLM',
+            startTime: ts,
+            service: SERVICE,
+            agent: SERVICE,
+            model: settings.model ?? null,
+            step,
+            content: text || null,
+          }),
+        )
+        lastLlm = llmId
+        step += 1
+      }
 
       for (const b of l.message.content ?? []) {
         if (b.type === 'tool_use' && b.name) {

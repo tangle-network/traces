@@ -171,6 +171,29 @@ export class QwenAdapter implements HarnessTraceAdapter {
           openToolsByName.set(name, q)
           step += 1
         }
+      } else if (r.type === 'user') {
+        // The human's prompt text. Gate on `type` only: tool_result records also
+        // carry `message.role === 'user'` (functionResponse rides a user Content),
+        // so a `role === 'user'` fallback would swallow them. A text-less user
+        // turn (e.g. functionResponse-only) yields no user.prompt span.
+        const prompt = textOf(r.message?.parts).slice(0, 8000)
+        if (prompt) {
+          spans.push(
+            span({
+              traceId,
+              spanId: `user:${r.uuid ?? step}`,
+              parentSpanId: rootId,
+              name: 'user.prompt',
+              kind: 'CHAIN',
+              startTime: ts,
+              service: SERVICE,
+              agent: SERVICE,
+              step,
+              content: prompt,
+            }),
+          )
+          step += 1
+        }
       } else if (r.type === 'tool_result') {
         const err = r.toolCallResult?.status === 'error' || r.toolCallResult?.error != null
         for (const p of r.message?.parts ?? []) {
