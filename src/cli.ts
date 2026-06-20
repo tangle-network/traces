@@ -20,8 +20,9 @@ import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
 import { runPipelines } from './pipelines.js'
-import { knownHarnesses, listAdapters, resolveAdapter } from './registry.js'
+import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { renderPipelines, renderReport } from './report.js'
+import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
 
@@ -86,20 +87,6 @@ function parseArgs(argv: string[]): Args {
   return a
 }
 
-/** Parse `--since`: `30m` / `2h` / `7d` (relative) or an ISO date; default 24h. */
-function parseSince(s: string | undefined): number {
-  if (!s) return Date.now() - 24 * 60 * 60 * 1000
-  const m = s.match(/^(\d+)\s*([mhd])$/i)
-  if (m) {
-    const unit = m[2]!.toLowerCase()
-    const ms = unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000
-    return Date.now() - Number(m[1]) * ms
-  }
-  const t = Date.parse(s)
-  if (Number.isNaN(t)) throw new Error(`--since: expected 30m / 2h / 7d or an ISO date, got "${s}"`)
-  return t
-}
-
 /** Y/N confirm on a TTY (prompt to stderr so stdout stays clean). Non-TTY → false. */
 async function confirm(question: string): Promise<boolean> {
   if (!process.stdin.isTTY) return false
@@ -116,12 +103,7 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 function adaptersFor(args: Args): HarnessTraceAdapter[] {
-  if (args.all) return [...listAdapters()]
-  const adapter = resolveAdapter(args.harness)
-  if (!adapter) {
-    throw new Error(`unknown harness "${args.harness}". Known: ${knownHarnesses().join(', ')}`)
-  }
-  return [adapter]
+  return selectAdapters({ all: args.all, harnesses: [args.harness] })
 }
 
 async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; refs: SessionRef[] }[]> {
@@ -237,10 +219,15 @@ async function cmdWatch(args: Args): Promise<void> {
 }
 
 async function cmdUpload(args: Args): Promise<void> {
-  const sinceMs = parseSince(args.since)
+  const sinceMs = args.since ? parseSince(args.since) : Date.now() - 24 * 60 * 60 * 1000
   // Default to ALL harnesses unless a specific --harness was given.
   const all = args.all || !args.harnessExplicit
-  const plan = await planUpload({ all, harness: args.harness, cwd: args.cwd, sinceMs })
+  const plan = await planUpload({
+    all,
+    harnesses: args.harnessExplicit ? [args.harness] : undefined,
+    cwd: args.cwd,
+    sinceMs,
+  })
 
   const newItems = plan.items.filter((i) => i.isNew)
   const byRule: Record<string, number> = {}

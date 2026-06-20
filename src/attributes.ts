@@ -1,0 +1,37 @@
+/**
+ * Span-attribute keys the upload path stamps. The CLI is the producer; the
+ * Tangle Intelligence Platform is the consumer.
+ *
+ * `SESSION_ID` and `INGEST_SOURCE` are a cross-repo WIRE CONTRACT — the platform
+ * keys its cross-source dedup on them (`session.id`/`tangle.sessionId` linkage +
+ * `tangle.ingest_source === "cli"`). Do NOT change their string VALUES without a
+ * coordinated platform release. The rest are stored-but-not-parsed metadata,
+ * free to evolve.
+ *
+ * `SESSION_ID` stays camelCase because it must match agent-eval's
+ * `parseConversationLinkage` key list; the metadata keys are snake_case.
+ */
+export const ATTR = {
+  /** = the trace/session id. Wire contract (dedup linkage). */
+  SESSION_ID: 'tangle.sessionId',
+  /** "cli" marks a CLI upload so the platform can drop a re-upload of a session
+   *  that also streamed live. Wire contract. */
+  INGEST_SOURCE: 'tangle.ingest_source',
+  HARNESS: 'tangle.harness',
+  CWD: 'tangle.cwd',
+  GIT_BRANCH: 'tangle.git_branch',
+  HOST: 'tangle.host',
+  /** Basename of the session file. (Renamed from the ambiguous `tangle.source`,
+   *  which collided with `tangle.ingest_source`.) */
+  SESSION_FILE: 'tangle.session_file',
+  UPLOADED_AT: 'tangle.uploaded_at',
+  UPLOADER: 'tangle.uploader',
+  REDACTION_VERSION: 'redaction.version',
+  REDACTION_COUNT: 'redaction.count',
+} as const
+
+/** `tangle.ingest_source` value for CLI-uploaded traces. Wire contract. */
+export const INGEST_SOURCE_CLI = 'cli'
+
+/** Harness used when none is specified on a single-harness command. */
+export const DEFAULT_HARNESS = 'claude-code'

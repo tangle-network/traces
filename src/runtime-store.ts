@@ -16,6 +16,7 @@
 import { InMemoryTraceStore } from '@tangle-network/agent-eval'
 import type { Run, Span } from '@tangle-network/agent-eval'
 import type { OtlpSpan, OtlpSpanKind } from './otlp.js'
+import { parseIsoToEpochMs as ms } from './time.js'
 
 const KIND: Record<OtlpSpanKind, Span['kind']> = {
   AGENT: 'agent',
@@ -23,11 +24,6 @@ const KIND: Record<OtlpSpanKind, Span['kind']> = {
   TOOL: 'tool',
   CHAIN: 'custom',
   SPAN: 'custom',
-}
-
-function ms(iso: string): number {
-  const n = Date.parse(iso)
-  return Number.isNaN(n) ? 0 : n
 }
 
 export interface RuntimeTrace {

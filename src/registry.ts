@@ -53,3 +53,26 @@ export function resolveAdapter(harness: string): HarnessTraceAdapter | undefined
 export function knownHarnesses(): string[] {
   return [...BY_NAME.keys()].sort()
 }
+
+/** Options for selecting which adapters a command/SDK call operates on. */
+export interface AdapterSelection {
+  /** Use these adapters verbatim (e.g. a caller's own harness) — wins over all. */
+  adapters?: readonly HarnessTraceAdapter[]
+  /** Every known harness. Implied when no `adapters`/`harnesses` are given. */
+  all?: boolean
+  /** Specific harness ids/aliases. Unknown ids throw (fail-loud). */
+  harnesses?: readonly string[]
+}
+
+/** Resolve a selection to the adapters to operate on. Precedence:
+ *  explicit `adapters` → named `harnesses` → everything (`all` or unspecified).
+ *  A named harness that doesn't resolve throws rather than silently dropping. */
+export function selectAdapters(opts: AdapterSelection): HarnessTraceAdapter[] {
+  if (opts.adapters && opts.adapters.length > 0) return [...opts.adapters]
+  if (opts.all || !opts.harnesses || opts.harnesses.length === 0) return [...ADAPTERS]
+  return opts.harnesses.map((h) => {
+    const a = resolveAdapter(h)
+    if (!a) throw new Error(`unknown harness "${h}". Known: ${knownHarnesses().join(', ')}`)
+    return a
+  })
+}
