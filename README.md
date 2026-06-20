@@ -1,8 +1,26 @@
 # traces
 
-Analyze your coding-agent session logs for failure modes — stuck loops, token bloat, dropped self-verification — with zero instrumentation. It reads the logs your harness (Claude Code, Codex, OpenCode, …) already writes to disk.
+> Point `traces` at the session logs your coding agent already writes to disk — Claude Code, Codex, OpenCode, Gemini, and more — and get failure-mode + efficiency findings. **Zero instrumentation.** A CLI *and* an SDK.
 
-`traces` is a CLI and an SDK: run it ad-hoc, or build on it.
+![traces analyzing a real Claude Code session](https://raw.githubusercontent.com/tangle-network/traces/main/docs/demo.gif)
+
+[![npm](https://img.shields.io/npm/v/@tangle-network/traces.svg)](https://www.npmjs.com/package/@tangle-network/traces)
+[![license](https://img.shields.io/npm/l/@tangle-network/traces.svg)](./LICENSE)
+[![node](https://img.shields.io/node/v/@tangle-network/traces.svg)](https://nodejs.org)
+
+It reads the transcripts your harness leaves on disk, reconstructs the run as spans, and reports where the agent got stuck, burned tokens, or stopped checking its own work — locally, with no API key and no cost for the deterministic pass.
+
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [What it finds](#what-it-finds)
+- [Supported harnesses](#supported-harnesses)
+- [CLI reference](#cli-reference)
+- [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
+- [Library (SDK)](#library-sdk)
+- [Examples](#examples)
+- [Develop](#develop)
 
 ## Install
 
@@ -12,25 +30,33 @@ npx @tangle-network/traces analyze  # or run without installing
 npm i @tangle-network/traces        # or use it as a library
 ```
 
+Requires Node ≥ 22.
+
 ## Quick start
 
 ```bash
 traces analyze --harness claude-code --last 1
 ```
 
-```
-# Trace report — claude-code · 1 session · 2,429 spans
+That's the command in the demo above. The **deterministic pass** — stuck loops, token growth, output decay, missing self-verification, tool monoculture — needs no API key and costs nothing.
 
-## Stuck loops
-- `bash` ×7 with identical args in 48s   (same git status retried, no state change)
+Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowledge-poisoning / improvement); they call OpenAI and respect `--budget <usd>`.
 
-## Tool use
-- 1,204 tool calls · duplicate-call 22% · retry 6% · error 8%
-```
+Every run also writes an **OTLP-JSONL artifact** that feeds [HALO](https://github.com/context-labs/halo) (`halo spans.jsonl -p "diagnose"`) — analysis is never locked to one engine.
 
-The deterministic pass (stuck loops, token growth, tool monoculture, missing self-verification) needs no API key and costs nothing. Add `--llm` for the agentic analysts (failure-mode / knowledge-gap / knowledge-poisoning / improvement); they call OpenAI and respect `--budget`.
+## What it finds
 
-The written OTLP-JSONL artifact also feeds [HALO](https://github.com/context-labs/halo) (`halo spans.jsonl -p "diagnose"`) — analysis is never locked to one engine.
+The deterministic pass (free, no key) surfaces:
+
+| Finding | Meaning |
+|---|---|
+| **Stuck loops** | the same tool called N× with identical args and no state change |
+| **Monotonic input growth** | full history re-sent every step — context never compressed |
+| **Output-length decay** | planning/reasoning per step shrinking as context grows |
+| **No self-verification** | state-mutating actions never followed by an eval/inspect/check |
+| **Tool monoculture / retry / error rates** | the shape of how the agent actually spent its calls |
+
+`--llm` adds agentic analysts that read the conversation and cluster higher-order failure and improvement signals.
 
 ## Supported harnesses
 
@@ -49,9 +75,9 @@ The written OTLP-JSONL artifact also feeds [HALO](https://github.com/context-lab
 | `github-copilot` (`copilot`) | `~/.copilot/session-state/<id>/events.jsonl` | fixture |
 | `forge` (`forgecode`) | `/dump` JSON exports | fixture |
 
-Factory stores token totals in `.settings.json`, not per turn. Forge reads `/dump` JSON exports (live SQLite is a follow-up). ACP-only bridges may not persist a local transcript.
+Every adapter captures the full conversation — the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage. (`github-copilot` is the one exception: its log format carries no user prompt.) Factory stores token totals in `.settings.json`, not per turn. Forge reads `/dump` JSON exports (live SQLite is a follow-up). ACP-only bridges may not persist a local transcript.
 
-## Commands
+## CLI reference
 
 ```bash
 traces list     --harness claude-code --last 20    # discover sessions
@@ -78,20 +104,30 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
 
-`upload` redacts PII/secrets locally before anything leaves the machine, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host). It needs `TANGLE_INGEST_URL` (or `TANGLE_ORCHESTRATOR_URL`), `TANGLE_INGEST_API_KEY` (or `TANGLE_API_KEY`), and `TANGLE_TENANT_ID`; without them, `--dry-run` still works.
+## Upload to the Intelligence Platform
 
-## Use as a library
+`upload` **redacts PII/secrets locally before anything leaves the machine**, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host).
 
-The CLI is a thin consumer of these exports. Full runnable examples in [`examples/`](./examples).
+```bash
+traces upload --since 24h --dry-run   # see exactly what would be sent — no network
+traces upload --since 24h             # send it
+```
+
+It needs `TANGLE_INGEST_URL` (or `TANGLE_ORCHESTRATOR_URL`), `TANGLE_INGEST_API_KEY` (or `TANGLE_API_KEY`), and `TANGLE_TENANT_ID`. Without them, `--dry-run` still works fully.
+
+## Library (SDK)
+
+The CLI is a thin consumer of these exports.
 
 | Export | Signature | Use |
 |---|---|---|
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run analysts — built-in, or **your own** via `registry` |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
+| `scanSessions` | `(ScanOptions) → AsyncIterable<ScannedSession>` | the shared locate→parse iterator |
 | `collectSessions` | `(CollectOptions) → SessionBatch[]` | redacted per-session batches for your own pipeline |
 | `redactSpans` | `(spans, rules?) → { spans, report }` | PII/secret redaction (`TRACES_REDACTION_RULES`) |
 | `planUpload` / `executeUpload` | `(…, { backend? }) → …` | redact + dedup + send to any sink |
-| `listAdapters` / `resolveAdapter` | `() → […]` / `(id) → adapter` | the harness registry |
+| `selectAdapters` / `listAdapters` / `resolveAdapter` | adapter selection + the harness registry |
 | `HarnessTraceAdapter` | interface (`locate` + `parse`) | implement to add a harness |
 
 ```ts
@@ -103,12 +139,25 @@ await watchSessions({ all: true, signal: c.signal, onLoop: (l) => alert(l.toolNa
 
 // Run your own analyst instead of the built-ins:
 const registry = new AnalystRegistry()
-registry.register({ id: 'mine', description: '…', inputKind: 'trace-store', cost: { kind: 'deterministic' }, version: '1.0.0',
-  async analyze() { return [makeFinding({ analyst_id: 'mine', area: 'custom', claim: '…', severity: 'info', evidence_refs: [], confidence: 0.9 })] } })
+registry.register({
+  id: 'mine', description: '…', inputKind: 'trace-store', cost: { kind: 'deterministic' }, version: '1.0.0',
+  async analyze() {
+    return [makeFinding({ analyst_id: 'mine', area: 'custom', claim: '…', severity: 'info', evidence_refs: [], confidence: 0.9 })]
+  },
+})
 await analyzeSpans(spans, { registry })
 ```
 
-Add a new harness: implement `HarnessTraceAdapter` and pass it via `adapters: [...]` to `watchSessions`/`collectSessions`, or drop a file in `src/adapters/`. See [`examples/register-harness.ts`](./examples/register-harness.ts).
+## Examples
+
+Runnable, in [`examples/`](./examples):
+
+| File | Shows |
+|---|---|
+| [`observe-and-alert.ts`](./examples/observe-and-alert.ts) | tail live sessions and alert on stuck loops |
+| [`custom-analyst.ts`](./examples/custom-analyst.ts) | register and run your own analyst |
+| [`custom-backend.ts`](./examples/custom-backend.ts) | redact + dedup + upload to your own sink |
+| [`register-harness.ts`](./examples/register-harness.ts) | add a new harness by implementing `HarnessTraceAdapter` |
 
 ## Develop
 
