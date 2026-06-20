@@ -49,6 +49,7 @@ interface Args {
   analyzers: string[]
   analyzerPrompt?: string
   redactorCmd?: string
+  model?: string
 }
 
 function parseArgs(argv: string[]): Args {
@@ -81,6 +82,7 @@ function parseArgs(argv: string[]): Args {
       case '--otlp': a.otlp = next(); break
       case '--llm': a.llm = true; break
       case '--budget': a.budget = Number(next()); break
+      case '--model': a.model = next(); break
       case '--interval': a.interval = Number(next()); break
       case '--window': a.window = Number(next()); break
       case '--min-loop': a.minLoop = Number(next()); break
@@ -194,6 +196,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   const ai = args.llm ? await buildAxService() : undefined
   const { otlpPath, result } = await analyzeSpans(spans, {
     ai,
+    model: args.model,
     budgetUsd: args.budget,
     otlpOutPath: args.otlp,
     log: (msg) => process.stderr.write(`${msg}\n`),
@@ -203,7 +206,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   if (args.analyzers.length > 0 && otlpPath) {
     const engines = args.analyzers.map((spec) =>
       spec === 'halo'
-        ? haloAnalyzer({ defaultPrompt: args.analyzerPrompt })
+        ? haloAnalyzer({ defaultPrompt: args.analyzerPrompt, model: args.model })
         : commandAnalyzer({ name: spec, command: spec, args: (p, prompt) => (prompt ? [p, prompt] : [p]) }),
     )
     const results = await runExternalAnalyzers(otlpPath, engines, { prompt: args.analyzerPrompt })
@@ -310,7 +313,7 @@ function usage(): void {
 Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines, write a markdown report
-  convert   Emit OTLP-JSONL only (also feeds HALO)
+  convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
   watch     Online observer: tail active sessions, notify on stuck loops (read-only)
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
@@ -324,6 +327,7 @@ Options:
   --out <path>     Write report to a file
   --otlp <path>    OTLP artifact path (also the dry-run upload preview path)
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
+  --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
   --budget <usd>   USD cap for agentic analysts
   --analyzer <cmd> analyze: also run an external engine over the OTLP (repeatable; "halo" or any command)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)

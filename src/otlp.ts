@@ -4,8 +4,10 @@
  * Every harness adapter projects its native session log onto `OtlpSpan[]`
  * and we serialize one span per JSONL line. This is the exact wire shape
  * `@tangle-network/agent-eval`'s `OtlpFileTraceStore` indexes
- * (`projectOtlpFlatLine` + `extractOtlpAttributes`) AND the OpenInference
- * OTLP form HALO consumes — so one emitted file feeds both engines.
+ * (`projectOtlpFlatLine` + `extractOtlpAttributes`). It is a flat subset, NOT
+ * canonical OpenInference (kind lives in attributes; no resource/scope; root
+ * parent is null) — external OpenInference engines like HALO need the canonical
+ * form, which `external.ts` `toCanonicalOpenInference` produces.
  *
  * Attribute vocabulary the downstream analysts key off:
  *   - `openinference.span.kind`  → span kind (AGENT | LLM | TOOL | CHAIN)

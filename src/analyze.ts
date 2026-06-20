@@ -6,8 +6,10 @@
  * LLM, model-agnostic). Supply `ai` to add the agentic RLM kinds
  * (failure-mode / knowledge-gap / knowledge-poisoning / improvement).
  *
- * The written OTLP file is the canonical artifact — the same file feeds HALO
- * (`halo <file> -p "diagnose"`), so analysis is never locked to one engine.
+ * The written OTLP file is the artifact our pipeline reads. External engines can
+ * analyze it too: HALO needs canonical OpenInference, so `--analyzer halo`
+ * converts it first (see external.ts `toCanonicalOpenInference`) — analysis is
+ * never locked to one engine.
  */
 
 import type { AxAIService } from '@ax-llm/ax'
@@ -36,7 +38,7 @@ export interface AnalyzeOptions {
 }
 
 export interface AnalyzeResult {
-  /** Path to the OTLP-JSONL artifact (feeds HALO too). */
+  /** Path to the OTLP-JSONL artifact (convert to canonical for HALO). */
   otlpPath: string
   result: Awaited<ReturnType<ReturnType<typeof buildDefaultAnalystRegistry>['run']>>
 }

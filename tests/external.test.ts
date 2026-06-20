@@ -1,5 +1,8 @@
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { commandAnalyzer, commandRedactor, haloAnalyzer, runCommand } from '../src/external.js'
+import { commandAnalyzer, commandRedactor, haloAnalyzer, runCommand, toCanonicalOpenInference } from '../src/external.js'
 import { span } from '../src/otlp.js'
 import { applyRedactor } from '../src/redact.js'
 
@@ -38,14 +41,41 @@ describe('commandAnalyzer', () => {
   })
 })
 
+describe('toCanonicalOpenInference', () => {
+  it('maps our OTLP to HALO canonical: top-level kind, resource, scope, string parent', () => {
+    const otlp = JSON.stringify({
+      trace_id: 't', span_id: 's', parent_span_id: null, name: 'session', start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:00:01Z',
+      status: { code: 'OK' }, attributes: { 'openinference.span.kind': 'AGENT', 'service.name': 'claude-code' },
+    })
+    const [row] = toCanonicalOpenInference(otlp).split('\n').map((l) => JSON.parse(l))
+    expect(row.kind).toBe('AGENT') // top-level, not in attributes only
+    expect(row.parent_span_id).toBe('') // null → "" (HALO requires a string)
+    expect(row.resource.attributes['service.name']).toBe('claude-code')
+    expect(row.scope.name).toBeTruthy()
+    expect(row.status.message).toBe('') // SpanStatus.message defaults to ""
+  })
+})
+
 describe('haloAnalyzer', () => {
-  it('drives "<cmd> <otlp> -p <prompt>" (stubbed via echo)', async () => {
-    const a = haloAnalyzer({ command: 'echo' })
+  it('converts our OTLP to canonical before running halo (stubbed via cat)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tt-halo-'))
+    const otlpPath = join(dir, 'spans.otlp.jsonl')
+    writeFileSync(
+      otlpPath,
+      JSON.stringify({ trace_id: 't', span_id: 's', parent_span_id: null, name: 'session', start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:00:01Z', status: { code: 'OK' }, attributes: { 'openinference.span.kind': 'AGENT' } }),
+    )
+    // stub that prints arg $1 (the canonical file) and ignores halo's -p/-m flags
+    const stub = join(dir, 'stub.sh')
+    writeFileSync(stub, '#!/bin/sh\ncat "$1"\n')
+    chmodSync(stub, 0o755)
+    const a = haloAnalyzer({ command: stub })
     expect(a.name).toBe('halo')
-    const res = await a.analyze('/tmp/spans.otlp.jsonl', { prompt: 'diagnose loops' })
+    const res = await a.analyze(otlpPath)
     expect(res.ok).toBe(true)
-    expect(res.output).toContain('/tmp/spans.otlp.jsonl')
-    expect(res.output).toContain('-p diagnose loops')
+    // proves the file halo receives is canonical (the shape it rejected before)
+    expect(res.output).toContain('"kind"')
+    expect(res.output).toContain('"resource"')
+    expect(res.output).toContain('"parent_span_id":""')
   })
 })
 

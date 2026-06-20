@@ -75,7 +75,7 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   }
 
   lines.push('---')
-  lines.push(`OTLP artifact: \`${meta.otlpPath}\` — also runnable with \`halo ${meta.otlpPath} -p "diagnose"\`.`)
+  lines.push(`OTLP artifact: \`${meta.otlpPath}\` — run external engines with \`traces analyze --analyzer halo\`.`)
   lines.push('')
   return lines.join('\n')
 }

@@ -11,6 +11,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { readFile, writeFile } from 'node:fs/promises'
 import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
 
 export interface RunResult {
@@ -124,16 +125,65 @@ export function commandAnalyzer(spec: {
   }
 }
 
-/** HALO (github.com/context-labs/halo) over the OTLP artifact: `halo <file> -p <prompt>`.
- *  Install HALO yourself; this just drives it. */
-export function haloAnalyzer(opts: { command?: string; defaultPrompt?: string; timeoutMs?: number } = {}): ExternalAnalyzer {
+/** Convert our OTLP-JSONL (the flat shape our pipeline reads) into the canonical
+ *  OpenInference span schema HALO's `SpanRecord` requires: top-level `kind`,
+ *  `resource`, `scope`, and a string (never null) `parent_span_id`. Our own
+ *  writer keeps the simpler shape for the agent-eval reader; this is the bridge
+ *  to OpenInference consumers. Input + output are JSONL strings (one span/line). */
+export function toCanonicalOpenInference(otlpJsonl: string, opts: { service?: string; scopeName?: string } = {}): string {
+  return otlpJsonl
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((line) => {
+      const s = JSON.parse(line)
+      const a: Record<string, unknown> = s.attributes ?? {}
+      const resourceAttrs: Record<string, unknown> = { 'service.name': a['service.name'] ?? opts.service ?? 'traces' }
+      if (a['agent.name']) resourceAttrs['agent.name'] = a['agent.name']
+      return JSON.stringify({
+        trace_id: s.trace_id,
+        span_id: s.span_id,
+        parent_span_id: s.parent_span_id ?? '',
+        trace_state: '',
+        name: s.name,
+        kind: a['openinference.span.kind'] ?? 'CHAIN',
+        start_time: s.start_time,
+        end_time: s.end_time,
+        status: { code: s.status?.code ?? 'OK', message: s.status?.message ?? '' },
+        resource: { attributes: resourceAttrs },
+        scope: { name: opts.scopeName ?? 'tangle-traces', version: '' },
+        attributes: a,
+      })
+    })
+    .join('\n')
+}
+
+/** HALO (github.com/context-labs/halo) over the OTLP artifact. HALO requires
+ *  canonical OpenInference, so this converts our OTLP to a `<path>.halo.jsonl`
+ *  first, then runs `halo <file> -p <prompt> [-m <model>]`. Install HALO yourself
+ *  and configure its LLM provider (it uses the OpenAI client — `OPENAI_BASE_URL`
+ *  / `OPENAI_API_KEY`); this just drives it. */
+export function haloAnalyzer(opts: { command?: string; defaultPrompt?: string; model?: string; timeoutMs?: number } = {}): ExternalAnalyzer {
+  const command = opts.command ?? 'halo'
   const defaultPrompt = opts.defaultPrompt ?? 'diagnose'
-  return commandAnalyzer({
+  return {
     name: 'halo',
-    command: opts.command ?? 'halo',
-    args: (otlpPath, prompt) => [otlpPath, '-p', prompt ?? defaultPrompt],
-    timeoutMs: opts.timeoutMs,
-  })
+    async analyze(otlpPath, o = {}) {
+      try {
+        const canonical = toCanonicalOpenInference(await readFile(otlpPath, 'utf8'))
+        const canonPath = `${otlpPath}.halo.jsonl`
+        await writeFile(canonPath, canonical)
+        const args = [canonPath, '-p', o.prompt ?? defaultPrompt]
+        if (opts.model) args.push('-m', opts.model)
+        const res = await runCommand(command, args, { signal: o.signal, timeoutMs: opts.timeoutMs })
+        if (res.code !== 0) {
+          return { analyzer: 'halo', ok: false, output: res.stdout, error: res.stderr.trim() || `exit ${res.code}` }
+        }
+        return { analyzer: 'halo', ok: true, output: res.stdout.trim() }
+      } catch (e) {
+        return { analyzer: 'halo', ok: false, output: '', error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+  }
 }
 
 /** Run external analyzers over one OTLP artifact, concurrently. Never throws —
