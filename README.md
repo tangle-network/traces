@@ -43,7 +43,7 @@ That's the command in the demo above. The **deterministic pass** — stuck loops
 
 Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowledge-poisoning / improvement); they call OpenAI and respect `--budget <usd>`.
 
-Every run also writes an **OTLP-JSONL artifact**, and you can run external engines like [HALO](https://github.com/context-labs/halo) over it with `--analyzer halo` (traces converts our spans to the canonical OpenInference shape HALO needs) — see [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
+Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo` — see [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
 
 ## What it finds
 
@@ -142,7 +142,7 @@ traces analyze --last 1 --analyzer halo --analyzer-prompt "find token waste"
 traces analyze --last 1 --analyzer halo --analyzer my-engine    # repeatable
 ```
 
-HALO needs canonical OpenInference, so `--analyzer halo` converts our spans automatically (`toCanonicalOpenInference`). HALO runs its *own* LLM (OpenAI client — set `OPENAI_BASE_URL` / `OPENAI_API_KEY`, or use HALO's provider); `--model` is forwarded to it. traces supplies the trace and drives the CLI; it doesn't pay for or configure HALO's model.
+Our OTLP artifact is **canonical OpenInference** (top-level `kind`, `resource`, `scope`), so HALO reads it directly — no conversion. HALO runs its *own* LLM (OpenAI client — set `OPENAI_BASE_URL` / `OPENAI_API_KEY`, or use HALO's provider); `--model` is forwarded to it. traces supplies the trace and drives the CLI; it doesn't pay for or configure HALO's model.
 
 **Redactors** scrub prompt/response prose with an external PII model (catching names/addresses the regex pass can't), running *after* the built-in redaction:
 

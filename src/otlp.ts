@@ -1,13 +1,12 @@
 /**
  * OTLP-flat-line emitter — the canonical normalized trace shape.
  *
- * Every harness adapter projects its native session log onto `OtlpSpan[]`
- * and we serialize one span per JSONL line. This is the exact wire shape
- * `@tangle-network/agent-eval`'s `OtlpFileTraceStore` indexes
- * (`projectOtlpFlatLine` + `extractOtlpAttributes`). It is a flat subset, NOT
- * canonical OpenInference (kind lives in attributes; no resource/scope; root
- * parent is null) — external OpenInference engines like HALO need the canonical
- * form, which `external.ts` `toCanonicalOpenInference` produces.
+ * Every harness adapter projects its native session log onto `OtlpSpan[]`.
+ * `serializeSpans` emits one COMPLETE OpenInference span per JSONL line
+ * (top-level `kind`, `resource`, `scope`, string `parent_span_id`, plus the
+ * `openinference.span.kind` attribute). One standard artifact feeds three
+ * consumers unchanged: `@tangle-network/agent-eval`'s `OtlpFileTraceStore`
+ * (which reads the attribute vocabulary), HALO, and any OpenInference tool.
  *
  * Attribute vocabulary the downstream analysts key off:
  *   - `openinference.span.kind`  → span kind (AGENT | LLM | TOOL | CHAIN)
@@ -93,10 +92,37 @@ export function span(input: SpanInput): OtlpSpan {
   }
 }
 
-/** Serialize spans to OTLP-JSONL (one span per line, trailing newline). */
+/** Project an in-memory span to a COMPLETE OpenInference span: the standard shape
+ *  OTel/OpenInference consumers (and HALO) expect — top-level `kind`, `resource`,
+ *  `scope`, and a string `parent_span_id` ("" at the root) — while keeping the
+ *  attribute vocabulary (incl. `openinference.span.kind`) our own analysts read.
+ *  One artifact feeds our pipeline, HALO, and any OpenInference tool. */
+export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
+  const a = s.attributes
+  const resourceAttrs: Record<string, unknown> = {}
+  if (a['service.name'] != null) resourceAttrs['service.name'] = a['service.name']
+  if (a['agent.name'] != null) resourceAttrs['agent.name'] = a['agent.name']
+  return {
+    trace_id: s.trace_id,
+    span_id: s.span_id,
+    parent_span_id: s.parent_span_id ?? '',
+    name: s.name,
+    kind: (typeof a['openinference.span.kind'] === 'string' ? a['openinference.span.kind'] : 'CHAIN'),
+    start_time: s.start_time,
+    end_time: s.end_time,
+    status: { code: s.status.code, message: s.status.message ?? '' },
+    resource: { attributes: resourceAttrs },
+    scope: { name: 'tangle-traces', version: '' },
+    attributes: a,
+  }
+}
+
+/** Serialize spans to OpenInference JSONL (one complete span per line). This is a
+ *  standard OpenInference representation: it feeds our analysts, HALO, and other
+ *  OpenInference tools directly — no per-tool conversion. */
 export function serializeSpans(spans: readonly OtlpSpan[]): string {
   if (spans.length === 0) return ''
-  return `${spans.map((s) => JSON.stringify(s)).join('\n')}\n`
+  return `${spans.map((s) => JSON.stringify(toOpenInferenceSpan(s))).join('\n')}\n`
 }
 
 /** Write spans to an OTLP-JSONL file (a temp file when no path is given). */
