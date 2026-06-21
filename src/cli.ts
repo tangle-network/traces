@@ -15,6 +15,7 @@
  */
 
 import { stat, writeFile } from 'node:fs/promises'
+import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import type { OtlpSpan } from './otlp.js'
@@ -22,7 +23,8 @@ import { writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
 import { runPipelines } from './pipelines.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
-import { renderPipelines, renderReport } from './report.js'
+import { analyzeReactions } from './reactions.js'
+import { renderAdoption, renderPipelines, renderReactions, renderReport } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
@@ -155,7 +157,7 @@ async function cmdList(args: Args): Promise<void> {
   }
 }
 
-async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: string; sessionCount: number }> {
+async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: string; sessionCount: number; cwds: string[] }> {
   if (args.session) {
     const adapter = resolveAdapter(args.harness)
     if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
@@ -164,23 +166,27 @@ async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: s
       harness: adapter.harness,
       sessionId: args.session,
       path: args.session,
-      cwd: null,
+      // --session is an explicit file; honor --cwd so adoption can find the
+      // project's .evolve/skill-runs.jsonl (locate() infers cwd in the scan path).
+      cwd: args.cwd ?? null,
       mtimeMs: st.mtimeMs,
     }
-    return { spans: await adapter.parse(ref), harness: adapter.harness, sessionCount: 1 }
+    return { spans: await adapter.parse(ref), harness: adapter.harness, sessionCount: 1, cwds: ref.cwd ? [ref.cwd] : [] }
   }
   const groups = await discover({ ...args, last: args.last || 1 })
   const spans: OtlpSpan[] = []
   let sessionCount = 0
   const harnesses: string[] = []
+  const cwds: string[] = []
   for (const { adapter, refs } of groups) {
     if (refs.length > 0) harnesses.push(adapter.harness)
     for (const ref of refs) {
       spans.push(...(await adapter.parse(ref)))
+      if (ref.cwd) cwds.push(ref.cwd)
       sessionCount += 1
     }
   }
-  return { spans, harness: harnesses.join('+') || args.harness, sessionCount }
+  return { spans, harness: harnesses.join('+') || args.harness, sessionCount, cwds }
 }
 
 async function cmdConvert(args: Args): Promise<void> {
@@ -191,7 +197,7 @@ async function cmdConvert(args: Args): Promise<void> {
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
-  const { spans, harness, sessionCount } = await collectSpans(args)
+  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const ai = args.llm ? await buildAxService() : undefined
   const { otlpPath, result } = await analyzeSpans(spans, {
@@ -202,7 +208,11 @@ async function cmdAnalyze(args: Args): Promise<void> {
     log: (msg) => process.stderr.write(`${msg}\n`),
   })
   const pipelines = await runPipelines(spans, { minLoopOccurrences: args.minLoop })
-  let report = `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath })}\n${renderPipelines(pipelines)}`
+  const reactions = analyzeReactions(spans)
+  const adoption = await analyzeAdoption(spans, { cwds })
+  let report =
+    `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath })}\n` +
+    `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
   if (args.analyzers.length > 0 && otlpPath) {
     const engines = args.analyzers.map((spec) =>
       spec === 'halo'

@@ -22,6 +22,22 @@ export function capText(raw: string): string {
   return `${t.slice(0, CONTENT_CAP)}… [+${t.length - CONTENT_CAP} chars]`
 }
 
+/**
+ * Who produced a `user.prompt` turn. The trace records every "user" message,
+ * but only some are a real human typing — the rest are the harness or another
+ * agent feeding the model:
+ *   - `human`          a person typed it
+ *   - `subagent-spawn` a parent agent spawned a subagent with this prompt
+ *   - `injected`       a synthetic harness prompt (benchmark task, memory, …)
+ *   - `tool-result`    a tool result surfaced as a user turn (rare)
+ * Analysts that measure human reactions must filter to `human` only.
+ */
+export type Actor = 'human' | 'subagent-spawn' | 'injected' | 'tool-result'
+
+/** Span attribute key for {@link Actor}. New (additive) — not part of the
+ *  `tangle.sessionId`/`tangle.ingest_source` wire contract. */
+export const ACTOR_ATTR = 'tangle.actor'
+
 export interface UserPromptInput {
   traceId: string
   spanId: string
@@ -32,11 +48,15 @@ export interface UserPromptInput {
   service?: string | null
   agent?: string | null
   step?: number
+  /** Who produced this turn. Defaults to `human` when the adapter can't tell. */
+  actor?: Actor
 }
 
 /** The canonical `user.prompt` span. Every adapter emits the human's turn the
  *  same way — a CHAIN span, because a user message is not an LLM call — so
- *  analysts see one consistent shape regardless of harness. */
+ *  analysts see one consistent shape regardless of harness. The `actor`
+ *  attribute lets analysts separate real human turns from agent-to-agent or
+ *  injected prompts. */
 export function userPromptSpan(o: UserPromptInput): OtlpSpan {
   return span({
     traceId: o.traceId,
@@ -49,5 +69,6 @@ export function userPromptSpan(o: UserPromptInput): OtlpSpan {
     agent: o.agent ?? null,
     step: o.step,
     content: o.content,
+    extra: { [ACTOR_ATTR]: o.actor ?? 'human' },
   })
 }

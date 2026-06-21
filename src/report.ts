@@ -7,7 +7,9 @@
  */
 
 import type { AnalystFinding, AnalystRunResult } from '@tangle-network/agent-eval/analyst'
+import type { AdoptionReport } from './adoption.js'
 import type { PipelineReport } from './pipelines.js'
+import type { ReactionReport } from './reactions.js'
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 const SEVERITY_BADGE: Record<string, string> = {
@@ -104,5 +106,107 @@ export function renderPipelines(pr: PipelineReport): string {
     )
   }
   lines.push('')
+  return lines.join('\n')
+}
+
+const REACTION_BADGE: Record<string, string> = {
+  correction: 'correction',
+  frustration: 'frustration',
+  jargon: 'jargon-complaint',
+  structure: 'structure-complaint',
+  praise: 'praise',
+}
+
+function ratioStr(r: number | null): string {
+  if (r === null) return 'n/a (no reaction signals)'
+  if (!Number.isFinite(r)) return '∞ (corrective with zero praise)'
+  return `${r.toFixed(2)}:1`
+}
+
+function oneLine(s: string, n: number): string {
+  const t = s.replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n)}…` : t
+}
+
+/**
+ * Render the user-reaction analyst: how the real human reacted to the agent's
+ * prose. Only `actor === 'human'` turns are counted (see actor tag) — agent-to-
+ * agent and injected prompts are excluded.
+ */
+export function renderReactions(rr: ReactionReport): string {
+  const lines: string[] = ['## user reactions (deterministic, human turns only)', '']
+  const total = Object.values(rr.signals).reduce((a, b) => a + b, 0)
+  if (rr.humanReactionTurns === 0) {
+    lines.push('- No human turns followed an assistant turn (nothing to classify).')
+    lines.push('')
+    return lines.join('\n')
+  }
+  lines.push(
+    `- **Reaction turns:** ${rr.humanReactionTurns} human turn(s) followed an assistant turn; ` +
+      `${total} carried a reaction signal.`,
+  )
+  lines.push(`- **Corrective-to-positive ratio:** ${ratioStr(rr.correctiveToPositiveRatio)}`)
+  lines.push('')
+  lines.push('| Signal | Count |')
+  lines.push('|---|---|')
+  for (const [k, v] of Object.entries(rr.signals)) {
+    if (v > 0) lines.push(`| ${REACTION_BADGE[k] ?? k} | ${v} |`)
+  }
+  lines.push('')
+  if (rr.triggerPairs.length > 0) {
+    lines.push('### top trigger pairs (assistant prose → human reaction)')
+    lines.push('')
+    for (const p of rr.triggerPairs) {
+      lines.push(`- **[${p.reactions.map((r) => REACTION_BADGE[r] ?? r).join(', ')}]**`)
+      lines.push(`  - assistant: \`${oneLine(p.assistant, 180)}\``)
+      lines.push(`  - human: \`${oneLine(p.human, 180)}\``)
+    }
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Render skill + subagent adoption. Explicit trace-level invocations and
+ * loop-dispatched runs are reported SEPARATELY — the trace count alone
+ * undercounts loop-dispatched skills by orders of magnitude.
+ */
+export function renderAdoption(ar: AdoptionReport): string {
+  const lines: string[] = ['## skill & subagent adoption (deterministic)', '']
+  lines.push(
+    `- **Skill penetration:** ${(ar.skillPenetration * 100).toFixed(0)}% ` +
+      `(${ar.sessionsWithSkill}/${ar.sessionCount} session(s) invoked a skill explicitly)`,
+  )
+  lines.push(
+    `- **Explicit skill invocations:** ${ar.totalSkillInvocations} (Skill tool spans)  ·  ` +
+      `**Loop-dispatched runs:** ${ar.totalLoopDispatchedRuns} ` +
+      `(from ${ar.skillRunFilesRead} \`.evolve/skill-runs.jsonl\` file(s))`,
+  )
+  lines.push(
+    `- **Subagent spawns:** ${ar.totalSubagentSpawns} across ${ar.sessionsWithSubagent} session(s)`,
+  )
+  lines.push('')
+
+  const skillRows = Object.entries(ar.skillInvocations).sort((a, b) => b[1] - a[1])
+  const loopRows = Object.entries(ar.loopDispatchedRuns).sort((a, b) => b[1] - a[1])
+  if (skillRows.length > 0 || loopRows.length > 0) {
+    lines.push('| Skill | Explicit invocations | Loop-dispatched runs |')
+    lines.push('|---|---|---|')
+    const names = [...new Set([...skillRows.map((r) => r[0]), ...loopRows.map((r) => r[0])])].sort(
+      (a, b) => (ar.skillInvocations[b] ?? 0) + (ar.loopDispatchedRuns[b] ?? 0) - (ar.skillInvocations[a] ?? 0) - (ar.loopDispatchedRuns[a] ?? 0),
+    )
+    for (const n of names) {
+      lines.push(`| \`${n}\` | ${ar.skillInvocations[n] ?? 0} | ${ar.loopDispatchedRuns[n] ?? 0} |`)
+    }
+    lines.push('')
+  }
+
+  const agentRows = Object.entries(ar.subagentSpawns).sort((a, b) => b[1] - a[1])
+  if (agentRows.length > 0) {
+    lines.push('| Subagent | Spawns |')
+    lines.push('|---|---|')
+    for (const [n, c] of agentRows) lines.push(`| \`${n}\` | ${c} |`)
+    lines.push('')
+  }
   return lines.join('\n')
 }

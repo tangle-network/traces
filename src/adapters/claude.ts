@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
+import { claudeActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
@@ -31,6 +32,7 @@ interface ClaudeEvent {
   timestamp?: string
   cwd?: string
   isSidechain?: boolean
+  userType?: string
   message?: {
     role?: string
     model?: string
@@ -128,6 +130,9 @@ export function parseClaudeStream(
   const spans: OtlpSpan[] = []
   const toolSpanByUseId = new Map<string, OtlpSpan>()
   let step = ctx.startStep
+  // First-turn detection for actor heuristics: the opening human turn of a
+  // sidechain/spawned run reads like an agent brief, not a person.
+  let sawUserTurn = false
 
   for (const ev of events) {
     const ts = ev.timestamp ?? new Date(0).toISOString()
@@ -180,6 +185,15 @@ export function parseClaudeStream(
       // blocks; a tool-result-only turn yields no text → no user.prompt span.)
       const prompt = textOf(ev.message.content)
       if (prompt) {
+        // Derive who produced this turn from the structural signals Claude Code
+        // already records, falling back to text heuristics for the first turn.
+        const actor = claudeActor({
+          text: prompt,
+          isSidechain: ev.isSidechain,
+          userType: ev.userType ?? null,
+          isFirstUserTurn: !sawUserTurn,
+        })
+        sawUserTurn = true
         spans.push(
           userPromptSpan({
             traceId: ctx.traceId,
@@ -190,6 +204,7 @@ export function parseClaudeStream(
             agent: ctx.agent,
             step,
             content: prompt,
+            actor,
           }),
         )
         step += 1
