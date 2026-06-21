@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
+import { codexActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
@@ -178,6 +179,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
     const toolByCallId = new Map<string, OtlpSpan>()
     let step = 0
     let lastLlm = rootId
+    let sawUserTurn = false
 
     for (const l of lines) {
       const ts = l.timestamp ?? new Date(0).toISOString()
@@ -235,6 +237,10 @@ export class CodexAdapter implements HarnessTraceAdapter {
         // so capture it here as its own CHAIN span (no text → no span).
         const prompt = textOf(l.payload.content)
         if (prompt) {
+          // Codex has no sidechain/userType signal, so actor is text-only:
+          // synthetic markers or a first-turn agent brief → injected.
+          const actor = codexActor({ text: prompt, isFirstUserTurn: !sawUserTurn })
+          sawUserTurn = true
           spans.push(
             userPromptSpan({
               traceId,
@@ -245,6 +251,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
               service: SERVICE,
               agent: SERVICE,
               step,
+              actor,
             }),
           )
           step += 1

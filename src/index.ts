@@ -29,10 +29,23 @@ export { CopilotAdapter } from './adapters/copilot.js'
 export { ForgeAdapter } from './adapters/forge.js'
 // Conversation-capture helpers for custom adapters — emit the human's turn the
 // same way every built-in adapter does.
-export { CONTENT_CAP, capText, userPromptSpan } from './adapters/conversation.js'
+export { ACTOR_ATTR, CONTENT_CAP, capText, userPromptSpan } from './adapters/conversation.js'
+export type { Actor, UserPromptInput } from './adapters/conversation.js'
+// Actor + reaction classification (the user-reaction analyst keys off these).
+export {
+  classifyReaction,
+  claudeActor,
+  codexActor,
+  CORRECTIVE_REACTIONS,
+  looksLikeAgentPrompt,
+  textIsSynthetic,
+} from './adapters/actor.js'
+export type { Reaction } from './adapters/actor.js'
 
 // ── Detection / analysis (built-in, or bring your own analysts) ───────────
 export * from './pipelines.js' // runPipelines() — stuck-loop + tool-use
+export * from './reactions.js' // analyzeReactions() — human-reaction analyst
+export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
 
