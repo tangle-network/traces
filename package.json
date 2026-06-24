@@ -52,7 +52,7 @@
   },
   "dependencies": {
     "@ax-llm/ax": "^19.0.45",
-    "@tangle-network/agent-eval": "0.94.0"
+    "@tangle-network/agent-eval": "0.95.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
