@@ -16,7 +16,8 @@ export * from './otlp.js' // OtlpSpan, span(), serializeSpans(), writeOtlpFile()
 export * from './attributes.js' // ATTR keys, INGEST_SOURCE_CLI, DEFAULT_HARNESS
 export * from './time.js' // parseIsoToEpochMs(), parseSince()
 export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
-export * from './session-source.js' // scanSessions() — shared locate→parse iterator
+export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp
+export * from './repo.js' // resolveRepoAttrs() — per-session repo/git resource labels
 export { ClaudeAdapter } from './adapters/claude.js'
 export { CodexAdapter } from './adapters/codex.js'
 export { OpencodeAdapter } from './adapters/opencode.js'

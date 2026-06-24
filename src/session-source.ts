@@ -8,7 +8,21 @@
 
 import type { OtlpSpan } from './otlp.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
-import type { SessionRef } from './types.js'
+import { resolveRepoAttrs, stampRepoAttrs } from './repo.js'
+import type { HarnessTraceAdapter, SessionRef } from './types.js'
+
+/**
+ * Parse one session to spans and stamp per-session repo/git resource attrs
+ * (`tangle.subject.key` etc.) derived from the ref's cwd. Every OTLP-producing
+ * path funnels through here so the spine can group by repo. Repo resolution is
+ * computed ONCE per session; it is fail-safe and never throws.
+ */
+export async function parseSession(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<OtlpSpan[]> {
+  const spans = await adapter.parse(ref)
+  const repoAttrs = await resolveRepoAttrs(ref.cwd)
+  stampRepoAttrs(spans, repoAttrs)
+  return spans
+}
 
 export interface ScanOptions extends AdapterSelection {
   /** Filter by working directory (exact/prefix). */
@@ -47,7 +61,7 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
       if (opts.signal?.aborted) return
       let spans: OtlpSpan[]
       try {
-        spans = await adapter.parse(ref)
+        spans = await parseSession(adapter, ref)
       } catch (err) {
         opts.onError?.(err, ref)
         continue

@@ -24,6 +24,7 @@ import { watchSessions } from './observer.js'
 import { runPipelines } from './pipelines.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { analyzeReactions } from './reactions.js'
+import { parseSession } from './session-source.js'
 import { renderAdoption, renderPipelines, renderReactions, renderReport } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -171,7 +172,7 @@ async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: s
       cwd: args.cwd ?? null,
       mtimeMs: st.mtimeMs,
     }
-    return { spans: await adapter.parse(ref), harness: adapter.harness, sessionCount: 1, cwds: ref.cwd ? [ref.cwd] : [] }
+    return { spans: await parseSession(adapter, ref), harness: adapter.harness, sessionCount: 1, cwds: ref.cwd ? [ref.cwd] : [] }
   }
   const groups = await discover({ ...args, last: args.last || 1 })
   const spans: OtlpSpan[] = []
@@ -181,7 +182,7 @@ async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: s
   for (const { adapter, refs } of groups) {
     if (refs.length > 0) harnesses.push(adapter.harness)
     for (const ref of refs) {
-      spans.push(...(await adapter.parse(ref)))
+      spans.push(...(await parseSession(adapter, ref)))
       if (ref.cwd) cwds.push(ref.cwd)
       sessionCount += 1
     }
