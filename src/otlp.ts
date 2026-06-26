@@ -102,6 +102,11 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
   const resourceAttrs: Record<string, unknown> = {}
   if (a['service.name'] != null) resourceAttrs['service.name'] = a['service.name']
   if (a['agent.name'] != null) resourceAttrs['agent.name'] = a['agent.name']
+  // Per-session repo/git grouping labels (see src/repo.ts). `tangle.subject.key`
+  // is THE spine grouping key; the rest are stored-but-not-parsed provenance.
+  for (const k of ['tangle.subject.key', 'git.repository', 'git.branch', 'git.commit', 'tangle.cwd']) {
+    if (a[k] != null) resourceAttrs[k] = a[k]
+  }
   return {
     trace_id: s.trace_id,
     span_id: s.span_id,

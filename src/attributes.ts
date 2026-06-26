@@ -19,6 +19,16 @@ export const ATTR = {
   INGEST_SOURCE: 'tangle.ingest_source',
   HARNESS: 'tangle.harness',
   CWD: 'tangle.cwd',
+  /** THE per-session grouping key the spine derives subjects from
+   *  (`deriveSubjectKey` reads `tangle.subject.key` first). Resolves to the git
+   *  remote (host/owner/repo) when readable, else the cwd path basename. */
+  SUBJECT_KEY: 'tangle.subject.key',
+  /** Normalized git remote (e.g. `github.com/tangle-network/agent-dev-container`). */
+  GIT_REPOSITORY: 'git.repository',
+  /** Current branch at conversion time. */
+  GIT_BRANCH_NAME: 'git.branch',
+  /** HEAD short sha at conversion time. */
+  GIT_COMMIT: 'git.commit',
   GIT_BRANCH: 'tangle.git_branch',
   HOST: 'tangle.host',
   /** Basename of the session file. (Renamed from the ambiguous `tangle.source`,
