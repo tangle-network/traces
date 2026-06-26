@@ -5,6 +5,7 @@
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
+ *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
  *
  * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
@@ -17,6 +18,7 @@
 import { stat, writeFile } from 'node:fs/promises'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
+import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
@@ -197,6 +199,49 @@ async function cmdConvert(args: Args): Promise<void> {
   console.log(`wrote ${spans.length} spans → ${path}`)
 }
 
+async function collectSessionRows(args: Args): Promise<Array<{ ref: SessionRef; spans: OtlpSpan[] }>> {
+  if (args.session) {
+    const adapter = resolveAdapter(args.harness)
+    if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
+    const st = await stat(args.session)
+    const ref: SessionRef = {
+      harness: adapter.harness,
+      sessionId: args.session,
+      path: args.session,
+      cwd: args.cwd ?? null,
+      mtimeMs: st.mtimeMs,
+    }
+    return [{ ref, spans: await parseSession(adapter, ref) }]
+  }
+  const groups = await discover({ ...args, last: args.last || 20 })
+  const rows: Array<{ ref: SessionRef; spans: OtlpSpan[] }> = []
+  for (const { adapter, refs } of groups) {
+    for (const ref of refs) rows.push({ ref, spans: await parseSession(adapter, ref) })
+  }
+  return rows
+}
+
+async function cmdEvidence(args: Args): Promise<void> {
+  const rows = (await collectSessionRows(args)).filter((row) => row.spans.length > 0)
+  if (rows.length === 0) throw new Error('no spans found for the given selection')
+  const otlpPath = args.otlp ? await writeOtlpFile(rows.flatMap((row) => row.spans), args.otlp) : undefined
+  const generatedAt = new Date().toISOString()
+  const records = await Promise.all(rows.map((row) =>
+    buildPolicyEvidenceRecord(row.ref, row.spans, {
+      generatedAt,
+      minLoopOccurrences: args.minLoop,
+      maxLoopExamples: 25,
+      otlpPath,
+    }),
+  ))
+  if (args.out) {
+    const path = await writePolicyEvidenceFile(records, args.out)
+    console.log(`policy evidence → ${path}  (${records.length} session rows${otlpPath ? `, OTLP: ${otlpPath}` : ''})`)
+  } else {
+    process.stdout.write(serializePolicyEvidence(records))
+  }
+}
+
 async function cmdAnalyze(args: Args): Promise<void> {
   const { spans, harness, sessionCount, cwds } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
@@ -325,6 +370,7 @@ Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines, write a markdown report
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
+  evidence  Emit compact session-evidence JSONL for downstream policy miners
   watch     Online observer: tail active sessions, notify on stuck loops (read-only)
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
@@ -336,7 +382,7 @@ Options:
   --cwd <dir>      Filter sessions by working directory
   --since <t>      upload: window — 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
-  --otlp <path>    OTLP artifact path (also the dry-run upload preview path)
+  --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
   --budget <usd>   USD cap for agentic analysts
@@ -359,6 +405,7 @@ async function main(): Promise<void> {
     case 'list': await cmdList(args); break
     case 'analyze': await cmdAnalyze(args); break
     case 'convert': await cmdConvert(args); break
+    case 'evidence': await cmdEvidence(args); break
     case 'watch': await cmdWatch(args); break
     case 'upload': await cmdUpload(args); break
     default: usage()

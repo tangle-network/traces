@@ -17,6 +17,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [What it finds](#what-it-finds)
 - [Supported harnesses](#supported-harnesses)
 - [CLI reference](#cli-reference)
+- [Policy-mining evidence](#policy-mining-evidence)
 - [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
 - [External engines (bring your own)](#external-engines-bring-your-own)
 - [Library (SDK)](#library-sdk)
@@ -85,6 +86,7 @@ traces list     --harness claude-code --last 20    # discover sessions
 traces analyze  --harness codex --last 1           # $0 deterministic report
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
+traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces watch    --all                              # live observer; notify on stuck loops
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
@@ -99,12 +101,30 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--cwd <dir>` | Filter by working directory |
 | `--since <t>` | `upload`: window — `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
-| `--otlp <path>` | OTLP artifact path (also the dry-run upload preview) |
+| `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
 | `--interval <s>` / `--window <m>` | `watch`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--no-content` | `upload`: send metadata only — strip all prompt/response text |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
+
+## Policy-mining evidence
+
+`traces` does **not** emit benchmark campaign cells. It emits normalized coding-agent session evidence that another system can mine.
+
+```bash
+traces evidence --all --since 24h --out policy-evidence.jsonl --otlp spans.otlp.jsonl
+```
+
+Each JSONL row is one session:
+
+- session provenance: harness, session id, cwd, path, mtime
+- repo labels: `tangle.subject.key`, `git.repository`, branch, commit
+- behavior metrics: span counts, LLM turns, tool calls, errored tool calls, tokens, models, tool histogram
+- mining signals: stuck loops and tool error rate
+- provenance marker: `notCampaignCell: true`
+
+That boundary matters. `agent-lab` campaign `cells.jsonl` says "arm X beat arm Y on task Z." `traces evidence` says "this real agent session had this repo/model/tool/failure shape." A downstream policy compiler can cluster these rows, propose candidate policies, then validate those policies in a separate eval campaign.
 
 ## Upload to the Intelligence Platform
 
@@ -163,6 +183,8 @@ The CLI is a thin consumer of these exports.
 |---|---|---|
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run analysts — built-in, or **your own** via `registry` |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
+| `buildPolicyEvidenceRecord` | `(ref, spans, opts?) → PolicyEvidenceRecord` | summarize one session for downstream policy mining |
+| `collectPolicyEvidence` | `(ScanOptions) → PolicyEvidenceRecord[]` | scan harness sessions and emit policy-evidence rows |
 | `scanSessions` | `(ScanOptions) → AsyncIterable<ScannedSession>` | the shared locate→parse iterator |
 | `collectSessions` | `(CollectOptions) → SessionBatch[]` | redacted per-session batches for your own pipeline |
 | `redactSpans` | `(spans, rules?) → { spans, report }` | PII/secret redaction (`TRACES_REDACTION_RULES`) |
