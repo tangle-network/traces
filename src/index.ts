@@ -50,6 +50,7 @@ export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
 export * from './evidence.js' // policy-evidence JSONL for downstream miners
+export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
 
 // ── External engines (NOT bundled — shell out to tools you install) ────────
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor

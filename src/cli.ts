@@ -5,6 +5,7 @@
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
+ *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
  *
@@ -20,8 +21,9 @@ import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
+import { exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
-import { writeOtlpFile } from './otlp.js'
+import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
 import { runPipelines } from './pipelines.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
@@ -34,6 +36,8 @@ import { executeUpload, planUpload } from './upload.js'
 
 interface Args {
   command: string
+  input?: string
+  help: boolean
   harness: string
   harnessExplicit: boolean
   all: boolean
@@ -55,11 +59,13 @@ interface Args {
   analyzerPrompt?: string
   redactorCmd?: string
   model?: string
+  format?: string
 }
 
 function parseArgs(argv: string[]): Args {
   const a: Args = {
-    command: argv[0] ?? 'help',
+    command: argv[0] === '--help' || argv[0] === '-h' ? 'help' : argv[0] ?? 'help',
+    help: argv[0] === '--help' || argv[0] === '-h',
     harness: 'claude-code',
     harnessExplicit: false,
     all: false,
@@ -96,10 +102,15 @@ function parseArgs(argv: string[]): Args {
       case '--analyzer': { const v = next(); if (v) a.analyzers.push(v); break }
       case '--analyzer-prompt': a.analyzerPrompt = next(); break
       case '--redactor': a.redactorCmd = next(); break
+      case '--format': a.format = next(); break
+      case '--help':
+      case '-h': a.help = true; break
       case '--yes':
       case '-y': a.yes = true; break
       default:
         if (arg?.startsWith('--')) throw new Error(`unknown flag: ${arg}`)
+        if (arg && !a.input) a.input = arg
+        else if (arg) throw new Error(`unexpected positional argument: ${arg}`)
     }
   }
   return a
@@ -242,6 +253,25 @@ async function cmdEvidence(args: Args): Promise<void> {
   }
 }
 
+async function cmdExport(args: Args): Promise<void> {
+  if (!args.input) throw new Error('export needs an input file; run `traces export --help` for examples')
+  const format = args.format ?? 'auto'
+  if (format !== 'auto' && format !== 'policy-evidence' && format !== 'sandbox-events' && format !== 'openinference') {
+    throw new Error('--format must be auto, policy-evidence, sandbox-events, or openinference')
+  }
+  const outPath = args.out ?? args.otlp
+  if (outPath) {
+    const result = await writeTraceEvidenceExportFile(args.input, outPath, { format })
+    console.log(
+      `exported ${result.spans.length} OpenInference span(s) from ${result.format} → ${result.path}` +
+        ` (${result.redactionCount} redaction${result.redactionCount === 1 ? '' : 's'})`,
+    )
+    return
+  }
+  const result = await exportTraceEvidenceFile(args.input, { format })
+  process.stdout.write(serializeSpans(result.spans))
+}
+
 async function cmdAnalyze(args: Args): Promise<void> {
   const { spans, harness, sessionCount, cwds } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
@@ -363,6 +393,29 @@ async function cmdUpload(args: Args): Promise<void> {
   )
 }
 
+function usageExport(): void {
+  console.log(`traces export — convert trace evidence files to OpenInference JSONL
+
+Usage:
+  traces export <input.jsonl|input.json> --out <spans.jsonl> [--format auto]
+  traces export <input.jsonl|input.json> > spans.jsonl
+
+Input formats:
+  policy-evidence  Compact JSONL rows from \`traces evidence --out policy-evidence.jsonl\`
+  sandbox-events   Sandbox/OpenCode event arrays with start/raw/result/done/error events
+  openinference    Existing OpenInference JSONL; rewrites through traces redaction
+  auto             Detect the format from the file contents (default)
+
+Examples:
+  traces evidence --all --since 24h --out policy-evidence.jsonl
+  traces export policy-evidence.jsonl --out spans.openinference.jsonl
+  traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
+  halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
+
+Safety:
+  export runs the same local regex redaction used by upload before writing spans.`)
+}
+
 function usage(): void {
   console.log(`traces — analyze, observe & upload coding-agent sessions
 
@@ -370,6 +423,7 @@ Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines, write a markdown report
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
+  export    Convert evidence/events files to OpenInference JSONL for HALO
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   watch     Online observer: tail active sessions, notify on stuck loops (read-only)
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
@@ -383,6 +437,7 @@ Options:
   --since <t>      upload: window — 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
+  --format <kind>  export: auto | policy-evidence | sandbox-events | openinference
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
   --budget <usd>   USD cap for agentic analysts
@@ -395,16 +450,27 @@ Options:
   --no-content     upload: strip prompt/response text — send metadata only
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass
   --yes, -y        upload: skip the confirmation prompt
+  --help, -h       Show help (use \`traces export --help\` for export examples)
 
 Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
+  if (args.help) {
+    if (args.command === 'export' || (args.command === 'help' && args.input === 'export')) usageExport()
+    else usage()
+    return
+  }
   switch (args.command) {
+    case 'help':
+      if (args.input === 'export') usageExport()
+      else usage()
+      break
     case 'list': await cmdList(args); break
     case 'analyze': await cmdAnalyze(args); break
     case 'convert': await cmdConvert(args); break
+    case 'export': await cmdExport(args); break
     case 'evidence': await cmdEvidence(args); break
     case 'watch': await cmdWatch(args); break
     case 'upload': await cmdUpload(args); break

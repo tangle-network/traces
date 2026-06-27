@@ -87,6 +87,7 @@ traces analyze  --harness codex --last 1           # $0 deterministic report
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
+traces export   policy-evidence.jsonl --out spans.openinference.jsonl
 traces watch    --all                              # live observer; notify on stuck loops
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
@@ -102,6 +103,7 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--since <t>` | `upload`: window — `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
+| `--format <kind>` | `export`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
 | `--interval <s>` / `--window <m>` | `watch`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
@@ -125,6 +127,24 @@ Each JSONL row is one session:
 - provenance marker: `notCampaignCell: true`
 
 That boundary matters. `agent-lab` campaign `cells.jsonl` says "arm X beat arm Y on task Z." `traces evidence` says "this real agent session had this repo/model/tool/failure shape." A downstream policy compiler can cluster these rows, propose candidate policies, then validate those policies in a separate eval campaign.
+
+### Export existing evidence/events to OpenInference
+
+If you already have compact evidence or Sandbox/OpenCode event captures on disk, convert them to the same OpenInference JSONL shape that `traces analyze --analyzer halo` uses:
+
+```bash
+traces export policy-evidence.jsonl --out spans.openinference.jsonl
+traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
+halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
+```
+
+`traces export` accepts:
+
+- compact `traces.policy_evidence.session` JSONL from `traces evidence`
+- Sandbox/OpenCode JSON arrays with `start`, `raw`, `result`, `done`, and `error` events
+- existing OpenInference JSONL, rewritten through the local redaction path
+
+Run `traces export --help` for the full command reference.
 
 ## Upload to the Intelligence Platform
 
@@ -185,6 +205,7 @@ The CLI is a thin consumer of these exports.
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
 | `buildPolicyEvidenceRecord` | `(ref, spans, opts?) → PolicyEvidenceRecord` | summarize one session for downstream policy mining |
 | `collectPolicyEvidence` | `(ScanOptions) → PolicyEvidenceRecord[]` | scan harness sessions and emit policy-evidence rows |
+| `exportTraceEvidenceFile` | `(path, opts?) → { format, spans, redactionCount }` | convert compact evidence/events/OpenInference files to redacted OpenInference spans |
 | `scanSessions` | `(ScanOptions) → AsyncIterable<ScannedSession>` | the shared locate→parse iterator |
 | `collectSessions` | `(CollectOptions) → SessionBatch[]` | redacted per-session batches for your own pipeline |
 | `redactSpans` | `(spans, rules?) → { spans, report }` | PII/secret redaction (`TRACES_REDACTION_RULES`) |
