@@ -96,20 +96,27 @@ describe('trace evidence export', () => {
 
   it('converts Sandbox/OpenCode event arrays to HALO-readable OpenInference JSONL with redaction', () => {
     const events = [
-      { type: 'start', timestamp: '2026-06-27T12:00:00.000Z', sessionId: 'sandbox-r115' },
+      { type: 'start', data: { created_at: Date.parse('2026-06-27T12:00:00.000Z') / 1000, sessionId: 'sandbox-r115' } },
       {
         type: 'raw',
-        timestamp: '2026-06-27T12:00:01.000Z',
         data: {
+          timestamp: Date.parse('2026-06-27T12:00:01.000Z'),
           type: 'tool-invocation',
           toolName: 'bash',
           input: 'curl -H "Authorization: Bearer ghp_0123456789abcdefghijklmnopqrstuvwxyzAB" https://example.com',
         },
       },
-      { type: 'result', timestamp: '2026-06-27T12:00:02.000Z', data: { ok: true } },
-      { type: 'done', timestamp: '2026-06-27T12:00:03.000Z' },
+      { type: 'result', data: { ok: true, time: { updated: Date.parse('2026-06-27T12:00:02.000Z') } } },
+      { type: 'done', data: { timestamp: '2026-06-27T12:00:03.000Z' } },
     ]
-    const result = exportTraceEvidenceRows(events)
+    const result = exportTraceEvidenceRows(events, {
+      attributes: {
+        'research.task_id': 'aec-001',
+        'research.score': 1,
+        'research.tags': ['aec', 'smoke'],
+        'research.config': { arm: 'command-contract' },
+      },
+    })
     expect(result.format).toBe('sandbox-events')
     expect(result.redactionCount).toBeGreaterThanOrEqual(1)
 
@@ -119,7 +126,17 @@ describe('trace evidence export', () => {
     expect(rows).toHaveLength(5)
     rows.forEach(expectOpenInferenceRow)
     expect(rows[0]!.name).toBe('sandbox.events')
+    expect(rows[0]!.start_time).toBe('2026-06-27T12:00:00.000Z')
+    expect(rows[0]!.end_time).toBe('2026-06-27T12:00:03.000Z')
     expect(rows.some((row) => row.name === 'tool.bash')).toBe(true)
+    for (const row of rows) {
+      expect(row.attributes).toEqual(expect.objectContaining({
+        'research.task_id': 'aec-001',
+        'research.score': 1,
+        'research.tags': ['aec', 'smoke'],
+        'research.config': '{"arm":"command-contract"}',
+      }))
+    }
   })
 
   it('writes an exported file from JSONL input', async () => {
@@ -128,10 +145,13 @@ describe('trace evidence export', () => {
     const output = join(dir, 'spans.jsonl')
     await writeFile(input, `${JSON.stringify(policyRecord)}\n`, 'utf8')
 
-    const result = await writeTraceEvidenceExportFile(input, output)
+    const result = await writeTraceEvidenceExportFile(input, output, {
+      attributes: { 'campaign.id': 'r116' },
+    })
     expect(result.path).toBe(output)
     expect(result.format).toBe('policy-evidence')
     const [row] = parseRows(await readFile(output, 'utf8'))
     expectOpenInferenceRow(row!)
+    expect(row!.attributes).toEqual(expect.objectContaining({ 'campaign.id': 'r116' }))
   })
 })

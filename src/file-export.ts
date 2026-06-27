@@ -17,6 +17,7 @@ export type TraceEvidenceFormatOption = TraceEvidenceInputFormat | 'auto'
 export interface TraceEvidenceExportOptions {
   readonly format?: TraceEvidenceFormatOption
   readonly sourcePath?: string
+  readonly attributes?: JsonObject
 }
 
 export interface TraceEvidenceExportResult {
@@ -68,6 +69,24 @@ function firstTime(obj: JsonObject, keys: readonly string[]): string | undefined
   for (const key of keys) {
     const value = isoTime(obj[key])
     if (value) return value
+  }
+  return undefined
+}
+
+function firstTimeDeep(value: unknown, keys: readonly string[], depth = 5): string | undefined {
+  if (depth < 0) return undefined
+  if (isObject(value)) {
+    const direct = firstTime(value, keys)
+    if (direct) return direct
+    for (const child of Object.values(value)) {
+      const found = firstTimeDeep(child, keys, depth - 1)
+      if (found) return found
+    }
+  } else if (Array.isArray(value)) {
+    for (const child of value) {
+      const found = firstTimeDeep(child, keys, depth - 1)
+      if (found) return found
+    }
   }
   return undefined
 }
@@ -235,8 +254,30 @@ function findStringKey(value: unknown, keys: readonly string[], depth = 4): stri
   return undefined
 }
 
-function eventTimestamp(row: JsonObject, index: number): string {
-  return firstTime(row, ['timestamp', 'time', 'createdAt', 'created_at', 'start_time', 'startTime']) ?? new Date(index).toISOString()
+function eventTimestamp(row: JsonObject): string | undefined {
+  return firstTimeDeep(row, [
+    'timestamp',
+    'start_time',
+    'startTime',
+    'startedAt',
+    'createdAt',
+    'created_at',
+    'created',
+    'time',
+  ])
+}
+
+function eventEndTimestamp(row: JsonObject, fallback: string): string {
+  return firstTimeDeep(row, [
+    'end_time',
+    'endTime',
+    'completedAt',
+    'completed_at',
+    'finishedAt',
+    'updatedAt',
+    'updated_at',
+    'updated',
+  ]) ?? fallback
 }
 
 function eventStatus(row: JsonObject, type: string): { status: OtlpStatusCode; message?: string } {
@@ -266,9 +307,14 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
     findStringKey(rows, ['trace_id', 'traceId', 'session_id', 'sessionId', 'run_id', 'runId'], 4) ??
     `sandbox:${hashId(rows, 32)}`
   const service = findStringKey(context, ['service', 'harness', 'source'], 2) ?? 'sandbox-opencode'
-  const times = rows.map((row, i) => eventTimestamp(row, i)).sort()
+  const times = rows.flatMap((row) => {
+    const time = eventTimestamp(row)
+    return time ? [time] : []
+  }).sort()
   const rootId = `events:${hashId({ traceId, rows: rows.length })}`
   const hasError = rows.some((row) => eventStatus(row, eventType(row) ?? 'event').status === 'ERROR')
+  const rootStart = times[0] ?? new Date(0).toISOString()
+  const rootEnd = times[times.length - 1] ?? rootStart
   const spans: OtlpSpan[] = [
     span({
       traceId,
@@ -276,8 +322,8 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
       parentSpanId: null,
       name: 'sandbox.events',
       kind: 'AGENT',
-      startTime: times[0] ?? new Date(0).toISOString(),
-      endTime: times[times.length - 1] ?? times[0] ?? new Date(0).toISOString(),
+      startTime: rootStart,
+      endTime: rootEnd,
       status: hasError ? 'ERROR' : 'OK',
       service,
       agent: service,
@@ -288,9 +334,11 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
     }),
   ]
 
+  let previousTime = rootStart
   rows.forEach((row, index) => {
     const type = eventType(row) ?? 'event'
-    const time = eventTimestamp(row, index)
+    const time = eventTimestamp(row) ?? previousTime
+    previousTime = time
     const { status, message } = eventStatus(row, type)
     const { kind, tool } = eventKind(row, type)
     const name = kind === 'TOOL' && tool ? `tool.${tool}` : `event.${type}`
@@ -311,7 +359,7 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
       name,
       kind,
       startTime: time,
-      endTime: firstTime(row, ['end_time', 'endTime', 'completedAt', 'completed_at']) ?? time,
+      endTime: eventEndTimestamp(row, time),
       status,
       statusMessage: message,
       service,
@@ -353,18 +401,42 @@ function openInferenceToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
   })
 }
 
+function normalizeAttributes(attributes: JsonObject | undefined): JsonObject {
+  const normalized: JsonObject = {}
+  for (const [key, value] of Object.entries(attributes ?? {})) {
+    if (!key || value == null) continue
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      normalized[key] = value
+    } else if (Array.isArray(value) && value.every((item) =>
+      typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean'
+    )) {
+      normalized[key] = value
+    } else {
+      normalized[key] = stableJson(value)
+    }
+  }
+  return normalized
+}
+
+function withExportAttributes(spans: readonly OtlpSpan[], attributes: JsonObject | undefined): OtlpSpan[] {
+  const normalized = normalizeAttributes(attributes)
+  if (Object.keys(normalized).length === 0) return [...spans]
+  return spans.map((s) => ({ ...s, attributes: { ...s.attributes, ...normalized } }))
+}
+
 export function exportTraceEvidenceRows(
   rows: readonly unknown[],
   opts: TraceEvidenceExportOptions = {},
   wrapper?: JsonObject,
 ): TraceEvidenceExportResult {
   const format = detectFormat(rows, opts.format ?? 'auto')
-  const spans =
+  const converted =
     format === 'policy-evidence'
       ? policyEvidenceToSpans(requirePolicyEvidenceRows(rows))
       : format === 'openinference'
         ? openInferenceToSpans(requireOpenInferenceRows(rows))
         : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
+  const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)
   return {

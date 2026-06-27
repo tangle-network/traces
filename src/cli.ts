@@ -16,7 +16,7 @@
  * touches the agent or its harness.
  */
 
-import { stat, writeFile } from 'node:fs/promises'
+import { readFile, stat, writeFile } from 'node:fs/promises'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
@@ -60,6 +60,8 @@ interface Args {
   redactorCmd?: string
   model?: string
   format?: string
+  metadata?: string
+  attrs: string[]
 }
 
 function parseArgs(argv: string[]): Args {
@@ -78,6 +80,7 @@ function parseArgs(argv: string[]): Args {
     yes: false,
     noContent: false,
     analyzers: [],
+    attrs: [],
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -94,6 +97,8 @@ function parseArgs(argv: string[]): Args {
       case '--llm': a.llm = true; break
       case '--budget': a.budget = Number(next()); break
       case '--model': a.model = next(); break
+      case '--metadata': a.metadata = next(); break
+      case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
       case '--interval': a.interval = Number(next()); break
       case '--window': a.window = Number(next()); break
       case '--min-loop': a.minLoop = Number(next()); break
@@ -259,17 +264,45 @@ async function cmdExport(args: Args): Promise<void> {
   if (format !== 'auto' && format !== 'policy-evidence' && format !== 'sandbox-events' && format !== 'openinference') {
     throw new Error('--format must be auto, policy-evidence, sandbox-events, or openinference')
   }
+  const attributes = await loadExportAttributes(args)
   const outPath = args.out ?? args.otlp
   if (outPath) {
-    const result = await writeTraceEvidenceExportFile(args.input, outPath, { format })
+    const result = await writeTraceEvidenceExportFile(args.input, outPath, { format, attributes })
     console.log(
       `exported ${result.spans.length} OpenInference span(s) from ${result.format} → ${result.path}` +
         ` (${result.redactionCount} redaction${result.redactionCount === 1 ? '' : 's'})`,
     )
     return
   }
-  const result = await exportTraceEvidenceFile(args.input, { format })
+  const result = await exportTraceEvidenceFile(args.input, { format, attributes })
   process.stdout.write(serializeSpans(result.spans))
+}
+
+function parseAttributeValue(raw: string): unknown {
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+    const number = Number(raw)
+    if (Number.isFinite(number)) return number
+  }
+  return raw
+}
+
+async function loadExportAttributes(args: Args): Promise<Record<string, unknown>> {
+  const attributes: Record<string, unknown> = {}
+  if (args.metadata) {
+    const parsed: unknown = JSON.parse(await readFile(args.metadata, 'utf8'))
+    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('--metadata must point to a JSON object')
+    }
+    Object.assign(attributes, parsed as Record<string, unknown>)
+  }
+  for (const attr of args.attrs) {
+    const eq = attr.indexOf('=')
+    if (eq <= 0) throw new Error(`--attr must be key=value, got ${attr}`)
+    attributes[attr.slice(0, eq)] = parseAttributeValue(attr.slice(eq + 1))
+  }
+  return attributes
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
@@ -398,6 +431,8 @@ function usageExport(): void {
 
 Usage:
   traces export <input.jsonl|input.json> --out <spans.jsonl> [--format auto]
+  traces export <input.json> --attr task.id=abc --attr arm=baseline --out spans.jsonl
+  traces export <input.json> --metadata run-metadata.json --out spans.jsonl
   traces export <input.jsonl|input.json> > spans.jsonl
 
 Input formats:
@@ -410,10 +445,12 @@ Examples:
   traces evidence --all --since 24h --out policy-evidence.jsonl
   traces export policy-evidence.jsonl --out spans.openinference.jsonl
   traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
+  traces export sandbox-events.json --attr task.id=aec-001 --attr outcome.score=1 --out spans.openinference.jsonl
   halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 
 Safety:
-  export runs the same local regex redaction used by upload before writing spans.`)
+  export runs the same local regex redaction used by upload before writing spans.
+  --metadata must be a JSON object; --attr key=value is repeatable and overrides matching metadata keys.`)
 }
 
 function usage(): void {
@@ -438,6 +475,8 @@ Options:
   --out <path>     Write report to a file
   --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
   --format <kind>  export: auto | policy-evidence | sandbox-events | openinference
+  --metadata <json> export: attach JSON object fields as span attributes
+  --attr <k=v>     export: attach one span attribute (repeatable)
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
   --budget <usd>   USD cap for agentic analysts
