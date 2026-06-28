@@ -202,7 +202,7 @@ Merging to `main` publishes a patch release automatically:
 1. The Publish workflow bumps `package.json` from `X.Y.Z` to `X.Y.(Z+1)`.
 2. It commits `chore(release): vX.Y.(Z+1) [skip release]` back to `main`.
 3. It pushes the matching `vX.Y.(Z+1)` tag.
-4. The tag run verifies, builds, publishes to npm, and creates a GitHub release.
+4. The same workflow verifies the tag, builds, publishes to npm, and creates a GitHub release.
 
 Minor releases are manual. Run the Publish workflow from GitHub Actions and choose `minor`; it publishes `X.(Y+1).0`. Use manual `patch` only when you need a patch release without merging a new code change.
 
