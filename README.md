@@ -195,6 +195,17 @@ In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnal
 
 > For the built-in agentic analysts (`--llm`), set `OPENAI_API_KEY` — or point at any OpenAI-compatible gateway with `OPENAI_BASE_URL` (e.g. an internal router) to use a non-OpenAI key.
 
+## Release automation
+
+Merging to `main` publishes a patch release automatically:
+
+1. The Publish workflow bumps `package.json` from `X.Y.Z` to `X.Y.(Z+1)`.
+2. It commits `chore(release): vX.Y.(Z+1) [skip release]` back to `main`.
+3. It pushes the matching `vX.Y.(Z+1)` tag.
+4. The tag run verifies, builds, publishes to npm, and creates a GitHub release.
+
+Minor releases are manual. Run the Publish workflow from GitHub Actions and choose `minor`; it publishes `X.(Y+1).0`. Use manual `patch` only when you need a patch release without merging a new code change.
+
 ## Library (SDK)
 
 The CLI is a thin consumer of these exports.

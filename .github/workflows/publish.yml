@@ -2,15 +2,125 @@ name: Publish
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Manual version bump; main pushes always use patch'
+        required: true
+        default: minor
+        type: choice
+        options:
+          - minor
+          - patch
+
+concurrency:
+  group: traces-publish
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  prepare-release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/main' &&
+       !contains(github.event.head_commit.message, '[skip release]'))
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+    outputs:
+      version: ${{ steps.next-version.outputs.version }}
+      release_type: ${{ steps.release-type.outputs.release_type }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Configure release git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Select release type
+        id: release-type
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release_type=${{ inputs.release_type }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_type=patch" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compute next version
+        id: next-version
+        env:
+          RELEASE_TYPE: ${{ steps.release-type.outputs.release_type }}
+        run: |
+          node <<'NODE' >> "$GITHUB_OUTPUT"
+          const { execFileSync } = require('node:child_process')
+          const { readFileSync } = require('node:fs')
+
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+          const releaseType = process.env.RELEASE_TYPE
+
+          function parseVersion(value) {
+            const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value).trim())
+            if (!match) throw new Error(`invalid semver: ${value}`)
+            return match.slice(1).map(Number)
+          }
+
+          function compareVersions(a, b) {
+            for (let i = 0; i < 3; i += 1) {
+              if (a[i] !== b[i]) return a[i] - b[i]
+            }
+            return 0
+          }
+
+          function publishedVersion(name) {
+            try {
+              return execFileSync('npm', ['view', name, 'version'], {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+              }).trim()
+            } catch {
+              return ''
+            }
+          }
+
+          const local = parseVersion(pkg.version)
+          const publishedRaw = publishedVersion(pkg.name)
+          const published = publishedRaw ? parseVersion(publishedRaw) : local
+          const base = compareVersions(published, local) > 0 ? published : local
+          const next =
+            releaseType === 'minor'
+              ? [base[0], base[1] + 1, 0]
+              : releaseType === 'patch'
+                ? [base[0], base[1], base[2] + 1]
+                : null
+
+          if (!next) throw new Error(`unsupported release type: ${releaseType}`)
+          console.log(`version=${next.join('.')}`)
+          console.log(`base=${base.join('.')}`)
+          NODE
+      - name: Create version commit and tag
+        env:
+          VERSION: ${{ steps.next-version.outputs.version }}
+        run: |
+          git fetch origin main --tags
+          git checkout main
+          git reset --hard origin/main
+          npm version "$VERSION" -m "chore(release): v%s [skip release]"
+          git push origin HEAD:main "v$VERSION"
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
       id-token: write # npm provenance / OIDC trusted publishing
     steps:
       - uses: actions/checkout@v4
@@ -21,12 +131,47 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
+      - name: Verify tag matches package version
+        id: package
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version)")"
+          if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "tag version $TAG_VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          PACKAGE_NAME="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).name)")"
+          echo "name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Check npm version
+        id: npm-version
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Verify (typecheck + test + build)
         run: |
           pnpm typecheck
           pnpm test
           pnpm build
       - name: Publish to npm
+        if: steps.npm-version.outputs.exists != 'true'
         run: pnpm publish --access public --no-git-checks
         env:
           NPM_CONFIG_PROVENANCE: 'true'
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes "Published @tangle-network/traces@${GITHUB_REF_NAME#v} to npm."
+          fi
