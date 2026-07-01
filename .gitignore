@@ -2,3 +2,12 @@ node_modules
 dist
 *.log
 .DS_Store
+
+# Eval/benchmark run bundles the harness writes to CWD (regenerable output, not source).
+# Root fix TODO: point the harness at a dedicated runs/ dir instead of the repo root.
+/tax-legal-research-*/
+**/product-benchmark-records.jsonl
+**/product-benchmark-manifest.json
+**/source-runs/
+**/raw-events/
+**/skill-runs.jsonl
