@@ -10,12 +10,17 @@ on:
     inputs:
       release_type:
         description: 'Manual version bump; main pushes always use patch'
-        required: true
+        required: false
         default: minor
         type: choice
         options:
           - minor
           - patch
+      existing_tag:
+        description: 'Existing v* tag to publish without creating a new version commit'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: traces-publish
@@ -24,7 +29,7 @@ concurrency:
 jobs:
   prepare-release:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.existing_tag == '') ||
       (github.event_name == 'push' &&
        github.ref == 'refs/heads/main' &&
        !contains(github.event.head_commit.message, '[skip release]'))
@@ -121,15 +126,43 @@ jobs:
     if: >-
       always() &&
       ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+       (github.event_name == 'workflow_dispatch' && inputs.existing_tag != '') ||
        needs.prepare-release.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write # npm provenance / OIDC trusted publishing
     steps:
+      - name: Select publish tag
+        id: publish-tag
+        env:
+          EXISTING_TAG: ${{ inputs.existing_tag }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          if [ -n "$EXISTING_TAG" ]; then
+            case "$EXISTING_TAG" in
+              v*) TAG_NAME="$EXISTING_TAG" ;;
+              *) TAG_NAME="v$EXISTING_TAG" ;;
+            esac
+          elif [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+          elif [ -n "$RELEASE_VERSION" ]; then
+            TAG_NAME="v$RELEASE_VERSION"
+          else
+            echo "No release tag was provided or created" >&2
+            exit 1
+          fi
+
+          if ! printf '%s\n' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid release tag: $TAG_NAME" >&2
+            exit 1
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "ref=refs/tags/$TAG_NAME" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref || format('refs/tags/v{0}', needs.prepare-release.outputs.version) }}
+          ref: ${{ steps.publish-tag.outputs.ref }}
           fetch-depth: 0
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -140,8 +173,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify tag matches package version
         id: package
+        env:
+          TAG_NAME: ${{ steps.publish-tag.outputs.tag_name }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${TAG_NAME#v}"
           PACKAGE_VERSION="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version)")"
           if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
             echo "tag version $TAG_VERSION does not match package.json version $PACKAGE_VERSION" >&2
@@ -174,11 +209,12 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.publish-tag.outputs.tag_name }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "GitHub release $GITHUB_REF_NAME already exists"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "GitHub release $TAG_NAME already exists"
           else
-            gh release create "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" \
-              --notes "Published @tangle-network/traces@${GITHUB_REF_NAME#v} to npm."
+            gh release create "$TAG_NAME" \
+              --title "$TAG_NAME" \
+              --notes "Published @tangle-network/traces@${TAG_NAME#v} to npm."
           fi
