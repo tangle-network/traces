@@ -1,0 +1,13 @@
+allowBuilds:
+  '@ax-llm/ax': set this to true or false
+  esbuild: set this to true or false
+overrides:
+  esbuild: ^0.28.1
+  vite: ^8.1.2
+  ws: ^8.21.0
+
+onlyBuiltDependencies:
+  - esbuild
+
+ignoredBuiltDependencies:
+  - '@ax-llm/ax'
