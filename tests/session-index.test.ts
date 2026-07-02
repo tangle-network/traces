@@ -119,8 +119,8 @@ describe('session index', () => {
     const root = await mkdtemp(join(tmpdir(), 'traces-index-context-'))
     created.push(root)
     await mkdir(join(root, '.evolve', 'reflections'), { recursive: true })
-    await writeFile(join(root, 'AGENTS.md'), '# Agents\n\nUse tests.\n', 'utf8')
-    await writeFile(join(root, '.evolve', 'skill-runs.jsonl'), '{"skill":"/evolve"}\n{"skill":"/verify"}\n', 'utf8')
+    await writeFile(join(root, 'AGENTS.md'), '# Agents\n\n## Contents\n\n- [Rules](#rules)\n\n## Rules\n\nUse tests.\n', 'utf8')
+    await writeFile(join(root, '.evolve', 'skill-runs.jsonl'), '{"skill":"/evolve","verdict":"pass"}\n{"skill":"/verify"}\nnot-json\n', 'utf8')
     await writeFile(join(root, '.evolve', 'governor.jsonl'), '{"next":"verify"}\n', 'utf8')
     await writeFile(join(root, '.evolve', 'reflections', 'r.md'), '# Reflection\n\nNext: verify.\n', 'utf8')
 
@@ -142,12 +142,21 @@ describe('session index', () => {
     expect(index.context?.totals.roots).toBe(1)
     expect(index.context?.totals.instructionDocs).toBe(1)
     expect(index.context?.totals.evolveFiles).toBe(2)
-    expect(index.context?.totals.jsonlRows).toBe(3)
+    expect(index.context?.totals.jsonlRows).toBe(4)
+    expect(index.context?.totals.invalidJsonlRows).toBe(1)
     expect(index.context?.roots[0]?.files.map((file) => file.kind).sort()).toEqual([
       'evolve-jsonl',
       'evolve-jsonl',
       'instruction-doc',
       'reflection',
     ])
+    const agents = index.context?.roots[0]?.files.find((file) => file.path.endsWith('AGENTS.md'))
+    expect(agents?.markdown).toEqual({ headings: 3, hasToc: true })
+    const skillRuns = index.context?.roots[0]?.files.find((file) => file.path.endsWith('skill-runs.jsonl'))
+    expect(skillRuns?.jsonl).toEqual({
+      rows: 3,
+      invalidRows: 1,
+      keys: { skill: 2, verdict: 1 },
+    })
   })
 })

@@ -38,6 +38,15 @@ export interface TraceIndexedFile {
   readonly mtimeMs: number
   readonly lines?: number
   readonly jsonlRows?: number
+  readonly markdown?: {
+    readonly headings: number
+    readonly hasToc: boolean
+  }
+  readonly jsonl?: {
+    readonly rows: number
+    readonly invalidRows: number
+    readonly keys: Record<string, number>
+  }
 }
 
 export interface TraceContextRoot {
@@ -52,6 +61,7 @@ export interface TraceContextIndex {
     readonly instructionDocs: number
     readonly evolveFiles: number
     readonly jsonlRows: number
+    readonly invalidJsonlRows: number
   }
   readonly roots: readonly TraceContextRoot[]
 }
@@ -188,6 +198,33 @@ function countLines(text: string): number {
   return text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length
 }
 
+function summarizeMarkdown(text: string): TraceIndexedFile['markdown'] {
+  const lines = text.split('\n')
+  return {
+    headings: lines.filter((line) => /^#{1,6}\s+\S/.test(line)).length,
+    hasToc: /\btable of contents\b/i.test(text) || /^\s*-\s+\[[^\]]+\]\(#[^)]+\)/m.test(text),
+  }
+}
+
+function summarizeJsonl(text: string): NonNullable<TraceIndexedFile['jsonl']> {
+  const keys: Record<string, number> = {}
+  let rows = 0
+  let invalidRows = 0
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    rows += 1
+    try {
+      const parsed: unknown = JSON.parse(line)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const key of Object.keys(parsed)) keys[key] = (keys[key] ?? 0) + 1
+      }
+    } catch {
+      invalidRows += 1
+    }
+  }
+  return { rows, invalidRows, keys: Object.fromEntries(Object.entries(keys).sort(([a], [b]) => a.localeCompare(b))) }
+}
+
 async function summarizeFile(path: string, kind: TraceIndexedFile['kind']): Promise<TraceIndexedFile | null> {
   const s = await pathStat(path)
   if (!s?.isFile()) return null
@@ -197,10 +234,12 @@ async function summarizeFile(path: string, kind: TraceIndexedFile['kind']): Prom
   try {
     const text = await readFile(path, 'utf8')
     const lines = countLines(text)
+    const jsonl = path.endsWith('.jsonl') ? summarizeJsonl(text) : undefined
     return {
       ...base,
       lines,
-      ...(path.endsWith('.jsonl') ? { jsonlRows: text.trim().length === 0 ? 0 : text.trim().split(/\n+/).length } : {}),
+      ...(path.endsWith('.md') ? { markdown: summarizeMarkdown(text) } : {}),
+      ...(jsonl ? { jsonlRows: jsonl.rows, jsonl } : {}),
     }
   } catch {
     return base
@@ -270,6 +309,7 @@ async function collectContextIndex(records: readonly PolicyEvidenceRecord[]): Pr
       instructionDocs: files.filter((file) => file.kind === 'instruction-doc').length,
       evolveFiles: files.filter((file) => file.kind.startsWith('evolve-')).length,
       jsonlRows: files.reduce((sum, file) => sum + (file.jsonlRows ?? 0), 0),
+      invalidJsonlRows: files.reduce((sum, file) => sum + (file.jsonl?.invalidRows ?? 0), 0),
     },
     roots,
   }

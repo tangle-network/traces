@@ -127,7 +127,7 @@ The index contains:
 - one row per session with harness, session id, path, cwd, repo labels, and time bounds
 - behavior metrics: spans, LLM turns, tool calls, tool errors, tokens, models, and tools
 - signal summaries: stuck loops and tool error rate
-- nearby context files for joins: `AGENTS.md`, `CLAUDE.md`, and `.evolve` JSONL / reflection artifacts
+- nearby context files for joins: `AGENTS.md`, `CLAUDE.md`, and `.evolve` JSONL / reflection artifacts, with markdown heading/ToC and JSONL key summaries
 
 ## Policy-mining evidence
 
