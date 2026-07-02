@@ -285,3 +285,28 @@ describe('capText', () => {
     expect(out.length).toBeLessThan(long.length)
   })
 })
+
+// A codex *continuation* session leads with a session_meta that has no cwd (or a
+// turn_context); cwd must be recovered from a later cwd-bearing line so the
+// session still gets repo labels instead of coming back cwd:null.
+describe('codex cwd recovery — continuation sessions', () => {
+  it('recovers cwd from turn_context when the leading session_meta lacks it', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'tt-codex-cont-'))
+    const day = join(base, 'sessions', '2026', '06', '20')
+    mkdirSync(day, { recursive: true })
+    const lines = [
+      { type: 'session_meta', timestamp: '2026-06-20T00:00:00Z', payload: { id: 'cont1' } },
+      { type: 'turn_context', timestamp: '2026-06-20T00:00:01Z', payload: { model: 'gpt-4', cwd: '/home/u/code/myrepo' } },
+    ]
+    writeFileSync(join(day, 'rollout-2026-06-20T00-00-00-cont1.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n'))
+    const prev = process.env.CODEX_HOME
+    process.env.CODEX_HOME = base
+    try {
+      const refs = await new CodexAdapter().locate({})
+      expect(refs.find((r) => r.sessionId === 'cont1')?.cwd).toBe('/home/u/code/myrepo')
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = prev
+    }
+  })
+})
