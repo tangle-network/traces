@@ -88,6 +88,7 @@ traces analyze  --harness codex --last 1           # $0 deterministic report
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
 traces index    --all --since 24h --out session-index.json
+traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces export   policy-evidence.jsonl --out spans.openinference.jsonl
 traces watch    --all                              # live observer; notify on stuck loops
@@ -119,6 +120,7 @@ It is meant for deeper investigation and joins with other local data, not for on
 
 ```bash
 traces index --all --since 24h --out session-index.json
+traces inspect session-index.json --out inspection-report.md
 ```
 
 The index contains:
@@ -128,6 +130,9 @@ The index contains:
 - behavior metrics: spans, LLM turns, tool calls, tool errors, tokens, models, and tools
 - signal summaries: stuck loops and tool error rate
 - nearby context files for joins: `AGENTS.md`, `CLAUDE.md`, and `.evolve` JSONL / reflection artifacts, with markdown heading/ToC and JSONL key summaries
+
+`traces inspect` reads that index back and prints ranked improvement findings over the sessions and nearby context.
+It is intentionally read-only: it points to repeated-call loops, high tool-error sessions, missing repo attribution, long docs without Contents, invalid JSONL rows, and skill-run rows that cannot be joined back to a session.
 
 ## Policy-mining evidence
 
@@ -234,6 +239,7 @@ The CLI is a thin consumer of these exports.
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run analysts — built-in, or **your own** via `registry` |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
 | `collectSessionIndex` | `(ScanOptions) → TraceSessionIndex` | scan sessions and return a reusable JSON-ready catalog |
+| `inspectSessionIndex` | `(TraceSessionIndex) → TraceInspectionReport` | rank improvement findings from an index without rescanning sessions |
 | `buildPolicyEvidenceRecord` | `(ref, spans, opts?) → PolicyEvidenceRecord` | summarize one session for downstream policy mining |
 | `collectPolicyEvidence` | `(ScanOptions) → PolicyEvidenceRecord[]` | scan harness sessions and emit policy-evidence rows |
 | `exportTraceEvidenceFile` | `(path, opts?) → { format, spans, redactionCount }` | convert compact evidence/events/OpenInference files to redacted OpenInference spans |

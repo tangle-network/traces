@@ -6,6 +6,7 @@
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
+ *   traces inspect session-index.json [--out inspection-report.md]
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
@@ -23,6 +24,7 @@ import { analyzeSpans } from './analyze.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import { exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
+import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
@@ -284,6 +286,18 @@ async function cmdIndex(args: Args): Promise<void> {
   }
 }
 
+async function cmdInspect(args: Args): Promise<void> {
+  if (!args.input) throw new Error('inspect needs an index file; run `traces index --out session-index.json` first')
+  const index = await readSessionIndexFile(args.input)
+  const report = inspectSessionIndex(index)
+  if (args.out) {
+    const path = await writeInspectionReportFile(report, args.out)
+    console.log(`inspection report → ${path}  (${report.totals.findings} finding(s), high ${report.totals.high})`)
+  } else {
+    process.stdout.write(renderInspectionReport(report))
+  }
+}
+
 async function cmdExport(args: Args): Promise<void> {
   if (!args.input) throw new Error('export needs an input file; run `traces export --help` for examples')
   const format = args.format ?? 'auto'
@@ -487,6 +501,7 @@ Commands:
   analyze   Run analyst suite + loop/waste pipelines, write a markdown report
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
+  inspect   Read a session index and print ranked improvement findings
   export    Convert evidence/events files to OpenInference JSONL for HALO
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   watch     Online observer: tail active sessions, notify on stuck loops (read-only)
@@ -537,6 +552,7 @@ async function main(): Promise<void> {
     case 'analyze': await cmdAnalyze(args); break
     case 'convert': await cmdConvert(args); break
     case 'index': await cmdIndex(args); break
+    case 'inspect': await cmdInspect(args); break
     case 'export': await cmdExport(args); break
     case 'evidence': await cmdEvidence(args); break
     case 'watch': await cmdWatch(args); break
