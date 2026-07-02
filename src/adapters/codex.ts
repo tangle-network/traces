@@ -137,16 +137,23 @@ export class CodexAdapter implements HarnessTraceAdapter {
         continue
       }
       if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
-      // cwd lives in the first line's session_meta; read only the head.
-      const head = (await readFile(path, 'utf8').catch(() => '')).split('\n', 1)[0] ?? ''
+      // cwd usually rides the first line's session_meta, but a *continuation*
+      // session leads with a turn_context (or a meta without cwd). Both line
+      // types carry `payload.cwd`, so scan a bounded head for the first one —
+      // otherwise these sessions come back cwd:null and lose their repo labels.
+      const head = (await readFile(path, 'utf8').catch(() => '')).split('\n', 40)
       let cwd: string | null = null
       let id = basename(path).replace(/^rollout-[\dT-]+-/, '').replace(/\.jsonl$/, '')
-      try {
-        const meta = JSON.parse(head) as CodexLine
-        if (meta.payload?.cwd) cwd = meta.payload.cwd
-        if (meta.payload?.id) id = meta.payload.id
-      } catch {
-        // keep filename-derived id
+      for (const line of head) {
+        if (!line) continue
+        try {
+          const l = JSON.parse(line) as CodexLine
+          if (l.type === 'session_meta' && l.payload?.id) id = l.payload.id
+          if (!cwd && l.payload?.cwd) cwd = l.payload.cwd
+        } catch {
+          // skip an unparseable line; keep scanning
+        }
+        if (cwd) break
       }
       if (opts.cwd && (!cwd || !cwd.startsWith(opts.cwd))) continue
       refs.push({ harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs })
