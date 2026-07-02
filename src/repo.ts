@@ -8,19 +8,25 @@
  *
  * Derivation (fail-safe; historical sessions may point at a DELETED cwd, e.g. an
  * old worktree):
- *   - cwd exists AND has a readable `.git` → read the git REMOTE url, normalize
- *     to `host/owner/repo` (e.g. github.com/tangle-network/agent-dev-container)
- *     for `tangle.subject.key` + `git.repository`, plus the current branch and
- *     HEAD short sha. `tangle.cwd` carries the path.
- *   - cwd is null/gone, or no readable `.git` → fall back to the cwd path
- *     basename for `tangle.subject.key` (the project dir name still groups
- *     per-project even when the dir is deleted), set `tangle.cwd`, and OMIT the
+ *   - recorded cwd exists in or under a git repo → read the repo REMOTE url,
+ *     normalize to `host/owner/repo`, plus branch and HEAD short sha.
+ *   - recorded cwd is a lossy slash-decoded path from a dashed transcript dir
+ *     (e.g. `agent/runtime`) → repair it to the real dashed directory when it
+ *     exists (e.g. `agent-runtime`).
+ *   - recorded cwd is missing or less specific than tool execution evidence →
+ *     infer from absolute paths and explicit tool `workdir` / `cwd` fields.
+ *   - no usable repo signal → fall back to the cwd path basename and omit
  *     `git.*` keys (no fabrication).
  *
  * Never throws. A missing cwd yields `{}` so the session keeps today's behavior.
  */
 
+import { stat } from 'node:fs/promises'
+import { dirname, isAbsolute, join, normalize, parse as parsePath } from 'node:path'
 import { ATTR } from './attributes.js'
+import type { OtlpSpan } from './otlp.js'
+
+export type RepoResolutionSource = 'none' | 'ref-cwd' | 'repaired-cwd' | 'span-path' | 'span-workdir'
 
 /** Resource-attribute keys this resolver may stamp. */
 export type RepoAttrs = Partial<
@@ -32,7 +38,16 @@ export type RepoAttrs = Partial<
     | typeof ATTR.CWD,
     string
   >
->
+> & Partial<Record<typeof ATTR.REPO_RESOLUTION_SOURCE, RepoResolutionSource>>
+
+export interface RepoResolution {
+  /** Resource attributes to stamp onto spans. */
+  attrs: RepoAttrs
+  /** Best-known cwd/repo directory after repair or span-path inference. */
+  cwd: string | null
+  /** Which signal produced the selected cwd. */
+  source: RepoResolutionSource
+}
 
 /**
  * Normalize a git remote url to `host/owner/repo`, dropping scheme, auth, the
@@ -69,7 +84,6 @@ export function normalizeRemote(url: string): string | null {
 }
 
 async function readGit(cwd: string): Promise<{ remote: string | null; branch: string | null; commit: string | null }> {
-  const { stat } = await import('node:fs/promises')
   // A readable `.git` (dir for a normal repo, file for a worktree/submodule).
   await stat(`${cwd}/.git`) // throws if absent → caller falls back
 
@@ -103,6 +117,175 @@ async function readGit(cwd: string): Promise<{ remote: string | null; branch: st
   }
 }
 
+async function pathStat(path: string): Promise<Awaited<ReturnType<typeof stat>> | null> {
+  try {
+    return await stat(path)
+  } catch {
+    return null
+  }
+}
+
+async function directoryExists(path: string): Promise<boolean> {
+  const s = await pathStat(path)
+  return Boolean(s?.isDirectory())
+}
+
+async function nearestExistingDir(path: string): Promise<string | null> {
+  if (!path || !isAbsolute(path)) return null
+
+  let cur = normalize(path)
+  for (;;) {
+    const s = await pathStat(cur)
+    if (s?.isDirectory()) return cur
+    if (s?.isFile()) return dirname(cur)
+
+    const parent = dirname(cur)
+    if (parent === cur) return null
+    cur = parent
+  }
+}
+
+async function findGitRoot(path: string): Promise<string | null> {
+  let cur = await nearestExistingDir(path)
+  while (cur) {
+    if (await pathStat(join(cur, '.git'))) return cur
+    const parent = dirname(cur)
+    if (parent === cur) return null
+    cur = parent
+  }
+  return null
+}
+
+async function repairDashedPath(cwd: string): Promise<string | null> {
+  if (!isAbsolute(cwd) || (await directoryExists(cwd))) return null
+
+  const normalized = normalize(cwd)
+  const parsed = parsePath(normalized)
+  const parts = normalized.slice(parsed.root.length).split('/').filter(Boolean)
+  if (parts.length === 0) return null
+
+  let current = parsed.root
+  let index = 0
+  while (index < parts.length) {
+    const nextPart = parts[index]
+    if (!nextPart) break
+    const exact = join(current, nextPart)
+    if (!(await directoryExists(exact))) break
+    current = exact
+    index += 1
+  }
+
+  while (index < parts.length) {
+    let match: string | null = null
+    let consumed = 0
+    for (let n = parts.length - index; n >= 1; n -= 1) {
+      const segment = parts.slice(index, index + n).join('-')
+      const candidate = join(current, segment)
+      if (await directoryExists(candidate)) {
+        match = candidate
+        consumed = n
+        break
+      }
+    }
+    if (!match) return null
+    current = match
+    index += consumed
+  }
+
+  return current !== normalized ? current : null
+}
+
+const ABSOLUTE_PATH_RE = /\/(?:home|tmp|private\/tmp|Users|work|workspace|workspaces|mnt|srv|var|opt|repo|app)\/[^\s"'`<>|;]+/g
+const MAX_SPAN_PATH_CANDIDATES = 64
+const MAX_SPAN_TEXT_CHARS = 200_000
+const SOURCE_WEIGHT: Record<RepoResolutionSource, number> = {
+  none: 0,
+  'span-path': 5,
+  'ref-cwd': 50,
+  'repaired-cwd': 90,
+  'span-workdir': 100,
+}
+
+interface PathEvidence {
+  path: string
+  source: Extract<RepoResolutionSource, 'span-path' | 'span-workdir'>
+  weight: number
+}
+
+function cleanPathCandidate(raw: string): string | null {
+  let value = raw
+    .trim()
+    .replace(/\\n/g, '')
+    .replace(/[),\].}]+$/g, '')
+    .replace(/:\d+(?::\d+)?$/g, '')
+  value = normalize(value)
+  return isAbsolute(value) ? value : null
+}
+
+function looksLikeWorkdirKey(key: string | undefined): boolean {
+  return key === 'cwd' || key === 'workdir' || key === 'workingDirectory' || key === 'working_directory'
+}
+
+function* pathEvidenceFromText(
+  text: string,
+  source: Extract<RepoResolutionSource, 'span-path' | 'span-workdir'>,
+): Generator<PathEvidence> {
+  if (source === 'span-workdir') {
+    const direct = cleanPathCandidate(text)
+    if (direct) yield { path: direct, source, weight: SOURCE_WEIGHT[source] }
+  }
+  for (const match of text.matchAll(ABSOLUTE_PATH_RE)) {
+    const candidate = cleanPathCandidate(match[0])
+    if (candidate) yield { path: candidate, source: 'span-path', weight: SOURCE_WEIGHT['span-path'] }
+  }
+}
+
+function* pathsFromUnknown(value: unknown, key?: string, depth = 0): Generator<PathEvidence> {
+  if (depth > 4 || value == null) return
+  if (typeof value === 'string') {
+    yield* pathEvidenceFromText(value, looksLikeWorkdirKey(key) ? 'span-workdir' : 'span-path')
+    const trimmed = value.trim()
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        yield* pathsFromUnknown(JSON.parse(trimmed), key, depth + 1)
+      } catch {
+        // Not JSON; the raw string was already yielded.
+      }
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) yield* pathsFromUnknown(item, key, depth + 1)
+    return
+  }
+  if (typeof value === 'object') {
+    for (const [childKey, item] of Object.entries(value as Record<string, unknown>)) yield* pathsFromUnknown(item, childKey, depth + 1)
+  }
+}
+
+function extractAbsolutePaths(spans: readonly OtlpSpan[]): PathEvidence[] {
+  const paths: PathEvidence[] = []
+  const seen = new Set<string>()
+  let scannedChars = 0
+
+  for (const span of spans) {
+    for (const value of [span.name, span.status.message, ...Object.values(span.attributes)]) {
+      for (const evidence of pathsFromUnknown(value)) {
+        scannedChars += evidence.path.length
+        if (scannedChars > MAX_SPAN_TEXT_CHARS) return paths
+
+        const key = `${evidence.source}:${evidence.path}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        paths.push(evidence)
+        if (paths.length >= MAX_SPAN_PATH_CANDIDATES) return paths
+      }
+    }
+  }
+
+  return paths
+}
+
 /**
  * Resolve per-session repo/git resource attributes from a session's cwd.
  * Fail-safe and never throws; see the module doc for the derivation contract.
@@ -121,7 +304,10 @@ export async function resolveRepoAttrs(cwd: string | null | undefined): Promise<
   })()
 
   try {
-    const { remote, branch, commit } = await readGit(cwd)
+    const gitRoot = await findGitRoot(cwd)
+    if (!gitRoot) throw new Error('no git root')
+
+    const { remote, branch, commit } = await readGit(gitRoot)
     const normalized = remote ? normalizeRemote(remote) : null
     if (normalized) {
       attrs[ATTR.SUBJECT_KEY] = normalized
@@ -141,6 +327,53 @@ export async function resolveRepoAttrs(cwd: string | null | undefined): Promise<
 
   attrs[ATTR.SUBJECT_KEY] = basename
   return attrs
+}
+
+async function repoCandidateForPath(path: string): Promise<string | null> {
+  return (await findGitRoot(path)) ?? (await nearestExistingDir(path))
+}
+
+export async function resolveSessionRepoAttrs(
+  cwd: string | null | undefined,
+  spans: readonly OtlpSpan[],
+): Promise<RepoResolution> {
+  const candidates = new Map<string, { cwd: string; source: RepoResolutionSource; score: number; order: number }>()
+  const add = (value: string | null | undefined, source: RepoResolutionSource, weight = SOURCE_WEIGHT[source]): void => {
+    if (!value) return
+    const existing = candidates.get(value)
+    if (existing) {
+      existing.score += weight
+      if (SOURCE_WEIGHT[source] > SOURCE_WEIGHT[existing.source]) existing.source = source
+      return
+    }
+    candidates.set(value, { cwd: value, source, score: weight, order: candidates.size })
+  }
+
+  if (cwd) {
+    add(await repairDashedPath(cwd), 'repaired-cwd')
+    add(cwd, 'ref-cwd')
+  }
+
+  for (const evidence of extractAbsolutePaths(spans)) {
+    add(await repoCandidateForPath(evidence.path), evidence.source, evidence.weight)
+  }
+
+  const resolved: Array<{ attrs: RepoAttrs; cwd: string; source: RepoResolutionSource; score: number; order: number }> = []
+  for (const candidate of candidates.values()) {
+    const attrs = await resolveRepoAttrs(candidate.cwd)
+    resolved.push({ ...candidate, attrs })
+  }
+
+  const byScore = (a: { score: number; order: number }, b: { score: number; order: number }): number => b.score - a.score || a.order - b.order
+  const withGit = resolved.filter((candidate) => candidate.attrs[ATTR.GIT_REPOSITORY]).sort(byScore)
+  const selected = withGit[0] ?? resolved.filter((candidate) => candidate.attrs[ATTR.SUBJECT_KEY]).sort(byScore)[0]
+  if (!selected) return { attrs: {}, cwd: null, source: 'none' }
+
+  return {
+    attrs: { ...selected.attrs, [ATTR.REPO_RESOLUTION_SOURCE]: selected.source },
+    cwd: selected.attrs[ATTR.CWD] ?? selected.cwd,
+    source: selected.source,
+  }
 }
 
 /**

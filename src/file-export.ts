@@ -211,6 +211,7 @@ function policyEvidenceToSpans(records: readonly PolicyEvidenceRecord[]): OtlpSp
       [ATTR.GIT_BRANCH_NAME]: record.repo.branch,
       [ATTR.GIT_COMMIT]: record.repo.commit,
       [ATTR.CWD]: record.repo.cwd ?? record.session.cwd,
+      [ATTR.REPO_RESOLUTION_SOURCE]: record.repo.resolutionSource,
     }
     return span({
       traceId,

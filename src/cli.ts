@@ -5,6 +5,7 @@
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
+ *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
@@ -29,6 +30,7 @@ import { runPipelines } from './pipelines.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { analyzeReactions } from './reactions.js'
 import { parseSession } from './session-source.js'
+import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { renderAdoption, renderPipelines, renderReactions, renderReport } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -190,7 +192,8 @@ async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: s
       cwd: args.cwd ?? null,
       mtimeMs: st.mtimeMs,
     }
-    return { spans: await parseSession(adapter, ref), harness: adapter.harness, sessionCount: 1, cwds: ref.cwd ? [ref.cwd] : [] }
+    const spans = await parseSession(adapter, ref)
+    return { spans, harness: adapter.harness, sessionCount: 1, cwds: ref.cwd ? [ref.cwd] : [] }
   }
   const groups = await discover({ ...args, last: args.last || 1 })
   const spans: OtlpSpan[] = []
@@ -255,6 +258,29 @@ async function cmdEvidence(args: Args): Promise<void> {
     console.log(`policy evidence → ${path}  (${records.length} session rows${otlpPath ? `, OTLP: ${otlpPath}` : ''})`)
   } else {
     process.stdout.write(serializePolicyEvidence(records))
+  }
+}
+
+async function cmdIndex(args: Args): Promise<void> {
+  const rows = (await collectSessionRows(args)).filter((row) => row.spans.length > 0)
+  if (rows.length === 0) throw new Error('no spans found for the given selection')
+  const index = await buildSessionIndexFromRows(rows, {
+    minLoopOccurrences: args.minLoop,
+    selection: {
+      command: 'index',
+      harness: args.harnessExplicit ? args.harness : undefined,
+      all: args.all || undefined,
+      last: args.last || undefined,
+      session: args.session,
+      cwd: args.cwd,
+      since: args.since,
+    },
+  })
+  if (args.out) {
+    const path = await writeSessionIndexFile(index, args.out)
+    console.log(`session index → ${path}  (${index.totals.sessions} session rows)`)
+  } else {
+    process.stdout.write(serializeSessionIndex(index))
   }
 }
 
@@ -460,6 +486,7 @@ Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines, write a markdown report
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
+  index     Emit a reusable session index JSON for later investigation
   export    Convert evidence/events files to OpenInference JSONL for HALO
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   watch     Online observer: tail active sessions, notify on stuck loops (read-only)
@@ -509,6 +536,7 @@ async function main(): Promise<void> {
     case 'list': await cmdList(args); break
     case 'analyze': await cmdAnalyze(args); break
     case 'convert': await cmdConvert(args); break
+    case 'index': await cmdIndex(args); break
     case 'export': await cmdExport(args); break
     case 'evidence': await cmdEvidence(args); break
     case 'watch': await cmdWatch(args); break

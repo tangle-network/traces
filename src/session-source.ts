@@ -8,7 +8,7 @@
 
 import type { OtlpSpan } from './otlp.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
-import { resolveRepoAttrs, stampRepoAttrs } from './repo.js'
+import { resolveSessionRepoAttrs, stampRepoAttrs } from './repo.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 
 /**
@@ -19,8 +19,9 @@ import type { HarnessTraceAdapter, SessionRef } from './types.js'
  */
 export async function parseSession(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<OtlpSpan[]> {
   const spans = await adapter.parse(ref)
-  const repoAttrs = await resolveRepoAttrs(ref.cwd)
-  stampRepoAttrs(spans, repoAttrs)
+  const repo = await resolveSessionRepoAttrs(ref.cwd, spans)
+  if (repo.cwd) ref.cwd = repo.cwd
+  stampRepoAttrs(spans, repo.attrs)
   return spans
 }
 
