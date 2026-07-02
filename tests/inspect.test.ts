@@ -186,7 +186,7 @@ describe('session index inspection', () => {
     expect(ids).toContain('context.skill-run-trace-links')
 
     const skillRunFinding = report.findings.find((finding) => finding.id === 'context.skill-run-trace-links')
-    expect(skillRunFinding?.evidence[0]).toContain('1/3 row(s)')
+    expect(skillRunFinding?.evidence[0]).toContain('best link key covers 1/3 row(s)')
   })
 
   it('renders and writes inspection reports from index JSON', async () => {

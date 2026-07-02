@@ -296,26 +296,34 @@ function addContextFindings(index: TraceSessionIndex, findings: MutableFinding[]
     .map((file) => {
       const rows = file.jsonl?.rows ?? 0
       const keys = file.jsonl?.keys ?? {}
-      const linkedRows = Math.max(
-        keys.transcriptPath ?? 0,
-        keys.traceDir ?? 0,
-        keys.sessionPath ?? 0,
-        keys.sessionId ?? 0,
+      const linkKeyCounts = {
+        transcriptPath: keys.transcriptPath ?? 0,
+        traceDir: keys.traceDir ?? 0,
+        sessionPath: keys.sessionPath ?? 0,
+        sessionId: keys.sessionId ?? 0,
+      }
+      const bestLinkKeyRows = Math.max(
+        linkKeyCounts.transcriptPath,
+        linkKeyCounts.traceDir,
+        linkKeyCounts.sessionPath,
+        linkKeyCounts.sessionId,
       )
-      return { file, rows, linkedRows }
+      return { file, rows, bestLinkKeyRows, linkKeyCounts }
     })
-    .filter(({ rows, linkedRows }) => linkedRows < rows)
-    .sort((a, b) => (b.rows - b.linkedRows) - (a.rows - a.linkedRows))
+    .filter(({ rows, bestLinkKeyRows }) => bestLinkKeyRows < rows)
+    .sort((a, b) => (b.rows - b.bestLinkKeyRows) - (a.rows - a.bestLinkKeyRows))
   if (skillRunFiles.length > 0) {
-    const missing = skillRunFiles.reduce((sum, row) => sum + (row.rows - row.linkedRows), 0)
+    const missing = skillRunFiles.reduce((sum, row) => sum + (row.rows - row.bestLinkKeyRows), 0)
     findings.push({
       id: 'context.skill-run-trace-links',
-      severity: skillRunFiles.some((row) => row.linkedRows === 0) ? 'medium' : 'low',
+      severity: skillRunFiles.some((row) => row.bestLinkKeyRows === 0) ? 'medium' : 'low',
       area: 'context',
-      title: `${missing} skill-run row(s) are missing a direct session link`,
+      title: `${skillRunFiles.length} skill-run file(s) have incomplete direct session-link fields`,
       impact: missing,
-      evidence: skillRunFiles.slice(0, 5).map(({ file, rows, linkedRows }) =>
-        `${file.path}: ${linkedRows}/${rows} row(s) include transcriptPath, traceDir, sessionPath, or sessionId`),
+      evidence: skillRunFiles.slice(0, 5).map(({ file, rows, bestLinkKeyRows, linkKeyCounts }) =>
+        `${file.path}: best link key covers ${bestLinkKeyRows}/${rows} row(s); ` +
+          `transcriptPath ${linkKeyCounts.transcriptPath}, traceDir ${linkKeyCounts.traceDir}, ` +
+          `sessionPath ${linkKeyCounts.sessionPath}, sessionId ${linkKeyCounts.sessionId}`),
       next: 'Write a transcriptPath or sessionId on every skill-run row so traces can connect skill outcomes to the actual session behavior.',
       refs: skillRunFiles.slice(0, 5).map(({ file }) => file.path),
     })
