@@ -35,6 +35,7 @@ export interface PolicyEvidenceRecord {
     readonly branch?: string
     readonly commit?: string
     readonly cwd?: string
+    readonly resolutionSource?: string
   }
   readonly metrics: {
     readonly spanCount: number
@@ -94,6 +95,7 @@ function repoFromSpans(spans: readonly OtlpSpan[]): PolicyEvidenceRecord['repo']
     branch?: string
     commit?: string
     cwd?: string
+    resolutionSource?: string
   } = {}
   for (const span of spans) {
     attrs.subjectKey ??= stringAttr(span, ATTR.SUBJECT_KEY)
@@ -101,7 +103,8 @@ function repoFromSpans(spans: readonly OtlpSpan[]): PolicyEvidenceRecord['repo']
     attrs.branch ??= stringAttr(span, ATTR.GIT_BRANCH_NAME)
     attrs.commit ??= stringAttr(span, ATTR.GIT_COMMIT)
     attrs.cwd ??= stringAttr(span, ATTR.CWD)
-    if (attrs.subjectKey && attrs.repository && attrs.branch && attrs.commit && attrs.cwd) break
+    attrs.resolutionSource ??= stringAttr(span, ATTR.REPO_RESOLUTION_SOURCE)
+    if (attrs.subjectKey && attrs.repository && attrs.branch && attrs.commit && attrs.cwd && attrs.resolutionSource) break
   }
   return attrs
 }
@@ -144,6 +147,7 @@ export async function buildPolicyEvidenceRecord(
   const loopLimit = opts.maxLoopExamples ?? 25
   const loopFindings = pipelines.stuckLoops.findings
   const { firstSpanAt, lastSpanAt } = timeBounds(spans)
+  const repo = repoFromSpans(spans)
   return {
     schemaVersion: 1,
     kind: 'traces.policy_evidence.session',
@@ -152,10 +156,10 @@ export async function buildPolicyEvidenceRecord(
       harness: ref.harness,
       sessionId: ref.sessionId,
       path: ref.path,
-      cwd: ref.cwd,
+      cwd: repo.cwd ?? ref.cwd,
       mtimeMs: ref.mtimeMs,
     },
-    repo: repoFromSpans(spans),
+    repo,
     metrics: {
       spanCount: spans.length,
       llmTurnCount: llmSpans.length,

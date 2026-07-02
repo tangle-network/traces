@@ -1,12 +1,12 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
 import { ATTR } from '../src/attributes.js'
 import { serializeSpans, span, toOpenInferenceSpan } from '../src/otlp.js'
-import { normalizeRemote, resolveRepoAttrs, stampRepoAttrs } from '../src/repo.js'
+import { normalizeRemote, resolveRepoAttrs, resolveSessionRepoAttrs, stampRepoAttrs } from '../src/repo.js'
 import { parseSession } from '../src/session-source.js'
 import type { HarnessTraceAdapter, OtlpSpan, SessionRef } from '../src/index.js'
 
@@ -17,14 +17,25 @@ afterAll(async () => {
   for (const d of created) await rm(d, { recursive: true, force: true })
 })
 
-async function gitRepo(remote: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'traces-repo-'))
-  created.push(dir)
+async function initGitRepo(dir: string, remote: string): Promise<void> {
   await run('git', ['-C', dir, 'init', '-q', '-b', 'main'])
   await run('git', ['-C', dir, 'remote', 'add', 'origin', remote])
   await run('git', ['-C', dir, 'config', 'user.email', 't@t.t'])
   await run('git', ['-C', dir, 'config', 'user.name', 'T'])
   await run('git', ['-C', dir, 'commit', '-q', '--allow-empty', '-m', 'init'])
+}
+
+async function gitRepo(remote: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'traces-repo-'))
+  created.push(dir)
+  await initGitRepo(dir, remote)
+  return dir
+}
+
+async function gitRepoUnder(base: string, name: string, remote: string): Promise<string> {
+  const dir = join(base, name)
+  await mkdir(dir, { recursive: true })
+  await initGitRepo(dir, remote)
   return dir
 }
 
@@ -98,6 +109,88 @@ describe('resolveRepoAttrs', () => {
     expect(ATTR.GIT_BRANCH_NAME in a).toBe(false)
     expect(ATTR.GIT_COMMIT in a).toBe(false)
   })
+
+  it('nested cwd → nearest parent git repo labels, while preserving the original cwd', async () => {
+    const repo = await gitRepo('git@github.com:tangle-network/traces.git')
+    const nested = join(repo, 'src', 'adapters')
+    await mkdir(nested, { recursive: true })
+
+    const a = await resolveRepoAttrs(nested)
+    expect(a[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/traces')
+    expect(a[ATTR.GIT_REPOSITORY]).toBe('github.com/tangle-network/traces')
+    expect(a[ATTR.CWD]).toBe(nested)
+  })
+})
+
+describe('resolveSessionRepoAttrs', () => {
+  it('repairs lossy slash-decoded cwd paths from dashed transcript directories', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'traces-lossy-cwd-'))
+    created.push(base)
+    const repo = await gitRepoUnder(base, 'agent-runtime', 'git@github.com:tangle-network/agent-runtime.git')
+    const lossyCwd = join(base, 'agent', 'runtime')
+
+    const result = await resolveSessionRepoAttrs(lossyCwd, [])
+    expect(result.source).toBe('repaired-cwd')
+    expect(result.cwd).toBe(repo)
+    expect(result.attrs[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/agent-runtime')
+    expect(result.attrs[ATTR.CWD]).toBe(repo)
+    expect(result.attrs[ATTR.REPO_RESOLUTION_SOURCE]).toBe('repaired-cwd')
+  })
+
+  it('infers a null session cwd from absolute paths captured in tool inputs', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'traces-span-cwd-'))
+    created.push(base)
+    const repo = await gitRepoUnder(base, 'opencode-repo', 'https://github.com/tangle-network/opencode-repo.git')
+    const src = join(repo, 'src')
+    await mkdir(src, { recursive: true })
+    const file = join(src, 'index.ts')
+
+    const spans = [
+      span({
+        traceId: 'sessSpanPath',
+        spanId: 'tool-1',
+        name: 'tool.bash',
+        kind: 'TOOL',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'opencode',
+        tool: 'bash',
+        content: JSON.stringify({ cmd: `sed -n '1,20p' ${file}`, workdir: repo }),
+      }),
+    ]
+
+    const result = await resolveSessionRepoAttrs(null, spans)
+    expect(result.source).toBe('span-workdir')
+    expect(result.cwd).toBe(repo)
+    expect(result.attrs[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/opencode-repo')
+    expect(result.attrs[ATTR.CWD]).toBe(repo)
+    expect(result.attrs[ATTR.REPO_RESOLUTION_SOURCE]).toBe('span-workdir')
+  })
+
+  it('prefers explicit tool workdir over a different recorded session cwd', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'traces-exec-cwd-'))
+    created.push(base)
+    const sessionRepo = await gitRepoUnder(base, 'session-repo', 'https://github.com/tangle-network/session-repo.git')
+    const execRepo = await gitRepoUnder(base, 'exec-repo', 'https://github.com/tangle-network/exec-repo.git')
+
+    const spans = [
+      span({
+        traceId: 'sessExecPath',
+        spanId: 'tool-1',
+        name: 'tool.exec_command',
+        kind: 'TOOL',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'codex',
+        tool: 'exec_command',
+        content: JSON.stringify({ cmd: 'pnpm test', workdir: execRepo }),
+      }),
+    ]
+
+    const result = await resolveSessionRepoAttrs(sessionRepo, spans)
+    expect(result.source).toBe('span-workdir')
+    expect(result.cwd).toBe(execRepo)
+    expect(result.attrs[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/exec-repo')
+    expect(result.attrs[ATTR.REPO_RESOLUTION_SOURCE]).toBe('span-workdir')
+  })
 })
 
 describe('per-session repo grouping in OTLP resource attrs', () => {
@@ -135,6 +228,20 @@ describe('per-session repo grouping in OTLP resource attrs', () => {
     expect('git.commit' in res).toBe(false)
   })
 
+  it('parseSession mutates the session ref to the repaired cwd before downstream consumers see it', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'traces-ref-cwd-'))
+    created.push(base)
+    const repo = await gitRepoUnder(base, 'agent-runtime', 'git@github.com:tangle-network/agent-runtime.git')
+    const r = ref('sessRepair', join(base, 'agent', 'runtime'))
+
+    const spans = await parseSession(adapter(), r)
+    const res = JSON.parse(serializeSpans(spans).trim().split('\n')[0]!).resource.attributes as Record<string, unknown>
+    expect(r.cwd).toBe(repo)
+    expect(res[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/agent-runtime')
+    expect(res[ATTR.CWD]).toBe(repo)
+    expect(res[ATTR.REPO_RESOLUTION_SOURCE]).toBe('repaired-cwd')
+  })
+
   it('toOpenInferenceSpan copies subject/git/cwd keys into resource attributes', () => {
     const s = stampRepoAttrs(
       [span({ traceId: 't', spanId: 's', name: 'x', kind: 'AGENT', startTime: 'now', service: 'codex', agent: 'codex' })],
@@ -144,6 +251,7 @@ describe('per-session repo grouping in OTLP resource attrs', () => {
         [ATTR.GIT_BRANCH_NAME]: 'feat/x',
         [ATTR.GIT_COMMIT]: 'abc1234',
         [ATTR.CWD]: '/work/r',
+        [ATTR.REPO_RESOLUTION_SOURCE]: 'span-path',
       },
     )[0]!
     const res = (toOpenInferenceSpan(s).resource as { attributes: Record<string, unknown> }).attributes
@@ -152,6 +260,7 @@ describe('per-session repo grouping in OTLP resource attrs', () => {
     expect(res['git.branch']).toBe('feat/x')
     expect(res['git.commit']).toBe('abc1234')
     expect(res['tangle.cwd']).toBe('/work/r')
+    expect(res['traces.repo_resolution_source']).toBe('span-path')
     expect(res['service.name']).toBe('codex')
   })
 })

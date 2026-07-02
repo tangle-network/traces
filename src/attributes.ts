@@ -29,6 +29,8 @@ export const ATTR = {
   GIT_BRANCH_NAME: 'git.branch',
   /** HEAD short sha at conversion time. */
   GIT_COMMIT: 'git.commit',
+  /** How traces resolved the session cwd: recorded cwd, repaired cwd, or span path. */
+  REPO_RESOLUTION_SOURCE: 'traces.repo_resolution_source',
   GIT_BRANCH: 'tangle.git_branch',
   HOST: 'tangle.host',
   /** Basename of the session file. (Renamed from the ambiguous `tangle.source`,

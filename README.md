@@ -17,6 +17,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [What it finds](#what-it-finds)
 - [Supported harnesses](#supported-harnesses)
 - [CLI reference](#cli-reference)
+- [Session index](#session-index)
 - [Policy-mining evidence](#policy-mining-evidence)
 - [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
 - [External engines (bring your own)](#external-engines-bring-your-own)
@@ -86,6 +87,7 @@ traces list     --harness claude-code --last 20    # discover sessions
 traces analyze  --harness codex --last 1           # $0 deterministic report
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
+traces index    --all --since 24h --out session-index.json
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces export   policy-evidence.jsonl --out spans.openinference.jsonl
 traces watch    --all                              # live observer; notify on stuck loops
@@ -109,6 +111,23 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--no-content` | `upload`: send metadata only — strip all prompt/response text |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
+
+## Session index
+
+`traces index` writes one general JSON catalog over the selected sessions.
+It is meant for deeper investigation and joins with other local data, not for one specific workflow.
+
+```bash
+traces index --all --since 24h --out session-index.json
+```
+
+The index contains:
+
+- selection metadata and aggregate totals
+- one row per session with harness, session id, path, cwd, repo labels, and time bounds
+- behavior metrics: spans, LLM turns, tool calls, tool errors, tokens, models, and tools
+- signal summaries: stuck loops and tool error rate
+- nearby context files for joins: `AGENTS.md`, `CLAUDE.md`, and `.evolve` JSONL / reflection artifacts
 
 ## Policy-mining evidence
 
@@ -214,6 +233,7 @@ The CLI is a thin consumer of these exports.
 |---|---|---|
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run analysts — built-in, or **your own** via `registry` |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
+| `collectSessionIndex` | `(ScanOptions) → TraceSessionIndex` | scan sessions and return a reusable JSON-ready catalog |
 | `buildPolicyEvidenceRecord` | `(ref, spans, opts?) → PolicyEvidenceRecord` | summarize one session for downstream policy mining |
 | `collectPolicyEvidence` | `(ScanOptions) → PolicyEvidenceRecord[]` | scan harness sessions and emit policy-evidence rows |
 | `exportTraceEvidenceFile` | `(path, opts?) → { format, spans, redactionCount }` | convert compact evidence/events/OpenInference files to redacted OpenInference spans |
