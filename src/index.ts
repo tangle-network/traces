@@ -51,6 +51,7 @@ export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipel
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
 export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog
+export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
 
 // ── External engines (NOT bundled — shell out to tools you install) ────────
