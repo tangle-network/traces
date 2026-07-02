@@ -84,6 +84,22 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
     return join(homedir(), this.homeDirName, 'tmp')
   }
 
+  /** `<home>/projects.json` maps `{ <absolute-cwd>: <projectName> }`. The session
+   *  dir name (`tmp/<projectHash>/`) is that projectName for registered projects,
+   *  so inverting the map recovers cwd. (Unregistered/older dirs are opaque cwd
+   *  digests and stay null.) Loaded once per locate(). */
+  private async loadProjectCwds(): Promise<Map<string, string>> {
+    const nameToPath = new Map<string, string>()
+    try {
+      const raw = await readFile(join(homedir(), this.homeDirName, 'projects.json'), 'utf8')
+      const projects = (JSON.parse(raw) as { projects?: Record<string, string> }).projects ?? {}
+      for (const [path, name] of Object.entries(projects)) nameToPath.set(name, path)
+    } catch {
+      // no registry — cwd stays null (unchanged behavior)
+    }
+    return nameToPath
+  }
+
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
     const root = this.chatsRoot()
     let projectDirs: string[]
@@ -92,8 +108,10 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
     } catch {
       return []
     }
+    const projectCwds = await this.loadProjectCwds()
     const refs: SessionRef[] = []
     for (const pd of projectDirs) {
+      const cwd = projectCwds.get(pd) ?? null
       const chatsDir = join(root, pd, 'chats')
       let files: string[]
       try {
@@ -111,9 +129,8 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
           continue
         }
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
-        // projectHash is a digest of the cwd — not reversible to a path.
-        if (opts.cwd) continue
-        refs.push({ harness: this.harness, sessionId: f.replace(/\.json$/, ''), path, cwd: null, mtimeMs: st.mtimeMs })
+        if (opts.cwd && (!cwd || !cwd.startsWith(opts.cwd))) continue
+        refs.push({ harness: this.harness, sessionId: f.replace(/\.json$/, ''), path, cwd, mtimeMs: st.mtimeMs })
       }
     }
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)

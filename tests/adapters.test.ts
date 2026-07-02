@@ -310,3 +310,24 @@ describe('codex cwd recovery — continuation sessions', () => {
     }
   })
 })
+
+// Gemini/Qwen-family sessions live at tmp/<projectHash>/chats/; for a *registered*
+// project the hash IS the project name, reversible via <home>/projects.json →
+// recover cwd. (Unregistered/digest dirs stay null — unavoidable.)
+describe('gemini cwd recovery — registered projects', () => {
+  it('resolves cwd from projects.json for a registered project name', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'tt-gem-home-'))
+    mkdirSync(join(home, '.gemini', 'tmp', 'myrepo', 'chats'), { recursive: true })
+    writeFileSync(join(home, '.gemini', 'projects.json'), JSON.stringify({ projects: { '/home/u/code/myrepo': 'myrepo' } }))
+    writeFileSync(join(home, '.gemini', 'tmp', 'myrepo', 'chats', 'session-1.json'), JSON.stringify({ sessionId: 's1', messages: [] }))
+    const prev = process.env.HOME
+    process.env.HOME = home
+    try {
+      const refs = await new GeminiAdapter().locate({})
+      expect(refs.find((r) => r.sessionId === 'session-1')?.cwd).toBe('/home/u/code/myrepo')
+    } finally {
+      if (prev === undefined) delete process.env.HOME
+      else process.env.HOME = prev
+    }
+  })
+})
