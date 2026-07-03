@@ -17,6 +17,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [What it finds](#what-it-finds)
 - [Supported harnesses](#supported-harnesses)
 - [CLI reference](#cli-reference)
+- [Improvement engine](#improvement-engine)
 - [Session index](#session-index)
 - [Policy-mining evidence](#policy-mining-evidence)
 - [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
@@ -42,6 +43,7 @@ Requires Node ≥ 22.
 
 ```bash
 traces analyze --harness claude-code --last 1
+traces improve --harness claude-code --last 5 --dir .traces/improvement
 ```
 
 That's the command in the demo above. The **deterministic pass** — stuck loops, token growth, output decay, missing self-verification, tool monoculture — needs no API key and costs nothing.
@@ -49,6 +51,8 @@ That's the command in the demo above. The **deterministic pass** — stuck loops
 Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowledge-poisoning / improvement); they call OpenAI and respect `--budget <usd>`.
 
 Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo` — see [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
+
+`traces improve` is the reviewable action path. It writes typed artifacts — findings, recommendations, evidence rows, claims, report, and before/after replay metadata — so another agent, CI job, or hosted product can consume the result without scraping prose.
 
 ## What it finds
 
@@ -88,6 +92,8 @@ Every adapter captures the full conversation — the **user's prompt** and the *
 ```bash
 traces list     --harness claude-code --last 20    # discover sessions
 traces analyze  --harness codex --last 1           # $0 deterministic report
+traces investigate --all --last 10 --out report.md  # typed findings + recommendations
+traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
 traces index    --all --since 24h --out session-index.json
@@ -108,13 +114,49 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--cwd <dir>` | Filter by working directory |
 | `--since <t>` | `upload`: window — `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
+| `--dir <path>` | `improve`: write the full artifact pack to this directory |
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | `export`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
+| `--config <path>` | `investigate` / `improve`: load BYO analysts, external analyzers, and proposal adapters |
 | `--interval <s>` / `--window <m>` | `watch`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--no-content` | `upload`: send metadata only — strip all prompt/response text |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
+
+## Improvement engine
+
+`traces improve` turns observed sessions into a portable improvement packet:
+
+```bash
+traces improve --all --last 20 --dir .traces/improvement
+```
+
+The directory contains:
+
+| File | Purpose |
+|---|---|
+| `findings.json` | typed `AnalystFinding[]`; finding ids, severity, evidence refs, recommended action, validation plan |
+| `recommendations.json` | ranked actions derived from analyst, deterministic, and external findings |
+| `evidence.jsonl` | one row per evidence ref, suitable for downstream mining |
+| `claims.json` | compact claim list for review agents and dashboards |
+| `report.md` | human-readable report rendered from the typed data |
+| `replay-before-after.json` | baseline counts plus proposal-only replay metadata |
+
+Bring your own analysts and proposal writer with a config file:
+
+```bash
+traces improve --last 5 --config examples/improvement-config.mjs --dir .traces/improvement
+```
+
+The config can export:
+
+- `analysts`: deterministic or LLM analysts that implement the `agent-eval` `Analyst` contract
+- `registry`: a prebuilt `AnalystRegistry`
+- `externalAnalyzers`: HALO or any command/model adapter that reads the OTLP artifact
+- `improvementAdapter`: a proposal writer that maps recommendations to patches, profile edits, prompts, or validation commands
+
+`traces` does not apply patches or open PRs by default. The public engine produces reviewable artifacts; hosted products can decide how to deliver, approve, or apply them.
 
 ## Session index
 
@@ -241,6 +283,11 @@ The CLI is a thin consumer of these exports.
 | Export | Signature | Use |
 |---|---|---|
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run analysts — built-in, or **your own** via `registry` |
+| `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings, recommendations, claims, external analyzer output, and report |
+| `runTraceImprovementLoop` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full improvement artifact pack and optional proposal output |
+| `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | turn any `AnalystFinding[]` into recommendations, claims, and a report |
+| `runTraceStoreInvestigation` | `({ traceStore }) → TraceStoreInvestigationResult` | run the same packet layer over a hosted/custom `TraceAnalysisStore` |
+| `loadTracesConfig` | `(path?) → TracesConfig \| undefined` | load BYO analysts, external analyzers, and proposal adapters |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
 | `collectSessionIndex` | `(ScanOptions) → TraceSessionIndex` | scan sessions and return a reusable JSON-ready catalog |
 | `inspectSessionIndex` | `(TraceSessionIndex) → TraceInspectionReport` | rank improvement findings from an index without rescanning sessions |
@@ -281,6 +328,7 @@ Runnable, in [`examples/`](./examples):
 |---|---|
 | [`observe-and-alert.ts`](./examples/observe-and-alert.ts) | tail live sessions and alert on stuck loops |
 | [`custom-analyst.ts`](./examples/custom-analyst.ts) | register and run your own analyst |
+| [`improvement-config.mjs`](./examples/improvement-config.mjs) | plug in BYO analysts and proposal generation for `traces improve` |
 | [`custom-backend.ts`](./examples/custom-backend.ts) | redact + dedup + upload to your own sink |
 | [`register-harness.ts`](./examples/register-harness.ts) | add a new harness by implementing `HarnessTraceAdapter` |
 | [`external-engines.ts`](./examples/external-engines.ts) | drive HALO + an external PII scrubber you install yourself |
