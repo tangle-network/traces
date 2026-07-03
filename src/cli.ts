@@ -4,6 +4,8 @@
  *
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
+ *   traces investigate [--harness claude-code] [--last 10] [--out report.md]
+ *   traces improve [--all] [--since 24h] --dir .traces/improvement
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces inspect session-index.json [--out inspection-report.md]
@@ -26,6 +28,13 @@ import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidence
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import { exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
+import {
+  loadTracesConfig,
+  mergeTracesConfig,
+  runTraceImprovementLoop,
+  runTraceInvestigation,
+  saveReport,
+} from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
@@ -51,6 +60,7 @@ interface Args {
   cwd?: string
   since?: string
   out?: string
+  dir?: string
   otlp?: string
   llm: boolean
   budget?: number
@@ -64,6 +74,7 @@ interface Args {
   analyzerPrompt?: string
   redactorCmd?: string
   model?: string
+  config?: string
   format?: string
   metadata?: string
   attrs: string[]
@@ -104,10 +115,12 @@ function parseArgs(argv: string[]): Args {
       case '--cwd': a.cwd = next(); break
       case '--since': a.since = next(); break
       case '--out': a.out = next(); break
+      case '--dir': a.dir = next(); break
       case '--otlp': a.otlp = next(); break
       case '--llm': a.llm = true; break
       case '--budget': a.budget = Number(next()); break
       case '--model': a.model = next(); break
+      case '--config': a.config = next(); break
       case '--metadata': a.metadata = next(); break
       case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
       case '--interval': a.interval = Number(next()); break
@@ -371,11 +384,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
     `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath, deterministic })}\n` +
     `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
   if (args.analyzers.length > 0 && otlpPath) {
-    const engines = args.analyzers.map((spec) =>
-      spec === 'halo'
-        ? haloAnalyzer({ defaultPrompt: args.analyzerPrompt, model: args.model })
-        : commandAnalyzer({ name: spec, command: spec, args: (p, prompt) => (prompt ? [p, prompt] : [p]) }),
-    )
+    const engines = externalAnalyzersFromArgs(args)
     const results = await runExternalAnalyzers(otlpPath, engines, { prompt: args.analyzerPrompt })
     for (const r of results) {
       report += `\n\n## ${r.analyzer} (external analyzer)\n\n${r.ok ? r.output || '(no output)' : `failed: ${r.error}`}`
@@ -387,6 +396,72 @@ async function cmdAnalyze(args: Args): Promise<void> {
   } else {
     console.log(report)
   }
+}
+
+function externalAnalyzersFromArgs(args: Args) {
+  return args.analyzers.map((spec) =>
+    spec === 'halo'
+      ? haloAnalyzer({ defaultPrompt: args.analyzerPrompt, model: args.model })
+      : commandAnalyzer({ name: spec, command: spec, args: (p, prompt) => (prompt ? [p, prompt] : [p]) }),
+  )
+}
+
+async function cmdInvestigate(args: Args): Promise<void> {
+  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
+  if (spans.length === 0) throw new Error('no spans found for the given selection')
+  const config = await loadTracesConfig(args.config)
+  const ai = args.llm ? await buildAxService() : undefined
+  const result = await runTraceInvestigation(mergeTracesConfig({
+    spans,
+    harness,
+    sessionCount,
+    cwds,
+    minLoopOccurrences: args.minLoop,
+    ai,
+    model: args.model,
+    budgetUsd: args.budget,
+    otlpOutPath: args.otlp,
+    externalAnalyzers: externalAnalyzersFromArgs(args),
+    analyzerPrompt: args.analyzerPrompt,
+    log: (msg) => process.stderr.write(`${msg}\n`),
+  }, config))
+  if (args.out) {
+    await saveReport(args.out, result.report)
+    console.log(`investigation report → ${args.out}  (${result.findings.length} findings, ${result.recommendations.length} recommendations, OTLP: ${result.otlpPath})`)
+  } else {
+    console.log(result.report)
+  }
+}
+
+async function cmdImprove(args: Args): Promise<void> {
+  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
+  if (spans.length === 0) throw new Error('no spans found for the given selection')
+  const config = await loadTracesConfig(args.config)
+  const ai = args.llm ? await buildAxService() : undefined
+  const result = await runTraceImprovementLoop({
+    ...mergeTracesConfig({
+      spans,
+      harness,
+      sessionCount,
+      cwds,
+      minLoopOccurrences: args.minLoop,
+      ai,
+      model: args.model,
+      budgetUsd: args.budget,
+      otlpOutPath: args.otlp,
+      externalAnalyzers: externalAnalyzersFromArgs(args),
+      analyzerPrompt: args.analyzerPrompt,
+      log: (msg) => process.stderr.write(`${msg}\n`),
+    }, config),
+    adapter: config?.improvementAdapter,
+    outDir: args.dir ?? args.out,
+  })
+  const dir = result.artifacts?.directory
+  if (!dir) throw new Error('improve did not produce an artifact directory')
+  console.log(
+    `improvement artifacts → ${dir}  ` +
+      `(${result.findings.length} findings, ${result.recommendations.length} recommendations, ${result.proposals.length} proposal(s), OTLP: ${result.otlpPath})`,
+  )
 }
 
 async function cmdWatch(args: Args): Promise<void> {
@@ -507,6 +582,8 @@ function usage(): void {
 Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines, write a markdown report
+  investigate Run typed investigation flow, including BYO config + recommendations
+  improve   Write a full improvement artifact directory for review/apply/rerun
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
   inspect   Read a session index and print ranked improvement findings
@@ -523,12 +600,14 @@ Options:
   --cwd <dir>      Filter sessions by working directory
   --since <t>      upload: window — 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
+  --dir <path>     improve: write artifacts to this directory
   --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
   --format <kind>  export: auto | policy-evidence | sandbox-events | openinference
   --metadata <json> export: attach JSON object fields as span attributes
   --attr <k=v>     export: attach one span attribute (repeatable)
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
+  --config <path>  investigate/improve: JS config with analysts, external analyzers, or proposal adapter
   --budget <usd>   USD cap for agentic analysts
   --analyzer <cmd> analyze: also run an external engine over the OTLP (repeatable; "halo" or any command)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
@@ -564,6 +643,8 @@ async function main(): Promise<void> {
       break
     case 'list': await cmdList(args); break
     case 'analyze': await cmdAnalyze(args); break
+    case 'investigate': await cmdInvestigate(args); break
+    case 'improve': await cmdImprove(args); break
     case 'convert': await cmdConvert(args); break
     case 'index': await cmdIndex(args); break
     case 'inspect': await cmdInspect(args); break

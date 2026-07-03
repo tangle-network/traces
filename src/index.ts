@@ -53,6 +53,7 @@ export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog
 export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
+export * from './improvement.js' // runTraceInvestigation()/runTraceImprovementLoop() artifact pack
 
 // ── External engines (NOT bundled — shell out to tools you install) ────────
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor
