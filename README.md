@@ -28,9 +28,12 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 ## Install
 
 ```bash
-npm i -g @tangle-network/traces     # the `traces` CLI
-npx @tangle-network/traces analyze  # or run without installing
-npm i @tangle-network/traces        # or use it as a library
+curl -fsSL https://raw.githubusercontent.com/tangle-network/traces/main/install.sh | bash
+traces --version
+
+npx --yes @tangle-network/traces@latest analyze --harness claude-code --last 1  # run without installing
+npm i -g @tangle-network/traces                                           # install manually
+npm i @tangle-network/traces                                              # use it as a library
 ```
 
 Requires Node ≥ 22.
@@ -227,6 +230,7 @@ Merging to `main` publishes a patch release automatically:
 2. It commits `chore(release): vX.Y.(Z+1) [skip release]` back to `main`.
 3. It pushes the matching `vX.Y.(Z+1)` tag.
 4. The same workflow verifies the tag, builds, publishes to npm, and creates a GitHub release.
+5. `pnpm check:package` proves the npm tarball contains the `traces` binary before release.
 
 Minor releases are manual. Run the Publish workflow from GitHub Actions and choose `minor`; it publishes `X.(Y+1).0`. Use manual `patch` only when you need a patch release without merging a new code change.
 
