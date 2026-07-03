@@ -25,6 +25,43 @@ export interface ReportMeta {
   sessionCount: number
   spanCount: number
   otlpPath: string
+  deterministic?: DeterministicSummary
+}
+
+export interface DeterministicSummary {
+  stuckLoops: number
+  reactionSignals: number
+  toolErrorRuns: number
+  totalSignals: number
+}
+
+function deterministicSummaryText(summary: DeterministicSummary): string {
+  const parts: string[] = []
+  if (summary.stuckLoops > 0) parts.push(`${summary.stuckLoops} stuck loop(s)`)
+  if (summary.reactionSignals > 0) parts.push(`${summary.reactionSignals} human reaction signal(s)`)
+  if (summary.toolErrorRuns > 0) parts.push(`${summary.toolErrorRuns} tool-error run(s)`)
+  if (parts.length === 0) return '0 deterministic signals'
+  if (parts.length === 1) return parts[0]!
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+}
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return count === 1 ? singular : pluralForm
+}
+
+export function summarizeDeterministicSignals(
+  pipelines: PipelineReport,
+  reactions: ReactionReport,
+): DeterministicSummary {
+  const stuckLoops = pipelines.stuckLoops.findings.length
+  const reactionSignals = Object.values(reactions.signals).reduce((total, count) => total + count, 0)
+  const toolErrorRuns = pipelines.toolUse.filter((run) => run.errorRate > 0).length
+  return {
+    stuckLoops,
+    reactionSignals,
+    toolErrorRuns,
+    totalSignals: stuckLoops + reactionSignals + toolErrorRuns,
+  }
 }
 
 export function renderReport(result: AnalystRunResult, meta: ReportMeta): string {
@@ -32,11 +69,17 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   const findings = [...result.findings].sort(
     (a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9),
   )
+  const deterministic = meta.deterministic ?? { stuckLoops: 0, reactionSignals: 0, toolErrorRuns: 0, totalSignals: 0 }
+  const findingSummary =
+    deterministic.totalSignals > 0
+      ? `${findings.length} analyst ${plural(findings.length, 'finding')} + ` +
+        `${deterministic.totalSignals} deterministic ${plural(deterministic.totalSignals, 'signal')}`
+      : `${findings.length} ${plural(findings.length, 'finding')}`
 
   lines.push(`# Trace analysis — ${meta.harness}`)
   lines.push('')
   lines.push(
-    `${meta.sessionCount} session(s), ${meta.spanCount} spans → **${findings.length} findings** ` +
+    `${meta.sessionCount} session(s), ${meta.spanCount} spans → **${findingSummary}** ` +
       `across ${result.per_analyst.length} analyst(s). Cost: $${result.total_cost_usd.toFixed(4)}.`,
   )
   lines.push('')
@@ -49,8 +92,12 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   }
   lines.push('')
 
-  if (findings.length === 0) {
+  if (findings.length === 0 && deterministic.totalSignals === 0) {
     lines.push('_No findings — no behavioral inefficiencies or failure modes detected._')
+  } else if (findings.length === 0) {
+    lines.push(
+      `_No analyst findings. Deterministic checks found ${deterministicSummaryText(deterministic)}; see sections below._`,
+    )
   } else {
     const byArea = new Map<string, AnalystFinding[]>()
     for (const f of findings) {
