@@ -22,3 +22,5 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+      - name: Check packed CLI
+        run: pnpm check:package

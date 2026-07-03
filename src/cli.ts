@@ -18,6 +18,7 @@
  * touches the agent or its harness.
  */
 
+import { readFileSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
@@ -66,6 +67,12 @@ interface Args {
   format?: string
   metadata?: string
   attrs: string[]
+}
+
+function packageVersion(): string {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
+  if (typeof pkg.version !== 'string' || !pkg.version) throw new Error('package.json is missing version')
+  return pkg.version
 }
 
 function parseArgs(argv: string[]): Args {
@@ -531,13 +538,19 @@ Options:
   --no-content     upload: strip prompt/response text — send metadata only
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass
   --yes, -y        upload: skip the confirmation prompt
+  --version, -v    Print the installed traces version
   --help, -h       Show help (use \`traces export --help\` for export examples)
 
 Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2))
+  const rawArgs = process.argv.slice(2)
+  if (rawArgs[0] === '--version' || rawArgs[0] === '-v' || rawArgs[0] === 'version') {
+    console.log(`traces ${packageVersion()}`)
+    return
+  }
+  const args = parseArgs(rawArgs)
   if (args.help) {
     if (args.command === 'export' || (args.command === 'help' && args.input === 'export')) usageExport()
     else usage()

@@ -201,6 +201,7 @@ jobs:
           pnpm typecheck
           pnpm test
           pnpm build
+          pnpm check:package
       - name: Publish to npm
         if: steps.npm-version.outputs.exists != 'true'
         run: pnpm publish --access public --no-git-checks

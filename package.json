@@ -37,6 +37,7 @@
   },
   "files": [
     "dist",
+    "install.sh",
     "README.md"
   ],
   "engines": {
@@ -45,10 +46,11 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsup src/index.ts src/cli.ts --format esm --target node22 --clean --dts",
+    "check:package": "node scripts/check-package-bin.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build && pnpm check:package"
   },
   "dependencies": {
     "@ax-llm/ax": "^19.0.45",
