@@ -61,40 +61,33 @@ if ! command -v npm >/dev/null 2>&1; then
 fi
 
 install_args=(install -g "${PACKAGE}@${VERSION}")
-bin_dir=""
+npm_prefix="$(npm prefix -g)"
+install_prefix="$npm_prefix"
 
 if [ -n "$PREFIX" ]; then
   mkdir -p "$PREFIX"
   install_args+=(--prefix "$PREFIX")
-  bin_dir="$PREFIX/bin"
+  install_prefix="$PREFIX"
 else
-  npm_prefix="$(npm prefix -g)"
   if [ ! -w "$npm_prefix" ]; then
-    PREFIX="$HOME/.local"
-    mkdir -p "$PREFIX"
-    install_args+=(--prefix "$PREFIX")
-    bin_dir="$PREFIX/bin"
-    echo "npm global prefix is not writable; installing into $PREFIX"
+    install_prefix="$HOME/.local"
+    mkdir -p "$install_prefix"
+    install_args+=(--prefix "$install_prefix")
+    echo "npm global prefix is not writable; installing into $install_prefix"
   fi
 fi
 
 npm "${install_args[@]}"
 
-if [ -n "$bin_dir" ] && [ -x "$bin_dir/traces" ]; then
+bin_dir="$install_prefix/bin"
+if [ -x "$bin_dir/traces" ]; then
   traces_cmd="$bin_dir/traces"
 elif command -v traces >/dev/null 2>&1; then
   traces_cmd="traces"
 else
-  npm_prefix="$(npm prefix -g)"
-  candidate="$npm_prefix/bin/traces"
-  if [ -x "$candidate" ]; then
-    traces_cmd="$candidate"
-    bin_dir="$npm_prefix/bin"
-  else
-    echo "Installed ${PACKAGE}@${VERSION}, but the traces binary was not found on PATH." >&2
-    [ -n "$bin_dir" ] && echo "Add this to PATH: $bin_dir" >&2
-    exit 1
-  fi
+  echo "Installed ${PACKAGE}@${VERSION}, but the traces binary was not found at $bin_dir/traces or on PATH." >&2
+  echo "Add this to PATH: $bin_dir" >&2
+  exit 1
 fi
 
 version_output="$("$traces_cmd" --version 2>/dev/null || true)"
@@ -102,10 +95,8 @@ case "$version_output" in
   traces\ [0-9]*.[0-9]*.[0-9]*) echo "$version_output" ;;
   *) echo "traces installed: $traces_cmd" ;;
 esac
-if [ -n "$bin_dir" ]; then
-  case ":$PATH:" in
-    *":$bin_dir:"*) ;;
-    *) echo "Add this to PATH for future shells: $bin_dir" ;;
-  esac
-fi
+case ":$PATH:" in
+  *":$bin_dir:"*) ;;
+  *) echo "Add this to PATH for future shells: $bin_dir" ;;
+esac
 echo "Run: traces analyze --harness claude-code --last 1"
