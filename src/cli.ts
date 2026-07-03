@@ -34,7 +34,7 @@ import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { analyzeReactions } from './reactions.js'
 import { parseSession } from './session-source.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
-import { renderAdoption, renderPipelines, renderReactions, renderReport } from './report.js'
+import { renderAdoption, renderPipelines, renderReactions, renderReport, summarizeDeterministicSignals } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
@@ -366,8 +366,9 @@ async function cmdAnalyze(args: Args): Promise<void> {
   const pipelines = await runPipelines(spans, { minLoopOccurrences: args.minLoop })
   const reactions = analyzeReactions(spans)
   const adoption = await analyzeAdoption(spans, { cwds })
+  const deterministic = summarizeDeterministicSignals(pipelines, reactions)
   let report =
-    `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath })}\n` +
+    `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath, deterministic })}\n` +
     `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
   if (args.analyzers.length > 0 && otlpPath) {
     const engines = args.analyzers.map((spec) =>
