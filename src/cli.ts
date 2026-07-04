@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `traces` — analyze your own coding-agent sessions.
+ * `traces`: analyze your own coding-agent sessions.
  *
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
@@ -201,7 +201,7 @@ async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
     throw new Error(
-      '--llm needs OPENAI_API_KEY — an OpenAI key, or a router/gateway key with OPENAI_BASE_URL set to an ' +
+      '--llm needs OPENAI_API_KEY: an OpenAI key, or a router/gateway key with OPENAI_BASE_URL set to an ' +
         'OpenAI-compatible endpoint (e.g. the Tangle router). Deterministic analysis needs no key.',
     )
   }
@@ -215,7 +215,7 @@ async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
 async function cmdList(args: Args): Promise<void> {
   const groups = await discover({ ...args, last: args.last || 20 })
   for (const { adapter, refs } of groups) {
-    console.log(`\n${adapter.harness} — ${refs.length} session(s)`)
+    console.log(`\n${adapter.harness}: ${refs.length} session(s)`)
     for (const r of refs) {
       console.log(`  ${new Date(r.mtimeMs).toISOString()}  ${r.sessionId}  ${r.cwd ?? ''}`)
     }
@@ -526,7 +526,7 @@ function formatLiveFinding(finding: TraceLiveFinding): string {
   const where = `[${finding.session.harness}] ${finding.session.sessionId.slice(0, 8)}`
   const cwd = finding.session.cwd ? ` · ${finding.session.cwd}` : ''
   return [
-    `${ts} ${finding.severity.toUpperCase()} ${where} — ${finding.title}${cwd}`,
+    `${ts} ${finding.severity.toUpperCase()} ${where}: ${finding.title}${cwd}`,
     `  evidence: ${summarizeFindingEvidence(finding)}`,
     `  action: ${finding.action}`,
     `  check: ${finding.check}`,
@@ -608,7 +608,7 @@ async function cmdStream(args: Args): Promise<void> {
   process.once('SIGINT', () => controller.abort())
   if (!args.replay) {
     process.stderr.write(
-      `traces stream — ${preset.mode} JSONL feed for ${all ? 'all harnesses' : args.harness}, ` +
+      `traces stream: ${preset.mode} JSONL feed for ${all ? 'all harnesses' : args.harness}, ` +
         `last ${args.window}m, every ${args.interval}s. Ctrl-C to stop.\n`,
     )
   }
@@ -641,7 +641,7 @@ async function cmdWatch(args: Args): Promise<void> {
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
   process.stderr.write(
-    `traces watch — observing ${all ? 'all harnesses' : args.harness}, ` +
+    `traces watch: observing ${all ? 'all harnesses' : args.harness}, ` +
       `sessions active in the last ${args.window}m, every ${args.interval}s. ` +
       `Loop + semantic live findings; read-only; Ctrl-C to stop.\n`,
   )
@@ -656,7 +656,7 @@ async function cmdWatch(args: Args): Promise<void> {
     onLoop: (l) => {
       const ts = new Date().toISOString().slice(11, 19)
       process.stdout.write(
-        `${ts} LOOP [${l.harness}] ${l.sessionId.slice(0, 8)} — ` +
+        `${ts} LOOP [${l.harness}] ${l.sessionId.slice(0, 8)}: ` +
           `\`${l.toolName}\` repeated ×${l.occurrences} with identical args ` +
           `(${(l.windowMs / 1000).toFixed(0)}s)${l.cwd ? ` · ${l.cwd}` : ''}\n`,
       )
@@ -705,7 +705,7 @@ async function cmdUpload(args: Args): Promise<void> {
 
   if (args.dryRun) {
     const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlp, stripContent: args.noContent, redactor })
-    console.log(`dry run — ${newItems.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP → ${res.otlpPath}`)
+    console.log(`dry run: ${newItems.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
   }
@@ -726,7 +726,7 @@ async function cmdUpload(args: Args): Promise<void> {
 }
 
 function usageExport(): void {
-  console.log(`traces export — convert trace evidence files to OpenInference JSONL
+  console.log(`traces export: convert trace evidence files to OpenInference JSONL
 
 Usage:
   traces export <input.jsonl|input.json> --out <spans.jsonl> [--format auto]
@@ -736,7 +736,7 @@ Usage:
 
 Input formats:
   policy-evidence  Compact JSONL rows from \`traces evidence --out policy-evidence.jsonl\`
-  sandbox-events   Sandbox/OpenCode event arrays with start/raw/result/done/error events
+  sandbox-events   JSON arrays with start/raw/result/done/error events
   openinference    Existing OpenInference JSONL; rewrites through traces redaction
   intelligence-spans  JSONL rows exported from Tangle Intelligence trace spans
   auto             Detect the format from the file contents (default)
@@ -755,7 +755,7 @@ Safety:
 }
 
 function usage(): void {
-  console.log(`traces — analyze, observe & upload coding-agent sessions
+  console.log(`traces: analyze, observe & upload coding-agent sessions
 
 Commands:
   list      List discovered sessions
@@ -777,7 +777,7 @@ Options:
   --last <n>       Most-recent N sessions
   --session <path> Analyze/stream one explicit harness session file
   --cwd <dir>      Filter sessions by working directory
-  --since <t>      upload: window — 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
+  --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory
   --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
@@ -794,11 +794,11 @@ Options:
   --budget <usd>   USD cap for agentic analysts
   --analyzer <cmd> analyze: also run an external engine over the OTLP (repeatable; "halo" or any command)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
-  --interval <s>   watch: poll interval seconds (default 5)
-  --window <m>     watch: only sessions active in the last N minutes (default 30)
+  --interval <s>   watch/stream: poll interval seconds (default 5)
+  --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
-  --no-content     upload: strip prompt/response text — send metadata only
+  --no-content     upload: strip prompt/response text; send metadata only
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version

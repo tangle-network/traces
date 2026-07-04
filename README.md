@@ -1,6 +1,6 @@
 # traces
 
-> Point `traces` at the session logs your coding agent already writes to disk — Claude Code, Codex, OpenCode, Gemini, and more — and get failure-mode + efficiency findings. **Zero instrumentation.** A CLI *and* an SDK.
+> Point `traces` at the session logs your coding agent already writes to disk: Claude Code, Codex, OpenCode, Gemini, and more. Get failure-mode and efficiency findings with zero instrumentation. A CLI *and* an SDK.
 
 ![traces analyzing a real Claude Code session](https://raw.githubusercontent.com/tangle-network/traces/main/docs/demo.gif)
 
@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/npm/l/@tangle-network/traces.svg)](./LICENSE)
 [![node](https://img.shields.io/node/v/@tangle-network/traces.svg)](https://nodejs.org)
 
-It reads the transcripts your harness leaves on disk, reconstructs the run as spans, and reports where the agent got stuck, burned tokens, or stopped checking its own work — locally, with no API key and no cost for the deterministic pass.
+It reads the transcripts your harness leaves on disk, reconstructs the run as spans, and reports where the agent got stuck, burned tokens, or stopped checking its own work. The deterministic pass runs locally, with no API key and no cost.
 
 ## Contents
 
@@ -46,16 +46,16 @@ Requires Node ≥ 22.
 traces analyze --harness claude-code --last 1
 traces improve --harness claude-code --last 5 --dir .traces/improvement
 traces watch --all
-traces stream --all --no-spans
+traces stream --all --mode findings
 ```
 
-That's the command in the demo above. The **deterministic pass** — stuck loops, token growth, output decay, missing self-verification, tool monoculture — needs no API key and costs nothing.
+That's the command in the demo above. The **deterministic pass** checks stuck loops, token growth, output decay, missing self-verification, and tool monoculture. It needs no API key and costs nothing.
 
 Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowledge-poisoning / improvement); they call OpenAI and respect `--budget <usd>`.
 
-Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo` — see [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
+Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo`. See [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
 
-`traces improve` is the reviewable action path. It writes typed artifacts — findings, recommendations, evidence rows, claims, report, and before/after replay metadata — so another agent, CI job, or hosted product can consume the result without scraping prose.
+`traces improve` is the reviewable action path. It writes typed artifacts: findings, recommendations, evidence rows, claims, report, and before/after replay metadata. Another agent, CI job, or hosted product can consume the result without scraping prose.
 
 ## What it finds
 
@@ -64,10 +64,10 @@ The deterministic pass (free, no key) surfaces:
 | Finding | Meaning |
 |---|---|
 | **Stuck loops** | the same tool called N× with identical args and no state change |
-| **Monotonic input growth** | full history re-sent every step — context never compressed |
+| **Monotonic input growth** | full history re-sent every step; context never compressed |
 | **Output-length decay** | planning/reasoning per step shrinking as context grows |
 | **No self-verification** | state-mutating actions never followed by an eval/inspect/check |
-| **Tool monoculture / retry / error rates** | the shape of how the agent actually spent its calls |
+| **Tool mix / retry / error rates** | repeated, retried, and failed tool calls |
 
 `--llm` adds agentic analysts that read the conversation and cluster higher-order failure and improvement signals.
 
@@ -88,7 +88,7 @@ The deterministic pass (free, no key) surfaces:
 | `github-copilot` (`copilot`) | `~/.copilot/session-state/<id>/events.jsonl` | fixture |
 | `forge` (`forgecode`) | `/dump` JSON exports | fixture |
 
-Every adapter captures the full conversation — the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage. (`github-copilot` is the one exception: its log format carries no user prompt.) Factory stores token totals in `.settings.json`, not per turn. Forge reads `/dump` JSON exports (live SQLite is a follow-up). ACP-only bridges may not persist a local transcript.
+Every adapter captures the full conversation: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage. (`github-copilot` is the one exception: its log format carries no user prompt.) Factory stores token totals in `.settings.json`, not per turn. Forge reads `/dump` JSON exports (live SQLite is a follow-up). ACP-only bridges may not persist a local transcript.
 
 ## CLI reference
 
@@ -118,7 +118,7 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--last <n>` | Most-recent N sessions |
 | `--session <path>` | One explicit session file |
 | `--cwd <dir>` | Filter by working directory |
-| `--since <t>` | `upload`: window — `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
+| `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory |
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
@@ -130,7 +130,7 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |
 | `--replay` / `--once` | `stream`: scan once, then exit |
 | `--no-spans` / `--no-findings` | `stream`: suppress raw span rows / finding rows |
-| `--no-content` | `upload`: send metadata only — strip all prompt/response text |
+| `--no-content` | `upload`: send metadata only; strip all prompt/response text |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
 
 ## Live stream
@@ -152,6 +152,33 @@ Live streaming emits `session`, `span`, `analysis_batch`, `finding`, and `tick` 
 The semantic findings currently cover repeated failing commands, verification churn without code/config changes, completion claims without later verification, and high tool-error rates.
 Use `--mode findings` when you want the low-volume meaning layer; keep `visualizer` for real-time views that need motion, timing, and tool-call texture.
 Use `--mode agent` when another agent needs deterministic loop/tool-use reports alongside the findings.
+
+Custom online analysts use the same config file as `investigate` and `improve`:
+
+```js
+export default {
+  liveAnalysts: [{
+    id: 'my-live-rule',
+    analyze(context) {
+      return context.actions.some((action) => action.kind === 'claim') ? [{
+        schemaVersion: 1,
+        kind: 'traces.live_finding',
+        id: `live.my-live-rule.${context.session.sessionId}`,
+        ruleId: 'my-live-rule',
+        fingerprint: `my-live-rule.${context.session.sessionId}`,
+        severity: 'info',
+        title: 'Completion claim seen',
+        claim: 'A claim-like assistant message appeared in the live trace.',
+        action: 'Require the next stream batch to include a verification action.',
+        check: 'A later finding or batch should show a test/build/typecheck action.',
+        evidence: [{ kind: 'metric', label: 'actions', value: String(context.actions.length) }],
+        session: context.session,
+        observedAt: context.generatedAt,
+      }] : []
+    },
+  }],
+}
+```
 
 ## Improvement engine
 
@@ -229,7 +256,7 @@ That boundary matters. `agent-lab` campaign `cells.jsonl` says "arm X beat arm Y
 
 ### Export existing evidence/events to OpenInference
 
-If you already have compact evidence or Sandbox/OpenCode event captures on disk, convert them to the same OpenInference JSONL shape that `traces analyze --analyzer halo` uses:
+If you already have compact evidence or event captures on disk, convert them to the same OpenInference JSONL shape that `traces analyze --analyzer halo` uses:
 
 ```bash
 traces export policy-evidence.jsonl --out spans.openinference.jsonl
@@ -240,7 +267,7 @@ halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 `traces export` accepts:
 
 - compact `traces.policy_evidence.session` JSONL from `traces evidence`
-- Sandbox/OpenCode JSON arrays with `start`, `raw`, `result`, `done`, and `error` events
+- JSON arrays with `start`, `raw`, `result`, `done`, and `error` events
 - existing OpenInference JSONL, rewritten through the local redaction path
 
 Run `traces export --help` for the full command reference.
@@ -250,28 +277,28 @@ Run `traces export --help` for the full command reference.
 `upload` **redacts locally before anything leaves the machine**, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host).
 
 ```bash
-traces upload --since 24h --dry-run     # see exactly what would be sent — no network
-traces upload --since 24h --no-content  # send metadata only — drop all prompt/response text
+traces upload --since 24h --dry-run     # see exactly what would be sent; no network
+traces upload --since 24h --no-content  # send metadata only; drop all prompt/response text
 traces upload --since 24h               # send it
 ```
 
 It needs `TANGLE_INGEST_URL` (or `TANGLE_ORCHESTRATOR_URL`), `TANGLE_INGEST_API_KEY` (or `TANGLE_API_KEY`), and `TANGLE_TENANT_ID`. Without them, `--dry-run` still works fully.
 
-### Redaction scope — read this before uploading prose
+### Redaction scope: read this before uploading prose
 
 Redaction is **best-effort regex** for *structured* secrets and credentials: API keys, GitHub/cloud tokens, JWTs, bearer headers, private-key blocks, `KEY=secret` assignments, and credentials embedded in URLs. It runs over every span attribute, including the captured prompt/response text.
 
-It does **not** catch free-form PII — names, postal addresses, phone numbers in prose — which needs a context-aware model. Three postures, strongest first:
+It does **not** catch free-form PII such as names, postal addresses, or phone numbers in prose. Those need a context-aware model. Three postures, strongest first:
 
-1. **`--no-content`** — upload metadata only (tool calls, tokens, timing, loop signal); no prose leaves the machine.
+1. **`--no-content`**: upload metadata only (tool calls, tokens, timing, loop signal); no prose leaves the machine.
 2. Run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) on the platform ingest side as defense-in-depth.
-3. Default — regex redaction of structured secrets.
+3. Default: regex redaction of structured secrets.
 
 Always `--dry-run` first to see exactly what would be sent.
 
 ## External engines (bring your own)
 
-`traces` hosts analysis engines and PII scrubbers it does **not** bundle — you install the tool, `traces` drives it over a thin command adapter. Same pattern for any future engine or model.
+`traces` hosts analysis engines and PII scrubbers it does **not** bundle. You install the tool; `traces` drives it over a thin command adapter. Same pattern for any future engine or model.
 
 **Analyzers** run over the emitted OTLP artifact as peers to the built-in analysts:
 
@@ -281,7 +308,7 @@ traces analyze --last 1 --analyzer halo --analyzer-prompt "find token waste"
 traces analyze --last 1 --analyzer halo --analyzer my-engine    # repeatable
 ```
 
-Our OTLP artifact is **canonical OpenInference** (top-level `kind`, `resource`, `scope`), so HALO reads it directly — no conversion. HALO runs its *own* LLM (OpenAI client — set `OPENAI_BASE_URL` / `OPENAI_API_KEY`, or use HALO's provider); `--model` is forwarded to it. traces supplies the trace and drives the CLI; it doesn't pay for or configure HALO's model.
+Our OTLP artifact is **canonical OpenInference** (top-level `kind`, `resource`, `scope`), so HALO reads it directly with no conversion. HALO runs its *own* LLM. Set `OPENAI_BASE_URL` / `OPENAI_API_KEY`, or use HALO's provider; `--model` is forwarded to it. `traces` supplies the trace and drives the CLI; it does not pay for or configure HALO's model.
 
 **Redactors** scrub prompt/response prose with an external PII model (catching names/addresses the regex pass can't), running *after* the built-in redaction:
 
@@ -292,7 +319,7 @@ traces upload --since 24h --dry-run --redactor "my-pii-scrubber"
 
 In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnalyzer`, `commandAnalyzer`, `commandRedactor`, `applyRedactor`, `runExternalAnalyzers`). See [`examples/external-engines.ts`](./examples/external-engines.ts).
 
-> For the built-in agentic analysts (`--llm`), set `OPENAI_API_KEY` — or point at any OpenAI-compatible gateway with `OPENAI_BASE_URL` (e.g. an internal router) to use a non-OpenAI key.
+> For the built-in agentic analysts (`--llm`), set `OPENAI_API_KEY`, or point at any OpenAI-compatible gateway with `OPENAI_BASE_URL` (e.g. an internal router) to use a non-OpenAI key.
 
 ## Release automation
 
@@ -312,7 +339,7 @@ The CLI is a thin consumer of these exports.
 
 | Export | Signature | Use |
 |---|---|---|
-| `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run analysts — built-in, or **your own** via `registry` |
+| `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run built-in analysts, or **your own** via `registry` |
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings, recommendations, claims, external analyzer output, and report |
 | `runTraceImprovementLoop` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full improvement artifact pack and optional proposal output |
 | `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | turn any `AnalystFinding[]` into recommendations, claims, and a report |
@@ -366,7 +393,7 @@ Runnable, in [`examples/`](./examples):
 |---|---|
 | [`observe-and-alert.ts`](./examples/observe-and-alert.ts) | tail live sessions and alert on stuck loops |
 | [`custom-analyst.ts`](./examples/custom-analyst.ts) | register and run your own analyst |
-| [`improvement-config.mjs`](./examples/improvement-config.mjs) | plug in BYO analysts and proposal generation for `traces improve` |
+| [`improvement-config.mjs`](./examples/improvement-config.mjs) | plug in BYO analysts for `traces stream` / `traces improve` |
 | [`custom-backend.ts`](./examples/custom-backend.ts) | redact + dedup + upload to your own sink |
 | [`register-harness.ts`](./examples/register-harness.ts) | add a new harness by implementing `HarnessTraceAdapter` |
 | [`external-engines.ts`](./examples/external-engines.ts) | drive HALO + an external PII scrubber you install yourself |
@@ -378,5 +405,5 @@ pnpm install
 pnpm dev analyze --harness claude-code --last 1   # run from source via tsx
 pnpm test
 pnpm typecheck
-pnpm build        # → dist/index.js (SDK) + dist/cli.js (bin) + .d.ts
+pnpm build        # dist/index.js (SDK) + dist/cli.js (bin) + .d.ts
 ```
