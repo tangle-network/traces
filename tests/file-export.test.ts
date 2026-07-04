@@ -179,6 +179,8 @@ describe('trace evidence export', () => {
         attributes: {
           'span.type': 'interaction',
           'service.name': 'claude-code',
+          'openinference.span.kind': 'TOOL',
+          content: 'raw provider content should not override the normalized prompt',
           'session.id': 'session_uri',
           user_prompt: 'Use skill add-validation-rule and the mcp__linear__linear_graphql tool.',
           'symphony.issue.identifier': 'EO-50',
@@ -231,15 +233,50 @@ describe('trace evidence export', () => {
         thread_id: null,
         received_at: '2026-06-25 22:44:52.146637',
       },
+      {
+        id: 'trace_uri:tool',
+        tenant_id: 'tenant_uri',
+        trace_id: 'trace_uri',
+        parent_span_id: 'trace_uri:root',
+        name: 'claude_code.tool_call',
+        start_unix_nano: '1782427464480000000',
+        end_unix_nano: '1782427464490000000',
+        attributes: {
+          'span.type': 'tool',
+          'service.name': 'claude-code',
+          'tool.name': 'mcp__linear__linear_graphql',
+          'tool.input': 'curl -H "Authorization: Bearer ghp_0123456789abcdefghijklmnopqrstuvwxyzAB" https://linear.app/graphql',
+          'symphony.issue.identifier': 'EO-50',
+        },
+        status_code: 'OK',
+        status_message: null,
+        redaction_version: '1.0.0+tangle.3',
+        model: null,
+        input_tokens: null,
+        output_tokens: null,
+        cost_usd: null,
+        run_id: null,
+        scenario_id: null,
+        generation: null,
+        cell_id: null,
+        session_id: 'session_uri',
+        thread_id: null,
+        received_at: '2026-06-25 22:44:52.146637',
+      },
     ]
 
     const result = exportTraceEvidenceRows(rows)
     expect(result.format).toBe('intelligence-spans')
-    expect(result.spans).toHaveLength(2)
+    expect(result.spans).toHaveLength(3)
+    expect(result.redactionCount).toBeGreaterThanOrEqual(1)
 
-    const outputRows = parseRows(serializeSpans(result.spans))
+    const output = serializeSpans(result.spans)
+    expect(output).not.toContain('ghp_0123456789')
+    const outputRows = parseRows(output)
     outputRows.forEach(expectOpenInferenceRow)
     expect(outputRows[0]!.kind).toBe('AGENT')
+    expect(outputRows[0]!.start_time).toBe('2026-06-25T22:44:24.458Z')
+    expect((outputRows[0]!.status as Record<string, unknown>).code).toBe('UNSET')
     expect(outputRows[0]!.resource).toEqual(expect.objectContaining({
       attributes: expect.objectContaining({
         'service.name': 'claude-code',
@@ -250,13 +287,25 @@ describe('trace evidence export', () => {
       'traces.source_format': 'intelligence-spans',
       'tangle.sessionId': 'session_uri',
       'symphony.issue.identifier': 'EO-50',
+      'traces.received_at': '2026-06-25T22:44:52.146Z',
+      'traces.raw_attribute.openinference.span.kind': 'TOOL',
       content: expect.stringContaining('add-validation-rule'),
     }))
+    expect(outputRows[0]!.attributes).not.toEqual(expect.objectContaining({
+      content: 'raw provider content should not override the normalized prompt',
+    }))
     expect(outputRows[1]!.kind).toBe('LLM')
+    expect(outputRows[1]!.parent_span_id).toBe('trace_uri:root')
     expect(outputRows[1]!.attributes).toEqual(expect.objectContaining({
       'llm.model_name': 'claude-opus-4-8',
       'llm.input_tokens': 25,
       'llm.output_tokens': 739,
+    }))
+    expect(outputRows[2]!.kind).toBe('TOOL')
+    expect(outputRows[2]!.parent_span_id).toBe('trace_uri:root')
+    expect(outputRows[2]!.attributes).toEqual(expect.objectContaining({
+      'tool.name': 'mcp__linear__linear_graphql',
+      'tool.input': expect.stringContaining('[redacted'),
     }))
   })
 })

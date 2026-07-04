@@ -55,7 +55,11 @@ function hashId(value: unknown, chars = 16): string {
 
 function isoTime(value: unknown): string | undefined {
   if (typeof value === 'string') {
-    const ms = Date.parse(value)
+    const trimmed = value.trim()
+    const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)
+      ? `${trimmed.replace(' ', 'T')}Z`
+      : trimmed
+    const ms = Date.parse(normalized)
     return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
   }
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -427,6 +431,30 @@ function firstNumber(row: JsonObject, attrs: JsonObject, keys: readonly string[]
   return undefined
 }
 
+const COMPUTED_SPAN_ATTRIBUTES = new Set([
+  'openinference.span.kind',
+  'service.name',
+  'agent.name',
+  'llm.model_name',
+  'tool.name',
+  'llm.input_tokens',
+  'llm.output_tokens',
+  'step',
+  'content',
+])
+
+function preserveRawAttributes(attrs: JsonObject): JsonObject {
+  const preserved: JsonObject = {}
+  for (const [key, value] of Object.entries(attrs)) {
+    if (COMPUTED_SPAN_ATTRIBUTES.has(key)) {
+      preserved[`traces.raw_attribute.${key}`] = value
+    } else {
+      preserved[key] = value
+    }
+  }
+  return preserved
+}
+
 function intelligenceSpanKind(name: string, attrs: JsonObject): OtlpSpanKind {
   const lowered = name.toLowerCase()
   const spanType = stringValue(attrs['span.type'])?.toLowerCase()
@@ -452,11 +480,13 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
     const name = stringValue(row.name) ?? 'intelligence.span'
     const startTime =
       unixNanoTime(row.start_unix_nano) ??
+      isoTime(row.start_time) ??
       stringValue(row.start_time) ??
       isoTime(row.received_at) ??
       new Date(0).toISOString()
     const endTime =
       unixNanoTime(row.end_unix_nano) ??
+      isoTime(row.end_time) ??
       stringValue(row.end_time) ??
       startTime
     const model =
@@ -470,12 +500,12 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
       stringValue(attrs['mcp.tool.name'])
     const sessionId = stringValue(row.session_id) ?? stringValue(attrs['session.id'])
     const extra: JsonObject = {
-      ...attrs,
+      ...preserveRawAttributes(attrs),
       'traces.source_format': 'intelligence-spans',
-      'traces.row.id': stringValue(row.id),
       'traces.row.index': index,
     }
     copyDefined(extra, {
+      'traces.row.id': stringValue(row.id),
       [ATTR.SESSION_ID]: sessionId,
       'session.id': sessionId,
       'run.id': stringValue(row.run_id),
