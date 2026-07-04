@@ -11,7 +11,7 @@ import { redactSpans } from './redact.js'
 
 type JsonObject = Record<string, unknown>
 
-export type TraceEvidenceInputFormat = 'policy-evidence' | 'sandbox-events' | 'openinference'
+export type TraceEvidenceInputFormat = 'policy-evidence' | 'sandbox-events' | 'openinference' | 'intelligence-spans'
 export type TraceEvidenceFormatOption = TraceEvidenceInputFormat | 'auto'
 
 export interface TraceEvidenceExportOptions {
@@ -101,14 +101,19 @@ function parseJsonRows(text: string): { rows: unknown[]; wrapper?: JsonObject } 
   const trimmed = text.trim()
   if (!trimmed) throw new Error('input file is empty')
   if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-    const parsed: unknown = JSON.parse(trimmed)
-    if (Array.isArray(parsed)) return { rows: parsed }
-    if (isObject(parsed)) {
-      const events = parsed.events
-      if (Array.isArray(events)) return { rows: events, wrapper: parsed }
-      return { rows: [parsed] }
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) return { rows: parsed }
+      if (isObject(parsed)) {
+        const events = parsed.events
+        if (Array.isArray(events)) return { rows: events, wrapper: parsed }
+        return { rows: [parsed] }
+      }
+      throw new Error('input JSON must be an object, array, or JSONL rows')
+    } catch (error) {
+      const hasMultipleRows = /\r?\n/.test(trimmed)
+      if (!hasMultipleRows) throw error
     }
-    throw new Error('input JSON must be an object, array, or JSONL rows')
   }
   return {
     rows: trimmed
@@ -137,6 +142,16 @@ function isOpenInferenceRow(row: unknown): row is JsonObject {
   )
 }
 
+function isIntelligenceSpanRow(row: unknown): row is JsonObject {
+  if (!isObject(row)) return false
+  return (
+    typeof row.trace_id === 'string' &&
+    typeof row.name === 'string' &&
+    isObject(row.attributes) &&
+    (row.start_unix_nano != null || row.start_time != null || row.received_at != null)
+  )
+}
+
 function eventType(row: JsonObject): string | undefined {
   return stringValue(row.type) ?? stringValue(row.event) ?? stringValue(row.name) ?? stringValue(row.kind)
 }
@@ -152,8 +167,9 @@ function detectFormat(rows: readonly unknown[], requested: TraceEvidenceFormatOp
   if (rows.length === 0) throw new Error('input contains no rows')
   if (rows.every(isPolicyEvidenceRow)) return 'policy-evidence'
   if (rows.every(isOpenInferenceRow)) return 'openinference'
+  if (rows.every(isIntelligenceSpanRow)) return 'intelligence-spans'
   if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
-  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, or openinference')
+  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, openinference, or intelligence-spans')
 }
 
 function requirePolicyEvidenceRows(rows: readonly unknown[]): readonly PolicyEvidenceRecord[] {
@@ -163,6 +179,11 @@ function requirePolicyEvidenceRows(rows: readonly unknown[]): readonly PolicyEvi
 
 function requireOpenInferenceRows(rows: readonly unknown[]): readonly JsonObject[] {
   if (!rows.every(isOpenInferenceRow)) throw new Error('openinference input must contain only complete OpenInference span rows')
+  return rows
+}
+
+function requireIntelligenceSpanRows(rows: readonly unknown[]): readonly JsonObject[] {
+  if (!rows.every(isIntelligenceSpanRow)) throw new Error('intelligence-spans input must contain only Intelligence span rows')
   return rows
 }
 
@@ -379,6 +400,121 @@ function statusCode(value: unknown): OtlpStatusCode {
   return value === 'OK' || value === 'ERROR' || value === 'UNSET' ? value : 'UNSET'
 }
 
+function numberValue(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function unixNanoTime(value: unknown): string | undefined {
+  if (value == null) return undefined
+  try {
+    const ns = typeof value === 'bigint' ? value : BigInt(String(value))
+    return new Date(Number(ns / 1_000_000n)).toISOString()
+  } catch {
+    return undefined
+  }
+}
+
+function firstNumber(row: JsonObject, attrs: JsonObject, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const value = numberValue(row[key]) ?? numberValue(attrs[key])
+    if (value != null) return value
+  }
+  return undefined
+}
+
+function intelligenceSpanKind(name: string, attrs: JsonObject): OtlpSpanKind {
+  const lowered = name.toLowerCase()
+  const spanType = stringValue(attrs['span.type'])?.toLowerCase()
+  if (spanType === 'llm_request' || lowered.includes('llm')) return 'LLM'
+  if (
+    spanType === 'tool' ||
+    lowered.includes('tool') ||
+    attrs['tool.name'] != null ||
+    attrs.tool_name != null ||
+    attrs['mcp.tool.name'] != null ||
+    attrs['tool.input'] != null ||
+    attrs['tool.output'] != null
+  ) {
+    return 'TOOL'
+  }
+  if (spanType === 'interaction' || lowered.includes('interaction') || lowered.includes('agent')) return 'AGENT'
+  return 'CHAIN'
+}
+
+function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
+  return rows.map((row, index) => {
+    const attrs = { ...(objectValue(row.attributes) ?? {}) }
+    const name = stringValue(row.name) ?? 'intelligence.span'
+    const startTime =
+      unixNanoTime(row.start_unix_nano) ??
+      stringValue(row.start_time) ??
+      isoTime(row.received_at) ??
+      new Date(0).toISOString()
+    const endTime =
+      unixNanoTime(row.end_unix_nano) ??
+      stringValue(row.end_time) ??
+      startTime
+    const model =
+      stringValue(row.model) ??
+      stringValue(attrs['llm.model_name']) ??
+      stringValue(attrs.model) ??
+      stringValue(attrs['gen_ai.request.model'])
+    const tool =
+      stringValue(attrs['tool.name']) ??
+      stringValue(attrs.tool_name) ??
+      stringValue(attrs['mcp.tool.name'])
+    const sessionId = stringValue(row.session_id) ?? stringValue(attrs['session.id'])
+    const extra: JsonObject = {
+      ...attrs,
+      'traces.source_format': 'intelligence-spans',
+      'traces.row.id': stringValue(row.id),
+      'traces.row.index': index,
+    }
+    copyDefined(extra, {
+      [ATTR.SESSION_ID]: sessionId,
+      'session.id': sessionId,
+      'run.id': stringValue(row.run_id),
+      'thread.id': stringValue(row.thread_id),
+      'scenario.id': stringValue(row.scenario_id),
+      'generation.id': stringValue(row.generation),
+      'cell.id': stringValue(row.cell_id),
+      'project.key': stringValue(row.project_key),
+      'llm.cost_usd': numberValue(row.cost_usd),
+      'redaction.version': stringValue(row.redaction_version),
+      'traces.received_at': isoTime(row.received_at),
+    })
+    return span({
+      traceId: stringValue(row.trace_id) ?? hashId(row, 32),
+      spanId: stringValue(row.id) ?? hashId({ row, field: 'span' }),
+      parentSpanId: stringValue(row.parent_span_id) ?? null,
+      name,
+      kind: intelligenceSpanKind(name, attrs),
+      startTime,
+      endTime,
+      status: statusCode(row.status_code),
+      statusMessage: stringValue(row.status_message),
+      service: stringValue(attrs['service.name']) ?? stringValue(attrs.service_name) ?? 'tangle-intelligence',
+      agent: stringValue(attrs['agent.name']) ?? stringValue(attrs['service.name']) ?? null,
+      model,
+      tool,
+      inputTokens: firstNumber(row, attrs, ['input_tokens', 'llm.input_tokens']),
+      outputTokens: firstNumber(row, attrs, ['output_tokens', 'llm.output_tokens']),
+      step: numberValue(attrs['interaction.sequence']) ?? index,
+      content:
+        stringValue(attrs.user_prompt) ??
+        stringValue(attrs['gen_ai.prompt.messages']) ??
+        stringValue(attrs['log.content.task']) ??
+        null,
+      extra,
+    })
+  })
+}
+
 function openInferenceToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
   return rows.map((row) => {
     const attrs = isObject(row.attributes) ? { ...row.attributes } : {}
@@ -436,7 +572,9 @@ export function exportTraceEvidenceRows(
       ? policyEvidenceToSpans(requirePolicyEvidenceRows(rows))
       : format === 'openinference'
         ? openInferenceToSpans(requireOpenInferenceRows(rows))
-        : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
+        : format === 'intelligence-spans'
+          ? intelligenceSpansToSpans(requireIntelligenceSpanRows(rows))
+          : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
   const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)

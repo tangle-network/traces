@@ -4,6 +4,7 @@
  *
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
+ *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
  *   traces investigate [--harness claude-code] [--last 10] [--out report.md]
  *   traces improve [--all] [--since 24h] --dir .traces/improvement
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
@@ -26,7 +27,7 @@ import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
-import { exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
+import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import {
   loadTracesConfig,
@@ -320,10 +321,7 @@ async function cmdInspect(args: Args): Promise<void> {
 
 async function cmdExport(args: Args): Promise<void> {
   if (!args.input) throw new Error('export needs an input file; run `traces export --help` for examples')
-  const format = args.format ?? 'auto'
-  if (format !== 'auto' && format !== 'policy-evidence' && format !== 'sandbox-events' && format !== 'openinference') {
-    throw new Error('--format must be auto, policy-evidence, sandbox-events, or openinference')
-  }
+  const format = traceEvidenceFormat(args.format)
   const attributes = await loadExportAttributes(args)
   const outPath = args.out ?? args.otlp
   if (outPath) {
@@ -336,6 +334,20 @@ async function cmdExport(args: Args): Promise<void> {
   }
   const result = await exportTraceEvidenceFile(args.input, { format, attributes })
   process.stdout.write(serializeSpans(result.spans))
+}
+
+function traceEvidenceFormat(raw: string | undefined): TraceEvidenceFormatOption {
+  const format = raw ?? 'auto'
+  if (
+    format !== 'auto' &&
+    format !== 'policy-evidence' &&
+    format !== 'sandbox-events' &&
+    format !== 'openinference' &&
+    format !== 'intelligence-spans'
+  ) {
+    throw new Error('--format must be auto, policy-evidence, sandbox-events, openinference, or intelligence-spans')
+  }
+  return format
 }
 
 function parseAttributeValue(raw: string): unknown {
@@ -366,7 +378,9 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
+  const { spans, harness, sessionCount, cwds } = args.input
+    ? await collectImportedSpans(args)
+    : await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const ai = args.llm ? await buildAxService() : undefined
   const { otlpPath, result } = await analyzeSpans(spans, {
@@ -395,6 +409,22 @@ async function cmdAnalyze(args: Args): Promise<void> {
     console.log(`report → ${args.out}  (${result.findings.length} findings, ${pipelines.stuckLoops.findings.length} loops, OTLP: ${otlpPath})`)
   } else {
     console.log(report)
+  }
+}
+
+async function collectImportedSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: string; sessionCount: number; cwds: string[] }> {
+  if (!args.input) throw new Error('analyze input missing')
+  const attributes = await loadExportAttributes(args)
+  const result = await exportTraceEvidenceFile(args.input, {
+    format: traceEvidenceFormat(args.format),
+    attributes,
+  })
+  const traceIds = new Set(result.spans.map((s) => s.trace_id).filter(Boolean))
+  return {
+    spans: result.spans,
+    harness: result.format,
+    sessionCount: traceIds.size || 1,
+    cwds: [],
   }
 }
 
@@ -562,12 +592,14 @@ Input formats:
   policy-evidence  Compact JSONL rows from \`traces evidence --out policy-evidence.jsonl\`
   sandbox-events   Sandbox/OpenCode event arrays with start/raw/result/done/error events
   openinference    Existing OpenInference JSONL; rewrites through traces redaction
+  intelligence-spans  JSONL rows exported from Tangle Intelligence trace spans
   auto             Detect the format from the file contents (default)
 
 Examples:
   traces evidence --all --since 24h --out policy-evidence.jsonl
   traces export policy-evidence.jsonl --out spans.openinference.jsonl
   traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
+  traces export intelligence-spans.jsonl --out spans.openinference.jsonl
   traces export sandbox-events.json --attr task.id=aec-001 --attr outcome.score=1 --out spans.openinference.jsonl
   halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 
@@ -581,7 +613,7 @@ function usage(): void {
 
 Commands:
   list      List discovered sessions
-  analyze   Run analyst suite + loop/waste pipelines, write a markdown report
+  analyze   Run analyst suite + loop/waste pipelines over sessions or an input file
   investigate Run typed investigation flow, including BYO config + recommendations
   improve   Write a full improvement artifact directory for review/apply/rerun
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
@@ -602,9 +634,9 @@ Options:
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory
   --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
-  --format <kind>  export: auto | policy-evidence | sandbox-events | openinference
-  --metadata <json> export: attach JSON object fields as span attributes
-  --attr <k=v>     export: attach one span attribute (repeatable)
+  --format <kind>  analyze/export file: auto | policy-evidence | sandbox-events | openinference | intelligence-spans
+  --metadata <json> analyze/export file: attach JSON object fields as span attributes
+  --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
   --config <path>  investigate/improve: JS config with analysts, external analyzers, or proposal adapter
