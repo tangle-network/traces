@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { OtlpSpan } from './otlp.js'
+import type { PipelineReport } from './pipelines.js'
+import { runPipelines } from './pipelines.js'
 import { scanSessions, type ScanOptions } from './session-source.js'
 import type { SessionRef } from './types.js'
 
@@ -35,6 +37,44 @@ export interface TraceStreamSession {
   readonly path?: string
 }
 
+export type TraceLiveActionKind = 'tool' | 'read' | 'edit' | 'verify' | 'claim' | 'other'
+
+export interface TraceLiveAction {
+  readonly kind: TraceLiveActionKind
+  readonly spanId: string
+  readonly span: OtlpSpan
+  readonly toolName?: string
+  readonly signature: string
+  readonly errored: boolean
+}
+
+export interface TraceLiveLoop {
+  readonly harness: string
+  readonly sessionId: string
+  readonly cwd: string | null
+  readonly toolName: string
+  readonly argHash: string
+  readonly occurrences: number
+  readonly windowMs: number
+}
+
+export interface TraceLiveAnalysisContext {
+  readonly spans: readonly OtlpSpan[]
+  readonly actions: readonly TraceLiveAction[]
+  readonly tools: readonly OtlpSpan[]
+  readonly erroredTools: readonly OtlpSpan[]
+  readonly verificationActions: readonly TraceLiveAction[]
+  readonly changeActions: readonly TraceLiveAction[]
+  readonly session: TraceStreamSession
+  readonly generatedAt: string
+  readonly newSpanCount: number
+}
+
+export interface TraceLiveAnalyst {
+  readonly id: string
+  analyze(context: TraceLiveAnalysisContext): readonly TraceLiveFinding[]
+}
+
 export interface TraceLiveBatch {
   readonly schemaVersion: 1
   readonly kind: 'traces.live_batch'
@@ -46,6 +86,7 @@ export interface TraceLiveBatch {
   readonly erroredToolCallCount: number
   readonly verificationCallCount: number
   readonly changeCallCount: number
+  readonly actionCounts: Readonly<Record<TraceLiveActionKind, number>>
   readonly findingCount: number
   readonly findings: readonly TraceLiveFinding[]
 }
@@ -74,7 +115,18 @@ export type TraceStreamEvent =
       readonly kind: 'traces.stream.batch'
       readonly event: 'analysis_batch'
       readonly generatedAt: string
+      readonly ref?: SessionRef
       readonly batch: TraceLiveBatch
+    }
+  | {
+      readonly schemaVersion: 1
+      readonly kind: 'traces.stream.report'
+      readonly event: 'report'
+      readonly generatedAt: string
+      readonly session: TraceStreamSession
+      readonly ref: SessionRef
+      readonly report: PipelineReport
+      readonly loops: readonly TraceLiveLoop[]
     }
   | {
       readonly schemaVersion: 1
@@ -97,6 +149,10 @@ export interface LiveBatchOptions {
   readonly generatedAt?: string
   readonly session?: Partial<TraceStreamSession>
   readonly newSpanCount?: number
+  /** Replaces the built-in deterministic live analysts. */
+  readonly analysts?: readonly TraceLiveAnalyst[]
+  /** Adds custom live analysts after the built-ins. */
+  readonly extraAnalysts?: readonly TraceLiveAnalyst[]
 }
 
 export interface TraceStreamReplayOptions extends LiveBatchOptions {
@@ -118,6 +174,12 @@ export interface TraceStreamOptions extends ScanOptions {
   readonly includeFindings?: boolean
   /** Emit session and analysis-batch events. Default true. */
   readonly includeBatches?: boolean
+  /** Emit deterministic pipeline report events. Default false. */
+  readonly includeReports?: boolean
+  /** Minimum repeated identical calls for report loop detection. Default 3. */
+  readonly minLoopOccurrences?: number
+  /** Adds custom live analysts after the built-ins. */
+  readonly extraAnalysts?: readonly TraceLiveAnalyst[]
   readonly onEvent: (event: TraceStreamEvent) => void | Promise<void>
 }
 
@@ -193,6 +255,40 @@ function isChange(span: OtlpSpan): boolean {
   return CHANGE_RE.test(`${toolName(span)} ${span.name} ${spanContent(span)}`)
 }
 
+function isRead(span: OtlpSpan): boolean {
+  if (!isTool(span)) return false
+  return /\b(read|cat|less|grep|rg|sed -n|nl|ls|find|git show|git diff)\b/i.test(`${toolName(span)} ${span.name} ${spanContent(span)}`)
+}
+
+function actionKind(span: OtlpSpan): TraceLiveActionKind {
+  if (isVerification(span)) return 'verify'
+  if (isChange(span)) return 'edit'
+  if (isRead(span)) return 'read'
+  if (isTool(span)) return 'tool'
+  if (isTextSpan(span) && CLAIM_DONE_RE.test(spanContent(span))) return 'claim'
+  return 'other'
+}
+
+export function classifyLiveActions(spans: readonly OtlpSpan[]): TraceLiveAction[] {
+  return orderSpans(spans).map((span) => {
+    const tool = isTool(span) ? toolName(span) : undefined
+    return {
+      kind: actionKind(span),
+      spanId: span.span_id,
+      span,
+      ...(tool ? { toolName: tool } : {}),
+      signature: toolSignature(span),
+      errored: span.status.code === 'ERROR',
+    }
+  })
+}
+
+function actionCounts(actions: readonly TraceLiveAction[]): Record<TraceLiveActionKind, number> {
+  const counts: Record<TraceLiveActionKind, number> = { tool: 0, read: 0, edit: 0, verify: 0, claim: 0, other: 0 }
+  for (const action of actions) counts[action.kind] += 1
+  return counts
+}
+
 function timeOf(span: OtlpSpan): number {
   const parsed = Date.parse(span.start_time)
   return Number.isFinite(parsed) ? parsed : 0
@@ -251,56 +347,53 @@ function finding(input: {
   }
 }
 
-export function analyzeLiveBatch(spans: readonly OtlpSpan[], opts: LiveBatchOptions = {}): TraceLiveBatch {
-  const ordered = orderSpans(spans)
-  const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const session = sessionFrom(ordered, opts)
-  const tools = ordered.filter(isTool)
-  const erroredTools = tools.filter((span) => span.status.code === 'ERROR')
-  const verificationCalls = tools.filter(isVerification)
-  const changeCalls = tools.filter(isChange)
-  const findings: TraceLiveFinding[] = []
-
-  const failedBySignature = new Map<string, OtlpSpan[]>()
-  for (const span of erroredTools) {
-    const signature = toolSignature(span)
-    failedBySignature.set(signature, [...(failedBySignature.get(signature) ?? []), span])
-  }
-  for (const [signature, rows] of failedBySignature) {
-    if (rows.length < 2) continue
-    findings.push(finding({
-      ruleId: 'same-failing-command',
-      severity: rows.length >= 3 ? 'high' : 'medium',
-      title: 'Same failing command is repeating',
-      claim: `${rows.length} failed tool call(s) repeated the same command or arguments.`,
-      action: 'Stop rerunning it; inspect the first failure, change state, or choose a different diagnostic path before another retry.',
-      check: 'The next action should read the failing file, inspect the stack/output, or edit code before this command runs again.',
-      evidence: [
-        evidence('pattern', 'command', signature, rows.map((span) => span.span_id)),
-        evidence('metric', 'failed_repeats', String(rows.length)),
-      ],
-      session,
-      observedAt: generatedAt,
-      signature: [signature, String(rows.length)],
-    }))
-  }
-
-  let lastChangeIndex = -1
-  let verificationSinceChange = 0
-  const verificationSpanIds: string[] = []
-  for (let i = 0; i < ordered.length; i++) {
-    const span = ordered[i]!
-    if (isChange(span)) {
-      lastChangeIndex = i
-      verificationSinceChange = 0
-      verificationSpanIds.length = 0
-    } else if (isVerification(span)) {
-      verificationSinceChange += 1
-      verificationSpanIds.push(span.span_id)
+const sameFailingCommandAnalyst: TraceLiveAnalyst = {
+  id: 'same-failing-command',
+  analyze(context) {
+    const findings: TraceLiveFinding[] = []
+    const failedBySignature = new Map<string, OtlpSpan[]>()
+    for (const action of context.actions) {
+      if (!action.toolName || !action.errored) continue
+      failedBySignature.set(action.signature, [...(failedBySignature.get(action.signature) ?? []), action.span])
     }
-  }
-  if (verificationSinceChange >= 2) {
-    findings.push(finding({
+    for (const [signature, rows] of failedBySignature) {
+      if (rows.length < 2) continue
+      findings.push(finding({
+        ruleId: 'same-failing-command',
+        severity: rows.length >= 3 ? 'high' : 'medium',
+        title: 'Same failing command is repeating',
+        claim: `${rows.length} failed tool call(s) repeated the same command or arguments.`,
+        action: 'Stop rerunning it; inspect the first failure, change state, or choose a different diagnostic path before another retry.',
+        check: 'The next action should read the failing file, inspect the stack/output, or edit code before this command runs again.',
+        evidence: [
+          evidence('pattern', 'command', signature, rows.map((span) => span.span_id)),
+          evidence('metric', 'failed_repeats', String(rows.length)),
+        ],
+        session: context.session,
+        observedAt: context.generatedAt,
+        signature: [signature, String(rows.length)],
+      }))
+    }
+    return findings
+  },
+}
+
+const verificationWithoutChangeAnalyst: TraceLiveAnalyst = {
+  id: 'verification-without-change',
+  analyze(context) {
+    let verificationSinceChange = 0
+    const verificationSpanIds: string[] = []
+    for (const action of context.actions) {
+      if (action.kind === 'edit') {
+        verificationSinceChange = 0
+        verificationSpanIds.length = 0
+      } else if (action.kind === 'verify') {
+        verificationSinceChange += 1
+        verificationSpanIds.push(action.spanId)
+      }
+    }
+    if (verificationSinceChange < 2) return []
+    return [finding({
       ruleId: 'verification-without-change',
       severity: verificationSinceChange >= 3 ? 'high' : 'medium',
       title: 'Verification is repeating without a state change',
@@ -309,53 +402,94 @@ export function analyzeLiveBatch(spans: readonly OtlpSpan[], opts: LiveBatchOpti
       check: 'The next action should be a code/config edit, targeted file read, or a different narrow diagnostic command.',
       evidence: [
         evidence('metric', 'verification_calls_since_change', String(verificationSinceChange), verificationSpanIds),
-        evidence('metric', 'change_calls', String(changeCalls.length)),
+        evidence('metric', 'change_calls', String(context.changeActions.length)),
       ],
-      session,
-      observedAt: generatedAt,
+      session: context.session,
+      observedAt: context.generatedAt,
       signature: [String(verificationSinceChange), verificationSpanIds.join(',')],
-    }))
-  }
+    })]
+  },
+}
 
-  const lastClaim = [...ordered].reverse().find((span) => isTextSpan(span) && CLAIM_DONE_RE.test(spanContent(span)))
-  if (lastClaim) {
-    const claimTime = timeOf(lastClaim)
-    const verificationAfterClaim = verificationCalls.some((span) => timeOf(span) > claimTime)
-    if (!verificationAfterClaim) {
-      findings.push(finding({
-        ruleId: 'completion-claim-without-verification',
-        severity: 'medium',
-        title: 'Completion claim has no later verification',
-        claim: 'The agent claimed completion, correctness, or verification without a later verification tool call in the observed trace.',
-        action: 'Require a concrete check after the claim, or downgrade the claim to an unverified hypothesis.',
-        check: 'A later test/build/typecheck/lint/smoke command should appear after the claim.',
-        evidence: [
-          evidence('span', 'claim_span', spanContent(lastClaim).slice(0, 240), [lastClaim.span_id]),
-          evidence('metric', 'verification_after_claim', '0'),
-        ],
-        session,
-        observedAt: generatedAt,
-        signature: [lastClaim.span_id, spanContent(lastClaim).slice(0, 120)],
-      }))
-    }
-  }
+const completionClaimWithoutVerificationAnalyst: TraceLiveAnalyst = {
+  id: 'completion-claim-without-verification',
+  analyze(context) {
+    const lastClaim = [...context.actions].reverse().find((action) => action.kind === 'claim')
+    if (!lastClaim) return []
+    const claimTime = timeOf(lastClaim.span)
+    const verificationAfterClaim = context.verificationActions.some((action) => timeOf(action.span) > claimTime)
+    if (verificationAfterClaim) return []
+    return [finding({
+      ruleId: 'completion-claim-without-verification',
+      severity: 'medium',
+      title: 'Completion claim has no later verification',
+      claim: 'The agent claimed completion, correctness, or verification without a later verification tool call in the observed trace.',
+      action: 'Require a concrete check after the claim, or downgrade the claim to an unverified hypothesis.',
+      check: 'A later test/build/typecheck/lint/smoke command should appear after the claim.',
+      evidence: [
+        evidence('span', 'claim_span', spanContent(lastClaim.span).slice(0, 240), [lastClaim.spanId]),
+        evidence('metric', 'verification_after_claim', '0'),
+      ],
+      session: context.session,
+      observedAt: context.generatedAt,
+      signature: [lastClaim.spanId, spanContent(lastClaim.span).slice(0, 120)],
+    })]
+  },
+}
 
-  if (tools.length >= 4 && erroredTools.length / tools.length >= 0.5) {
-    findings.push(finding({
+const highToolErrorRateAnalyst: TraceLiveAnalyst = {
+  id: 'high-tool-error-rate',
+  analyze(context) {
+    if (context.tools.length < 4 || context.erroredTools.length / context.tools.length < 0.5) return []
+    return [finding({
       ruleId: 'high-tool-error-rate',
-      severity: erroredTools.length / tools.length >= 0.75 ? 'high' : 'medium',
+      severity: context.erroredTools.length / context.tools.length >= 0.75 ? 'high' : 'medium',
       title: 'Tool calls are mostly failing',
-      claim: `${erroredTools.length}/${tools.length} tool call(s) in this live batch ended with ERROR.`,
+      claim: `${context.erroredTools.length}/${context.tools.length} tool call(s) in this live batch ended with ERROR.`,
       action: 'Switch from broad execution to diagnosis: classify the dominant error, then run one targeted command to validate the fix path.',
       check: 'The next batch should reduce the error ratio or show a new targeted diagnostic result.',
       evidence: [
-        evidence('metric', 'errored_tool_calls', `${erroredTools.length}/${tools.length}`, erroredTools.map((span) => span.span_id)),
+        evidence('metric', 'errored_tool_calls', `${context.erroredTools.length}/${context.tools.length}`, context.erroredTools.map((span) => span.span_id)),
       ],
-      session,
-      observedAt: generatedAt,
-      signature: [String(erroredTools.length), String(tools.length)],
-    }))
+      session: context.session,
+      observedAt: context.generatedAt,
+      signature: [String(context.erroredTools.length), String(context.tools.length)],
+    })]
+  },
+}
+
+export const defaultTraceLiveAnalysts: readonly TraceLiveAnalyst[] = [
+  sameFailingCommandAnalyst,
+  verificationWithoutChangeAnalyst,
+  completionClaimWithoutVerificationAnalyst,
+  highToolErrorRateAnalyst,
+]
+
+function liveAnalysts(opts: LiveBatchOptions): readonly TraceLiveAnalyst[] {
+  return [...(opts.analysts ?? defaultTraceLiveAnalysts), ...(opts.extraAnalysts ?? [])]
+}
+
+export function analyzeLiveBatch(spans: readonly OtlpSpan[], opts: LiveBatchOptions = {}): TraceLiveBatch {
+  const ordered = orderSpans(spans)
+  const generatedAt = opts.generatedAt ?? new Date().toISOString()
+  const session = sessionFrom(ordered, opts)
+  const actions = classifyLiveActions(ordered)
+  const tools = ordered.filter(isTool)
+  const erroredTools = tools.filter((span) => span.status.code === 'ERROR')
+  const verificationActions = actions.filter((action) => action.kind === 'verify')
+  const changeActions = actions.filter((action) => action.kind === 'edit')
+  const context: TraceLiveAnalysisContext = {
+    spans: ordered,
+    actions,
+    tools,
+    erroredTools,
+    verificationActions,
+    changeActions,
+    session,
+    generatedAt,
+    newSpanCount: opts.newSpanCount ?? ordered.length,
   }
+  const findings = liveAnalysts(opts).flatMap((analyst) => [...analyst.analyze(context)])
 
   return {
     schemaVersion: 1,
@@ -366,8 +500,9 @@ export function analyzeLiveBatch(spans: readonly OtlpSpan[], opts: LiveBatchOpti
     newSpanCount: opts.newSpanCount ?? ordered.length,
     toolCallCount: tools.length,
     erroredToolCallCount: erroredTools.length,
-    verificationCallCount: verificationCalls.length,
-    changeCallCount: changeCalls.length,
+    verificationCallCount: verificationActions.length,
+    changeCallCount: changeActions.length,
+    actionCounts: actionCounts(actions),
     findingCount: findings.length,
     findings,
   }
@@ -396,14 +531,20 @@ export function traceStreamEventsFromSpans(spans: readonly OtlpSpan[], opts: Tra
       : opts.session,
   })
   const ordered = orderSpans(spans)
-  const batch = analyzeLiveBatch(ordered, { generatedAt, session, newSpanCount: ordered.length })
+  const batch = analyzeLiveBatch(ordered, {
+    generatedAt,
+    session,
+    newSpanCount: ordered.length,
+    analysts: opts.analysts,
+    extraAnalysts: opts.extraAnalysts,
+  })
   const events: TraceStreamEvent[] = [sessionEvent(session, ordered, generatedAt)]
   if (opts.includeSpans !== false) {
     for (const span of ordered) {
       events.push({ schemaVersion: 1, kind: 'traces.stream.span', event: 'span', generatedAt, session, span })
     }
   }
-  events.push({ schemaVersion: 1, kind: 'traces.stream.batch', event: 'analysis_batch', generatedAt, batch })
+  events.push({ schemaVersion: 1, kind: 'traces.stream.batch', event: 'analysis_batch', generatedAt, ref: opts.ref, batch })
   if (opts.includeFindings !== false) {
     for (const liveFinding of batch.findings) {
       events.push({ schemaVersion: 1, kind: 'traces.stream.finding', event: 'finding', generatedAt, finding: liveFinding })
@@ -416,12 +557,25 @@ export function serializeTraceStreamEvent(event: TraceStreamEvent): string {
   return `${JSON.stringify(event)}\n`
 }
 
+function loopsFromReport(session: TraceStreamSession, report: PipelineReport): TraceLiveLoop[] {
+  return report.stuckLoops.findings.map((loop) => ({
+    harness: session.harness,
+    sessionId: session.sessionId,
+    cwd: session.cwd,
+    toolName: loop.toolName,
+    argHash: loop.argHash,
+    occurrences: loop.occurrences,
+    windowMs: loop.windowMs,
+  }))
+}
+
 export async function streamSessions(opts: TraceStreamOptions): Promise<void> {
   const intervalMs = Math.max(250, opts.intervalMs ?? 5_000)
   const windowMs = opts.windowMs ?? 30 * 60_000
   const includeSpans = opts.includeSpans !== false
   const includeFindings = opts.includeFindings !== false
   const includeBatches = opts.includeBatches !== false
+  const includeReports = opts.includeReports === true
   const seenSessions = new Set<string>()
   const seenSpans = new Set<string>()
   const seenFindings = new Set<string>()
@@ -456,9 +610,31 @@ export async function streamSessions(opts: TraceStreamOptions): Promise<void> {
           await opts.onEvent({ schemaVersion: 1, kind: 'traces.stream.span', event: 'span', generatedAt, session, span })
         }
       }
-      const batch = analyzeLiveBatch(ordered, { generatedAt, session, newSpanCount: unseen.length })
+      const batch = analyzeLiveBatch(ordered, {
+        generatedAt,
+        session,
+        newSpanCount: unseen.length,
+        extraAnalysts: opts.extraAnalysts,
+      })
       if (includeBatches) {
-        await opts.onEvent({ schemaVersion: 1, kind: 'traces.stream.batch', event: 'analysis_batch', generatedAt, batch })
+        await opts.onEvent({ schemaVersion: 1, kind: 'traces.stream.batch', event: 'analysis_batch', generatedAt, ref, batch })
+      }
+      if (includeReports) {
+        try {
+          const report = await runPipelines(ordered, { minLoopOccurrences: opts.minLoopOccurrences })
+          await opts.onEvent({
+            schemaVersion: 1,
+            kind: 'traces.stream.report',
+            event: 'report',
+            generatedAt,
+            session,
+            ref,
+            report,
+            loops: loopsFromReport(session, report),
+          })
+        } catch (err) {
+          opts.onError?.(err, ref)
+        }
       }
       if (includeFindings) {
         for (const liveFinding of batch.findings) {

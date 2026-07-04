@@ -42,6 +42,7 @@ import {
   serializeTraceStreamEvent,
   streamSessions,
   traceStreamEventsFromSpans,
+  type TraceLiveAnalyst,
   type TraceLiveFinding,
 } from './live.js'
 import type { OtlpSpan } from './otlp.js'
@@ -85,6 +86,7 @@ interface Args {
   model?: string
   config?: string
   format?: string
+  mode?: string
   replay: boolean
   noSpans: boolean
   noFindings: boolean
@@ -136,6 +138,7 @@ function parseArgs(argv: string[]): Args {
       case '--budget': a.budget = Number(next()); break
       case '--model': a.model = next(); break
       case '--config': a.config = next(); break
+      case '--mode': a.mode = next(); break
       case '--metadata': a.metadata = next(); break
       case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
       case '--interval': a.interval = Number(next()); break
@@ -530,10 +533,30 @@ function formatLiveFinding(finding: TraceLiveFinding): string {
   ].join('\n')
 }
 
-async function streamExplicitSession(args: Args): Promise<void> {
+type StreamMode = 'visualizer' | 'findings' | 'agent'
+
+function streamMode(raw: string | undefined): StreamMode {
+  if (raw === undefined) return 'visualizer'
+  if (raw === 'visualizer' || raw === 'findings' || raw === 'agent') return raw
+  throw new Error(`unknown stream mode "${raw}" (expected visualizer, findings, or agent)`)
+}
+
+function streamPreset(args: Args): { mode: StreamMode; includeSpans: boolean; includeFindings: boolean; includeBatches: boolean; includeReports: boolean } {
+  const mode = streamMode(args.mode)
+  return {
+    mode,
+    includeSpans: !args.noSpans && mode === 'visualizer',
+    includeFindings: !args.noFindings,
+    includeBatches: true,
+    includeReports: mode === 'agent',
+  }
+}
+
+async function streamExplicitSession(args: Args, extraAnalysts: readonly TraceLiveAnalyst[] | undefined): Promise<void> {
   if (!args.session) throw new Error('streamExplicitSession needs --session')
   const adapter = resolveAdapter(args.harness)
   if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
+  const preset = streamPreset(args)
   const st = await stat(args.session)
   const ref: SessionRef = {
     harness: adapter.harness,
@@ -545,14 +568,17 @@ async function streamExplicitSession(args: Args): Promise<void> {
   const spans = await parseSession(adapter, ref)
   for (const event of traceStreamEventsFromSpans(spans, {
     ref,
-    includeSpans: !args.noSpans,
-    includeFindings: !args.noFindings,
+    includeSpans: preset.includeSpans,
+    includeFindings: preset.includeFindings,
+    extraAnalysts,
   })) {
     process.stdout.write(serializeTraceStreamEvent(event))
   }
 }
 
 async function cmdStream(args: Args): Promise<void> {
+  const config = await loadTracesConfig(args.config)
+  const preset = streamPreset(args)
   if (args.input) {
     const { spans, harness } = await collectImportedSpans(args)
     const ref: SessionRef = {
@@ -564,15 +590,16 @@ async function cmdStream(args: Args): Promise<void> {
     }
     for (const event of traceStreamEventsFromSpans(spans, {
       ref,
-      includeSpans: !args.noSpans,
-      includeFindings: !args.noFindings,
+      includeSpans: preset.includeSpans,
+      includeFindings: preset.includeFindings,
+      extraAnalysts: config?.liveAnalysts,
     })) {
       process.stdout.write(serializeTraceStreamEvent(event))
     }
     return
   }
   if (args.session) {
-    await streamExplicitSession(args)
+    await streamExplicitSession(args, config?.liveAnalysts)
     return
   }
 
@@ -581,7 +608,7 @@ async function cmdStream(args: Args): Promise<void> {
   process.once('SIGINT', () => controller.abort())
   if (!args.replay) {
     process.stderr.write(
-      `traces stream — JSONL live feed for ${all ? 'all harnesses' : args.harness}, ` +
+      `traces stream — ${preset.mode} JSONL feed for ${all ? 'all harnesses' : args.harness}, ` +
         `last ${args.window}m, every ${args.interval}s. Ctrl-C to stop.\n`,
     )
   }
@@ -593,8 +620,11 @@ async function cmdStream(args: Args): Promise<void> {
     windowMs: args.window * 60_000,
     intervalMs: args.interval * 1000,
     once: args.replay,
-    includeSpans: !args.noSpans,
-    includeFindings: !args.noFindings,
+    includeSpans: preset.includeSpans,
+    includeFindings: preset.includeFindings,
+    includeBatches: preset.includeBatches,
+    includeReports: preset.includeReports,
+    extraAnalysts: config?.liveAnalysts,
     signal: controller.signal,
     onEvent: (event) => {
       process.stdout.write(serializeTraceStreamEvent(event))
@@ -754,12 +784,13 @@ Options:
   --format <kind>  analyze/export file: auto | policy-evidence | sandbox-events | openinference | intelligence-spans
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
+  --mode <kind>    stream: visualizer | findings | agent (default visualizer)
   --replay, --once stream: scan once and exit (default for positional input / --session)
   --no-spans       stream: omit per-span pulse events
   --no-findings    stream: omit semantic live-finding events
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
-  --config <path>  investigate/improve: JS config with analysts, external analyzers, or proposal adapter
+  --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, external analyzers, or proposal adapter
   --budget <usd>   USD cap for agentic analysts
   --analyzer <cmd> analyze: also run an external engine over the OTLP (repeatable; "halo" or any command)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)

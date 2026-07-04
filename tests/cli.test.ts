@@ -155,4 +155,65 @@ describe('traces CLI', () => {
       'verification-without-change',
     ])
   })
+
+  it('loads custom live analysts for stream replay from traces config', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-live-config-'))
+    const input = join(dir, 'spans.openinference.jsonl')
+    const config = join(dir, 'traces.config.mjs')
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace_stream_config',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'synthetic',
+      }),
+    ]), 'utf8')
+    await writeFile(config, `export default {
+      liveAnalysts: [{
+        id: 'cfg-live',
+        analyze(context) {
+          return [{
+            schemaVersion: 1,
+            kind: 'traces.live_finding',
+            id: 'live.cfg-live',
+            ruleId: 'cfg-live',
+            fingerprint: 'cfg-live',
+            severity: 'info',
+            title: 'Config live analyst',
+            claim: 'Loaded from config.',
+            action: 'Keep streaming.',
+            check: 'Finding appears in stream JSONL.',
+            evidence: [{ kind: 'metric', label: 'spans', value: String(context.spans.length) }],
+            session: context.session,
+            observedAt: context.generatedAt,
+          }]
+        },
+      }],
+    }\n`, 'utf8')
+
+    const { stdout } = await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'stream',
+      input,
+      '--format',
+      'openinference',
+      '--config',
+      config,
+      '--mode',
+      'findings',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const rows = parseRows(stdout)
+    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding'])
+    expect((rows.find((row) => row.event === 'finding')!.finding as Record<string, unknown>).ruleId).toBe('cfg-live')
+  })
 })

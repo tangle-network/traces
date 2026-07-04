@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   analyzeLiveBatch,
+  classifyLiveActions,
   serializeTraceStreamEvent,
   span,
   streamSessions,
@@ -8,6 +9,7 @@ import {
   type HarnessTraceAdapter,
   type OtlpSpan,
   type SessionRef,
+  type TraceLiveAnalyst,
   type TraceStreamEvent,
 } from '../src/index.js'
 
@@ -95,6 +97,8 @@ describe('live trace intelligence', () => {
     expect(batch.toolCallCount).toBe(3)
     expect(batch.erroredToolCallCount).toBe(3)
     expect(batch.verificationCallCount).toBe(3)
+    expect(batch.actionCounts.verify).toBe(3)
+    expect(batch.actionCounts.claim).toBe(1)
     expect(batch.findings.map((f) => f.ruleId).sort()).toEqual([
       'completion-claim-without-verification',
       'same-failing-command',
@@ -103,6 +107,34 @@ describe('live trace intelligence', () => {
     const repeated = batch.findings.find((f) => f.ruleId === 'same-failing-command')
     expect(repeated?.action).toContain('Stop rerunning it')
     expect(repeated?.evidence[0]?.spanIds).toEqual(['test-1', 'test-2', 'test-3'])
+  })
+
+  it('classifies actions once and lets callers bring custom live analysts', () => {
+    const actions = classifyLiveActions(liveSpans())
+    expect(actions.map((action) => action.kind)).toEqual(['other', 'verify', 'verify', 'verify', 'claim'])
+
+    const analyst: TraceLiveAnalyst = {
+      id: 'custom-live',
+      analyze(context) {
+        return [{
+          schemaVersion: 1,
+          kind: 'traces.live_finding',
+          id: 'live.custom-live.action-count',
+          ruleId: 'custom-live',
+          fingerprint: 'custom-live',
+          severity: 'info',
+          title: 'Custom live analyst saw the batch',
+          claim: `Saw ${context.actions.length} classified action(s).`,
+          action: 'Keep streaming.',
+          check: 'The custom analyst emitted a typed finding.',
+          evidence: [{ kind: 'metric', label: 'actions', value: String(context.actions.length) }],
+          session: context.session,
+          observedAt: context.generatedAt,
+        }]
+      },
+    }
+    const batch = analyzeLiveBatch(liveSpans(), { analysts: [], extraAnalysts: [analyst] })
+    expect(batch.findings.map((finding) => finding.ruleId)).toEqual(['custom-live'])
   })
 
   it('builds replayable JSONL stream events for visualizers and downstream agents', () => {
@@ -135,6 +167,7 @@ describe('live trace intelligence', () => {
     await streamSessions({
       adapters: [adapter],
       intervalMs: 250,
+      includeReports: true,
       signal: controller.signal,
       onEvent: (event) => {
         events.push(event)
@@ -147,6 +180,7 @@ describe('live trace intelligence', () => {
 
     expect(events.filter((event) => event.event === 'span')).toHaveLength(liveSpans().length)
     expect(events.filter((event) => event.event === 'analysis_batch')).toHaveLength(2)
+    expect(events.filter((event) => event.event === 'report')).toHaveLength(2)
     expect(events.filter((event) => event.event === 'finding')).toHaveLength(3)
   })
 })

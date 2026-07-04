@@ -1,33 +1,16 @@
 /**
- * Live trace observer — the reusable, event-driven core behind `traces watch`.
+ * Live trace observer — compatibility wrapper behind `traces watch`.
  *
- * `watchSessions` tails active coding-agent sessions across harnesses and emits
- * structured events as it goes: every session's pipeline report each tick
- * (`onReport`), and a deduped signal whenever a stuck loop first appears or
- * grows (`onLoop`). It's read-only (never touches the agent or its harness) and
- * cancellable via an `AbortSignal`, so a third party can subscribe to the live
- * findings stream and feed it into any system — a dashboard, an alerter, a
- * steering layer, or another agent — without shelling out to the CLI.
+ * `streamSessions` is the single live scanner. `watchSessions` keeps the
+ * callback-oriented SDK surface for existing users while consuming stream
+ * events instead of running a second polling loop.
  */
 
 import type { PipelineReport } from './pipelines.js'
-import { runPipelines } from './pipelines.js'
-import { scanSessions } from './session-source.js'
+import { streamSessions, type TraceLiveBatch, type TraceLiveFinding, type TraceLiveLoop } from './live.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
-import { analyzeLiveBatch, type TraceLiveBatch, type TraceLiveFinding } from './live.js'
 
-/** A newly-observed (or grown) stuck loop in a live session. */
-export interface ObservedLoop {
-  harness: string
-  sessionId: string
-  cwd: string | null
-  toolName: string
-  argHash: string
-  /** Identical repeated calls observed so far. */
-  occurrences: number
-  /** Milliseconds between the first and last call in the loop. */
-  windowMs: number
-}
+export type ObservedLoop = TraceLiveLoop
 
 export interface ObserverOptions {
   /** Harness ids/aliases to observe. Omit (or pass `all: true`) → every harness. */
@@ -62,117 +45,53 @@ export interface ObserverOptions {
   onTick?: (stats: { sessions: number }) => void
 }
 
-const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
-  new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve()
-      return
-    }
-    const onAbort = () => {
-      clearTimeout(t)
-      resolve()
-    }
-    // Detach on normal timeout too — `once` only fires on abort, so without
-    // this every tick would leak a listener onto a long-lived signal.
-    const t = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve()
-    }, ms)
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
-
-/** A loop's stable identity within a session — keyed so we only re-emit on growth. */
-function loopKey(sessionId: string, toolName: string, argHash: string): string {
-  return `${sessionId}:${toolName}:${argHash}`
+function loopKey(loop: ObservedLoop): string {
+  return `${loop.sessionId}:${loop.toolName}:${loop.argHash}`
 }
 
-/**
- * Observe active sessions until `opts.signal` aborts. Returns a promise that
- * resolves on abort. Errors in a single session are routed to `onError` and
- * never stop the loop.
- */
-export async function watchSessions(opts: ObserverOptions): Promise<void> {
-  const windowMs = opts.windowMs ?? 30 * 60_000
-  const intervalMs = Math.max(250, opts.intervalMs ?? 5_000)
-  const minLoop = opts.minLoopOccurrences ?? 3
-  const seen = new Map<string, number>() // loopKey → max occurrences already emitted
-  const seenFindings = new Set<string>()
-
-  while (!opts.signal?.aborted) {
-    let sessionCount = 0
-    for await (const { adapter, ref, spans } of scanSessions({
-      adapters: opts.adapters,
-      all: opts.all,
-      harnesses: opts.harnesses,
-      cwd: opts.cwd,
-      sinceMs: Date.now() - windowMs,
-      signal: opts.signal,
-      onError: opts.onError,
-    })) {
-      let report: PipelineReport
-      try {
-        report = await runPipelines(spans, { minLoopOccurrences: minLoop })
-      } catch (err) {
-        opts.onError?.(err, ref)
-        continue
-      }
-      sessionCount += 1
-      if (opts.onReport) {
-        try {
-          await opts.onReport(ref, report)
-        } catch (err) {
-          opts.onError?.(err, ref)
-        }
-      }
-      const batch = analyzeLiveBatch(spans, {
-        session: { harness: adapter.harness, sessionId: ref.sessionId, cwd: ref.cwd, path: ref.path },
-      })
-      if (opts.onBatch) {
-        try {
-          await opts.onBatch(ref, batch)
-        } catch (err) {
-          opts.onError?.(err, ref)
-        }
-      }
-      if (opts.onFinding) {
-        for (const finding of batch.findings) {
-          if (seenFindings.has(finding.id)) continue
-          seenFindings.add(finding.id)
-          try {
-            await opts.onFinding(finding)
-          } catch (err) {
-            opts.onError?.(err, ref)
-          }
-        }
-      }
-      for (const f of report.stuckLoops.findings) {
-        const key = loopKey(ref.sessionId, f.toolName, f.argHash)
-        if (f.occurrences > (seen.get(key) ?? 0)) {
-          seen.set(key, f.occurrences)
-          if (opts.onLoop) {
-            try {
-              await opts.onLoop({
-                harness: adapter.harness,
-                sessionId: ref.sessionId,
-                cwd: ref.cwd,
-                toolName: f.toolName,
-                argHash: f.argHash,
-                occurrences: f.occurrences,
-                windowMs: f.windowMs,
-              })
-            } catch (err) {
-              opts.onError?.(err, ref)
-            }
-          }
-        }
-      }
-    }
-    try {
-      opts.onTick?.({ sessions: sessionCount })
-    } catch (err) {
-      opts.onError?.(err)
-    }
-    if (opts.signal?.aborted) break
-    await sleep(intervalMs, opts.signal)
+async function callSafely(ref: SessionRef | undefined, onError: ObserverOptions['onError'], fn: () => void | Promise<void>): Promise<void> {
+  try {
+    await fn()
+  } catch (err) {
+    onError?.(err, ref)
   }
+}
+
+export async function watchSessions(opts: ObserverOptions): Promise<void> {
+  const seenLoops = new Map<string, number>()
+
+  await streamSessions({
+    adapters: opts.adapters,
+    all: opts.all,
+    harnesses: opts.harnesses,
+    cwd: opts.cwd,
+    windowMs: opts.windowMs,
+    intervalMs: opts.intervalMs,
+    minLoopOccurrences: opts.minLoopOccurrences,
+    signal: opts.signal,
+    includeSpans: false,
+    includeBatches: Boolean(opts.onBatch),
+    includeFindings: Boolean(opts.onFinding),
+    includeReports: Boolean(opts.onReport || opts.onLoop),
+    onError: opts.onError,
+    onEvent: async (event) => {
+      if (event.event === 'analysis_batch') {
+        if (event.ref) {
+          await callSafely(event.ref, opts.onError, () => opts.onBatch?.(event.ref!, event.batch))
+        }
+      } else if (event.event === 'finding') {
+        await callSafely(undefined, opts.onError, () => opts.onFinding?.(event.finding))
+      } else if (event.event === 'report') {
+        await callSafely(event.ref, opts.onError, () => opts.onReport?.(event.ref, event.report))
+        for (const loop of event.loops) {
+          const key = loopKey(loop)
+          if (loop.occurrences <= (seenLoops.get(key) ?? 0)) continue
+          seenLoops.set(key, loop.occurrences)
+          await callSafely(event.ref, opts.onError, () => opts.onLoop?.(loop))
+        }
+      } else if (event.event === 'tick') {
+        await callSafely(undefined, opts.onError, () => opts.onTick?.({ sessions: event.sessions }))
+      }
+    },
+  })
 }

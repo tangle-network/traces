@@ -104,7 +104,8 @@ traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces export   policy-evidence.jsonl --out spans.openinference.jsonl
 traces watch    --all                              # live observer; loops + semantic findings
-traces stream   --all --no-spans                   # live JSONL events for dashboards/visualizers
+traces stream   --all --mode findings              # low-volume semantic feed
+traces stream   --all --mode agent                 # findings + deterministic report events
 traces stream   spans.openinference.jsonl --format openinference --no-spans
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
@@ -123,9 +124,10 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | `export` / file `stream`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
-| `--config <path>` | `investigate` / `improve`: load BYO analysts, external analyzers, and proposal adapters |
+| `--config <path>` | `investigate` / `improve` / `stream`: load BYO analysts, live analysts, external analyzers, and proposal adapters |
 | `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
+| `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |
 | `--replay` / `--once` | `stream`: scan once, then exit |
 | `--no-spans` / `--no-findings` | `stream`: suppress raw span rows / finding rows |
 | `--no-content` | `upload`: send metadata only — strip all prompt/response text |
@@ -141,13 +143,15 @@ It emits newline-delimited JSON events that a dashboard, art visualizer, local w
 
 ```bash
 traces stream --all
-traces stream --all --no-spans
+traces stream --all --mode findings
+traces stream --all --mode agent --config traces.config.mjs
 traces stream spans.openinference.jsonl --format openinference --no-spans
 ```
 
-The stream emits `session`, `span`, `analysis_batch`, `finding`, and `tick` events.
+Live streaming emits `session`, `span`, `analysis_batch`, `finding`, and `tick` events; `--mode agent` also emits `report` events.
 The semantic findings currently cover repeated failing commands, verification churn without code/config changes, completion claims without later verification, and high tool-error rates.
-Use `--no-spans` when you want the low-volume meaning layer; keep spans on for real-time visualizers that need motion, timing, and tool-call texture.
+Use `--mode findings` when you want the low-volume meaning layer; keep `visualizer` for real-time views that need motion, timing, and tool-call texture.
+Use `--mode agent` when another agent needs deterministic loop/tool-use reports alongside the findings.
 
 ## Improvement engine
 
@@ -177,6 +181,7 @@ traces improve --last 5 --config examples/improvement-config.mjs --dir .traces/i
 The config can export:
 
 - `analysts`: deterministic or LLM analysts that implement the `agent-eval` `Analyst` contract
+- `liveAnalysts`: deterministic online analysts that implement the `TraceLiveAnalyst` contract for `traces stream`
 - `registry`: a prebuilt `AnalystRegistry`
 - `externalAnalyzers`: HALO or any command/model adapter that reads the OTLP artifact
 - `improvementAdapter`: a proposal writer that maps recommendations to patches, profile edits, prompts, or validation commands
@@ -317,6 +322,8 @@ The CLI is a thin consumer of these exports.
 | `streamSessions` | `(TraceStreamOptions) → Promise<void>` | live JSONL-ready event stream over active sessions |
 | `traceStreamEventsFromSpans` | `(spans, opts?) → TraceStreamEvent[]` | replay an existing span list as stream events |
 | `analyzeLiveBatch` | `(spans, opts?) → TraceLiveBatch` | compute semantic online findings for one batch |
+| `classifyLiveActions` | `(spans) → TraceLiveAction[]` | classify spans once as read/edit/verify/claim/tool/other |
+| `defaultTraceLiveAnalysts` | `TraceLiveAnalyst[]` | the built-in online analysts; extend or replace them |
 | `collectSessionIndex` | `(ScanOptions) → TraceSessionIndex` | scan sessions and return a reusable JSON-ready catalog |
 | `inspectSessionIndex` | `(TraceSessionIndex) → TraceInspectionReport` | rank improvement findings from an index without rescanning sessions |
 | `buildPolicyEvidenceRecord` | `(ref, spans, opts?) → PolicyEvidenceRecord` | summarize one session for downstream policy mining |
