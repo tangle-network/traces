@@ -16,6 +16,7 @@ import { analyzeAdoption, type AdoptionReport } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import type { ExternalAnalysisResult, ExternalAnalyzer } from './external.js'
 import { runExternalAnalyzers } from './external.js'
+import type { TraceLiveAnalyst } from './live.js'
 import type { OtlpSpan } from './otlp.js'
 import { type PipelineReport, runPipelines } from './pipelines.js'
 import { analyzeReactions, type ReactionReport } from './reactions.js'
@@ -24,6 +25,7 @@ import { renderAdoption, renderPipelines, renderReactions, renderReport, summari
 export interface TracesConfig {
   readonly registry?: AnalystRegistry
   readonly analysts?: readonly Analyst[]
+  readonly liveAnalysts?: readonly TraceLiveAnalyst[]
   readonly externalAnalyzers?: readonly ExternalAnalyzer[]
   readonly improvementAdapter?: ImprovementAdapter
 }
