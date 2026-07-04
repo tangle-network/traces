@@ -17,6 +17,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [What it finds](#what-it-finds)
 - [Supported harnesses](#supported-harnesses)
 - [CLI reference](#cli-reference)
+- [Live stream](#live-stream)
 - [Improvement engine](#improvement-engine)
 - [Session index](#session-index)
 - [Policy-mining evidence](#policy-mining-evidence)
@@ -44,6 +45,8 @@ Requires Node ≥ 22.
 ```bash
 traces analyze --harness claude-code --last 1
 traces improve --harness claude-code --last 5 --dir .traces/improvement
+traces watch --all
+traces stream --all --no-spans
 ```
 
 That's the command in the demo above. The **deterministic pass** — stuck loops, token growth, output decay, missing self-verification, tool monoculture — needs no API key and costs nothing.
@@ -100,7 +103,9 @@ traces index    --all --since 24h --out session-index.json
 traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces export   policy-evidence.jsonl --out spans.openinference.jsonl
-traces watch    --all                              # live observer; notify on stuck loops
+traces watch    --all                              # live observer; loops + semantic findings
+traces stream   --all --no-spans                   # live JSONL events for dashboards/visualizers
+traces stream   spans.openinference.jsonl --format openinference --no-spans
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
 ```
@@ -116,13 +121,33 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory |
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
-| `--format <kind>` | `export`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
+| `--format <kind>` | `export` / file `stream`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
 | `--config <path>` | `investigate` / `improve`: load BYO analysts, external analyzers, and proposal adapters |
-| `--interval <s>` / `--window <m>` | `watch`: poll seconds (default 5) / active-session window minutes (default 30) |
+| `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
+| `--replay` / `--once` | `stream`: scan once, then exit |
+| `--no-spans` / `--no-findings` | `stream`: suppress raw span rows / finding rows |
 | `--no-content` | `upload`: send metadata only — strip all prompt/response text |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
+
+## Live stream
+
+`traces watch` is the human terminal view.
+It prints repeated-tool loops and semantic findings while a coding agent is still running.
+
+`traces stream` is the machine feed.
+It emits newline-delimited JSON events that a dashboard, art visualizer, local watcher, or hosted product can consume without scraping terminal prose.
+
+```bash
+traces stream --all
+traces stream --all --no-spans
+traces stream spans.openinference.jsonl --format openinference --no-spans
+```
+
+The stream emits `session`, `span`, `analysis_batch`, `finding`, and `tick` events.
+The semantic findings currently cover repeated failing commands, verification churn without code/config changes, completion claims without later verification, and high tool-error rates.
+Use `--no-spans` when you want the low-volume meaning layer; keep spans on for real-time visualizers that need motion, timing, and tool-call texture.
 
 ## Improvement engine
 
@@ -289,6 +314,9 @@ The CLI is a thin consumer of these exports.
 | `runTraceStoreInvestigation` | `({ traceStore }) → TraceStoreInvestigationResult` | run the same packet layer over a hosted/custom `TraceAnalysisStore` |
 | `loadTracesConfig` | `(path?) → TracesConfig \| undefined` | load BYO analysts, external analyzers, and proposal adapters |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
+| `streamSessions` | `(TraceStreamOptions) → Promise<void>` | live JSONL-ready event stream over active sessions |
+| `traceStreamEventsFromSpans` | `(spans, opts?) → TraceStreamEvent[]` | replay an existing span list as stream events |
+| `analyzeLiveBatch` | `(spans, opts?) → TraceLiveBatch` | compute semantic online findings for one batch |
 | `collectSessionIndex` | `(ScanOptions) → TraceSessionIndex` | scan sessions and return a reusable JSON-ready catalog |
 | `inspectSessionIndex` | `(TraceSessionIndex) → TraceInspectionReport` | rank improvement findings from an index without rescanning sessions |
 | `buildPolicyEvidenceRecord` | `(ref, spans, opts?) → PolicyEvidenceRecord` | summarize one session for downstream policy mining |
@@ -303,11 +331,14 @@ The CLI is a thin consumer of these exports.
 | `ExternalAnalyzer` / `Redactor` | `haloAnalyzer` / `commandAnalyzer` / `commandRedactor` | drive engines/models you install (not bundled) |
 
 ```ts
-import { watchSessions, analyzeSpans, AnalystRegistry, makeFinding } from '@tangle-network/traces'
+import { watchSessions, streamSessions, analyzeSpans, AnalystRegistry, makeFinding } from '@tangle-network/traces'
 
 // Observe live sessions, feed findings anywhere (read-only, cancellable):
 const c = new AbortController()
 await watchSessions({ all: true, signal: c.signal, onLoop: (l) => alert(l.toolName, l.occurrences) })
+
+// Feed a visualizer or dashboard:
+await streamSessions({ all: true, signal: c.signal, includeSpans: false, onEvent: (event) => console.log(event) })
 
 // Run your own analyst instead of the built-ins:
 const registry = new AnalystRegistry()
