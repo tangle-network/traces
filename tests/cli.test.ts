@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
+import { serializeSpans, span } from '../src/index.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -84,5 +85,74 @@ describe('traces CLI', () => {
       'content': 'Fix the Linear issue using the available tools.',
     }))
     expect(outputRows[1]!.parent_span_id).toBe('trace_cli:root')
+  })
+
+  it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-stream-'))
+    const input = join(dir, 'spans.openinference.jsonl')
+    const spans = [
+      span({
+        traceId: 'trace_stream',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'synthetic',
+      }),
+      ...[1, 2, 3].map((i) =>
+        span({
+          traceId: 'trace_stream',
+          spanId: `test-${i}`,
+          parentSpanId: 'root',
+          name: 'tool.bash',
+          kind: 'TOOL',
+          startTime: `2026-01-01T00:00:0${i}.000Z`,
+          service: 'synthetic',
+          tool: 'bash',
+          content: 'pnpm test',
+          status: 'ERROR',
+          step: i,
+        })),
+      span({
+        traceId: 'trace_stream',
+        spanId: 'claim',
+        parentSpanId: 'root',
+        name: 'assistant.message',
+        kind: 'LLM',
+        startTime: '2026-01-01T00:00:04.000Z',
+        service: 'synthetic',
+        content: 'Complete. Tests pass.',
+        step: 4,
+      }),
+    ]
+    await writeFile(input, serializeSpans(spans), 'utf8')
+
+    const { stdout } = await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'stream',
+      input,
+      '--format',
+      'openinference',
+      '--no-spans',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const rows = parseRows(stdout)
+    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding', 'finding', 'finding'])
+    const rules = rows
+      .filter((row) => row.event === 'finding')
+      .map((row) => (row.finding as Record<string, unknown>).ruleId)
+      .sort()
+    expect(rules).toEqual([
+      'completion-claim-without-verification',
+      'same-failing-command',
+      'verification-without-change',
+    ])
   })
 })

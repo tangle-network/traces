@@ -12,17 +12,19 @@
  *   traces inspect session-index.json [--out inspection-report.md]
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
+ *   traces stream  [input.jsonl] [--replay] [--all] [--format auto]
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
  *
  * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
  * loop/waste pipelines; +agentic RLM kinds with `--llm`). `watch` is the
- * online observer: it tails active sessions and prints a notification when a
- * stuck loop / high duplicate-rate appears. `watch` is read-only — it never
- * touches the agent or its harness.
+ * online observer: it tails active sessions and prints notifications when a
+ * stuck loop or semantic live finding appears. `stream` emits the same live
+ * feed as JSONL for visualizers, dashboards, and external agents.
  */
 
 import { readFileSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
+import { basename, resolve } from 'node:path'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
@@ -36,6 +38,12 @@ import {
   runTraceInvestigation,
   saveReport,
 } from './improvement.js'
+import {
+  serializeTraceStreamEvent,
+  streamSessions,
+  traceStreamEventsFromSpans,
+  type TraceLiveFinding,
+} from './live.js'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
@@ -77,6 +85,9 @@ interface Args {
   model?: string
   config?: string
   format?: string
+  replay: boolean
+  noSpans: boolean
+  noFindings: boolean
   metadata?: string
   attrs: string[]
 }
@@ -103,6 +114,9 @@ function parseArgs(argv: string[]): Args {
     yes: false,
     noContent: false,
     analyzers: [],
+    replay: false,
+    noSpans: false,
+    noFindings: false,
     attrs: [],
   }
   for (let i = 1; i < argv.length; i++) {
@@ -129,6 +143,10 @@ function parseArgs(argv: string[]): Args {
       case '--min-loop': a.minLoop = Number(next()); break
       case '--dry-run': a.dryRun = true; break
       case '--no-content': a.noContent = true; break
+      case '--replay':
+      case '--once': a.replay = true; break
+      case '--no-spans': a.noSpans = true; break
+      case '--no-findings': a.noFindings = true; break
       case '--analyzer': { const v = next(); if (v) a.analyzers.push(v); break }
       case '--analyzer-prompt': a.analyzerPrompt = next(); break
       case '--redactor': a.redactorCmd = next(); break
@@ -494,13 +512,108 @@ async function cmdImprove(args: Args): Promise<void> {
   )
 }
 
+function summarizeFindingEvidence(finding: TraceLiveFinding): string {
+  const first = finding.evidence[0]
+  if (!first) return 'no evidence'
+  return `${first.label}: ${first.value}`
+}
+
+function formatLiveFinding(finding: TraceLiveFinding): string {
+  const ts = new Date(finding.observedAt).toISOString().slice(11, 19)
+  const where = `[${finding.session.harness}] ${finding.session.sessionId.slice(0, 8)}`
+  const cwd = finding.session.cwd ? ` · ${finding.session.cwd}` : ''
+  return [
+    `${ts} ${finding.severity.toUpperCase()} ${where} — ${finding.title}${cwd}`,
+    `  evidence: ${summarizeFindingEvidence(finding)}`,
+    `  action: ${finding.action}`,
+    `  check: ${finding.check}`,
+  ].join('\n')
+}
+
+async function streamExplicitSession(args: Args): Promise<void> {
+  if (!args.session) throw new Error('streamExplicitSession needs --session')
+  const adapter = resolveAdapter(args.harness)
+  if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
+  const st = await stat(args.session)
+  const ref: SessionRef = {
+    harness: adapter.harness,
+    sessionId: basename(args.session),
+    path: resolve(args.session),
+    cwd: args.cwd ?? null,
+    mtimeMs: st.mtimeMs,
+  }
+  const spans = await parseSession(adapter, ref)
+  for (const event of traceStreamEventsFromSpans(spans, {
+    ref,
+    includeSpans: !args.noSpans,
+    includeFindings: !args.noFindings,
+  })) {
+    process.stdout.write(serializeTraceStreamEvent(event))
+  }
+}
+
+async function cmdStream(args: Args): Promise<void> {
+  if (args.input) {
+    const { spans, harness } = await collectImportedSpans(args)
+    const ref: SessionRef = {
+      harness,
+      sessionId: basename(args.input),
+      path: resolve(args.input),
+      cwd: args.cwd ?? null,
+      mtimeMs: Date.now(),
+    }
+    for (const event of traceStreamEventsFromSpans(spans, {
+      ref,
+      includeSpans: !args.noSpans,
+      includeFindings: !args.noFindings,
+    })) {
+      process.stdout.write(serializeTraceStreamEvent(event))
+    }
+    return
+  }
+  if (args.session) {
+    await streamExplicitSession(args)
+    return
+  }
+
+  const all = args.all || (!args.harnessExplicit && !args.cwd)
+  const controller = new AbortController()
+  process.once('SIGINT', () => controller.abort())
+  if (!args.replay) {
+    process.stderr.write(
+      `traces stream — JSONL live feed for ${all ? 'all harnesses' : args.harness}, ` +
+        `last ${args.window}m, every ${args.interval}s. Ctrl-C to stop.\n`,
+    )
+  }
+  await streamSessions({
+    all,
+    harnesses: all ? undefined : [args.harness],
+    cwd: args.cwd,
+    last: args.last > 0 ? args.last : args.replay ? 1 : undefined,
+    windowMs: args.window * 60_000,
+    intervalMs: args.interval * 1000,
+    once: args.replay,
+    includeSpans: !args.noSpans,
+    includeFindings: !args.noFindings,
+    signal: controller.signal,
+    onEvent: (event) => {
+      process.stdout.write(serializeTraceStreamEvent(event))
+    },
+    onError: (err, ref) => {
+      const where = ref ? ` [${ref.harness}] ${ref.sessionId}` : ''
+      process.stderr.write(`stream error${where}: ${err instanceof Error ? err.message : String(err)}\n`)
+    },
+  })
+}
+
 async function cmdWatch(args: Args): Promise<void> {
   const all = args.all || (!args.harnessExplicit && !args.cwd)
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
   process.stderr.write(
     `traces watch — observing ${all ? 'all harnesses' : args.harness}, ` +
-      `sessions active in the last ${args.window}m, every ${args.interval}s. Read-only; Ctrl-C to stop.\n`,
+      `sessions active in the last ${args.window}m, every ${args.interval}s. ` +
+      `Loop + semantic live findings; read-only; Ctrl-C to stop.\n`,
   )
   await watchSessions({
     all,
@@ -513,10 +626,13 @@ async function cmdWatch(args: Args): Promise<void> {
     onLoop: (l) => {
       const ts = new Date().toISOString().slice(11, 19)
       process.stdout.write(
-        `⚠️  ${ts} [${l.harness}] ${l.sessionId.slice(0, 8)} — ` +
+        `${ts} LOOP [${l.harness}] ${l.sessionId.slice(0, 8)} — ` +
           `\`${l.toolName}\` repeated ×${l.occurrences} with identical args ` +
           `(${(l.windowMs / 1000).toFixed(0)}s)${l.cwd ? ` · ${l.cwd}` : ''}\n`,
       )
+    },
+    onFinding: (finding) => {
+      process.stdout.write(`${formatLiveFinding(finding)}\n`)
     },
   })
 }
@@ -621,14 +737,15 @@ Commands:
   inspect   Read a session index and print ranked improvement findings
   export    Convert evidence/events files to OpenInference JSONL for HALO
   evidence  Emit compact session-evidence JSONL for downstream policy miners
-  watch     Online observer: tail active sessions, notify on stuck loops (read-only)
+  stream    Emit JSONL trace stream events for live visualizers or replay
+  watch     Online observer: tail active sessions, notify on loops + semantic findings
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
 Options:
   --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
   --all            Sweep every known harness
   --last <n>       Most-recent N sessions
-  --session <path> Analyze one explicit session file
+  --session <path> Analyze/stream one explicit harness session file
   --cwd <dir>      Filter sessions by working directory
   --since <t>      upload: window — 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
@@ -637,6 +754,9 @@ Options:
   --format <kind>  analyze/export file: auto | policy-evidence | sandbox-events | openinference | intelligence-spans
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
+  --replay, --once stream: scan once and exit (default for positional input / --session)
+  --no-spans       stream: omit per-span pulse events
+  --no-findings    stream: omit semantic live-finding events
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
   --config <path>  investigate/improve: JS config with analysts, external analyzers, or proposal adapter
@@ -682,6 +802,7 @@ async function main(): Promise<void> {
     case 'inspect': await cmdInspect(args); break
     case 'export': await cmdExport(args); break
     case 'evidence': await cmdEvidence(args); break
+    case 'stream': await cmdStream(args); break
     case 'watch': await cmdWatch(args); break
     case 'upload': await cmdUpload(args); break
     default: usage()

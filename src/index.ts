@@ -59,6 +59,7 @@ export * from './improvement.js' // runTraceInvestigation()/runTraceImprovementL
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor
 
 // ── Live observation (event-driven; feed any system) ──────────────────────
+export * from './live.js' // streamSessions(), traceStreamEventsFromSpans(), semantic live findings
 export * from './observer.js' // watchSessions({ onLoop, onReport, signal })
 
 // ── Privacy + batch collection + upload (pluggable backend) ───────────────
