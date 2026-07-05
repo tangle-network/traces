@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 1100 540">
+  <title>traces stream findings mode terminal capture</title>
+  <desc>A terminal preview of traces stream findings mode showing session, batch, and finding JSONL rows.</desc>
+  <rect width="1100" height="540" fill="#f6f7f9"/>
+  <rect x="50" y="44" width="1000" height="452" rx="8" fill="#111827"/>
+  <rect x="50" y="44" width="1000" height="42" rx="8" fill="#202938"/>
+  <circle cx="78" cy="65" r="7" fill="#ff5f57"/>
+  <circle cx="100" cy="65" r="7" fill="#febc2e"/>
+  <circle cx="122" cy="65" r="7" fill="#28c840"/>
+  <text x="550" y="70" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#cbd5e1">traces stream --mode findings</text>
+
+  <text x="78" y="124" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" fill="#8bd5ff">$ traces stream spans.openinference.jsonl --format openinference --mode findings</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">
+    <text x="78" y="174" fill="#e5e7eb">{&quot;event&quot;:&quot;session&quot;,</text>
+    <text x="313" y="174" fill="#a7f3d0">&quot;spanCount&quot;:5,</text>
+    <text x="458" y="174" fill="#e5e7eb">&quot;sessionId&quot;:&quot;spans.openinference.jsonl&quot;}</text>
+
+    <text x="78" y="224" fill="#e5e7eb">{&quot;event&quot;:&quot;analysis_batch&quot;,</text>
+    <text x="352" y="224" fill="#a7f3d0">&quot;findingCount&quot;:3,</text>
+    <text x="536" y="224" fill="#fcd34d">&quot;toolCallCount&quot;:3,</text>
+    <text x="732" y="224" fill="#fca5a5">&quot;erroredToolCallCount&quot;:3}</text>
+
+    <text x="78" y="274" fill="#e5e7eb">{&quot;event&quot;:&quot;finding&quot;, &quot;finding&quot;:{</text>
+    <text x="407" y="274" fill="#fca5a5">&quot;severity&quot;:&quot;high&quot;,</text>
+    <text x="608" y="274" fill="#c4b5fd">&quot;ruleId&quot;:&quot;same-failing-command&quot;}}</text>
+    <text x="102" y="304" fill="#94a3b8">action: Stop rerunning it; inspect the first failure before another retry.</text>
+
+    <text x="78" y="354" fill="#e5e7eb">{&quot;event&quot;:&quot;finding&quot;, &quot;finding&quot;:{</text>
+    <text x="407" y="354" fill="#fca5a5">&quot;severity&quot;:&quot;high&quot;,</text>
+    <text x="608" y="354" fill="#c4b5fd">&quot;ruleId&quot;:&quot;verification-without-change&quot;}}</text>
+    <text x="102" y="384" fill="#94a3b8">evidence: 3 verification calls since the last detected code/config change.</text>
+
+    <text x="78" y="434" fill="#e5e7eb">{&quot;event&quot;:&quot;finding&quot;, &quot;finding&quot;:{</text>
+    <text x="407" y="434" fill="#fcd34d">&quot;severity&quot;:&quot;medium&quot;,</text>
+    <text x="627" y="434" fill="#c4b5fd">&quot;ruleId&quot;:&quot;completion-claim-without-verification&quot;}}</text>
+    <text x="102" y="464" fill="#94a3b8">check: a later test/build/typecheck/lint/smoke command should appear.</text>
+  </g>
+</svg>

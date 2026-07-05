@@ -152,6 +152,9 @@ Live streaming emits `session`, `span`, `analysis_batch`, `finding`, and `tick` 
 The semantic findings currently cover repeated failing commands, verification churn without code/config changes, completion claims without later verification, and high tool-error rates.
 Use `--mode findings` when you want the low-volume meaning layer; keep `visualizer` for real-time views that need motion, timing, and tool-call texture.
 Use `--mode agent` when another agent needs deterministic loop/tool-use reports alongside the findings.
+The same JSONL shape is used for live sessions and replayed trace files:
+
+![traces stream findings mode terminal capture](./docs/stream-findings.svg)
 
 Custom online analysts use the same config file as `investigate` and `improve`:
 
