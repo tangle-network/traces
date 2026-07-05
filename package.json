@@ -37,6 +37,7 @@
   },
   "files": [
     "dist",
+    "docs/stream-findings.svg",
     "install.sh",
     "README.md"
   ],
