@@ -449,3 +449,71 @@ export function stampRepoAttrs(spans: readonly import('./otlp.js').OtlpSpan[], a
   }
   return spans
 }
+
+function replaceRepoAttrs(spans: readonly import('./otlp.js').OtlpSpan[], attrs: RepoAttrs): void {
+  for (const s of spans) {
+    for (const [key, value] of Object.entries(attrs)) s.attributes[key] = value
+  }
+}
+
+async function resolutionForWorkdirEvidence(
+  evidence: PathEvidence,
+  cache: Map<string, RepoResolution | null>,
+): Promise<RepoResolution | null> {
+  const cached = cache.get(evidence.path)
+  if (cached !== undefined) return cached
+
+  const cwd = await repoCandidateForPath(evidence.path)
+  if (!cwd) {
+    cache.set(evidence.path, null)
+    return null
+  }
+
+  const attrs = await resolveRepoAttrs(cwd)
+  const resolved = attrs[ATTR.SUBJECT_KEY]
+    ? {
+        attrs: { ...attrs, [ATTR.REPO_RESOLUTION_SOURCE]: evidence.source },
+        cwd: attrs[ATTR.CWD] ?? cwd,
+        source: evidence.source,
+      }
+    : null
+  cache.set(evidence.path, resolved)
+  return resolved
+}
+
+async function resolveSpanWorkdirRepoAttrs(
+  span: import('./otlp.js').OtlpSpan,
+  cache: Map<string, RepoResolution | null>,
+): Promise<RepoResolution | null> {
+  const candidates = new Map<string, { repo: RepoResolution; score: number; order: number }>()
+  const add = (value: RepoResolution | null, weight: number): void => {
+    if (!value?.cwd) return
+    const existing = candidates.get(value.cwd)
+    if (existing) {
+      existing.score += weight
+      return
+    }
+    candidates.set(value.cwd, { repo: value, score: weight, order: candidates.size })
+  }
+
+  for (const evidence of extractAbsolutePaths([span])) {
+    if (evidence.source !== 'span-workdir') continue
+    add(await resolutionForWorkdirEvidence(evidence, cache), evidence.weight)
+  }
+
+  const byScore = (a: { score: number; order: number }, b: { score: number; order: number }): number => b.score - a.score || a.order - b.order
+  const resolved = [...candidates.values()]
+  const selected = resolved.filter((candidate) => candidate.repo.attrs[ATTR.GIT_REPOSITORY]).sort(byScore)[0]
+    ?? resolved.filter((candidate) => candidate.repo.attrs[ATTR.SUBJECT_KEY]).sort(byScore)[0]
+  if (!selected) return null
+
+  return selected.repo
+}
+
+export async function stampSpanWorkdirRepoAttrs(spans: readonly import('./otlp.js').OtlpSpan[]): Promise<void> {
+  const cache = new Map<string, RepoResolution | null>()
+  for (const span of spans) {
+    const repo = await resolveSpanWorkdirRepoAttrs(span, cache)
+    if (repo?.attrs && Object.keys(repo.attrs).length > 0) replaceRepoAttrs([span], repo.attrs)
+  }
+}
