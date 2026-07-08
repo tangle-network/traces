@@ -117,6 +117,62 @@ async function readGit(cwd: string): Promise<{ remote: string | null; branch: st
   }
 }
 
+async function gitOutput(cwd: string, args: string[]): Promise<string | null> {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const run = promisify(execFile)
+  try {
+    const { stdout } = await run('git', ['-C', cwd, ...args], { timeout: 5000 })
+    const v = stdout.trim()
+    return v.length > 0 ? v : null
+  } catch {
+    return null
+  }
+}
+
+function uniqNormalized(paths: Iterable<string>): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const path of paths) {
+    const n = normalize(path)
+    if (seen.has(n)) continue
+    seen.add(n)
+    out.push(n)
+  }
+  return out
+}
+
+function parseWorktreePorcelain(output: string): string[] {
+  return output
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length).trim())
+    .filter(Boolean)
+}
+
+/** Expand a selected cwd to every checked-out worktree for the same git repo. */
+export async function equivalentGitCwds(cwd: string | null | undefined): Promise<string[]> {
+  if (!cwd) return []
+  const selected = normalize(cwd)
+  if (!isAbsolute(selected)) return [selected]
+
+  const top = await gitOutput(selected, ['rev-parse', '--show-toplevel'])
+  if (!top) return [selected]
+
+  const worktrees = await gitOutput(top, ['worktree', 'list', '--porcelain'])
+  return uniqNormalized([selected, top, ...(worktrees ? parseWorktreePorcelain(worktrees) : [])])
+}
+
+/** Boundary-aware cwd matching; `/repo` matches `/repo/src`, not `/repo-old`. */
+export function cwdMatchesSelection(cwd: string | null | undefined, selections: readonly string[]): boolean {
+  if (!cwd) return false
+  const value = normalize(cwd)
+  return selections.some((selection) => {
+    const prefix = normalize(selection)
+    return value === prefix || value.startsWith(`${prefix}/`)
+  })
+}
+
 async function pathStat(path: string): Promise<Awaited<ReturnType<typeof stat>> | null> {
   try {
     return await stat(path)

@@ -6,8 +6,15 @@ import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
 import { ATTR } from '../src/attributes.js'
 import { serializeSpans, span, toOpenInferenceSpan } from '../src/otlp.js'
-import { normalizeRemote, resolveRepoAttrs, resolveSessionRepoAttrs, stampRepoAttrs } from '../src/repo.js'
-import { parseSession } from '../src/session-source.js'
+import {
+  cwdMatchesSelection,
+  equivalentGitCwds,
+  normalizeRemote,
+  resolveRepoAttrs,
+  resolveSessionRepoAttrs,
+  stampRepoAttrs,
+} from '../src/repo.js'
+import { locateSessions, parseSession } from '../src/session-source.js'
 import type { HarnessTraceAdapter, OtlpSpan, SessionRef } from '../src/index.js'
 
 const run = promisify(execFile)
@@ -119,6 +126,44 @@ describe('resolveRepoAttrs', () => {
     expect(a[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/traces')
     expect(a[ATTR.GIT_REPOSITORY]).toBe('github.com/tangle-network/traces')
     expect(a[ATTR.CWD]).toBe(nested)
+  })
+})
+
+describe('cwd selection', () => {
+  it('expands a selected git worktree to sibling worktree roots', async () => {
+    const repo = await gitRepo('git@github.com:tangle-network/traces.git')
+    const sibling = `${repo}-sibling`
+    created.push(sibling)
+    await run('git', ['-C', repo, 'worktree', 'add', '-q', '--detach', sibling, 'HEAD'])
+
+    const aliases = await equivalentGitCwds(sibling)
+    expect(aliases).toContain(repo)
+    expect(aliases).toContain(sibling)
+  })
+
+  it('locates sessions recorded under an equivalent sibling worktree', async () => {
+    const repo = await gitRepo('git@github.com:tangle-network/traces.git')
+    const sibling = `${repo}-sibling`
+    created.push(sibling)
+    await run('git', ['-C', repo, 'worktree', 'add', '-q', '--detach', sibling, 'HEAD'])
+    const session = ref('main-worktree-session', repo)
+    const locatingAdapter: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return [session, ref('wrong-prefix', `${repo}-old`)]
+      },
+      async parse() {
+        return []
+      },
+    }
+
+    const refs = await locateSessions(locatingAdapter, { cwd: sibling })
+    expect(refs.map((r) => r.sessionId)).toEqual(['main-worktree-session'])
+  })
+
+  it('uses path boundaries when filtering cwd matches', () => {
+    expect(cwdMatchesSelection('/tmp/repo/src', ['/tmp/repo'])).toBe(true)
+    expect(cwdMatchesSelection('/tmp/repo-old', ['/tmp/repo'])).toBe(false)
   })
 })
 

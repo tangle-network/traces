@@ -8,7 +8,7 @@
 
 import type { OtlpSpan } from './otlp.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
-import { resolveSessionRepoAttrs, stampRepoAttrs } from './repo.js'
+import { cwdMatchesSelection, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs } from './repo.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 
 /**
@@ -23,6 +23,28 @@ export async function parseSession(adapter: HarnessTraceAdapter, ref: SessionRef
   if (repo.cwd) ref.cwd = repo.cwd
   stampRepoAttrs(spans, repo.attrs)
   return spans
+}
+
+function refKey(ref: SessionRef): string {
+  return `${ref.harness}\0${ref.path}\0${ref.sessionId}`
+}
+
+/** Locate through every equivalent git worktree for the selected cwd, then
+ *  dedupe and apply a boundary-aware final filter. */
+export async function locateSessions(
+  adapter: HarnessTraceAdapter,
+  opts: { cwd?: string; sinceMs?: number } = {},
+): Promise<SessionRef[]> {
+  if (!opts.cwd) return adapter.locate({ sinceMs: opts.sinceMs })
+
+  const cwdSelections = await equivalentGitCwds(opts.cwd)
+  const refs = await adapter.locate({ sinceMs: opts.sinceMs })
+  const byKey = new Map<string, SessionRef>()
+  for (const ref of refs) {
+    if (!cwdMatchesSelection(ref.cwd, cwdSelections)) continue
+    byKey.set(refKey(ref), ref)
+  }
+  return [...byKey.values()].sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
 export interface ScanOptions extends AdapterSelection {
@@ -52,7 +74,7 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
     if (opts.signal?.aborted) return
     let refs: SessionRef[]
     try {
-      refs = await adapter.locate({ cwd: opts.cwd, sinceMs: opts.sinceMs })
+      refs = await locateSessions(adapter, { cwd: opts.cwd, sinceMs: opts.sinceMs })
     } catch (err) {
       opts.onError?.(err)
       continue
