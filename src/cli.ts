@@ -51,7 +51,7 @@ import { watchSessions } from './observer.js'
 import { runPipelines } from './pipelines.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { analyzeReactions } from './reactions.js'
-import { parseSession } from './session-source.js'
+import { locateSessions, parseSession } from './session-source.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { renderAdoption, renderPipelines, renderReactions, renderReport, summarizeDeterministicSignals } from './report.js'
 import { parseSince } from './time.js'
@@ -190,7 +190,7 @@ async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref
   const sinceMs = args.since ? Date.parse(args.since) : undefined
   const out: { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] = []
   for (const adapter of adaptersFor(args)) {
-    let refs = await adapter.locate({ cwd: args.cwd, sinceMs })
+    let refs = await locateSessions(adapter, { cwd: args.cwd, sinceMs })
     if (args.last > 0) refs = refs.slice(0, args.last)
     out.push({ adapter, refs })
   }
