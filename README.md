@@ -55,7 +55,7 @@ Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowled
 
 Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo`. See [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
 
-`traces improve` is the reviewable action path. It writes typed artifacts: findings, recommendations, evidence rows, claims, report, and before/after replay metadata. Another agent, CI job, or hosted product can consume the result without scraping prose.
+`traces improve` is the reviewable action path. It writes typed artifacts: findings, recommendations, proposal-only artifacts, evidence rows, claims, report, and before/after replay metadata. Another agent, CI job, or hosted product can consume the result without scraping prose.
 
 ## What it finds
 
@@ -197,6 +197,7 @@ The directory contains:
 |---|---|
 | `findings.json` | typed `AnalystFinding[]`; finding ids, severity, evidence refs, recommended action, validation plan |
 | `recommendations.json` | ranked actions derived from analyst, deterministic, and external findings |
+| `proposals.json` | reviewable proposal-only artifacts linked to recommendation ids and evidence refs |
 | `evidence.jsonl` | one row per evidence ref, suitable for downstream mining |
 | `claims.json` | compact claim list for review agents and dashboards |
 | `report.md` | human-readable report rendered from the typed data |
@@ -214,7 +215,7 @@ The config can export:
 - `liveAnalysts`: deterministic online analysts that implement the `TraceLiveAnalyst` contract for `traces stream`
 - `registry`: a prebuilt `AnalystRegistry`
 - `externalAnalyzers`: HALO or any command/model adapter that reads the OTLP artifact
-- `improvementAdapter`: a proposal writer that maps recommendations to patches, profile edits, prompts, or validation commands
+- `improvementAdapter`: a proposal writer that replaces the default proposal set with product-specific patches, profile edits, prompts, or validation commands
 
 `traces` does not apply patches or open PRs by default. The public engine produces reviewable artifacts; hosted products can decide how to deliver, approve, or apply them.
 
@@ -344,7 +345,7 @@ The CLI is a thin consumer of these exports.
 |---|---|---|
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run built-in analysts, or **your own** via `registry` |
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings, recommendations, claims, external analyzer output, and report |
-| `runTraceImprovementLoop` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full improvement artifact pack and optional proposal output |
+| `runTraceImprovementLoop` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full improvement artifact pack and proposal-only output |
 | `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | turn any `AnalystFinding[]` into recommendations, claims, and a report |
 | `runTraceStoreInvestigation` | `({ traceStore }) → TraceStoreInvestigationResult` | run the same packet layer over a hosted/custom `TraceAnalysisStore` |
 | `loadTracesConfig` | `(path?) → TracesConfig \| undefined` | load BYO analysts, external analyzers, and proposal adapters |

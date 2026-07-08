@@ -133,6 +133,7 @@ export interface TraceImprovementArtifacts {
   readonly directory: string
   readonly findings: string
   readonly recommendations: string
+  readonly proposals: string
   readonly evidence: string
   readonly claims: string
   readonly report: string
@@ -503,6 +504,30 @@ export function buildTraceFindingPacket(opts: BuildTraceFindingPacketOptions): T
   return { ...packet, report: renderFindingPacket(packet, opts.title) }
 }
 
+function buildDefaultImprovementProposals(input: ImprovementAdapterInput): ImprovementProposal[] {
+  return input.recommendations.slice(0, 5).map((recommendation, index) => {
+    const matchingFindings = input.findings.filter((finding) => recommendation.findingIds.includes(finding.finding_id))
+    const evidenceRefs = recommendation.evidenceRefs.length > 0
+      ? recommendation.evidenceRefs
+      : matchingFindings.flatMap((finding) => finding.evidence_refs)
+    return {
+      id: `proposal-${index + 1}-${slug(recommendation.title)}`,
+      title: recommendation.title,
+      description: [
+        recommendation.action,
+        '',
+        `Why: ${recommendation.rationale}`,
+        `Validation: ${recommendation.validationPlan}`,
+        '',
+        'This is a proposal-only artifact. It does not mutate code, prompts, skills, tools, MCP config, hooks, subagents, or external systems until a human applies it and reruns validation.',
+      ].join('\n'),
+      recommendationIds: [recommendation.id],
+      validationCommand: 'traces improve --last 1 --dir .traces/improvement',
+      evidenceRefs,
+    }
+  })
+}
+
 function renderExternal(results: readonly ExternalAnalysisResult[]): string {
   if (results.length === 0) return ''
   const lines = ['## external analyzers', '']
@@ -675,7 +700,7 @@ function replayProof(result: TraceInvestigationResult, proposals: readonly Impro
 }
 
 export async function writeTraceImprovementArtifacts(
-  result: Pick<TraceImprovementResult, 'findings' | 'recommendations' | 'claims' | 'report' | 'replay'>,
+  result: Pick<TraceImprovementResult, 'findings' | 'recommendations' | 'proposals' | 'claims' | 'report' | 'replay'>,
   outDir?: string,
 ): Promise<TraceImprovementArtifacts> {
   const directory = outDir ? resolve(outDir) : await mkdtemp(join(tmpdir(), 'traces-improvement-'))
@@ -684,6 +709,7 @@ export async function writeTraceImprovementArtifacts(
     directory,
     findings: join(directory, 'findings.json'),
     recommendations: join(directory, 'recommendations.json'),
+    proposals: join(directory, 'proposals.json'),
     evidence: join(directory, 'evidence.jsonl'),
     claims: join(directory, 'claims.json'),
     report: join(directory, 'report.md'),
@@ -692,6 +718,7 @@ export async function writeTraceImprovementArtifacts(
   await Promise.all([
     writeFile(paths.findings, json(result.findings), 'utf8'),
     writeFile(paths.recommendations, json(result.recommendations), 'utf8'),
+    writeFile(paths.proposals, json(result.proposals), 'utf8'),
     writeFile(paths.evidence, jsonl(buildEvidenceRows(result.findings)), 'utf8'),
     writeFile(paths.claims, json(result.claims), 'utf8'),
     writeFile(paths.report, result.report, 'utf8'),
@@ -702,15 +729,16 @@ export async function writeTraceImprovementArtifacts(
 
 export async function runTraceImprovementLoop(opts: TraceImprovementOptions): Promise<TraceImprovementResult> {
   const investigation = await runTraceInvestigation(opts)
+  const adapterInput = {
+    findings: investigation.findings,
+    recommendations: investigation.recommendations,
+    claims: investigation.claims,
+    spans: opts.spans,
+    otlpPath: investigation.otlpPath,
+  }
   const proposals = opts.adapter
-    ? await opts.adapter.propose({
-      findings: investigation.findings,
-      recommendations: investigation.recommendations,
-      claims: investigation.claims,
-      spans: opts.spans,
-      otlpPath: investigation.otlpPath,
-    })
-    : []
+    ? await opts.adapter.propose(adapterInput)
+    : buildDefaultImprovementProposals(adapterInput)
   const replay = replayProof(investigation, proposals)
   const result: TraceImprovementResult = {
     ...investigation,

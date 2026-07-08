@@ -10,6 +10,7 @@ import {
   runTraceImprovementLoop,
   runTraceInvestigation,
   type TraceEvidenceRow,
+  type ImprovementProposal,
   type TraceRecommendation,
 } from '../src/improvement.js'
 import { type OtlpSpan, span } from '../src/otlp.js'
@@ -143,7 +144,34 @@ describe('buildTraceFindingPacket', () => {
 })
 
 describe('runTraceImprovementLoop', () => {
-  it('writes the public artifact pack and records proposal-only replay metadata', async () => {
+  it('writes default proposal-only artifacts when no adapter is configured', async () => {
+    const outDir = await mkdtemp(join(tmpdir(), 'traces-improve-default-test-'))
+    const result = await runTraceImprovementLoop({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      sessionCount: 1,
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      outDir,
+    })
+
+    expect(result.kind).toBe('traces.improvement')
+    expect(result.recommendations.length).toBeGreaterThan(0)
+    expect(result.proposals.length).toBeGreaterThan(0)
+    expect(result.proposals[0]!.recommendationIds).toEqual([result.recommendations[0]!.id])
+    expect(result.proposals[0]!.description).toContain('proposal-only artifact')
+    expect(result.replay.status).toBe('proposal-only')
+    expect(result.replay.candidateApplied).toBe(false)
+
+    const proposals = JSON.parse(await readFile(result.artifacts!.proposals, 'utf8')) as ImprovementProposal[]
+    const replay = JSON.parse(await readFile(result.artifacts!.replay, 'utf8')) as { proposals: unknown[]; baseline: { spanCount: number } }
+
+    expect(proposals).toHaveLength(result.proposals.length)
+    expect(proposals[0]!.evidenceRefs?.length).toBeGreaterThan(0)
+    expect(replay.proposals).toHaveLength(result.proposals.length)
+    expect(replay.baseline.spanCount).toBe(fixtureSpans().length)
+  })
+
+  it('lets a configured adapter replace the default proposal set', async () => {
     const outDir = await mkdtemp(join(tmpdir(), 'traces-improve-test-'))
     const result = await runTraceImprovementLoop({
       spans: fixtureSpans(),
@@ -167,11 +195,13 @@ describe('runTraceImprovementLoop', () => {
 
     expect(result.kind).toBe('traces.improvement')
     expect(result.proposals).toHaveLength(1)
+    expect(result.proposals[0]!.id).toBe('proposal-loop-breaker')
     expect(result.replay.status).toBe('proposal-only')
     expect(result.replay.candidateApplied).toBe(false)
     expect(result.artifacts?.directory).toBe(outDir)
 
     const recommendations = JSON.parse(await readFile(result.artifacts!.recommendations, 'utf8')) as TraceRecommendation[]
+    const proposals = JSON.parse(await readFile(result.artifacts!.proposals, 'utf8')) as ImprovementProposal[]
     const evidence = (await readFile(result.artifacts!.evidence, 'utf8'))
       .trim()
       .split('\n')
@@ -184,6 +214,8 @@ describe('runTraceImprovementLoop', () => {
     expect(evidence[0]!.kind).toBe('traces.improvement_evidence')
     expect(replay.baseline.spanCount).toBe(fixtureSpans().length)
     expect(replay.proposals).toHaveLength(1)
+    expect(proposals).toHaveLength(1)
+    expect(proposals[0]!.id).toBe('proposal-loop-breaker')
   })
 })
 
