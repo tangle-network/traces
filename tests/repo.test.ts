@@ -308,4 +308,67 @@ describe('per-session repo grouping in OTLP resource attrs', () => {
     expect(res['traces.repo_resolution_source']).toBe('span-path')
     expect(res['service.name']).toBe('codex')
   })
+
+  it('overlays explicit tool workdir labels on the individual tool span', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'traces-span-overlay-'))
+    created.push(base)
+    const sessionRepo = await gitRepoUnder(base, 'session-repo', 'https://github.com/tangle-network/session-repo.git')
+    const execRepo = await gitRepoUnder(base, 'exec-repo', 'https://github.com/tangle-network/exec-repo.git')
+    const ad: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return []
+      },
+      async parse(r: SessionRef): Promise<OtlpSpan[]> {
+        return [
+          span({
+            traceId: r.sessionId,
+            spanId: `root:${r.sessionId}`,
+            name: 'session',
+            kind: 'AGENT',
+            startTime: '2026-01-01T00:00:00.000Z',
+            service: 'codex',
+            agent: 'codex',
+          }),
+          span({
+            traceId: r.sessionId,
+            spanId: 'tool-session',
+            parentSpanId: `root:${r.sessionId}`,
+            name: 'tool.exec_command',
+            kind: 'TOOL',
+            startTime: '2026-01-01T00:00:01.000Z',
+            service: 'codex',
+            agent: 'codex',
+            tool: 'exec_command',
+            content: JSON.stringify({ cmd: 'pnpm test', workdir: sessionRepo }),
+          }),
+          span({
+            traceId: r.sessionId,
+            spanId: 'tool-exec',
+            parentSpanId: `root:${r.sessionId}`,
+            name: 'tool.exec_command',
+            kind: 'TOOL',
+            startTime: '2026-01-01T00:00:02.000Z',
+            service: 'codex',
+            agent: 'codex',
+            tool: 'exec_command',
+            content: JSON.stringify({ cmd: 'pnpm test', workdir: execRepo }),
+          }),
+        ]
+      },
+    }
+
+    const spans = await parseSession(ad, ref('sessSpanOverlay', sessionRepo))
+    const rootRes = (toOpenInferenceSpan(spans[0]!).resource as { attributes: Record<string, unknown> }).attributes
+    const sessionToolRes = (toOpenInferenceSpan(spans[1]!).resource as { attributes: Record<string, unknown> }).attributes
+    const execToolRes = (toOpenInferenceSpan(spans[2]!).resource as { attributes: Record<string, unknown> }).attributes
+
+    expect(rootRes[ATTR.GIT_REPOSITORY]).toBe('github.com/tangle-network/session-repo')
+    expect(sessionToolRes[ATTR.CWD]).toBe(sessionRepo)
+    expect(execToolRes[ATTR.GIT_REPOSITORY]).toBe('github.com/tangle-network/exec-repo')
+    expect(execToolRes[ATTR.CWD]).toBe(execRepo)
+    expect(execToolRes[ATTR.REPO_RESOLUTION_SOURCE]).toBe('span-workdir')
+    expect(execToolRes['service.name']).toBe('codex')
+    expect(execToolRes['agent.name']).toBe('codex')
+  })
 })
