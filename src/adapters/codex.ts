@@ -24,7 +24,6 @@ import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'codex'
-const EXPECTED_BLOCKING_TOOLS = new Set(['wait', 'write_stdin'])
 
 interface CodexLine {
   timestamp?: string
@@ -106,6 +105,13 @@ function classifyNestedTool(name: string, input: string | undefined): string {
   return name === 'exec_command' && input && (verificationCommand.test(input) || hasReadOnlyCurl(input))
     ? 'exec_command.verify'
     : name
+}
+
+function isExpectedBlockingTool(name: string, input: string | undefined): boolean {
+  if (!input) return false
+  if (name === 'wait') return /\bcell_id\b["']?\s*:/.test(input)
+  if (name === 'write_stdin') return /\bsession_id\b["']?\s*:/.test(input)
+  return false
 }
 
 async function* walkRollouts(root: string): AsyncGenerator<string> {
@@ -269,7 +275,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
             'traces.codex.call_type': l.payload.type,
             ...(name !== outerName ? { 'traces.codex.outer_tool_name': outerName } : {}),
             ...(nestedName ? { 'traces.codex.nested_tool_name': nestedName } : {}),
-            ...(EXPECTED_BLOCKING_TOOLS.has(name) ? { 'traces.expected_blocking': true } : {}),
+            ...(isExpectedBlockingTool(name, input) ? { 'traces.expected_blocking': true } : {}),
           },
         })
         spans.push(toolSpan)

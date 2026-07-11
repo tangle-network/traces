@@ -296,6 +296,21 @@ describe('codex current tool and subagent events', () => {
           payload: { type: 'function_call_output', call_id: 'blocking-1', output: 'Completed' },
         },
         {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.900Z',
+          payload: {
+            type: 'function_call',
+            call_id: 'domain-wait-1',
+            name: 'wait',
+            arguments: '{"job_id":"domain-1"}',
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:05.000Z',
+          payload: { type: 'function_call_output', call_id: 'domain-wait-1', output: 'Completed' },
+        },
+        {
           type: 'event_msg',
           timestamp: '2026-07-11T09:00:05.500Z',
           payload: {
@@ -338,7 +353,7 @@ describe('codex current tool and subagent events', () => {
 
     const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
     const tools = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
-    expect(tools).toHaveLength(6)
+    expect(tools).toHaveLength(7)
     const verifications = tools.filter((item) => item.attributes['tool.name'] === 'exec_command.verify')
     expect(verifications).toHaveLength(2)
     const failedVerification = verifications.find((item) => item.status.code === 'ERROR')
@@ -356,9 +371,11 @@ describe('codex current tool and subagent events', () => {
     ])
     expect(mutations.every((item) => item.status.code === 'OK')).toBe(true)
 
-    const blocking = tools.find((item) => item.attributes['tool.name'] === 'wait')
-    expect(blocking?.attributes['traces.expected_blocking']).toBe(true)
-    expect(blocking?.status.code).toBe('OK')
+    const waits = tools.filter((item) => item.attributes['tool.name'] === 'wait')
+    expect(waits).toHaveLength(2)
+    expect(waits.find((item) => String(item.attributes.content).includes('cell_id'))?.attributes['traces.expected_blocking']).toBe(true)
+    expect(waits.find((item) => String(item.attributes.content).includes('job_id'))?.attributes['traces.expected_blocking']).toBeUndefined()
+    expect(waits.every((item) => item.status.code === 'OK')).toBe(true)
 
     const agent = tools.find((item) => item.attributes['tool.name'] === 'Agent')
     expect(JSON.parse(String(agent?.attributes.content))).toEqual({
