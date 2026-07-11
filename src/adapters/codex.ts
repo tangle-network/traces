@@ -37,8 +37,8 @@ interface CodexLine {
     role?: string
     name?: string
     content?: unknown
-    arguments?: string
-    input?: string
+    arguments?: unknown
+    input?: unknown
     call_id?: string
     output?: unknown
     event_id?: string
@@ -93,12 +93,22 @@ function singleNestedToolName(input: string | undefined): string | null {
   return unique.length === 1 ? unique[0]! : null
 }
 
+function toolInputToString(input: unknown): string | undefined {
+  if (typeof input === 'string') return input
+  if (input == null) return undefined
+  return JSON.stringify(input)
+}
+
 const verificationCommand =
   /\b(?:pnpm|npm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9:_-]+)?\b|\b(?:vitest|jest|pytest|tsc|biome|eslint|sha256sum|pdfinfo|pdftotext)\b|\bgo\s+test\b|\bcargo\s+(?:test|check|clippy|build)\b|\bgit\s+(?:status|diff|show|merge-tree)\b|\bgh-drew\s+pr\s+(?:view|checks)\b/i
 
 function hasReadOnlyCurl(input: string): boolean {
   if (!/\bcurl\b/i.test(input)) return false
-  return !/(?:^|\s)(?:-X|--request)(?:=|\s*)(?:POST|PUT|PATCH|DELETE)\b|(?:^|\s)(?:-d|--data(?:-ascii|-binary|-raw|-urlencode)?)(?:=|\s)/i.test(input)
+  const method =
+    input.match(/(?:^|\s)-X(?:=|\s*)([A-Za-z]+)\b/)?.[1] ??
+    input.match(/(?:^|\s)--request(?:=|\s+)([A-Za-z]+)\b/i)?.[1]
+  if (method && !/^(?:GET|HEAD)$/i.test(method)) return false
+  return !/(?:^|\s)-(?:d|F|T)(?:\S*|\s+\S+)|(?:^|\s)--(?:data(?:-ascii|-binary|-raw|-urlencode)?|form(?:-string)?|json|upload-file)(?:=|\s)/i.test(input)
 }
 
 function classifyNestedTool(name: string, input: string | undefined): string {
@@ -256,7 +266,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
       ) {
         const outerName = l.payload.name ?? 'tool'
         const callId = l.payload.call_id ?? `${step}`
-        const input = l.payload.type === 'custom_tool_call' ? l.payload.input : l.payload.arguments
+        const input = toolInputToString(
+          l.payload.type === 'custom_tool_call' ? l.payload.input : l.payload.arguments,
+        )
         const nestedName = l.payload.type === 'custom_tool_call' ? singleNestedToolName(input) : null
         const name = classifyNestedTool(nestedName ?? outerName, input)
         const toolSpan = span({
@@ -324,13 +336,23 @@ export class CodexAdapter implements HarnessTraceAdapter {
           spans.push(toolSpan)
           subagentByThreadId.set(threadId, toolSpan)
           step += 1
-        } else if (l.payload.kind === 'interrupted' && threadId) {
+        } else if (l.payload.kind === 'completed' && threadId) {
           const toolSpan = subagentByThreadId.get(threadId)
           if (toolSpan) {
             toolSpan.end_time = eventTime
-            toolSpan.status = { code: 'ERROR', message: 'subagent interrupted' }
+            toolSpan.status = { code: 'OK' }
+          }
+        } else if (
+          ['interrupted', 'failed', 'timed_out'].includes(l.payload.kind ?? '') &&
+          threadId
+        ) {
+          const toolSpan = subagentByThreadId.get(threadId)
+          if (toolSpan) {
+            toolSpan.end_time = eventTime
+            toolSpan.status = { code: 'ERROR', message: `subagent ${l.payload.kind}` }
           }
         }
+        // `interacted` is a progress event, not a terminal state.
       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
         // The human's prompt text. Codex drops the user turn from token events,
         // so capture it here as its own CHAIN span (no text → no span).

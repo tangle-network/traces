@@ -207,7 +207,7 @@ describe('conversation capture — JSONL adapters', () => {
 })
 
 describe('codex current tool and subagent events', () => {
-  it('captures custom tool calls, joins their outputs, and counts one subagent start', async () => {
+  it('captures custom tool calls, joins their outputs, and tracks subagent lifecycles', async () => {
     const path = join(dir, 'rollout-codex-current.jsonl')
     const startedAt = Date.parse('2026-07-11T09:00:05.000Z')
     writeFileSync(
@@ -311,6 +311,36 @@ describe('codex current tool and subagent events', () => {
           payload: { type: 'function_call_output', call_id: 'domain-wait-1', output: 'Completed' },
         },
         {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:05.100Z',
+          payload: {
+            type: 'custom_tool_call',
+            call_id: 'malformed-input-1',
+            name: 'exec',
+            input: { cmd: 'ls' },
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:05.200Z',
+          payload: { type: 'custom_tool_call_output', call_id: 'malformed-input-1', output: 'Completed' },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:05.300Z',
+          payload: {
+            type: 'custom_tool_call',
+            call_id: 'write-stdin-1',
+            name: 'exec',
+            input: "const r = await tools.write_stdin({ session_id: 7, chars: '' })",
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:05.400Z',
+          payload: { type: 'custom_tool_call_output', call_id: 'write-stdin-1', output: 'Completed' },
+        },
+        {
           type: 'event_msg',
           timestamp: '2026-07-11T09:00:05.500Z',
           payload: {
@@ -346,6 +376,30 @@ describe('codex current tool and subagent events', () => {
             kind: 'interrupted',
           },
         },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-11T09:00:08.000Z',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'spawn-2',
+            occurred_at_ms: startedAt + 3_000,
+            agent_thread_id: 'thread-2',
+            agent_path: '/root/runtime_audit',
+            kind: 'started',
+          },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-11T09:00:09.000Z',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'complete-2',
+            occurred_at_ms: startedAt + 4_000,
+            agent_thread_id: 'thread-2',
+            agent_path: '/root/runtime_audit',
+            kind: 'completed',
+          },
+        },
       ]
         .map((event) => JSON.stringify(event))
         .join('\n'),
@@ -353,7 +407,7 @@ describe('codex current tool and subagent events', () => {
 
     const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
     const tools = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
-    expect(tools).toHaveLength(7)
+    expect(tools).toHaveLength(10)
     const verifications = tools.filter((item) => item.attributes['tool.name'] === 'exec_command.verify')
     expect(verifications).toHaveLength(2)
     const failedVerification = verifications.find((item) => item.status.code === 'ERROR')
@@ -377,7 +431,17 @@ describe('codex current tool and subagent events', () => {
     expect(waits.find((item) => String(item.attributes.content).includes('job_id'))?.attributes['traces.expected_blocking']).toBeUndefined()
     expect(waits.every((item) => item.status.code === 'OK')).toBe(true)
 
-    const agent = tools.find((item) => item.attributes['tool.name'] === 'Agent')
+    const malformed = tools.find((item) => item.attributes['tool.name'] === 'exec')
+    expect(malformed?.attributes.content).toBe('{"cmd":"ls"}')
+    expect(malformed?.status.code).toBe('OK')
+
+    const writeStdin = tools.find((item) => item.attributes['tool.name'] === 'write_stdin')
+    expect(writeStdin?.attributes['traces.expected_blocking']).toBe(true)
+    expect(writeStdin?.status.code).toBe('OK')
+
+    const agents = tools.filter((item) => item.attributes['tool.name'] === 'Agent')
+    expect(agents).toHaveLength(2)
+    const agent = agents.find((item) => String(item.attributes.content).includes('paper_audit'))
     expect(JSON.parse(String(agent?.attributes.content))).toEqual({
       subagent_type: 'paper_audit',
       agent_path: '/root/paper_audit',
@@ -386,6 +450,49 @@ describe('codex current tool and subagent events', () => {
     expect(agent?.start_time).toBe('2026-07-11T09:00:05.000Z')
     expect(agent?.end_time).toBe('2026-07-11T09:00:07.000Z')
     expect(agent?.status).toEqual({ code: 'ERROR', message: 'subagent interrupted' })
+
+    const completed = agents.find((item) => String(item.attributes.content).includes('runtime_audit'))
+    expect(completed?.start_time).toBe('2026-07-11T09:00:08.000Z')
+    expect(completed?.end_time).toBe('2026-07-11T09:00:09.000Z')
+    expect(completed?.status).toEqual({ code: 'OK' })
+  })
+
+  it.each([
+    ['curl https://example.test/health', 'exec_command.verify'],
+    ['curl -X HEAD https://example.test/health', 'exec_command.verify'],
+    ['curl -F file=@x https://example.test/upload', 'exec_command'],
+    ["curl --json '{\"ok\":true}' https://example.test", 'exec_command'],
+    ['curl -T ./x https://example.test/upload', 'exec_command'],
+    ['curl -d@payload.json https://example.test', 'exec_command'],
+    ['curl -X PURGE https://example.test/cache', 'exec_command'],
+  ])('classifies curl command %s as %s', async (command, expectedTool) => {
+    const path = join(dir, `rollout-codex-curl-${expectedTool}-${command.length}.jsonl`)
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: '2026-07-11T09:00:00.000Z', payload: { id: `curl-${command}`, cwd: '/x' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:01.000Z',
+          payload: {
+            type: 'custom_tool_call',
+            call_id: 'curl-1',
+            name: 'exec',
+            input: `const r = await tools.exec_command({ cmd: ${JSON.stringify(command)} })`,
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:02.000Z',
+          payload: { type: 'custom_tool_call_output', call_id: 'curl-1', output: 'Completed' },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const tool = spans.find((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    expect(tool?.attributes['tool.name']).toBe(expectedTool)
   })
 })
 
