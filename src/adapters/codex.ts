@@ -4,7 +4,8 @@
  * Line types: `session_meta` (id + cwd), `turn_context`, `event_msg`
  * (carries `token_count` with per-turn `last_token_usage`), and
  * `response_item` (the OpenAI Responses items: `message`, `reasoning`,
- * `function_call`, `function_call_output`).
+ * function/custom tool calls, and their outputs). Current Codex builds also
+ * emit `sub_agent_activity` events for delegated agents.
  *
  * Token trajectory comes from the `token_count` deltas (Codex puts usage
  * on events, not on the message). Tools come from `function_call`, with
@@ -36,9 +37,15 @@ interface CodexLine {
     role?: string
     name?: string
     content?: unknown
-    arguments?: string
+    arguments?: unknown
+    input?: unknown
     call_id?: string
     output?: unknown
+    event_id?: string
+    occurred_at_ms?: number
+    agent_thread_id?: string
+    agent_path?: string
+    kind?: string
     info?: { last_token_usage?: { input_tokens?: number; output_tokens?: number }; model_context_window?: number }
   }
 }
@@ -76,6 +83,45 @@ function outputIsError(output: unknown): { error: boolean; message: string } {
   const s = typeof output === 'string' ? output : JSON.stringify(output ?? '')
   const error = /"success"\s*:\s*false|exit(?:_| )code["\s:]+[1-9]|\bcommand failed\b|\bENOENT\b|\berror:/i.test(s)
   return { error, message: error ? s.slice(0, 500) : '' }
+}
+
+/** A custom `exec` call is a small JavaScript program around one or more real tools. */
+function singleNestedToolName(input: string | undefined): string | null {
+  if (!input) return null
+  const names = [...input.matchAll(/\btools\.([A-Za-z][A-Za-z0-9_]*)\s*\(/g)].map((match) => match[1]!)
+  const unique = [...new Set(names)]
+  return unique.length === 1 ? unique[0]! : null
+}
+
+function toolInputToString(input: unknown): string | undefined {
+  if (typeof input === 'string') return input
+  if (input == null) return undefined
+  return JSON.stringify(input)
+}
+
+const verificationCommand =
+  /\b(?:pnpm|npm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9:_-]+)?\b|\b(?:vitest|jest|pytest|tsc|biome|eslint|sha256sum|pdfinfo|pdftotext)\b|\bgo\s+test\b|\bcargo\s+(?:test|check|clippy|build)\b|\bgit\s+(?:status|diff|show|merge-tree)\b|\bgh-drew\s+pr\s+(?:view|checks)\b/i
+
+function hasReadOnlyCurl(input: string): boolean {
+  if (!/\bcurl\b/i.test(input)) return false
+  const method =
+    input.match(/(?:^|\s)-X(?:=|\s*)([A-Za-z]+)\b/)?.[1] ??
+    input.match(/(?:^|\s)--request(?:=|\s+)([A-Za-z]+)\b/i)?.[1]
+  if (method && !/^(?:GET|HEAD)$/i.test(method)) return false
+  return !/(?:^|\s)-(?:d|F|T)(?:\S*|\s+\S+)|(?:^|\s)--(?:data(?:-ascii|-binary|-raw|-urlencode)?|form(?:-string)?|json|upload-file)(?:=|\s)/i.test(input)
+}
+
+function classifyNestedTool(name: string, input: string | undefined): string {
+  return name === 'exec_command' && input && (verificationCommand.test(input) || hasReadOnlyCurl(input))
+    ? 'exec_command.verify'
+    : name
+}
+
+function isExpectedBlockingTool(name: string, input: string | undefined): boolean {
+  if (!input) return false
+  if (name === 'wait') return /\bcell_id\b["']?\s*:/.test(input)
+  if (name === 'write_stdin') return /\bsession_id\b["']?\s*:/.test(input)
+  return false
 }
 
 async function* walkRollouts(root: string): AsyncGenerator<string> {
@@ -184,6 +230,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
     ]
 
     const toolByCallId = new Map<string, OtlpSpan>()
+    const subagentByThreadId = new Map<string, OtlpSpan>()
     let step = 0
     let lastLlm = rootId
     let sawUserTurn = false
@@ -213,9 +260,17 @@ export class CodexAdapter implements HarnessTraceAdapter {
           lastLlm = id
           step += 1
         }
-      } else if (l.type === 'response_item' && l.payload?.type === 'function_call') {
-        const name = l.payload.name ?? 'tool'
+      } else if (
+        l.type === 'response_item' &&
+        (l.payload?.type === 'function_call' || l.payload?.type === 'custom_tool_call')
+      ) {
+        const outerName = l.payload.name ?? 'tool'
         const callId = l.payload.call_id ?? `${step}`
+        const input = toolInputToString(
+          l.payload.type === 'custom_tool_call' ? l.payload.input : l.payload.arguments,
+        )
+        const nestedName = l.payload.type === 'custom_tool_call' ? singleNestedToolName(input) : null
+        const name = classifyNestedTool(nestedName ?? outerName, input)
         const toolSpan = span({
           traceId,
           spanId: `tool:${callId}`,
@@ -227,18 +282,77 @@ export class CodexAdapter implements HarnessTraceAdapter {
           agent: SERVICE,
           tool: name,
           step,
-          content: l.payload.arguments ?? null,
+          content: input ?? null,
+          extra: {
+            'traces.codex.call_type': l.payload.type,
+            ...(name !== outerName ? { 'traces.codex.outer_tool_name': outerName } : {}),
+            ...(nestedName ? { 'traces.codex.nested_tool_name': nestedName } : {}),
+            ...(isExpectedBlockingTool(name, input) ? { 'traces.expected_blocking': true } : {}),
+          },
         })
         spans.push(toolSpan)
         toolByCallId.set(callId, toolSpan)
         step += 1
-      } else if (l.type === 'response_item' && l.payload?.type === 'function_call_output') {
+      } else if (
+        l.type === 'response_item' &&
+        (l.payload?.type === 'function_call_output' || l.payload?.type === 'custom_tool_call_output')
+      ) {
         const t = toolByCallId.get(l.payload.call_id ?? '')
         if (t) {
           const { error, message } = outputIsError(l.payload.output)
           t.end_time = ts
           t.status = error ? { code: 'ERROR', message } : { code: 'OK' }
         }
+      } else if (l.type === 'event_msg' && l.payload?.type === 'sub_agent_activity') {
+        const threadId = l.payload.agent_thread_id
+        const occurredAtMs = l.payload.occurred_at_ms
+        const eventTime = typeof occurredAtMs === 'number' && Number.isFinite(occurredAtMs)
+          ? new Date(occurredAtMs).toISOString()
+          : ts
+        if (l.payload.kind === 'started' && threadId && !subagentByThreadId.has(threadId)) {
+          const agentPath = l.payload.agent_path ?? 'subagent'
+          const subagentType = agentPath.split('/').filter(Boolean).at(-1) ?? 'subagent'
+          const toolSpan = span({
+            traceId,
+            spanId: `subagent:${threadId}`,
+            parentSpanId: lastLlm,
+            name: 'tool.Agent',
+            kind: 'TOOL',
+            startTime: eventTime,
+            service: SERVICE,
+            agent: SERVICE,
+            tool: 'Agent',
+            step,
+            content: JSON.stringify({
+              subagent_type: subagentType,
+              agent_path: agentPath,
+              agent_thread_id: threadId,
+            }),
+            extra: {
+              'traces.codex.subagent_path': agentPath,
+              'traces.codex.subagent_thread_id': threadId,
+            },
+          })
+          spans.push(toolSpan)
+          subagentByThreadId.set(threadId, toolSpan)
+          step += 1
+        } else if (l.payload.kind === 'completed' && threadId) {
+          const toolSpan = subagentByThreadId.get(threadId)
+          if (toolSpan) {
+            toolSpan.end_time = eventTime
+            toolSpan.status = { code: 'OK' }
+          }
+        } else if (
+          ['interrupted', 'failed', 'timed_out'].includes(l.payload.kind ?? '') &&
+          threadId
+        ) {
+          const toolSpan = subagentByThreadId.get(threadId)
+          if (toolSpan) {
+            toolSpan.end_time = eventTime
+            toolSpan.status = { code: 'ERROR', message: `subagent ${l.payload.kind}` }
+          }
+        }
+        // `interacted` is a progress event, not a terminal state.
       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
         // The human's prompt text. Codex drops the user turn from token events,
         // so capture it here as its own CHAIN span (no text → no span).
