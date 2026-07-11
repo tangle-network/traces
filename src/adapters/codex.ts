@@ -24,6 +24,7 @@ import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'codex'
+const EXPECTED_BLOCKING_TOOLS = new Set(['wait', 'write_stdin'])
 
 interface CodexLine {
   timestamp?: string
@@ -268,6 +269,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
             'traces.codex.call_type': l.payload.type,
             ...(name !== outerName ? { 'traces.codex.outer_tool_name': outerName } : {}),
             ...(nestedName ? { 'traces.codex.nested_tool_name': nestedName } : {}),
+            ...(EXPECTED_BLOCKING_TOOLS.has(name) ? { 'traces.expected_blocking': true } : {}),
           },
         })
         spans.push(toolSpan)

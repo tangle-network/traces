@@ -281,6 +281,21 @@ describe('codex current tool and subagent events', () => {
           payload: { type: 'custom_tool_call_output', call_id: 'custom-4', output: 'Script completed' },
         },
         {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.700Z',
+          payload: {
+            type: 'function_call',
+            call_id: 'blocking-1',
+            name: 'wait',
+            arguments: '{"cell_id":"running-1"}',
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.800Z',
+          payload: { type: 'function_call_output', call_id: 'blocking-1', output: 'Completed' },
+        },
+        {
           type: 'event_msg',
           timestamp: '2026-07-11T09:00:05.500Z',
           payload: {
@@ -323,7 +338,7 @@ describe('codex current tool and subagent events', () => {
 
     const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
     const tools = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
-    expect(tools).toHaveLength(5)
+    expect(tools).toHaveLength(6)
     const verifications = tools.filter((item) => item.attributes['tool.name'] === 'exec_command.verify')
     expect(verifications).toHaveLength(2)
     const failedVerification = verifications.find((item) => item.status.code === 'ERROR')
@@ -340,6 +355,10 @@ describe('codex current tool and subagent events', () => {
       expect.stringContaining('curl -X POST'),
     ])
     expect(mutations.every((item) => item.status.code === 'OK')).toBe(true)
+
+    const blocking = tools.find((item) => item.attributes['tool.name'] === 'wait')
+    expect(blocking?.attributes['traces.expected_blocking']).toBe(true)
+    expect(blocking?.status.code).toBe('OK')
 
     const agent = tools.find((item) => item.attributes['tool.name'] === 'Agent')
     expect(JSON.parse(String(agent?.attributes.content))).toEqual({

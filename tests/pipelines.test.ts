@@ -3,7 +3,13 @@ import { span } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
 
 /** Build a tool call span with given name + identical input (→ same argHash). */
-function toolCall(i: number, name: string, input: unknown, status: 'OK' | 'ERROR' = 'OK') {
+function toolCall(
+  i: number,
+  name: string,
+  input: unknown,
+  status: 'OK' | 'ERROR' = 'OK',
+  extra?: Record<string, unknown>,
+) {
   return span({
     traceId: 'sess',
     spanId: `t${i}`,
@@ -16,6 +22,7 @@ function toolCall(i: number, name: string, input: unknown, status: 'OK' | 'ERROR
     tool: name,
     content: JSON.stringify(input),
     step: i,
+    extra,
   })
 }
 
@@ -51,15 +58,27 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
   it('does not call repeated blocking waits a stuck loop', async () => {
     const spans = [
       span({ traceId: 'sess', spanId: 'root', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'codex' }),
-      toolCall(1, 'write_stdin', { session_id: 7, chars: '' }),
-      toolCall(2, 'write_stdin', { session_id: 7, chars: '' }),
-      toolCall(3, 'write_stdin', { session_id: 7, chars: '' }),
-      toolCall(4, 'wait', { cell_id: 'a' }),
-      toolCall(5, 'wait', { cell_id: 'a' }),
-      toolCall(6, 'wait', { cell_id: 'a' }),
+      toolCall(1, 'write_stdin', { session_id: 7, chars: '' }, 'OK', { 'traces.expected_blocking': true }),
+      toolCall(2, 'write_stdin', { session_id: 7, chars: '' }, 'OK', { 'traces.expected_blocking': true }),
+      toolCall(3, 'write_stdin', { session_id: 7, chars: '' }, 'OK', { 'traces.expected_blocking': true }),
+      toolCall(4, 'wait', { cell_id: 'a' }, 'OK', { 'traces.expected_blocking': true }),
+      toolCall(5, 'wait', { cell_id: 'a' }, 'OK', { 'traces.expected_blocking': true }),
+      toolCall(6, 'wait', { cell_id: 'a' }, 'OK', { 'traces.expected_blocking': true }),
     ]
     const r = await runPipelines(spans)
     expect(r.stuckLoops.findings).toHaveLength(0)
     expect(r.toolUse[0]!.totalCalls).toBe(6)
+  })
+
+  it('still flags repeated domain waits that are not marked as expected blocking', async () => {
+    const spans = [
+      span({ traceId: 'sess', spanId: 'root', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'other' }),
+      toolCall(1, 'wait', { job_id: 7 }),
+      toolCall(2, 'wait', { job_id: 7 }),
+      toolCall(3, 'wait', { job_id: 7 }),
+    ]
+    const r = await runPipelines(spans)
+    expect(r.stuckLoops.findings).toHaveLength(1)
+    expect(r.stuckLoops.findings[0]!.toolName).toBe('wait')
   })
 })

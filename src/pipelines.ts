@@ -13,8 +13,9 @@
  * error rates above, so adding it would only emit a misleading waste %.
  *
  * Both are cheap ($0, deterministic), so they're safe to run continuously in
- * `watch` mode, over the OTLP spans traces already produces. Blocking wait and
- * stdin-poll calls stay in usage totals but are excluded from stuck-loop findings.
+ * `watch` mode, over the OTLP spans traces already produces. Calls explicitly
+ * marked as expected blocking stay in usage totals but are excluded from
+ * stuck-loop findings.
  */
 
 import { computeToolUseMetrics } from '@tangle-network/agent-eval'
@@ -34,20 +35,9 @@ export interface PipelineOptions {
   minLoopOccurrences?: number
 }
 
-const expectedBlockingTools = new Set(['wait', 'write_stdin'])
-
-function toolNameOf(span: OtlpSpan): string | null {
-  const value = span.attributes['tool.name']
-  if (typeof value === 'string') return value
-  return span.name.startsWith('tool.') ? span.name.slice('tool.'.length) : null
-}
-
 export async function runPipelines(spans: readonly OtlpSpan[], opts: PipelineOptions = {}): Promise<PipelineReport> {
   const { store, runIds } = await toRuntimeStore(spans)
-  const loopEligible = spans.filter((item) => {
-    const name = toolNameOf(item)
-    return name === null || !expectedBlockingTools.has(name)
-  })
+  const loopEligible = spans.filter((item) => item.attributes['traces.expected_blocking'] !== true)
   const { store: loopStore } = await toRuntimeStore(loopEligible)
   const stuckLoops = await stuckLoopView(loopStore, { minOccurrences: opts.minLoopOccurrences ?? 3 })
   const toolUse = await Promise.all(runIds.map((runId) => computeToolUseMetrics(store, runId)))
