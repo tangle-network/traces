@@ -47,4 +47,19 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
     const r = await runPipelines(spans)
     expect(r.stuckLoops.findings.length).toBe(0)
   })
+
+  it('does not call repeated blocking waits a stuck loop', async () => {
+    const spans = [
+      span({ traceId: 'sess', spanId: 'root', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'codex' }),
+      toolCall(1, 'write_stdin', { session_id: 7, chars: '' }),
+      toolCall(2, 'write_stdin', { session_id: 7, chars: '' }),
+      toolCall(3, 'write_stdin', { session_id: 7, chars: '' }),
+      toolCall(4, 'wait', { cell_id: 'a' }),
+      toolCall(5, 'wait', { cell_id: 'a' }),
+      toolCall(6, 'wait', { cell_id: 'a' }),
+    ]
+    const r = await runPipelines(spans)
+    expect(r.stuckLoops.findings).toHaveLength(0)
+    expect(r.toolUse[0]!.totalCalls).toBe(6)
+  })
 })

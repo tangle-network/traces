@@ -206,6 +206,153 @@ describe('conversation capture — JSONL adapters', () => {
   }
 })
 
+describe('codex current tool and subagent events', () => {
+  it('captures custom tool calls, joins their outputs, and counts one subagent start', async () => {
+    const path = join(dir, 'rollout-codex-current.jsonl')
+    const startedAt = Date.parse('2026-07-11T09:00:05.000Z')
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: '2026-07-11T09:00:00.000Z', payload: { id: 'codex-current', cwd: '/x' } },
+        { type: 'turn_context', timestamp: '2026-07-11T09:00:01.000Z', payload: { model: 'gpt-5' } },
+        { type: 'event_msg', timestamp: '2026-07-11T09:00:02.000Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 4 } } } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:03.000Z',
+          payload: {
+            type: 'custom_tool_call',
+            call_id: 'custom-1',
+            name: 'exec',
+            input: "const r = await tools.exec_command({ cmd: 'pnpm test' })",
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.000Z',
+          payload: {
+            type: 'custom_tool_call_output',
+            call_id: 'custom-1',
+            output: [{ type: 'input_text', text: 'Command failed with exit code 1' }],
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.100Z',
+          payload: {
+            type: 'custom_tool_call',
+            call_id: 'custom-2',
+            name: 'exec',
+            input: "const r = await tools.exec_command({ cmd: 'rm -rf build' })",
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.200Z',
+          payload: { type: 'custom_tool_call_output', call_id: 'custom-2', output: 'Script completed' },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.300Z',
+          payload: {
+            type: 'custom_tool_call',
+            call_id: 'custom-3',
+            name: 'exec',
+            input: "const r = await tools.exec_command({ cmd: 'curl -X POST https://example.test/release' })",
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.400Z',
+          payload: { type: 'custom_tool_call_output', call_id: 'custom-3', output: 'Script completed' },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.500Z',
+          payload: {
+            type: 'custom_tool_call',
+            call_id: 'custom-4',
+            name: 'exec',
+            input: "const r = await tools.exec_command({ cmd: 'curl https://example.test/health' })",
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.600Z',
+          payload: { type: 'custom_tool_call_output', call_id: 'custom-4', output: 'Script completed' },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-11T09:00:05.500Z',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'spawn-1',
+            occurred_at_ms: startedAt,
+            agent_thread_id: 'thread-1',
+            agent_path: '/root/paper_audit',
+            kind: 'started',
+          },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-11T09:00:06.000Z',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'message-1',
+            occurred_at_ms: startedAt + 1_000,
+            agent_thread_id: 'thread-1',
+            agent_path: '/root/paper_audit',
+            kind: 'interacted',
+          },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-11T09:00:07.000Z',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'interrupt-1',
+            occurred_at_ms: startedAt + 2_000,
+            agent_thread_id: 'thread-1',
+            agent_path: '/root/paper_audit',
+            kind: 'interrupted',
+          },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const tools = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    expect(tools).toHaveLength(5)
+    const verifications = tools.filter((item) => item.attributes['tool.name'] === 'exec_command.verify')
+    expect(verifications).toHaveLength(2)
+    const failedVerification = verifications.find((item) => item.status.code === 'ERROR')
+    expect(failedVerification?.attributes.content).toContain('tools.exec_command')
+    expect(failedVerification?.attributes['traces.codex.call_type']).toBe('custom_tool_call')
+    expect(failedVerification?.attributes['traces.codex.outer_tool_name']).toBe('exec')
+    expect(failedVerification?.attributes['traces.codex.nested_tool_name']).toBe('exec_command')
+    expect(failedVerification?.status.message).toContain('Command failed')
+    expect(verifications.find((item) => item.status.code === 'OK')?.attributes.content).toContain('/health')
+    const mutations = tools.filter((item) => item.attributes['tool.name'] === 'exec_command')
+    expect(mutations).toHaveLength(2)
+    expect(mutations.map((item) => item.attributes.content)).toEqual([
+      expect.stringContaining('rm -rf build'),
+      expect.stringContaining('curl -X POST'),
+    ])
+    expect(mutations.every((item) => item.status.code === 'OK')).toBe(true)
+
+    const agent = tools.find((item) => item.attributes['tool.name'] === 'Agent')
+    expect(JSON.parse(String(agent?.attributes.content))).toEqual({
+      subagent_type: 'paper_audit',
+      agent_path: '/root/paper_audit',
+      agent_thread_id: 'thread-1',
+    })
+    expect(agent?.start_time).toBe('2026-07-11T09:00:05.000Z')
+    expect(agent?.end_time).toBe('2026-07-11T09:00:07.000Z')
+    expect(agent?.status).toEqual({ code: 'ERROR', message: 'subagent interrupted' })
+  })
+})
+
 describe('conversation capture — single-JSON adapters', () => {
   it('gemini captures user.prompt + assistant text + a tool call', async () => {
     const path = join(dir, 'gem.json')
