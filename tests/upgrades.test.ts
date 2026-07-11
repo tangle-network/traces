@@ -53,6 +53,11 @@ describe('actor derivation', () => {
       claudeActor({ text: 'This session is being continued from a previous conversation…', userType: 'external' }),
     ).toBe('injected')
     expect(codexActor({ text: '<task-notification> done </task-notification>' })).toBe('injected')
+    expect(codexActor({ text: '<codex_internal_context source="goal">continue</codex_internal_context>' })).toBe(
+      'injected',
+    )
+    expect(codexActor({ text: '<subagent_notification>done</subagent_notification>' })).toBe('injected')
+    expect(codexActor({ text: '# AGENTS.md instructions for /workspace\n<INSTRUCTIONS>' })).toBe('injected')
     // Slash-command skill bodies expand into a user turn without a <command-name> wrapper.
     expect(claudeActor({ text: 'Base directory for this skill: /x\nYou are…', userType: 'external' })).toBe(
       'injected',
@@ -237,8 +242,38 @@ describe('analyzeAdoption', () => {
       skillTool(1, 's1', 'evolve'),
       skillTool(2, 's1', 'polish'),
       taskTool(3, 's1', 'Explore'),
+      span({
+        traceId: 's1',
+        spanId: 'fallback-ignored',
+        name: 'tool.spawn_agent',
+        kind: 'TOOL',
+        startTime: new Date(5000).toISOString(),
+        step: 4,
+        tool: 'spawn_agent',
+        content: JSON.stringify({ agent_type: 'duplicate' }),
+      }),
       span({ traceId: 's2', spanId: 'root2', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'claude-code' }),
-      // s2 invokes no skill → penetration is 1/2.
+      span({
+        traceId: 's2',
+        spanId: 'spawn-1',
+        name: 'tool.spawn_agent',
+        kind: 'TOOL',
+        startTime: new Date(2000).toISOString(),
+        step: 1,
+        tool: 'spawn_agent',
+        content: JSON.stringify({ agent_type: 'explorer' }),
+      }),
+      span({
+        traceId: 's2',
+        spanId: 'spawn-2',
+        name: 'tool.multi_agent_v1__spawn_agent',
+        kind: 'TOOL',
+        startTime: new Date(3000).toISOString(),
+        step: 2,
+        tool: 'multi_agent_v1__spawn_agent',
+        content: JSON.stringify({ subagent_type: 'reviewer' }),
+      }),
+      // s2 invokes no skill → penetration is 1/2, but its spawn tools count.
     ]
     const r = await analyzeAdoption(spans, { cwds: [cwd] })
     expect(r.sessionCount).toBe(2)
@@ -248,7 +283,11 @@ describe('analyzeAdoption', () => {
     expect(r.skillInvocations.polish).toBe(1)
     expect(r.totalSkillInvocations).toBe(2)
     expect(r.subagentSpawns.Explore).toBe(1)
-    expect(r.totalSubagentSpawns).toBe(1)
+    expect(r.subagentSpawns.explorer).toBe(1)
+    expect(r.subagentSpawns.reviewer).toBe(1)
+    expect(r.subagentSpawns.duplicate).toBeUndefined()
+    expect(r.totalSubagentSpawns).toBe(3)
+    expect(r.sessionsWithSubagent).toBe(2)
     // Loop-dispatched runs are counted SEPARATELY from explicit invocations.
     expect(r.loopDispatchedRuns.evolve).toBe(2)
     expect(r.loopDispatchedRuns.converge).toBe(1)

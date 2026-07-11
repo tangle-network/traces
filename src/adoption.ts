@@ -71,10 +71,14 @@ function skillNameOf(input: Record<string, unknown>): string {
   return typeof v === 'string' && v.length > 0 ? v : '?'
 }
 
-/** Subagent type from a Task/Agent tool input. */
+/** Subagent type from a Task/Agent or provider-specific spawn tool input. */
 function subagentTypeOf(input: Record<string, unknown>): string {
-  const v = input.subagent_type
+  const v = input.subagent_type ?? input.agent_type ?? input.type ?? input.name
   return typeof v === 'string' && v.length > 0 ? v : '?'
+}
+
+function isSpawnAgentTool(name: string): boolean {
+  return name === 'spawn_agent' || name.endsWith('__spawn_agent')
 }
 
 /**
@@ -140,6 +144,8 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
   const sessionsWithSubagent = new Set<string>()
   const skillInvocations: Record<string, number> = {}
   const subagentSpawns: Record<string, number> = {}
+  const canonicalSubagentSessions = new Set<string>()
+  const fallbackSubagents = new Map<string, string[]>()
 
   for (const s of spans) {
     sessions.add(s.trace_id)
@@ -152,6 +158,19 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
       const type = subagentTypeOf(parseInput(s))
       subagentSpawns[type] = (subagentSpawns[type] ?? 0) + 1
       sessionsWithSubagent.add(s.trace_id)
+      canonicalSubagentSessions.add(s.trace_id)
+    } else if (tn && isSpawnAgentTool(tn)) {
+      const types = fallbackSubagents.get(s.trace_id) ?? []
+      types.push(subagentTypeOf(parseInput(s)))
+      fallbackSubagents.set(s.trace_id, types)
+    }
+  }
+
+  for (const [traceId, types] of fallbackSubagents) {
+    if (canonicalSubagentSessions.has(traceId)) continue
+    sessionsWithSubagent.add(traceId)
+    for (const type of types) {
+      subagentSpawns[type] = (subagentSpawns[type] ?? 0) + 1
     }
   }
 
