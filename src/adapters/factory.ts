@@ -14,7 +14,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { collectJsonl } from '../jsonl.js'
+import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
@@ -100,11 +100,6 @@ export class FactoryAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const lines = await collectJsonl<FactoryLine>(ref.path)
-    const start = lines.find((l) => l.type === 'session_start')
-    const traceId = start?.id ?? ref.sessionId
-    const rootId = `root:${traceId}`
-
     // Sidecar holds model + session-total tokens.
     let settings: FactorySettings = {}
     try {
@@ -113,33 +108,28 @@ export class FactoryAdapter implements HarnessTraceAdapter {
       // no sidecar → model/tokens unknown
     }
 
-    const spans: OtlpSpan[] = [
-      span({
-        traceId,
-        spanId: rootId,
-        parentSpanId: null,
-        name: 'session',
-        kind: 'AGENT',
-        startTime: start?.timestamp ?? lines[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: lines.at(-1)?.timestamp,
-        service: SERVICE,
-        agent: SERVICE,
-        model: settings.model ?? null,
-        extra: settings.tokenUsage
-          ? {
-              'session.input_tokens': settings.tokenUsage.inputTokens ?? 0,
-              'session.output_tokens': settings.tokenUsage.outputTokens ?? 0,
-            }
-          : undefined,
-      }),
-    ]
-
+    const sourceTraceId = ref.sessionId
+    const sourceRootId = `root:${sourceTraceId}`
+    const spans: OtlpSpan[] = []
     const toolByUseId = new Map<string, OtlpSpan>()
+    let firstTimestamp: string | undefined
+    let lastTimestamp: string | undefined
+    let sessionLine: Pick<FactoryLine, 'id' | 'timestamp'> | undefined
+    let sawLine = false
     let step = 0
-    let lastLlm = rootId
+    let lastLlm = sourceRootId
 
-    for (const l of lines) {
+    for await (const l of readJsonl<FactoryLine>(ref.path)) {
+      if (!sawLine) {
+        firstTimestamp = l.timestamp
+        sawLine = true
+      }
+      lastTimestamp = l.timestamp
+      if (!sessionLine && l.type === 'session_start') {
+        sessionLine = { id: l.id, timestamp: l.timestamp }
+      }
       if (l.type !== 'message' || !l.message) continue
+
       const ts = l.timestamp ?? new Date(0).toISOString()
       const role = l.message.role
       const text = textOf(l.message.content)
@@ -149,9 +139,9 @@ export class FactoryAdapter implements HarnessTraceAdapter {
         if (text) {
           spans.push(
             userPromptSpan({
-              traceId,
+              traceId: sourceTraceId,
               spanId: `user:${l.id ?? step}`,
-              parentSpanId: rootId,
+              parentSpanId: sourceRootId,
               startTime: ts,
               content: text,
               service: SERVICE,
@@ -165,9 +155,9 @@ export class FactoryAdapter implements HarnessTraceAdapter {
         const llmId = `llm:${l.id ?? step}`
         spans.push(
           span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: llmId,
-            parentSpanId: rootId,
+            parentSpanId: sourceRootId,
             name: `message.${role ?? 'unknown'}`,
             kind: 'LLM',
             startTime: ts,
@@ -185,7 +175,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
       for (const b of l.message.content ?? []) {
         if (b.type === 'tool_use' && b.name) {
           const t = span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: `tool:${b.id ?? `${l.id}:${step}`}`,
             parentSpanId: lastLlm,
             name: `tool.${b.name}`,
@@ -206,6 +196,31 @@ export class FactoryAdapter implements HarnessTraceAdapter {
         }
       }
     }
-    return spans
+
+    const traceId = sessionLine?.id ?? sourceTraceId
+    const rootId = `root:${traceId}`
+    for (const item of spans) {
+      item.trace_id = traceId
+      if (item.parent_span_id === sourceRootId) item.parent_span_id = rootId
+    }
+    const root = span({
+      traceId,
+      spanId: rootId,
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: sessionLine?.timestamp ?? firstTimestamp ?? new Date(0).toISOString(),
+      endTime: lastTimestamp,
+      service: SERVICE,
+      agent: SERVICE,
+      model: settings.model ?? null,
+      extra: settings.tokenUsage
+        ? {
+            'session.input_tokens': settings.tokenUsage.inputTokens ?? 0,
+            'session.output_tokens': settings.tokenUsage.outputTokens ?? 0,
+          }
+        : undefined,
+    })
+    return [root, ...spans]
   }
 }

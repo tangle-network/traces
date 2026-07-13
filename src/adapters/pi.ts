@@ -10,7 +10,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { collectJsonl } from '../jsonl.js'
+import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { capText, userPromptSpan } from './conversation.js'
@@ -111,30 +111,27 @@ export class PiAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const lines = await collectJsonl<PiLine>(ref.path)
-    const sessionLine = lines.find((l) => l.type === 'session')
-    const traceId = sessionLine?.id ?? ref.sessionId
-    const rootId = `root:${traceId}`
-
-    const spans: OtlpSpan[] = [
-      span({
-        traceId,
-        spanId: rootId,
-        parentSpanId: null,
-        name: 'session',
-        kind: 'AGENT',
-        startTime: sessionLine?.timestamp ?? lines[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: lines.at(-1)?.timestamp,
-        service: SERVICE,
-        agent: SERVICE,
-      }),
-    ]
-
+    const sourceTraceId = ref.sessionId
+    const sourceRootId = `root:${sourceTraceId}`
+    const spans: OtlpSpan[] = []
     const toolByCallId = new Map<string, OtlpSpan>()
+    let firstTimestamp: string | undefined
+    let lastTimestamp: string | undefined
+    let sessionLine: Pick<PiLine, 'id' | 'timestamp'> | undefined
+    let sawLine = false
     let step = 0
 
-    for (const l of lines) {
+    for await (const l of readJsonl<PiLine>(ref.path)) {
+      if (!sawLine) {
+        firstTimestamp = l.timestamp
+        sawLine = true
+      }
+      lastTimestamp = l.timestamp
+      if (!sessionLine && l.type === 'session') {
+        sessionLine = { id: l.id, timestamp: l.timestamp }
+      }
       if (l.type !== 'message' || !l.message) continue
+
       const ts = l.timestamp ?? new Date(0).toISOString()
       const mid = l.id ?? `m${step}`
       const msg = l.message
@@ -146,9 +143,9 @@ export class PiAdapter implements HarnessTraceAdapter {
         if (prompt) {
           spans.push(
             userPromptSpan({
-              traceId,
+              traceId: sourceTraceId,
               spanId: `${mid}:user`,
-              parentSpanId: rootId,
+              parentSpanId: sourceRootId,
               startTime: ts,
               service: SERVICE,
               agent: SERVICE,
@@ -162,9 +159,9 @@ export class PiAdapter implements HarnessTraceAdapter {
         const errored = !!msg.errorMessage
         spans.push(
           span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: llmId,
-            parentSpanId: rootId,
+            parentSpanId: sourceRootId,
             name: `message.${msg.role ?? 'unknown'}`,
             kind: 'LLM',
             startTime: ts,
@@ -187,7 +184,7 @@ export class PiAdapter implements HarnessTraceAdapter {
           const name = b.toolName ?? b.name ?? 'tool'
           const callId = b.id ?? b.callId ?? b.toolCallId ?? `${mid}:${step}`
           const toolSpan = span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: `tool:${callId}`,
             parentSpanId: llmId,
             name: `tool.${name}`,
@@ -213,6 +210,24 @@ export class PiAdapter implements HarnessTraceAdapter {
         }
       }
     }
-    return spans
+
+    const traceId = sessionLine?.id ?? sourceTraceId
+    const rootId = `root:${traceId}`
+    for (const item of spans) {
+      item.trace_id = traceId
+      if (item.parent_span_id === sourceRootId) item.parent_span_id = rootId
+    }
+    const root = span({
+      traceId,
+      spanId: rootId,
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: sessionLine?.timestamp ?? firstTimestamp ?? new Date(0).toISOString(),
+      endTime: lastTimestamp,
+      service: SERVICE,
+      agent: SERVICE,
+    })
+    return [root, ...spans]
   }
 }

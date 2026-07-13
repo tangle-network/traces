@@ -1,6 +1,9 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { closeSync, mkdirSync, mkdtempSync, openSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { AmpAdapter } from '../src/adapters/amp.js'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
@@ -13,6 +16,7 @@ import { GeminiAdapter } from '../src/adapters/gemini.js'
 import { OpencodeAdapter } from '../src/adapters/opencode.js'
 import { PiAdapter } from '../src/adapters/pi.js'
 import { QwenAdapter } from '../src/adapters/qwen.js'
+import { JsonlParseError } from '../src/jsonl.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import type { SessionRef } from '../src/types.js'
 
@@ -24,6 +28,125 @@ function refFor(path: string, harness: string): SessionRef {
 const llm = (s: OtlpSpan[]) => s.find((x) => x.attributes['openinference.span.kind'] === 'LLM')
 const tool = (s: OtlpSpan[]) => s.find((x) => x.attributes['openinference.span.kind'] === 'TOOL')
 const userPrompt = (s: OtlpSpan[]) => s.find((x) => x.name === 'user.prompt')
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (!value || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  return Object.fromEntries(
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, canonicalize(record[key])]),
+  )
+}
+
+function spanDigest(spans: OtlpSpan[]): string {
+  return createHash('sha256').update(JSON.stringify(canonicalize(spans))).digest('hex')
+}
+
+async function expectJsonlParseFailure(
+  parse: Promise<unknown>,
+  sourcePath: string,
+  lineNumber: number,
+  rawSecret: string,
+): Promise<void> {
+  const error = await parse.then(
+    () => undefined,
+    (cause: unknown) => cause,
+  )
+
+  expect(error).toBeInstanceOf(JsonlParseError)
+  expect(error).toMatchObject({
+    name: 'JsonlParseError',
+    message: `Invalid JSONL at ${sourcePath}:${lineNumber}`,
+    sourcePath,
+    lineNumber,
+  })
+  expect(String(error)).not.toContain(rawSecret)
+  expect(JSON.stringify(error)).not.toContain(rawSecret)
+  expect((error as Error).stack).not.toContain(rawSecret)
+}
+
+describe('JSONL adapter streaming', () => {
+  const adapters = [
+    { harness: 'claude-code', make: () => new ClaudeAdapter() },
+    { harness: 'github-copilot', make: () => new CopilotAdapter() },
+    { harness: 'factory', make: () => new FactoryAdapter() },
+    { harness: 'pi', make: () => new PiAdapter() },
+    { harness: 'qwen', make: () => new QwenAdapter() },
+  ]
+
+  it.each(adapters)('$harness propagates a missing session file', async ({ harness, make }) => {
+    await expect(make().parse(refFor(join(dir, 'missing-session.jsonl'), harness))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+
+  it.each(adapters)('$harness propagates malformed main-session JSON with its location', async ({ harness, make }) => {
+    const path = join(dir, `${harness}-malformed-session.jsonl`)
+    const rawSecret = `secret-${harness}-session-row`
+    writeFileSync(path, `{}\n${rawSecret}\n{}\n`)
+
+    await expectJsonlParseFailure(make().parse(refFor(path, harness)), path, 2, rawSecret)
+  })
+
+  it('propagates malformed Claude subagent JSON with its location', async () => {
+    const path = join(dir, 'claude-malformed-subagent.jsonl')
+    writeFileSync(path, '{}\n')
+    const subDir = join(dir, 'claude-malformed-subagent', 'subagents')
+    mkdirSync(subDir, { recursive: true })
+    const subagentPath = join(subDir, 'agent-secret.jsonl')
+    const rawSecret = 'secret-claude-subagent-row'
+    writeFileSync(subagentPath, `{}\n${rawSecret}\n{}\n`)
+
+    await expectJsonlParseFailure(
+      new ClaudeAdapter().parse(refFor(path, 'claude-code')),
+      subagentPath,
+      2,
+      rawSecret,
+    )
+  })
+
+  it('parses a 100 MB file with a fixed 128 MB heap', () => {
+    const path = join(dir, 'large-ignored-session.jsonl')
+    // Unique payloads prevent string deduplication from hiding retained rows.
+    const suffix = 'x'.repeat(2040)
+    const file = openSync(path, 'w')
+    try {
+      for (let start = 0; start < 50_000; start += 100) {
+        const chunk = Array.from({ length: 100 }, (_, offset) =>
+          JSON.stringify({ type: 'ignored', payload: `${start + offset}:${suffix}` }),
+        )
+        writeSync(file, `${chunk.join('\n')}\n`)
+      }
+    } finally {
+      closeSync(file)
+    }
+
+    const adapterUrl = pathToFileURL(join(process.cwd(), 'src/adapters/claude.ts')).href
+    const childSource = `
+      import { ClaudeAdapter } from ${JSON.stringify(adapterUrl)}
+      const spans = await new ClaudeAdapter().parse({
+        harness: 'claude-code',
+        sessionId: 'large',
+        path: ${JSON.stringify(path)},
+        cwd: null,
+        mtimeMs: 0,
+      })
+      process.stdout.write(String(spans.length))
+    `
+    const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' }
+    delete env.NODE_OPTIONS
+    const child = spawnSync(
+      process.execPath,
+      ['--max-old-space-size=128', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      { cwd: process.cwd(), encoding: 'utf8', env, timeout: 30_000 },
+    )
+
+    expect(child.status, child.stderr || child.error?.message).toBe(0)
+    expect(child.stdout).toBe('1')
+  })
+})
 
 describe('amp adapter (thread JSON, camelCase usage)', () => {
   it('sums cache+fresh input tokens and flags tool errors', async () => {
@@ -70,6 +193,7 @@ describe('copilot adapter (event envelope, toolCallId join)', () => {
         .join('\n'),
     )
     const spans = await new CopilotAdapter().parse(refFor(path, 'github-copilot'))
+    expect(spanDigest(spans)).toBe('94cfe096ae5b7e1c9182306c8db364a0440212e8b9f97e84b2afc7c9f45d8d52')
     expect(llm(spans)?.attributes['llm.input_tokens']).toBe(900)
     expect(llm(spans)?.attributes['llm.output_tokens']).toBe(30)
     expect(tool(spans)?.status.code).toBe('ERROR')
@@ -100,6 +224,7 @@ describe('qwen adapter (flat ChatRecord, genai parts)', () => {
         .join('\n'),
     )
     const spans = await new QwenAdapter().parse(refFor(path, 'qwen'))
+    expect(spanDigest(spans)).toBe('e351b605d91cc5c0217ca4bdab22aedc3b34db32cfcfea1777bba754764266c4')
     expect(llm(spans)?.attributes['llm.input_tokens']).toBe(500)
     expect(llm(spans)?.attributes['llm.output_tokens']).toBe(40)
     expect(tool(spans)?.attributes['tool.name']).toBe('read_file')
@@ -125,6 +250,7 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
     )
     writeFileSync(`${base}.settings.json`, JSON.stringify({ model: 'claude-opus-4-5', tokenUsage: { inputTokens: 1234, outputTokens: 56 } }))
     const spans = await new FactoryAdapter().parse(refFor(`${base}.jsonl`, 'factory'))
+    expect(spanDigest(spans)).toBe('670b89a0d703b8181c605e44168b945edb66825952d714fc9d9e2430731b1ef5')
     expect(llm(spans)?.attributes['llm.model_name']).toBe('claude-opus-4-5')
     expect(tool(spans)?.attributes['tool.name']).toBe('edit')
     expect(tool(spans)?.status.code).toBe('ERROR')
@@ -134,28 +260,48 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
 })
 
 describe('claude adapter (conversation capture)', () => {
-  it('captures the user prompt + assistant text, but not a tool-result-only turn', async () => {
+  it('preserves complete output while folding subagents under their Agent call', async () => {
     const path = join(dir, 'claude.jsonl')
     writeFileSync(
       path,
       [
-        { type: 'user', uuid: 'u1', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: [{ type: 'text', text: 'do the thing' }] } },
-        {
+        JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: [{ type: 'text', text: 'ship it' }] } }),
+        JSON.stringify({
           type: 'assistant',
           uuid: 'a1',
+          sessionId: 'claude-trace',
           timestamp: '2026-01-01T00:00:01Z',
-          message: { role: 'assistant', model: 'claude-opus', usage: { input_tokens: 100, output_tokens: 10 }, content: [{ type: 'text', text: 'on it' }, { type: 'tool_use', id: 'c1', name: 'bash', input: { cmd: 'ls' } }] },
+          message: { role: 'assistant', model: 'opus', usage: { input_tokens: 10, cache_read_input_tokens: 5, output_tokens: 3 }, content: [{ type: 'text', text: 'working' }, { type: 'tool_use', id: 'agent-call', name: 'Agent', input: { task: 'inspect' } }] },
+        }),
+        JSON.stringify({ type: 'user', uuid: 'u2', timestamp: '2026-01-01T00:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-call', is_error: false, content: 'done' }] } }),
+      ].join('\n'),
+    )
+    const subDir = join(dir, 'claude', 'subagents')
+    mkdirSync(subDir, { recursive: true })
+    writeFileSync(
+      join(subDir, 'agent-a.jsonl'),
+      [
+        { type: 'user', uuid: 'su1', timestamp: '2026-01-01T00:00:01.100Z', isSidechain: true, message: { role: 'user', content: [{ type: 'text', text: 'inspect' }] } },
+        {
+          type: 'assistant',
+          uuid: 'sa1',
+          timestamp: '2026-01-01T00:00:01.200Z',
+          message: { role: 'assistant', model: 'haiku', usage: { input_tokens: 2, output_tokens: 1 }, content: [{ type: 'text', text: 'found it' }] },
         },
-        { type: 'user', uuid: 'u2', timestamp: '2026-01-01T00:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', is_error: false, content: 'files' }] } },
       ]
         .map((e) => JSON.stringify(e))
         .join('\n'),
     )
+    writeFileSync(join(subDir, 'agent-a.meta.json'), JSON.stringify({ agentType: 'Explore', toolUseId: 'agent-call' }))
+
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    expect(userPrompt(spans)?.attributes['content']).toBe('do the thing')
-    expect(spans.filter((x) => x.name === 'user.prompt')).toHaveLength(1)
-    expect(llm(spans)?.attributes['content']).toBe('on it')
-    expect(tool(spans)?.attributes['tool.name']).toBe('bash')
+    expect(spanDigest(spans)).toBe('07c0e5ddeb1f8ec5f219431173dc4f2b36ed074aae35ce150c6c86d612e286ac')
+    expect(spans.map((item) => item.name)).toEqual(['session', 'user.prompt', 'llm.turn', 'tool.Agent', 'user.prompt', 'llm.turn'])
+    expect(spans.every((item) => item.trace_id === 'claude-trace')).toBe(true)
+    expect(spans[0]).toMatchObject({ start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:00:02Z' })
+    const agentCall = tool(spans)
+    expect(agentCall).toMatchObject({ end_time: '2026-01-01T00:00:02Z', status: { code: 'OK' } })
+    expect(spans.filter((item) => item.attributes['agent.name'] === 'subagent:Explore').every((item) => item.parent_span_id === agentCall?.span_id)).toBe(true)
   })
 })
 
@@ -199,6 +345,9 @@ describe('conversation capture — JSONL adapters', () => {
       const path = join(dir, c.file)
       writeFileSync(path, c.lines.map((l) => JSON.stringify(l)).join('\n'))
       const spans = await c.make().parse(refFor(path, c.name))
+      if (c.name === 'pi') {
+        expect(spanDigest(spans)).toBe('34349866cdd14e36ff4868c4299ded65958c853dd44c160d48526ec919af061b')
+      }
       expect(userPrompt(spans)?.attributes['content']).toBe('hello world')
       expect(hasContent(spans, 'on it')).toBe(true)
       expect(tool(spans)?.attributes['tool.name']).toBe(c.toolName)

@@ -15,7 +15,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { collectJsonl } from '../jsonl.js'
+import { readJsonl } from '../jsonl.js'
 import { capText, userPromptSpan } from './conversation.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
@@ -89,40 +89,33 @@ export class QwenAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const records = await collectJsonl<QwenRecord>(ref.path)
-    const traceId = records.find((r) => r.sessionId)?.sessionId ?? ref.sessionId
-    const rootId = `root:${traceId}`
-
-    const spans: OtlpSpan[] = [
-      span({
-        traceId,
-        spanId: rootId,
-        parentSpanId: null,
-        name: 'session',
-        kind: 'AGENT',
-        startTime: records[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: records.at(-1)?.timestamp,
-        service: SERVICE,
-        agent: SERVICE,
-      }),
-    ]
-
-    // Tool calls have no stable id in genai parts — match results to the most
-    // recent unresolved call of the same function name.
+    const sourceTraceId = ref.sessionId
+    const sourceRootId = `root:${sourceTraceId}`
+    const spans: OtlpSpan[] = []
     const openToolsByName = new Map<string, OtlpSpan[]>()
+    let discoveredTraceId: string | undefined
+    let firstTimestamp: string | undefined
+    let lastTimestamp: string | undefined
+    let sawRecord = false
     let step = 0
-    let lastLlm = rootId
 
-    for (const r of records) {
+    for await (const r of readJsonl<QwenRecord>(ref.path)) {
+      if (!sawRecord) {
+        firstTimestamp = r.timestamp
+        sawRecord = true
+      }
+      lastTimestamp = r.timestamp
+      if (!discoveredTraceId && r.sessionId) discoveredTraceId = r.sessionId
+
       const ts = r.timestamp ?? new Date(0).toISOString()
       const role = r.message?.role
       if (r.type === 'assistant' || role === 'model') {
         const llmId = `llm:${r.uuid ?? step}`
         spans.push(
           span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: llmId,
-            parentSpanId: rootId,
+            parentSpanId: sourceRootId,
             name: 'llm.turn',
             kind: 'LLM',
             startTime: ts,
@@ -135,14 +128,13 @@ export class QwenAdapter implements HarnessTraceAdapter {
             content: capText(textOf(r.message?.parts)) || null,
           }),
         )
-        lastLlm = llmId
         step += 1
 
         for (const p of r.message?.parts ?? []) {
           if (!p.functionCall?.name) continue
           const name = p.functionCall.name
           const t = span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: `tool:${name}:${step}`,
             parentSpanId: llmId,
             name: `tool.${name}`,
@@ -169,9 +161,9 @@ export class QwenAdapter implements HarnessTraceAdapter {
         if (prompt) {
           spans.push(
             userPromptSpan({
-              traceId,
+              traceId: sourceTraceId,
               spanId: `user:${r.uuid ?? step}`,
-              parentSpanId: rootId,
+              parentSpanId: sourceRootId,
               startTime: ts,
               service: SERVICE,
               agent: SERVICE,
@@ -194,6 +186,24 @@ export class QwenAdapter implements HarnessTraceAdapter {
         }
       }
     }
-    return spans
+
+    const traceId = discoveredTraceId ?? sourceTraceId
+    const rootId = `root:${traceId}`
+    for (const item of spans) {
+      item.trace_id = traceId
+      if (item.parent_span_id === sourceRootId) item.parent_span_id = rootId
+    }
+    const root = span({
+      traceId,
+      spanId: rootId,
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: firstTimestamp ?? new Date(0).toISOString(),
+      endTime: lastTimestamp,
+      service: SERVICE,
+      agent: SERVICE,
+    })
+    return [root, ...spans]
   }
 }

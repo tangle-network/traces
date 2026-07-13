@@ -16,7 +16,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { collectJsonl } from '../jsonl.js'
+import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
@@ -74,29 +74,24 @@ export class CopilotAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const events = await collectJsonl<CopilotEvent>(ref.path)
     const traceId = ref.sessionId
     const rootId = `root:${traceId}`
-    const spans: OtlpSpan[] = [
-      span({
-        traceId,
-        spanId: rootId,
-        parentSpanId: null,
-        name: 'session',
-        kind: 'AGENT',
-        startTime: events[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: events.at(-1)?.timestamp,
-        service: SERVICE,
-        agent: SERVICE,
-      }),
-    ]
-
+    const spans: OtlpSpan[] = []
     const toolByCallId = new Map<string, OtlpSpan>()
+    let firstTimestamp: string | undefined
+    let lastTimestamp: string | undefined
+    let sawEvent = false
     let step = 0
     let lastLlm = rootId
     let pendingInputTokens: number | null = null
 
-    for (const ev of events) {
+    for await (const ev of readJsonl<CopilotEvent>(ref.path)) {
+      if (!sawEvent) {
+        firstTimestamp = ev.timestamp
+        sawEvent = true
+      }
+      lastTimestamp = ev.timestamp
+
       const ts = ev.timestamp ?? new Date(0).toISOString()
       const d = ev.data ?? {}
       if (ev.type === 'assistant.usage') {
@@ -153,6 +148,18 @@ export class CopilotAdapter implements HarnessTraceAdapter {
         }
       }
     }
-    return spans
+
+    const root = span({
+      traceId,
+      spanId: rootId,
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: firstTimestamp ?? new Date(0).toISOString(),
+      endTime: lastTimestamp,
+      service: SERVICE,
+      agent: SERVICE,
+    })
+    return [root, ...spans]
   }
 }
