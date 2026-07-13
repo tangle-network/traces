@@ -10,6 +10,7 @@ import { analyzeAdoption, countSkillRunsJsonl } from '../src/adoption.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import { span } from '../src/otlp.js'
 import { analyzeReactions } from '../src/reactions.js'
+import { renderAdoption } from '../src/report.js'
 import type { SessionRef } from '../src/types.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'tt-upgrades-'))
@@ -295,6 +296,8 @@ describe('analyzeAdoption', () => {
     expect(r.sessionCount).toBe(2)
     expect(r.sessionsWithSkill).toBe(1)
     expect(r.skillPenetration).toBe(0.5)
+    expect(r.skillTelemetryStatus).toBe('measured')
+    expect(r.skillTelemetrySessions).toBe(2)
     expect(r.skillInvocations.evolve).toBe(1)
     expect(r.skillInvocations.polish).toBe(1)
     expect(r.totalSkillInvocations).toBe(2)
@@ -309,6 +312,93 @@ describe('analyzeAdoption', () => {
     expect(r.loopDispatchedRuns.converge).toBe(1)
     expect(r.totalLoopDispatchedRuns).toBe(3)
     expect(r.skillRunFilesRead).toBe(1)
+  })
+
+  it('reports Codex skill invocation as unsupported while preserving catalog, file, and subagent evidence', async () => {
+    const path = join(dir, 'rollout-codex-skill-evidence.jsonl')
+    const rows = [
+      { type: 'session_meta', timestamp: '2026-06-20T00:00:00Z', payload: { id: 'codex-skill-evidence', cwd: '/x' } },
+      {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:01Z',
+        payload: {
+          type: 'message',
+          role: 'developer',
+          content: '<skills_instructions>\n### Available skills\n- simplify: capability-preserving cleanup',
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:02Z',
+        payload: {
+          type: 'custom_tool_call',
+          call_id: 'skill-file',
+          name: 'exec',
+          input: 'const r = await tools.exec_command({cmd:"sed -n 1,80p /skills/simplify/SKILL.md"}); text(r.output)',
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:03Z',
+        payload: { type: 'custom_tool_call_output', call_id: 'skill-file', output: 'Script completed' },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-06-20T00:00:04Z',
+        payload: {
+          type: 'sub_agent_activity',
+          kind: 'started',
+          agent_thread_id: 'child-1',
+          agent_path: 'reviewer',
+        },
+      },
+    ]
+    writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const report = await analyzeAdoption(spans)
+    const rendered = renderAdoption(report)
+
+    expect(report.skillPenetration).toBeNull()
+    expect(report.skillTelemetryStatus).toBe('unsupported')
+    expect(report.skillTelemetrySessions).toBe(0)
+    expect(report.sessionsWithMaterializedSkills).toBe(1)
+    expect(report.sessionsWithSkillFileReference).toBe(1)
+    expect(report.totalSubagentSpawns).toBe(1)
+    expect(report.subagentSpawns.reviewer).toBe(1)
+    expect(rendered).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
+    expect(rendered).toContain('Materialized skill catalogs/instructions:** 1/1')
+    expect(rendered).toContain('SKILL.md tool references:** 1/1')
+    expect(rendered).toContain('Subagent spawns:** 1')
+    expect(rendered).not.toContain('Skill penetration')
+    expect(rendered).not.toContain('0%')
+  })
+
+  it('excludes Codex from a mixed corpus explicit-invocation denominator', async () => {
+    const report = await analyzeAdoption([
+      span({
+        traceId: 'claude-session',
+        spanId: 'claude-root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+      }),
+      span({
+        traceId: 'codex-session',
+        spanId: 'codex-root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'codex',
+      }),
+    ])
+    const rendered = renderAdoption(report)
+
+    expect(report.skillTelemetryStatus).toBe('partial')
+    expect(report.skillTelemetrySessions).toBe(1)
+    expect(report.skillPenetration).toBe(0)
+    expect(rendered).toContain('0/1 measurable session(s); 1 unmeasurable session(s) excluded')
   })
 
   it('handles a corpus with no skill-runs files (loop counts stay zero, not crash)', async () => {

@@ -96,7 +96,9 @@ function topLoopTools(row: TraceSessionIndexRow): string {
     .slice(0, 3)
     .map(([toolName, stats]) => `${toolName} ${stats.groups} group(s), max x${stats.maxOccurrences}`)
   const suffix = row.signals.stuckLoopsOmitted > 0 ? `, +${row.signals.stuckLoopsOmitted} omitted` : ''
-  return loops.length > 0 ? `${loops.join(', ')}${suffix}` : `${row.signals.stuckLoopCount} loop(s)`
+  return loops.length > 0
+    ? `${loops.join(', ')}${suffix}`
+    : `${row.signals.stuckLoopCount} full-session group(s)`
 }
 
 function sortFindings(findings: MutableFinding[]): TraceInspectionFinding[] {
@@ -152,15 +154,15 @@ function addSessionFindings(index: TraceSessionIndex, findings: MutableFinding[]
     const stuckLoops = loopSessions.reduce((sum, row) => sum + row.signals.stuckLoopCount, 0)
     findings.push({
       id: 'session.repeated-call-loops',
-      severity: stuckLoops >= 10 || loopSessions.length / index.totals.sessions >= 0.3 ? 'high' : 'medium',
+      severity: 'low',
       area: 'session',
-      title: `Repeated tool-call loops in ${loopSessions.length}/${index.totals.sessions} session(s)`,
+      title: `Identical-call groups (full-session, not time-bounded) in ${loopSessions.length}/${index.totals.sessions} session(s)`,
       impact: stuckLoops,
       evidence: [
-        `${stuckLoops} repeated-call loop(s) across ${loopSessions.length} session(s).`,
-        ...loopSessions.slice(0, 5).map((row) => `${sessionLabel(row)}: ${row.signals.stuckLoopCount} loop(s); ${topLoopTools(row)}`),
+        `${stuckLoops} identical-call group(s) across ${loopSessions.length} session(s); groups may span the complete run.`,
+        ...loopSessions.slice(0, 5).map((row) => `${sessionLabel(row)}: ${row.signals.stuckLoopCount} group(s); ${topLoopTools(row)}`),
       ],
-      next: 'Inspect the repeated commands and results in the referenced sessions; fix the instruction or tool path that lets the same failed action repeat.',
+      next: 'Inspect timestamps before classifying a group as a loop; this detector version does not bound the interval between matching calls.',
       refs: loopSessions.slice(0, 5).map((row) => row.session.path),
     })
   }

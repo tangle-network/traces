@@ -52,7 +52,7 @@ export interface DeterministicSummary {
 
 function deterministicSummaryText(summary: DeterministicSummary): string {
   const parts: string[] = []
-  if (summary.stuckLoops > 0) parts.push(`${summary.stuckLoops} stuck loop(s)`)
+  if (summary.stuckLoops > 0) parts.push(`${summary.stuckLoops} full-session repeated-call group(s)`)
   if (summary.reactionSignals > 0) parts.push(`${summary.reactionSignals} human reaction signal(s)`)
   if (summary.toolErrorRuns > 0) parts.push(`${summary.toolErrorRuns} tool-error run(s)`)
   if (parts.length === 0) return '0 deterministic signals'
@@ -227,18 +227,19 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
 }
 
 /**
- * Render the deterministic loop/stall/waste pipelines (agent-eval's shipped
- * detectors). This is the "is the agent stuck" view.
+ * Render agent-eval's deterministic repeated-call and tool-use metrics.
+ * The installed detector groups identical calls over the complete run, so its
+ * output is evidence of repetition, not evidence of a continuous stuck loop.
  */
 export function renderPipelines(pr: PipelineReport): string {
-  const lines: string[] = ['## loops & waste (deterministic)', '']
+  const lines: string[] = ['## repeated calls & waste (deterministic)', '']
 
   if (pr.stuckLoops.findings.length === 0) {
-    lines.push('- **Stuck loops:** none (no tool called ≥3× with identical args in a short interval).')
+    lines.push('- **Full-session repeated-call groups:** none (not time-bounded).')
   } else {
-    lines.push(`- **Stuck loops:** ${pr.stuckLoops.findings.length} (${(pr.stuckLoops.affectedRunRatio * 100).toFixed(0)}% of runs affected)`)
+    lines.push(`- **Full-session repeated-call groups (not time-bounded):** ${pr.stuckLoops.findings.length} (${(pr.stuckLoops.affectedRunRatio * 100).toFixed(0)}% of runs affected)`)
     for (const f of pr.stuckLoops.findings.sort((a, b) => b.occurrences - a.occurrences).slice(0, 10)) {
-      lines.push(`  - 🔁 \`${f.toolName}\` ×${f.occurrences} with identical args over ${(f.windowMs / 1000).toFixed(1)}s`)
+      lines.push(`  - \`${f.toolName}\` ×${f.occurrences} with identical args across ${(f.windowMs / 1000).toFixed(1)}s`)
     }
   }
 
@@ -251,10 +252,10 @@ export function renderPipelines(pr: PipelineReport): string {
     const errorCalls = toolStats.length > 0
       ? toolStats.reduce((total, stats) => total + stats.errors, 0)
       : Math.round(m.errorRate * m.totalCalls)
-    const retriedFailures = Math.round(m.retryRate * errorCalls)
+    const followedFailures = Math.round(m.retryRate * errorCalls)
     const failureFollowUp =
       errorCalls > 0
-        ? `; ${(m.retryRate * 100).toFixed(0)}% of failed calls retried with the same tool (${retriedFailures}/${errorCalls})`
+        ? `; ${followedFailures}/${errorCalls} failed calls followed by another same-tool call (${(m.retryRate * 100).toFixed(0)}%)`
         : ''
     lines.push(
       `- **Tool use:** ${m.totalCalls} calls; ${duplicateCalls}/${m.totalCalls} repeated exactly; ` +
@@ -329,9 +330,23 @@ export function renderReactions(rr: ReactionReport): string {
  */
 export function renderAdoption(ar: AdoptionReport): string {
   const lines: string[] = ['## skill & subagent adoption (deterministic)', '']
+  if (ar.skillPenetration === null) {
+    const label = ar.skillTelemetryStatus === 'unsupported' ? 'uncaptured/unsupported' : 'uncaptured/unknown'
+    lines.push(
+      `- **Explicit skill invocation rate:** ${label} ` +
+        `(${ar.skillTelemetrySessions}/${ar.sessionCount} selected session(s) expose a dedicated Skill event)`,
+    )
+  } else {
+    const excluded = ar.sessionCount - ar.skillTelemetrySessions
+    lines.push(
+      `- **Explicit skill invocation rate:** ${(ar.skillPenetration * 100).toFixed(0)}% ` +
+        `(${ar.sessionsWithSkill}/${ar.skillTelemetrySessions} measurable session(s)` +
+        `${excluded > 0 ? `; ${excluded} unmeasurable session(s) excluded` : ''})`,
+    )
+  }
   lines.push(
-    `- **Skill penetration:** ${(ar.skillPenetration * 100).toFixed(0)}% ` +
-      `(${ar.sessionsWithSkill}/${ar.sessionCount} session(s) invoked a skill explicitly)`,
+    `- **Materialized skill catalogs/instructions:** ${ar.sessionsWithMaterializedSkills}/${ar.sessionCount} session(s)  ·  ` +
+      `**SKILL.md tool references:** ${ar.sessionsWithSkillFileReference}/${ar.sessionCount} session(s)`,
   )
   lines.push(
     `- **Explicit skill invocations:** ${ar.totalSkillInvocations} (Skill tool spans)  ·  ` +

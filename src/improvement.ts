@@ -238,26 +238,9 @@ function toolErrorRuns(pipelines: PipelineReport): number {
 
 function deterministicFindings(pipelines: PipelineReport, reactions: ReactionReport, adoption: AdoptionReport): AnalystFinding[] {
   const findings: AnalystFinding[] = []
-  const loops = pipelines.stuckLoops.findings
-  if (loops.length > 0) {
-    const top = [...loops].sort((a, b) => b.occurrences - a.occurrences)[0]
-    findings.push(makeFinding({
-      analyst_id: 'traces-deterministic',
-      area: 'tool-use',
-      claim: `${loops.length} repeated tool-call loop(s) were observed`,
-      severity: loops.length >= 10 ? 'high' : 'medium',
-      rationale: 'Repeated identical tool calls usually mean the agent is retrying without new information or a stop rule.',
-      evidence_refs: [
-        evidence('metric', 'pipelines.stuck_loop_count', `${loops.length} loop(s)`),
-        ...(top ? [evidence('metric', `tool.${top.toolName}.repeated_calls`, `${top.toolName} repeated ${top.occurrences} time(s)`)] : []),
-      ],
-      recommended_action: 'Add a loop breaker: when the same tool and arguments fail or repeat, force a state check, alternate plan, or stop condition before retrying.',
-      validation_plan: 'Rerun traces over fresh sessions and require repeated-call loops to drop to zero or explain each remaining loop with changed state.',
-      confidence: 0.95,
-      metadata: { source: 'traces.pipeline.stuckLoopView', loopCount: loops.length },
-    }))
-  }
-
+  // agent-eval 0.116 groups identical calls over the complete run. The raw
+  // groups stay in the report, but cannot support a loop-breaker recommendation
+  // until the upstream time-bounded clustering option is published.
   const erroredRuns = toolErrorRuns(pipelines)
   if (erroredRuns > 0) {
     findings.push(makeFinding({
@@ -292,7 +275,8 @@ function deterministicFindings(pipelines: PipelineReport, reactions: ReactionRep
   }
 
   const skillRuns = adoption.totalSkillInvocations + adoption.totalLoopDispatchedRuns
-  if (adoption.sessionCount > 0 && skillRuns === 0) {
+  const allSessionsMeasurable = adoption.skillTelemetrySessions === adoption.sessionCount
+  if (allSessionsMeasurable && adoption.sessionCount > 0 && skillRuns === 0) {
     findings.push(makeFinding({
       analyst_id: 'traces-deterministic',
       area: 'workflow',

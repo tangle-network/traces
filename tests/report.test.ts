@@ -37,7 +37,7 @@ describe('renderReport', () => {
     expect(report).toContain('5 session(s), 17470 spans')
     expect(report).toContain('**0 analyst findings + 77 deterministic signals**')
     expect(report).toContain(
-      '_No analyst findings. Deterministic checks found 12 stuck loop(s), 61 human reaction signal(s) and 4 tool-error run(s); see sections below._',
+      '_No analyst findings. Deterministic checks found 12 full-session repeated-call group(s), 61 human reaction signal(s) and 4 tool-error run(s); see sections below._',
     )
     expect(report).not.toContain('No findings')
   })
@@ -147,8 +147,9 @@ describe('renderPipelines', () => {
 
     expect(report).toContain('36/358 repeated exactly')
     expect(report).toContain('53/358 failed')
-    expect(report).toContain('98% of failed calls retried with the same tool (52/53)')
+    expect(report).toContain('52/53 failed calls followed by another same-tool call (98%)')
     expect(report).not.toContain('98% retry')
+    expect(report).not.toContain('failed calls retried')
   })
 })
 

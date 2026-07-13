@@ -14,6 +14,8 @@ const LEGACY_TRUNCATION_MARKER = /\n\[truncated (\d+) bytes; sha256=[a-f0-9]{64}
 const COUNTED_TRUNCATION_MARKER = /\n\[truncated \d+ bytes\]$/
 const TRUNCATION_MARKER = /\n\[truncated\]$/
 
+// Sort structurally, then stringify once. Recursive string concatenation
+// exceeds the bounded-heap adapter contract for large structured values.
 function canonicalJson(value: unknown): string {
   const sort = (item: unknown): unknown => {
     if (Array.isArray(item)) return item.map(sort)

@@ -16,9 +16,9 @@
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
  *
  * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
- * loop/waste pipelines; +agentic RLM kinds with `--llm`). `watch` is the
+ * repeated-call/tool-use pipelines; +agentic RLM kinds with `--llm`). `watch` is the
  * online observer: it tails active sessions and prints notifications when a
- * stuck loop or semantic live finding appears. `stream` emits the same live
+ * repeated-call group or semantic live finding appears. `stream` emits the same live
  * feed as JSONL for visualizers, dashboards, and external agents.
  */
 
@@ -493,7 +493,10 @@ async function cmdAnalyze(args: Args): Promise<void> {
   }
   if (args.out) {
     await writeFile(args.out, report, 'utf8')
-    console.log(`report → ${args.out}  (${result.findings.length} findings, ${pipelines.stuckLoops.findings.length} loops, OTLP: ${otlpPath})`)
+    console.log(
+      `report → ${args.out}  (${result.findings.length} findings, ` +
+        `${pipelines.stuckLoops.findings.length} full-session repeated-call groups, OTLP: ${otlpPath})`,
+    )
   } else {
     console.log(report)
   }
@@ -716,7 +719,7 @@ async function cmdWatch(args: Args): Promise<void> {
   process.stderr.write(
     `traces watch: observing ${all ? 'all harnesses' : args.harness}, ` +
       `sessions active in the last ${args.window}m, every ${args.interval}s. ` +
-      `Loop + semantic live findings; read-only; Ctrl-C to stop.\n`,
+      `Full-session repeated-call groups + semantic live findings; read-only; Ctrl-C to stop.\n`,
   )
   await watchSessions({
     all,
@@ -729,7 +732,7 @@ async function cmdWatch(args: Args): Promise<void> {
     onLoop: (l) => {
       const ts = new Date().toISOString().slice(11, 19)
       process.stdout.write(
-        `${ts} LOOP [${l.harness}] ${l.sessionId.slice(0, 8)}: ` +
+        `${ts} REPEATED-GROUP [full-session, not time-bounded] [${l.harness}] ${l.sessionId.slice(0, 8)}: ` +
           `\`${l.toolName}\` repeated ×${l.occurrences} with identical args ` +
           `(${(l.windowMs / 1000).toFixed(0)}s)${l.cwd ? ` · ${l.cwd}` : ''}\n`,
       )
@@ -832,7 +835,7 @@ function usage(): void {
 
 Commands:
   list      List discovered sessions
-  analyze   Run analyst suite + loop/waste pipelines over sessions or an input file
+  analyze   Run analyst suite + repeated-call/tool-use pipelines over sessions or an input file
   investigate Run typed investigation flow, including BYO config + recommendations
   improve   Write a full improvement artifact directory for review/apply/rerun
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
@@ -841,7 +844,7 @@ Commands:
   export    Convert evidence/events files to OpenInference JSONL for HALO
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
-  watch     Online observer: tail active sessions, notify on loops + semantic findings
+  watch     Online observer: tail active sessions, notify on repeated-call groups + semantic findings
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
 Options:
@@ -869,7 +872,7 @@ Options:
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
   --interval <s>   watch/stream: poll interval seconds (default 5)
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
-  --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
+  --min-loop <n>   Min identical calls in a full-session group (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
   --no-content     upload: strip prompt/response text; send metadata only
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass

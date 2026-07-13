@@ -2,7 +2,7 @@
  * Skill + subagent adoption metrics — deterministic.
  *
  * Reports three things:
- *   1. skill penetration — % of sessions that invoked any skill
+ *   1. explicit skill invocation rate over sessions with dedicated telemetry
  *   2. per-skill invocation frequency
  *   3. subagent (Task/Agent) spawn frequency
  *
@@ -23,8 +23,16 @@ export interface AdoptionReport {
   sessionCount: number
   /** Sessions that invoked ≥1 skill (explicitly, via the Skill tool). */
   sessionsWithSkill: number
-  /** sessionsWithSkill / sessionCount (0 when no sessions). */
-  skillPenetration: number
+  /** sessionsWithSkill / skillTelemetrySessions; null when invocation is not measurable. */
+  skillPenetration: number | null
+  /** Whether explicit Skill events can measure all, some, or none of the selected sessions. */
+  skillTelemetryStatus: 'measured' | 'partial' | 'unsupported' | 'unknown'
+  /** Sessions whose harness exposes a dedicated Skill event. */
+  skillTelemetrySessions: number
+  /** Sessions containing materialized skill instructions or a skill catalog. */
+  sessionsWithMaterializedSkills: number
+  /** Sessions with tool inputs that reference a SKILL.md path. */
+  sessionsWithSkillFileReference: number
   /** Explicit `Skill` tool invocations per skill name, corpus-wide. */
   skillInvocations: Record<string, number>
   /** Total explicit `Skill` tool invocations. */
@@ -78,6 +86,40 @@ function subagentTypeOf(input: Record<string, unknown>): string {
 
 function isSpawnAgentTool(name: string): boolean {
   return name === 'spawn_agent' || name.endsWith('__spawn_agent')
+}
+
+type SkillTelemetryCapability = 'supported' | 'unsupported' | 'unknown'
+
+function skillTelemetryCapability(service: unknown): SkillTelemetryCapability {
+  if (service === 'claude-code') return 'supported'
+  if (service === 'codex') return 'unsupported'
+  return 'unknown'
+}
+
+const MATERIALIZED_SKILL_RE =
+  /<skills_instructions>|(?:^|\n)#{1,3}\s+(?:available\s+)?skills\b|base directory for this skill:/i
+
+function hasMaterializedSkillEvidence(s: OtlpSpan): boolean {
+  if (s.name !== 'message.developer' && s.attributes['tangle.actor'] !== 'injected') return false
+  const content = s.attributes.content
+  return typeof content === 'string' && MATERIALIZED_SKILL_RE.test(content)
+}
+
+function hasSkillFileReference(s: OtlpSpan): boolean {
+  if (s.attributes['openinference.span.kind'] !== 'TOOL') return false
+  const input = s.attributes['input.value']
+  return typeof input === 'string' && input.includes('SKILL.md')
+}
+
+function telemetryStatus(
+  measured: number,
+  unsupported: number,
+  unknown: number,
+): AdoptionReport['skillTelemetryStatus'] {
+  if (measured > 0 && unsupported === 0 && unknown === 0) return 'measured'
+  if (measured > 0) return 'partial'
+  if (unsupported > 0 && unknown === 0) return 'unsupported'
+  return 'unknown'
 }
 
 /**
@@ -141,15 +183,26 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
   const sessions = new Set<string>()
   const sessionsWithSkill = new Set<string>()
   const sessionsWithSubagent = new Set<string>()
+  const sessionsWithMaterializedSkills = new Set<string>()
+  const sessionsWithSkillFileReference = new Set<string>()
   const skillInvocations: Record<string, number> = {}
   const subagentSpawns: Record<string, number> = {}
   const canonicalSubagentSessions = new Set<string>()
   const fallbackSubagents = new Map<string, string[]>()
+  const sessionCapabilities = new Map<string, SkillTelemetryCapability>()
 
   for (const s of spans) {
     sessions.add(s.trace_id)
+    const observedCapability = skillTelemetryCapability(s.attributes['service.name'])
+    const currentCapability = sessionCapabilities.get(s.trace_id) ?? 'unknown'
+    if (observedCapability === 'supported' || currentCapability === 'unknown') {
+      sessionCapabilities.set(s.trace_id, observedCapability)
+    }
+    if (hasMaterializedSkillEvidence(s)) sessionsWithMaterializedSkills.add(s.trace_id)
+    if (hasSkillFileReference(s)) sessionsWithSkillFileReference.add(s.trace_id)
     const tn = toolName(s)
     if (tn === 'Skill') {
+      sessionCapabilities.set(s.trace_id, 'supported')
       const name = skillNameOf(parseInput(s))
       skillInvocations[name] = (skillInvocations[name] ?? 0) + 1
       sessionsWithSkill.add(s.trace_id)
@@ -178,11 +231,28 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
   const totalSkillInvocations = Object.values(skillInvocations).reduce((a, b) => a + b, 0)
   const totalSubagentSpawns = Object.values(subagentSpawns).reduce((a, b) => a + b, 0)
   const totalLoopDispatchedRuns = Object.values(loopDispatchedRuns).reduce((a, b) => a + b, 0)
+  let skillTelemetrySessions = 0
+  let skillTelemetryUnsupportedSessions = 0
+  let skillTelemetryUnknownSessions = 0
+  for (const traceId of sessions) {
+    const capability = sessionCapabilities.get(traceId) ?? 'unknown'
+    if (capability === 'supported') skillTelemetrySessions += 1
+    else if (capability === 'unsupported') skillTelemetryUnsupportedSessions += 1
+    else skillTelemetryUnknownSessions += 1
+  }
 
   return {
     sessionCount: sessions.size,
     sessionsWithSkill: sessionsWithSkill.size,
-    skillPenetration: sessions.size === 0 ? 0 : sessionsWithSkill.size / sessions.size,
+    skillPenetration: skillTelemetrySessions === 0 ? null : sessionsWithSkill.size / skillTelemetrySessions,
+    skillTelemetryStatus: telemetryStatus(
+      skillTelemetrySessions,
+      skillTelemetryUnsupportedSessions,
+      skillTelemetryUnknownSessions,
+    ),
+    skillTelemetrySessions,
+    sessionsWithMaterializedSkills: sessionsWithMaterializedSkills.size,
+    sessionsWithSkillFileReference: sessionsWithSkillFileReference.size,
     skillInvocations,
     totalSkillInvocations,
     subagentSpawns,

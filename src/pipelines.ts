@@ -1,9 +1,9 @@
 /**
  * Run agent-eval's shipped trace pipelines over normalized harness spans.
  *
- * These are the deterministic loop/thrash detectors that already exist in
+ * These are the deterministic repeated-call/thrash detectors that already exist in
  * `@tangle-network/agent-eval`:
- *   - stuckLoopView         — same tool + same args ≥ N times in a short interval
+ *   - stuckLoopView         — same tool + same args ≥ N times across a run
  *   - computeToolUseMetrics — duplicate-call / retry / error rates per run
  *
  * `toolWasteView` is intentionally NOT used: its default heuristic needs
@@ -15,7 +15,9 @@
  * Both are cheap ($0, deterministic), so they're safe to run continuously in
  * `watch` mode, over the OTLP spans traces already produces. Calls explicitly
  * marked as expected blocking stay in usage totals but are excluded from
- * stuck-loop findings.
+ * repeated-call findings. agent-eval 0.116 groups over the complete run; do
+ * not describe those groups as continuous loops until its bounded clustering
+ * option is released and adopted here.
  */
 
 import { computeToolUseMetrics } from '@tangle-network/agent-eval'
@@ -31,7 +33,7 @@ export interface PipelineReport {
 }
 
 export interface PipelineOptions {
-  /** Minimum repeated identical calls to flag a loop (default 3). */
+  /** Minimum identical calls in a full-session group (default 3). */
   minLoopOccurrences?: number
 }
 

@@ -106,11 +106,49 @@ describe('runTraceInvestigation', () => {
     expect(result.findings.some((finding) => finding.analyst_id === 'traces-deterministic')).toBe(true)
     expect(result.findings.some((finding) => finding.analyst_id === 'external:json-engine')).toBe(true)
     expect(result.findings.every((finding) => finding.finding_id && Array.isArray(finding.evidence_refs))).toBe(true)
+    expect(result.findings.some((finding) => finding.claim.includes('repeated tool-call loop'))).toBe(false)
+    expect(result.findings.some((finding) => finding.claim === 'No skill usage was observed in the selected sessions')).toBe(false)
     expect(result.recommendations.length).toBeGreaterThan(0)
     expect(result.recommendations[0]!.validationPlan).toMatch(/Rerun|rerun|Run/)
     expect(result.claims.length).toBe(result.findings.length)
     expect(result.report).toContain('## recommendations')
     expect(result.report).toContain('external engine found')
+    expect(result.report).toContain('Full-session repeated-call groups (not time-bounded)')
+  })
+
+  it('does not recommend skill adoption when Codex has no dedicated Skill event', async () => {
+    const spans = [
+      span({
+        traceId: 'codex-skill-telemetry',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'codex',
+      }),
+      span({
+        traceId: 'codex-skill-telemetry',
+        spanId: 'developer',
+        parentSpanId: 'root',
+        name: 'message.developer',
+        kind: 'CHAIN',
+        startTime: '2026-01-01T00:00:01.000Z',
+        service: 'codex',
+        content: '<skills_instructions>### Available skills</skills_instructions>',
+      }),
+    ]
+
+    const result = await runTraceInvestigation({
+      spans,
+      harness: 'codex',
+      sessionCount: 1,
+      generatedAt: '2026-01-01T00:00:02.000Z',
+    })
+
+    expect(result.findings.some((finding) => finding.claim.includes('skill usage'))).toBe(false)
+    expect(result.report).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
+    expect(result.report).toContain('Materialized skill catalogs/instructions:** 1/1')
+    expect(result.report).not.toContain('Skill penetration')
   })
 })
 
