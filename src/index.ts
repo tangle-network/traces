@@ -19,11 +19,9 @@ export { JsonSourceError, readJsonFile } from './json.js'
 export { JsonlParseError, readJsonl, takeJsonl } from './jsonl.js'
 export type { JsonlCorruptionReceipt, JsonlReadOptions } from './jsonl.js'
 export {
-  MAX_SESSION_CORRUPTION_ATTRIBUTE_BYTES,
-  MAX_SESSION_CORRUPTION_RECEIPTS,
   recordSessionCorruption,
-  SessionCorruptionLimitError,
   sessionIntegrityAttributes,
+  stampSessionIntegrity,
 } from './integrity.js'
 export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp

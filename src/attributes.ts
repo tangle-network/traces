@@ -40,11 +40,18 @@ export const ATTR = {
   UPLOADER: 'tangle.uploader',
   REDACTION_VERSION: 'redaction.version',
   REDACTION_COUNT: 'redaction.count',
-  /** Upload contract: degraded source status and location-only corruption receipts.
+  /** Upload contract: bounded root summary plus location-only receipt child spans.
    *  Receipt hashes are deliberate integrity evidence; raw malformed bytes never upload. */
   SESSION_INTEGRITY: 'traces.session.integrity',
   CORRUPTION_COUNT: 'traces.session.corruption_count',
-  CORRUPTION_RECEIPTS: 'traces.session.corruption_receipts',
+  CORRUPTION_DIGEST: 'traces.session.corruption_digest',
+  CORRUPTION_RECEIPT_VERSION: 'traces.session.corruption.receipt_version',
+  CORRUPTION_RECEIPT_KIND: 'traces.session.corruption.kind',
+  CORRUPTION_SOURCE_PATH: 'traces.session.corruption.source_path',
+  CORRUPTION_LINE_NUMBER: 'traces.session.corruption.line_number',
+  CORRUPTION_BYTE_OFFSET: 'traces.session.corruption.byte_offset',
+  CORRUPTION_BYTE_LENGTH: 'traces.session.corruption.byte_length',
+  CORRUPTION_SHA256: 'traces.session.corruption.sha256',
   RAW_SOURCE_RETENTION: 'traces.session.raw_source_retention',
 } as const
 

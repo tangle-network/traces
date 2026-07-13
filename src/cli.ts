@@ -28,6 +28,7 @@ import { basename, resolve } from 'node:path'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import { ATTR } from './attributes.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -54,7 +55,14 @@ import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { analyzeReactions } from './reactions.js'
 import { locateSessions, parseSession } from './session-source.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
-import { renderAdoption, renderPipelines, renderReactions, renderReport, summarizeDeterministicSignals } from './report.js'
+import {
+  CORRUPTION_RECEIPT_DISPLAY_LIMIT,
+  renderAdoption,
+  renderPipelines,
+  renderReactions,
+  renderReport,
+  summarizeDeterministicSignals,
+} from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionCorruptionReceipt, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
@@ -230,6 +238,8 @@ interface SelectedSessionSource {
   role: 'operator' | 'child' | 'unknown'
   parentSessionId?: string
   integrity: 'complete' | 'degraded_not_lossless'
+  corruptionCount?: number
+  corruptionDigest?: string
   corruptions?: readonly SessionCorruptionReceipt[]
 }
 
@@ -242,7 +252,7 @@ interface CollectedSpans {
 }
 
 function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): SelectedSessionSource {
-  const root = spans.find((item) => item.parent_span_id === null)
+  const root = spans.find((item) => item.parent_span_id === null) ?? spans[0]
   const prompt = spans.find(
     (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
   ) ?? spans.find((item) => item.name === 'user.prompt')
@@ -253,6 +263,7 @@ function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): Sel
     : firstLine
   const role = root?.attributes['traces.session.role']
   const parentSessionId = root?.attributes['traces.parent_session_id']
+  const corruptionDigest = root?.attributes[ATTR.CORRUPTION_DIGEST]
   return {
     sessionId: root?.trace_id ?? ref.sessionId,
     path: ref.path,
@@ -260,7 +271,11 @@ function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): Sel
     role: role === 'operator' || role === 'child' ? role : 'unknown',
     ...(typeof parentSessionId === 'string' ? { parentSessionId } : {}),
     integrity: ref.integrity?.status ?? 'complete',
-    ...(ref.integrity ? { corruptions: ref.integrity.corruptions } : {}),
+    ...(ref.integrity ? {
+      corruptionCount: ref.integrity.corruptions.length,
+      ...(typeof corruptionDigest === 'string' ? { corruptionDigest } : {}),
+      corruptions: ref.integrity.corruptions.slice(0, CORRUPTION_RECEIPT_DISPLAY_LIMIT),
+    } : {}),
   }
 }
 

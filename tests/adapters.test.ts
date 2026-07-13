@@ -20,7 +20,7 @@ import { PiAdapter } from '../src/adapters/pi.js'
 import { QwenAdapter } from '../src/adapters/qwen.js'
 import { TOOL_IO_VALUE_MAX_BYTES, toolIoAttributes } from '../src/adapters/tool-io.js'
 import { JsonSourceError, type JsonSourceErrorKind } from '../src/json.js'
-import { MAX_SESSION_CORRUPTION_RECEIPTS, SessionCorruptionLimitError } from '../src/integrity.js'
+import { stampSessionIntegrity } from '../src/integrity.js'
 import { JsonlParseError } from '../src/jsonl.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import { parseSession } from '../src/session-source.js'
@@ -320,7 +320,16 @@ describe('JSONL adapter streaming', () => {
     })
     expect(root.attributes['traces.session.integrity']).toBe('degraded_not_lossless')
     expect(root.attributes['traces.session.corruption_count']).toBe(1)
-    expect(String(root.attributes['traces.session.corruption_receipts'])).not.toContain(rawSecret)
+    expect(root.attributes['traces.session.corruption_digest']).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(root.attributes['traces.session.corruption_receipts']).toBeUndefined()
+    const receiptSpan = spans.find((item) => item.name === 'source.corruption.receipt')!
+    expect(receiptSpan.parent_span_id).toBe(root.span_id)
+    expect(receiptSpan.attributes).toMatchObject({
+      'traces.session.corruption.source_path': path,
+      'traces.session.corruption.line_number': 3,
+      'traces.session.corruption.sha256': createHash('sha256').update(rawSecret).digest('hex'),
+    })
+    expect(JSON.stringify(receiptSpan.attributes)).not.toContain(rawSecret)
     await expectJsonlParseFailure(
       parseSession(new CodexAdapter(), refFor(path, 'codex'), { corruptionMode: 'strict' }),
       path,
@@ -329,28 +338,86 @@ describe('JSONL adapter streaming', () => {
     )
   })
 
-  it('fails loudly at the bounded corruption-receipt limit', async () => {
-    const path = join(dir, 'claude-corruption-limit.jsonl')
+  it('retains later valid records and receipts after more than 128 corruptions', async () => {
+    const path = join(dir, `codex-many-corruptions-${'x'.repeat(160)}.jsonl`)
     const malformed = Array.from(
-      { length: MAX_SESSION_CORRUPTION_RECEIPTS + 1 },
-      (_, index) => `secret-corrupt-record-${index}`,
+      { length: 130 },
+      (_, index) => `secret-noisy-record-${index}`,
     )
-    writeFileSync(path, ['{}', ...malformed, '{}'].join('\n'))
-    const ref = refFor(path, 'claude-code')
+    const lines = [
+      JSON.stringify({
+        type: 'session_meta',
+        timestamp: '2026-07-13T00:00:00.000Z',
+        payload: { id: 'noisy-codex', cwd: '/tmp/noisy' },
+      }),
+      JSON.stringify({
+        type: 'response_item',
+        timestamp: '2026-07-13T00:00:01.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'before noise' }] },
+      }),
+      ...malformed,
+      JSON.stringify({
+        type: 'response_item',
+        timestamp: '2026-07-13T00:00:02.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'after noise' }] },
+      }),
+    ]
+    writeFileSync(path, `${lines.join('\n')}\n`)
+    const ref = refFor(path, 'codex')
 
-    const error = await new ClaudeAdapter().parse(ref).then(
-      () => undefined,
-      (cause: unknown) => cause,
-    )
+    const spans = await parseSession(new CodexAdapter(), ref)
+    const root = spans.find((item) => item.parent_span_id === null)!
+    const receiptSpans = spans.filter((item) => item.name === 'source.corruption.receipt')
 
-    expect(error).toBeInstanceOf(SessionCorruptionLimitError)
-    expect(error).toMatchObject({
-      sourcePath: path,
-      lineNumber: MAX_SESSION_CORRUPTION_RECEIPTS + 2,
-      receiptCount: MAX_SESSION_CORRUPTION_RECEIPTS + 1,
+    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content)).toEqual([
+      'before noise',
+      'after noise',
+    ])
+    expect(ref.integrity?.corruptions).toHaveLength(malformed.length)
+    expect(root.attributes).toMatchObject({
+      'traces.session.integrity': 'degraded_not_lossless',
+      'traces.session.corruption_count': malformed.length,
     })
-    expect(ref.integrity?.corruptions).toHaveLength(MAX_SESSION_CORRUPTION_RECEIPTS)
-    expect(JSON.stringify(error)).not.toContain(malformed.at(-1))
+    expect(root.attributes['traces.session.corruption_digest']).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(root.attributes['traces.session.corruption_receipts']).toBeUndefined()
+    const rootCorruptionAttributes = Object.fromEntries(
+      Object.entries(root.attributes).filter(([key]) => key.startsWith('traces.session.corruption_')),
+    )
+    expect(Buffer.byteLength(JSON.stringify(rootCorruptionAttributes))).toBeLessThan(256)
+    expect(receiptSpans).toHaveLength(malformed.length)
+    expect(new Set(receiptSpans.map((item) => item.span_id))).toHaveLength(malformed.length)
+    expect(receiptSpans.every((item) =>
+      Buffer.byteLength(JSON.stringify(item.attributes)) < 16 * 1024,
+    )).toBe(true)
+    let byteOffset = Buffer.byteLength(`${lines[0]}\n${lines[1]}\n`)
+    for (const [index, receiptSpan] of receiptSpans.entries()) {
+      expect(receiptSpan).toMatchObject({
+        trace_id: 'noisy-codex',
+        parent_span_id: root.span_id,
+        attributes: {
+          'traces.session.integrity': 'degraded_not_lossless',
+          'traces.session.corruption.receipt_version': 1,
+          'traces.session.corruption.kind': 'jsonl_corruption',
+          'traces.session.corruption.source_path': path,
+          'traces.session.corruption.line_number': index + 3,
+          'traces.session.corruption.byte_offset': byteOffset,
+          'traces.session.corruption.byte_length': Buffer.byteLength(malformed[index]!),
+          'traces.session.corruption.sha256': createHash('sha256').update(malformed[index]!).digest('hex'),
+          'traces.session.raw_source_retention': 'local_source_only',
+        },
+      })
+      byteOffset += Buffer.byteLength(malformed[index]!) + 1
+    }
+    expect(JSON.stringify(receiptSpans)).not.toContain('secret-noisy-record')
+    const spanIds = spans.map((item) => item.span_id)
+    stampSessionIntegrity(ref, spans)
+    expect(spans.map((item) => item.span_id)).toEqual(spanIds)
+    await expectJsonlParseFailure(
+      parseSession(new CodexAdapter(), refFor(path, 'codex'), { corruptionMode: 'strict' }),
+      path,
+      3,
+      malformed[0]!,
+    )
   })
 })
 

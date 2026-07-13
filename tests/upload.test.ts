@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { toolIoAttributes } from '../src/adapters/tool-io.js'
-import { sessionIntegrityAttributes } from '../src/integrity.js'
+import { stampSessionIntegrity } from '../src/integrity.js'
 import { span } from '../src/otlp.js'
 import { applyRedactor, redactSpans } from '../src/redact.js'
 import { executeUpload, PartialUploadError, toTraceSpanEvents } from '../src/upload.js'
@@ -263,35 +263,38 @@ describe('executeUpload final identity and acceptance', () => {
   })
 
   it('uploads corruption provenance after normalization without malformed content', async () => {
-    const rawSecret = 'secret-malformed-upload-record'
+    const rawSecrets = Array.from({ length: 130 }, (_, index) => `secret-malformed-upload-record-${index}`)
+    const sourcePath = `/safe/${'x'.repeat(160)}/session.jsonl`
     const item = uploadItem('safe prompt') as UploadPlan['items'][number]
     item.ref.integrity = {
       status: 'degraded_not_lossless',
-      corruptions: [{
+      corruptions: rawSecrets.map((rawSecret, index) => ({
         receiptVersion: 1,
-        kind: 'jsonl_corruption',
-        status: 'degraded_not_lossless',
+        kind: 'jsonl_corruption' as const,
+        status: 'degraded_not_lossless' as const,
         harness: 'claude-code',
         sessionId: 'sess1',
-        sourcePath: '/safe/session.jsonl',
-        lineNumber: 7,
-        byteOffset: 91,
+        sourcePath,
+        lineNumber: index + 7,
+        byteOffset: index * 100,
         byteLength: Buffer.byteLength(rawSecret),
         sha256: createHash('sha256').update(rawSecret).digest('hex'),
-        rawBytes: 'local_source_only',
-      }],
+        rawBytes: 'local_source_only' as const,
+      })),
     }
-    Object.assign(item.spans[0]!.attributes, sessionIntegrityAttributes(item.ref))
+    stampSessionIntegrity(item.ref, item.spans)
     item.spans = redactSpans(item.spans).spans
     const calls: Parameters<UploadBackend['ingestTraces']>[0][] = []
+    const idempotencyKeys: string[] = []
 
     await executeUpload(
       { items: [item], state: {} },
       {
         stripContent: true,
         backend: {
-          async ingestTraces(events) {
+          async ingestTraces(events, idempotencyKey) {
             calls.push(events)
+            idempotencyKeys.push(idempotencyKey!)
             return { accepted: events.length }
           },
         },
@@ -299,16 +302,44 @@ describe('executeUpload final identity and acceptance', () => {
     )
 
     const payload = JSON.stringify(calls)
-    const receipt = JSON.parse(String(calls[0]![0]!.attributes['traces.session.corruption_receipts']))
-    expect(payload).not.toContain(rawSecret)
-    expect(calls[0]![0]!.attributes).toMatchObject({
+    const rootEvent = calls[0]!.find((event) => !event.parentSpanId)!
+    const receiptEvents = calls[0]!.filter((event) => event.name === 'source.corruption.receipt')
+    expect(payload).not.toContain('secret-malformed-upload-record')
+    expect(rootEvent.attributes).toMatchObject({
       'traces.session.integrity': 'degraded_not_lossless',
-      'traces.session.corruption_count': 1,
+      'traces.session.corruption_count': rawSecrets.length,
       'traces.session.raw_source_retention': 'local_source_only',
     })
-    expect(receipt).toEqual(item.ref.integrity.corruptions)
-    expect(receipt[0].sha256).toBe(createHash('sha256').update(rawSecret).digest('hex'))
-    expect(receipt[0].rawBytes).toBe('local_source_only')
+    const expectedDigest = createHash('sha256')
+    for (const [index, rawSecret] of rawSecrets.entries()) {
+      expectedDigest.update(JSON.stringify([
+        sourcePath,
+        index + 7,
+        index * 100,
+        Buffer.byteLength(rawSecret),
+        createHash('sha256').update(rawSecret).digest('hex'),
+      ]))
+      expectedDigest.update('\n')
+    }
+    expect(rootEvent.attributes['traces.session.corruption_digest']).toBe(`sha256:${expectedDigest.digest('hex')}`)
+    expect(rootEvent.attributes['traces.session.corruption_receipts']).toBeUndefined()
+    expect(receiptEvents).toHaveLength(rawSecrets.length)
+    expect(new Set(receiptEvents.map((event) => event.spanId))).toHaveLength(rawSecrets.length)
+    for (const [index, receiptEvent] of receiptEvents.entries()) {
+      expect(receiptEvent.parentSpanId).toBe(rootEvent.spanId)
+      expect(receiptEvent.attributes).toMatchObject({
+        'traces.session.corruption.receipt_version': 1,
+        'traces.session.corruption.kind': 'jsonl_corruption',
+        'traces.session.corruption.source_path': sourcePath,
+        'traces.session.corruption.line_number': index + 7,
+        'traces.session.corruption.byte_offset': index * 100,
+        'traces.session.corruption.byte_length': Buffer.byteLength(rawSecrets[index]!),
+        'traces.session.corruption.sha256': createHash('sha256').update(rawSecrets[index]!).digest('hex'),
+        'traces.session.raw_source_retention': 'local_source_only',
+      })
+    }
+    expect(calls[0]).toHaveLength(rawSecrets.length + 1)
+    expect(idempotencyKeys[0]).toMatch(/^claude-code:sess1:[a-f0-9]{32}$/)
   })
 })
 

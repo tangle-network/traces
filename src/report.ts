@@ -13,6 +13,7 @@ import type { ReactionReport } from './reactions.js'
 import type { SessionCorruptionReceipt } from './types.js'
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+export const CORRUPTION_RECEIPT_DISPLAY_LIMIT = 100
 const SEVERITY_BADGE: Record<string, string> = {
   critical: '🔴 CRITICAL',
   high: '🟠 HIGH',
@@ -37,6 +38,8 @@ export interface ReportSource {
   role: 'operator' | 'child' | 'unknown'
   parentSessionId?: string
   integrity?: 'complete' | 'degraded_not_lossless'
+  corruptionCount?: number
+  corruptionDigest?: string
   corruptions?: readonly SessionCorruptionReceipt[]
 }
 
@@ -106,7 +109,7 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
     lines.push('| Role | Session ID | Parent session | Integrity | Subject (first prompt line) | Source path |')
     lines.push('|---|---|---|---|---|---|')
     for (const source of meta.sources) {
-      const corruptionCount = source.corruptions?.length ?? 0
+      const corruptionCount = source.corruptionCount ?? source.corruptions?.length ?? 0
       const integrity = source.integrity === 'degraded_not_lossless'
         ? `degraded, not lossless (${corruptionCount} corrupt ${plural(corruptionCount, 'record')})`
         : 'complete'
@@ -127,8 +130,19 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
       lines.push('')
     }
 
-    const corruptions = meta.sources.flatMap((source) => source.corruptions ?? [])
-    if (corruptions.length > 0) {
+    const totalCorruptionCount = meta.sources.reduce(
+      (total, source) => total + (source.corruptionCount ?? source.corruptions?.length ?? 0),
+      0,
+    )
+    const corruptions: SessionCorruptionReceipt[] = []
+    for (const source of meta.sources) {
+      for (const receipt of source.corruptions ?? []) {
+        if (corruptions.length === CORRUPTION_RECEIPT_DISPLAY_LIMIT) break
+        corruptions.push(receipt)
+      }
+      if (corruptions.length === CORRUPTION_RECEIPT_DISPLAY_LIMIT) break
+    }
+    if (totalCorruptionCount > 0) {
       lines.push('## Source corruption receipts')
       lines.push('')
       lines.push(
@@ -137,16 +151,33 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
           'the local source file still contains that byte range.',
       )
       lines.push('')
-      lines.push('| Session ID | Source path | Line | Byte offset | Byte length | SHA-256 | Raw bytes |')
-      lines.push('|---|---|---:|---:|---:|---|---|')
-      for (const receipt of corruptions) {
-        lines.push(
-          `| \`${tableCell(receipt.sessionId)}\` | \`${tableCell(receipt.sourcePath)}\` | ` +
-            `${receipt.lineNumber} | ${receipt.byteOffset} | ${receipt.byteLength} | ` +
-            `\`${receipt.sha256}\` | local source only |`,
-        )
+      for (const source of meta.sources) {
+        const count = source.corruptionCount ?? source.corruptions?.length ?? 0
+        if (count === 0) continue
+        const digest = source.corruptionDigest ? `, digest \`${source.corruptionDigest}\`` : ''
+        lines.push(`- Session \`${tableCell(source.sessionId)}\`: ${count} ${plural(count, 'receipt')}${digest}.`)
       }
       lines.push('')
+      if (corruptions.length > 0) {
+        lines.push('| Session ID | Source path | Line | Byte offset | Byte length | SHA-256 | Raw bytes |')
+        lines.push('|---|---|---:|---:|---:|---|---|')
+        for (const receipt of corruptions) {
+          lines.push(
+            `| \`${tableCell(receipt.sessionId)}\` | \`${tableCell(receipt.sourcePath)}\` | ` +
+              `${receipt.lineNumber} | ${receipt.byteOffset} | ${receipt.byteLength} | ` +
+              `\`${receipt.sha256}\` | local source only |`,
+          )
+        }
+        lines.push('')
+      }
+      const omitted = totalCorruptionCount - corruptions.length
+      if (omitted > 0) {
+        lines.push(
+          `_${omitted} additional ${plural(omitted, 'receipt')} omitted from this report; ` +
+            'all receipts remain in `source.corruption.receipt` child spans._',
+        )
+        lines.push('')
+      }
     }
   }
 

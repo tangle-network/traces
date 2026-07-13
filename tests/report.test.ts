@@ -99,6 +99,8 @@ describe('renderReport', () => {
         sessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
         role: 'operator',
         integrity: 'degraded_not_lossless',
+        corruptionCount: 130,
+        corruptionDigest: `sha256:${'1'.repeat(64)}`,
         path: sourcePath,
         subject: 'Operator task',
         corruptions: [{
@@ -117,9 +119,12 @@ describe('renderReport', () => {
       }],
     })
 
-    expect(report).toContain('degraded, not lossless (1 corrupt record)')
+    expect(report).toContain('degraded, not lossless (130 corrupt records)')
     expect(report).toContain('## Source corruption receipts')
+    expect(report).toContain(`130 receipts, digest \`sha256:${'1'.repeat(64)}\``)
     expect(report).toContain('| 8558 | 22424907 |')
+    expect(report).toContain('129 additional receipts omitted from this report')
+    expect(report).toContain('all receipts remain in `source.corruption.receipt` child spans')
     expect(report).toContain(sha256)
     expect(report).toContain('exact bytes are retrievable only while the local source file still contains that byte range')
     expect(report).not.toContain(rawSecret)
