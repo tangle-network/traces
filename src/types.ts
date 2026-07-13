@@ -11,6 +11,24 @@
  */
 
 import type { OtlpSpan } from './otlp.js'
+import type { JsonlCorruptionReceipt } from './jsonl.js'
+
+export type CorruptionMode = 'recover' | 'strict'
+
+export interface ParseOptions {
+  /** Recover valid JSONL records by default; strict rejects the first corruption. */
+  corruptionMode?: CorruptionMode
+}
+
+export interface SessionCorruptionReceipt extends JsonlCorruptionReceipt {
+  harness: string
+  sessionId: string
+}
+
+export interface SessionIntegrity {
+  status: 'degraded_not_lossless'
+  corruptions: SessionCorruptionReceipt[]
+}
 
 /** A single discovered session, before parsing. */
 export interface SessionRef {
@@ -24,6 +42,8 @@ export interface SessionRef {
   cwd: string | null
   /** Last-modified epoch ms — used for `--last N` recency ordering. */
   mtimeMs: number
+  /** Present when parsing recovered valid records around corrupt source records. */
+  integrity?: SessionIntegrity
 }
 
 export interface LocateOptions {
@@ -41,5 +61,5 @@ export interface HarnessTraceAdapter {
   /** Discover session files for this harness on disk. */
   locate(opts?: LocateOptions): Promise<SessionRef[]>
   /** Parse one discovered session into normalized OTLP spans. */
-  parse(ref: SessionRef): Promise<OtlpSpan[]>
+  parse(ref: SessionRef, options?: ParseOptions): Promise<OtlpSpan[]>
 }

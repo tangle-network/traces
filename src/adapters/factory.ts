@@ -14,11 +14,12 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
@@ -105,7 +106,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     // Sidecar holds model + session-total tokens.
     let settings: FactorySettings = {}
     try {
@@ -125,7 +126,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
     let step = 0
     let lastLlm = sourceRootId
 
-    for await (const l of readJsonl<FactoryLine>(ref.path)) {
+    for await (const l of readJsonl<FactoryLine>(ref.path, sessionJsonlOptions(ref, options))) {
       if (!sawLine) {
         firstTimestamp = l.timestamp
         sawLine = true

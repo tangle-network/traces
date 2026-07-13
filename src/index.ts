@@ -16,7 +16,15 @@ export * from './otlp.js' // OtlpSpan, span(), serializeSpans(), writeOtlpFile()
 export * from './attributes.js' // ATTR keys, INGEST_SOURCE_CLI, DEFAULT_HARNESS
 export * from './time.js' // parseIsoToEpochMs(), parseSince()
 export { JsonSourceError, readJsonFile } from './json.js'
-export { JsonlParseError } from './jsonl.js'
+export { JsonlParseError, readJsonl, takeJsonl } from './jsonl.js'
+export type { JsonlCorruptionReceipt, JsonlReadOptions } from './jsonl.js'
+export {
+  MAX_SESSION_CORRUPTION_ATTRIBUTE_BYTES,
+  MAX_SESSION_CORRUPTION_RECEIPTS,
+  recordSessionCorruption,
+  SessionCorruptionLimitError,
+  sessionIntegrityAttributes,
+} from './integrity.js'
 export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp
 export * from './repo.js' // resolveRepoAttrs() — per-session repo/git resource labels

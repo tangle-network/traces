@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, mkdirSync, mkdtempSync, openSync, statSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import { analyzeAdoption } from '../src/adoption.js'
 import { AmpAdapter } from '../src/adapters/amp.js'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
@@ -20,11 +20,14 @@ import { PiAdapter } from '../src/adapters/pi.js'
 import { QwenAdapter } from '../src/adapters/qwen.js'
 import { TOOL_IO_VALUE_MAX_BYTES, toolIoAttributes } from '../src/adapters/tool-io.js'
 import { JsonSourceError, type JsonSourceErrorKind } from '../src/json.js'
+import { MAX_SESSION_CORRUPTION_RECEIPTS, SessionCorruptionLimitError } from '../src/integrity.js'
 import { JsonlParseError } from '../src/jsonl.js'
 import type { OtlpSpan } from '../src/otlp.js'
+import { parseSession } from '../src/session-source.js'
 import type { SessionRef } from '../src/types.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'tt-adapters-'))
+afterAll(() => rmSync(dir, { recursive: true, force: true }))
 
 function refFor(path: string, harness: string): SessionRef {
   return { harness, sessionId: 'fixture', path, cwd: null, mtimeMs: 0 }
@@ -143,15 +146,31 @@ describe('JSONL adapter streaming', () => {
     })
   })
 
-  it.each(adapters)('$harness propagates malformed main-session JSON with its location', async ({ harness, make }) => {
+  it.each(adapters)('$harness recovers malformed records by default and preserves strict mode', async ({ harness, make }) => {
     const path = join(dir, `${harness}-malformed-session.jsonl`)
     const rawSecret = `secret-${harness}-session-row`
     writeFileSync(path, `{}\n${rawSecret}\n{}\n`)
 
-    await expectJsonlParseFailure(make().parse(refFor(path, harness)), path, 2, rawSecret)
+    const recoveredRef = refFor(path, harness)
+    await expect(make().parse(recoveredRef)).resolves.not.toHaveLength(0)
+    expect(recoveredRef.integrity).toMatchObject({
+      status: 'degraded_not_lossless',
+      corruptions: [{
+        sourcePath: path,
+        lineNumber: 2,
+        sha256: createHash('sha256').update(rawSecret).digest('hex'),
+      }],
+    })
+    expect(JSON.stringify(recoveredRef.integrity)).not.toContain(rawSecret)
+    await expectJsonlParseFailure(
+      make().parse(refFor(path, harness), { corruptionMode: 'strict' }),
+      path,
+      2,
+      rawSecret,
+    )
   })
 
-  it('propagates malformed Claude subagent JSON with its location', async () => {
+  it('recovers malformed Claude subagent records by default and preserves strict mode', async () => {
     const path = join(dir, 'claude-malformed-subagent.jsonl')
     writeFileSync(path, '{}\n')
     const subDir = join(dir, 'claude-malformed-subagent', 'subagents')
@@ -160,20 +179,26 @@ describe('JSONL adapter streaming', () => {
     const rawSecret = 'secret-claude-subagent-row'
     writeFileSync(subagentPath, `{}\n${rawSecret}\n{}\n`)
 
+    const recoveredRef = refFor(path, 'claude-code')
+    await expect(new ClaudeAdapter().parse(recoveredRef)).resolves.not.toHaveLength(0)
+    expect(recoveredRef.integrity).toMatchObject({
+      status: 'degraded_not_lossless',
+      corruptions: [{ sourcePath: subagentPath, lineNumber: 2 }],
+    })
     await expectJsonlParseFailure(
-      new ClaudeAdapter().parse(refFor(path, 'claude-code')),
+      new ClaudeAdapter().parse(refFor(path, 'claude-code'), { corruptionMode: 'strict' }),
       subagentPath,
       2,
       rawSecret,
     )
   })
 
-  it('caps tool inputs while parsing a 100 MB file below 128 MB peak RSS', () => {
+  it('recovers corruption while parsing a 100 MB file below 128 MB peak RSS', () => {
     const path = join(dir, 'large-tool-inputs.jsonl')
-    const suffix = 'x'.repeat(512 * 1024)
+    const suffix = 'x'.repeat(1024 * 1024)
     const file = openSync(path, 'w')
     try {
-      for (let index = 0; index < 201; index += 1) {
+      for (let index = 0; index < 101; index += 1) {
         writeSync(
           file,
           `${JSON.stringify({
@@ -194,7 +219,9 @@ describe('JSONL adapter streaming', () => {
             },
           })}\n`,
         )
+        if (index === 50) writeSync(file, 'secret-large-middle-record\n')
       }
+      writeSync(file, 'secret-large-final-record')
     } finally {
       closeSync(file)
     }
@@ -203,13 +230,14 @@ describe('JSONL adapter streaming', () => {
     const adapterUrl = pathToFileURL(join(process.cwd(), 'src/adapters/claude.ts')).href
     const childSource = `
       import { ClaudeAdapter } from ${JSON.stringify(adapterUrl)}
-      const spans = await new ClaudeAdapter().parse({
+      const ref = {
         harness: 'claude-code',
         sessionId: 'large',
         path: ${JSON.stringify(path)},
         cwd: null,
         mtimeMs: 0,
-      })
+      }
+      const spans = await new ClaudeAdapter().parse(ref)
       const tools = spans.filter((span) => span.attributes['openinference.span.kind'] === 'TOOL')
       process.stdout.write(JSON.stringify({
         spanCount: spans.length,
@@ -220,13 +248,14 @@ describe('JSONL adapter streaming', () => {
           span.attributes['traces.input.truncated'] === true &&
           Buffer.byteLength(String(span.attributes['input.value'])) <= 16 * 1024
         ),
+        integrity: ref.integrity,
       }))
     `
     const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' }
     delete env.NODE_OPTIONS
     const child = spawnSync(
       process.execPath,
-      ['--max-old-space-size=48', '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      ['--max-old-space-size=40', '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
       { cwd: process.cwd(), encoding: 'utf8', env, timeout: 30_000 },
     )
 
@@ -236,9 +265,92 @@ describe('JSONL adapter streaming', () => {
       toolCount: number
       maxRssKb: number
       bounded: boolean
+      integrity: SessionRef['integrity']
     }
-    expect(result).toMatchObject({ spanCount: 403, toolCount: 201, bounded: true })
+    expect(result).toMatchObject({
+      spanCount: 203,
+      toolCount: 101,
+      bounded: true,
+      integrity: { status: 'degraded_not_lossless' },
+    })
+    expect(result.integrity?.corruptions).toHaveLength(2)
     expect(result.maxRssKb).toBeLessThan(128 * 1024)
+  })
+
+  it('customer session parsing retains valid Codex records and stamps a degraded receipt', async () => {
+    const path = join(dir, 'codex-recovered-session.jsonl')
+    const rawSecret = 'secret-corrupt-codex-record'
+    const lines = [
+      JSON.stringify({
+        type: 'session_meta',
+        timestamp: '2026-07-13T00:00:00.000Z',
+        payload: { id: 'recovered-codex', cwd: '/tmp/recovered' },
+      }),
+      JSON.stringify({
+        type: 'response_item',
+        timestamp: '2026-07-13T00:00:01.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'before corruption' }] },
+      }),
+      rawSecret,
+      JSON.stringify({
+        type: 'response_item',
+        timestamp: '2026-07-13T00:00:02.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'after corruption' }] },
+      }),
+    ]
+    writeFileSync(path, `${lines.join('\n')}\n`)
+    const ref = refFor(path, 'codex')
+
+    const spans = await parseSession(new CodexAdapter(), ref)
+    const root = spans.find((item) => item.parent_span_id === null)!
+
+    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content)).toEqual([
+      'before corruption',
+      'after corruption',
+    ])
+    expect(ref.integrity).toMatchObject({
+      status: 'degraded_not_lossless',
+      corruptions: [{
+        sessionId: 'recovered-codex',
+        sourcePath: path,
+        lineNumber: 3,
+        sha256: createHash('sha256').update(rawSecret).digest('hex'),
+        rawBytes: 'local_source_only',
+      }],
+    })
+    expect(root.attributes['traces.session.integrity']).toBe('degraded_not_lossless')
+    expect(root.attributes['traces.session.corruption_count']).toBe(1)
+    expect(String(root.attributes['traces.session.corruption_receipts'])).not.toContain(rawSecret)
+    await expectJsonlParseFailure(
+      parseSession(new CodexAdapter(), refFor(path, 'codex'), { corruptionMode: 'strict' }),
+      path,
+      3,
+      rawSecret,
+    )
+  })
+
+  it('fails loudly at the bounded corruption-receipt limit', async () => {
+    const path = join(dir, 'claude-corruption-limit.jsonl')
+    const malformed = Array.from(
+      { length: MAX_SESSION_CORRUPTION_RECEIPTS + 1 },
+      (_, index) => `secret-corrupt-record-${index}`,
+    )
+    writeFileSync(path, ['{}', ...malformed, '{}'].join('\n'))
+    const ref = refFor(path, 'claude-code')
+
+    const error = await new ClaudeAdapter().parse(ref).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    expect(error).toBeInstanceOf(SessionCorruptionLimitError)
+    expect(error).toMatchObject({
+      sourcePath: path,
+      lineNumber: MAX_SESSION_CORRUPTION_RECEIPTS + 2,
+      receiptCount: MAX_SESSION_CORRUPTION_RECEIPTS + 1,
+    })
+    expect(ref.integrity?.corruptions).toHaveLength(MAX_SESSION_CORRUPTION_RECEIPTS)
+    expect(JSON.stringify(error)).not.toContain(malformed.at(-1))
   })
 })
 
@@ -1162,7 +1274,7 @@ describe('codex cwd recovery — continuation sessions', () => {
     }
   })
 
-  it('rejects malformed JSON in a discovered session head', async () => {
+  it('discovers a session with malformed head data and records its corruption', async () => {
     const base = mkdtempSync(join(tmpdir(), 'tt-codex-malformed-'))
     const day = join(base, 'sessions', '2026', '07', '13')
     mkdirSync(day, { recursive: true })
@@ -1173,9 +1285,42 @@ describe('codex cwd recovery — continuation sessions', () => {
       `${JSON.stringify({ type: 'session_meta', payload: { id: 'malformed', cwd: '/x' } })}\n${rawSecret}\n`,
     )
 
-    await withEnv('CODEX_HOME', base, () =>
-      expectJsonlParseFailure(new CodexAdapter().locate({}), path, 2, rawSecret),
-    )
+    const refs = await withEnv('CODEX_HOME', base, () => new CodexAdapter().locate({}))
+    expect(refs).toHaveLength(1)
+    expect(refs[0]).toMatchObject({
+      sessionId: 'malformed',
+      path,
+      integrity: {
+        status: 'degraded_not_lossless',
+        corruptions: [{
+          lineNumber: 2,
+          sha256: createHash('sha256').update(rawSecret).digest('hex'),
+        }],
+      },
+    })
+    expect(JSON.stringify(refs)).not.toContain(rawSecret)
+  })
+
+  it('keeps a degraded session with unknown cwd when a cwd filter is requested', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'tt-codex-malformed-cwd-'))
+    const day = join(base, 'sessions', '2026', '07', '13')
+    mkdirSync(day, { recursive: true })
+    const path = join(day, 'rollout-2026-07-13T00-00-00-unknown-cwd.jsonl')
+    const rawSecret = 'secret-corrupt-session-meta'
+    writeFileSync(path, `${rawSecret}\n{}\n`)
+
+    const refs = await withEnv('CODEX_HOME', base, () => new CodexAdapter().locate({ cwd: '/expected/repo' }))
+
+    expect(refs).toHaveLength(1)
+    expect(refs[0]).toMatchObject({
+      path,
+      cwd: null,
+      integrity: {
+        status: 'degraded_not_lossless',
+        corruptions: [{ lineNumber: 1 }],
+      },
+    })
+    expect(JSON.stringify(refs)).not.toContain(rawSecret)
   })
 })
 

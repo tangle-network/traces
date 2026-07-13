@@ -7,9 +7,10 @@
  */
 
 import type { OtlpSpan } from './otlp.js'
+import { stampSessionIntegrity } from './integrity.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
 import { cwdMatchesSelection, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
-import type { HarnessTraceAdapter, SessionRef } from './types.js'
+import type { HarnessTraceAdapter, ParseOptions, SessionRef } from './types.js'
 
 /**
  * Parse one session to spans and stamp per-session repo/git resource attrs
@@ -17,9 +18,14 @@ import type { HarnessTraceAdapter, SessionRef } from './types.js'
  * path funnels through here so the spine can group by repo. Repo resolution is
  * computed ONCE per session; it is fail-safe and never throws.
  */
-export async function parseSession(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<OtlpSpan[]> {
-  const spans = await adapter.parse(ref)
+export async function parseSession(
+  adapter: HarnessTraceAdapter,
+  ref: SessionRef,
+  options: ParseOptions = {},
+): Promise<OtlpSpan[]> {
+  const spans = await adapter.parse(ref, options)
   if (spans.length === 0) throw new EmptySessionError(ref.path)
+  stampSessionIntegrity(ref, spans)
   const repo = await resolveSessionRepoAttrs(ref.cwd, spans)
   if (repo.cwd) ref.cwd = repo.cwd
   stampRepoAttrs(spans, repo.attrs)
@@ -53,13 +59,13 @@ export async function locateSessions(
   const refs = await adapter.locate({ sinceMs: opts.sinceMs })
   const byKey = new Map<string, SessionRef>()
   for (const ref of refs) {
-    if (!cwdMatchesSelection(ref.cwd, cwdSelections)) continue
+    if (!cwdMatchesSelection(ref.cwd, cwdSelections) && !(ref.cwd === null && ref.integrity)) continue
     byKey.set(refKey(ref), ref)
   }
   return [...byKey.values()].sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
-export interface ScanOptions extends AdapterSelection {
+export interface ScanOptions extends AdapterSelection, ParseOptions {
   /** Filter by working directory (exact/prefix). */
   cwd?: string
   /** Only sessions modified at/after this epoch ms. */
@@ -97,7 +103,7 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
       if (opts.signal?.aborted) return
       let spans: OtlpSpan[]
       try {
-        spans = await parseSession(adapter, ref)
+        spans = await parseSession(adapter, ref, { corruptionMode: opts.corruptionMode })
       } catch (err) {
         if (!opts.onError) throw err
         opts.onError(err, ref)

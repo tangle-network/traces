@@ -17,14 +17,15 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingPathError } from '../json.js'
 import { readJsonl, takeJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { codexActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'codex'
 const SESSION_HEAD_LINES = 40
@@ -228,27 +229,35 @@ export class CodexAdapter implements HarnessTraceAdapter {
       // session leads with a turn_context (or a meta without cwd). Both line
       // types carry `payload.cwd`, so scan a bounded head for the first one —
       // otherwise these sessions come back cwd:null and lose their repo labels.
-      const head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES)
       let cwd: string | null = null
       let id = basename(path).replace(/^rollout-[\dT-]+-/, '').replace(/\.jsonl$/, '')
+      const ref: SessionRef = { harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs }
+      const head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES, sessionJsonlOptions(ref))
       for (const parsed of head) {
         if (parsed.type === 'session_meta' && parsed.payload?.id) id = parsed.payload.id
         if (!cwd && parsed.payload?.cwd) cwd = parsed.payload.cwd
         if (cwd) break
       }
-      if (opts.cwd && (!cwd || !cwd.startsWith(opts.cwd))) continue
-      refs.push({ harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs })
+      ref.sessionId = id
+      ref.cwd = cwd
+      if (ref.integrity) {
+        ref.integrity.corruptions = ref.integrity.corruptions.map((receipt) => ({ ...receipt, sessionId: id }))
+      }
+      if (opts.cwd && cwd && !cwd.startsWith(opts.cwd)) continue
+      if (opts.cwd && !cwd && !ref.integrity) continue
+      refs.push(ref)
     }
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const head = await takeJsonl<CodexLine>(ref.path, SESSION_HEAD_LINES)
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    const jsonl = sessionJsonlOptions(ref, options)
+    const head = await takeJsonl<CodexLine>(ref.path, SESSION_HEAD_LINES, jsonl)
     let first = head[0]
     let meta = head.find((line) => line.type === 'session_meta')
     let model = head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
     if (!first || !meta) {
-      for await (const line of readJsonl<CodexLine>(ref.path)) {
+      for await (const line of readJsonl<CodexLine>(ref.path, jsonl)) {
         first ??= line
         if (!meta && line.type === 'session_meta') meta = line
         if (!model && line.type === 'turn_context') model = line.payload?.model ?? null
@@ -294,7 +303,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let lastTimestamp: string | undefined
     const awaitingModel = model ? [] : [root]
 
-    for await (const l of readJsonl<CodexLine>(ref.path)) {
+    for await (const l of readJsonl<CodexLine>(ref.path, jsonl)) {
       lastTimestamp = l.timestamp
       const ts = l.timestamp ?? new Date(0).toISOString()
       if (!model && l.type === 'turn_context' && l.payload?.model) {

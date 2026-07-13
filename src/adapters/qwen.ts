@@ -15,12 +15,13 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingPathError } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import { capText, userPromptSpan } from './conversation.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'qwen'
@@ -93,7 +94,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     const sourceTraceId = ref.sessionId
     const sourceRootId = `root:${sourceTraceId}`
     const spans: OtlpSpan[] = []
@@ -104,7 +105,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
     let sawRecord = false
     let step = 0
 
-    for await (const r of readJsonl<QwenRecord>(ref.path)) {
+    for await (const r of readJsonl<QwenRecord>(ref.path, sessionJsonlOptions(ref, options))) {
       if (!sawRecord) {
         firstTimestamp = r.timestamp
         sawRecord = true

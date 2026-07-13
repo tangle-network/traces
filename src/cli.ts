@@ -56,7 +56,7 @@ import { locateSessions, parseSession } from './session-source.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { renderAdoption, renderPipelines, renderReactions, renderReport, summarizeDeterministicSignals } from './report.js'
 import { parseSince } from './time.js'
-import type { HarnessTraceAdapter, SessionRef } from './types.js'
+import type { HarnessTraceAdapter, SessionCorruptionReceipt, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
 
 interface Args {
@@ -229,6 +229,8 @@ interface SelectedSessionSource {
   subject: string
   role: 'operator' | 'child' | 'unknown'
   parentSessionId?: string
+  integrity: 'complete' | 'degraded_not_lossless'
+  corruptions?: readonly SessionCorruptionReceipt[]
 }
 
 interface CollectedSpans {
@@ -257,6 +259,8 @@ function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): Sel
     subject,
     role: role === 'operator' || role === 'child' ? role : 'unknown',
     ...(typeof parentSessionId === 'string' ? { parentSessionId } : {}),
+    integrity: ref.integrity?.status ?? 'complete',
+    ...(ref.integrity ? { corruptions: ref.integrity.corruptions } : {}),
   }
 }
 
@@ -498,6 +502,7 @@ async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
       path: args.input!,
       subject: '',
       role: 'unknown',
+      integrity: 'complete',
     })),
   }
 }

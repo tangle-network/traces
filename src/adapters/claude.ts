@@ -16,14 +16,15 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { claudeActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'claude-code'
 
@@ -292,7 +293,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     const sourceTraceId = ref.sessionId
     const sourceRootId = `root:${sourceTraceId}`
     const ctx: ClaudeStreamContext = {
@@ -308,7 +309,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     let lastTimestamp: string | undefined
     let sawEvent = false
 
-    for await (const event of readJsonl<ClaudeEvent>(ref.path)) {
+    for await (const event of readJsonl<ClaudeEvent>(ref.path, sessionJsonlOptions(ref, options))) {
       if (!sawEvent) {
         firstTimestamp = event.timestamp
         sawEvent = true
@@ -340,12 +341,18 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       ...main.spans,
     ]
 
-    await this.foldSubagents(ref, traceId, main, spans)
+    await this.foldSubagents(ref, traceId, main, spans, options)
     return spans
   }
 
   /** Parse `<session>/subagents/agent-*.jsonl`, parenting each under its Agent call. */
-  private async foldSubagents(ref: SessionRef, traceId: string, main: ParsedStream, out: OtlpSpan[]): Promise<void> {
+  private async foldSubagents(
+    ref: SessionRef,
+    traceId: string,
+    main: ParsedStream,
+    out: OtlpSpan[],
+    options: ParseOptions,
+  ): Promise<void> {
     const subDir = join(ref.path.replace(/\.jsonl$/, ''), 'subagents')
     let files: string[]
     try {
@@ -374,7 +381,10 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         rootParent: parent,
       }
       const state = createClaudeStream(ctx.startStep)
-      for await (const event of readJsonl<ClaudeEvent>(join(subDir, file))) {
+      for await (const event of readJsonl<ClaudeEvent>(
+        join(subDir, file),
+        sessionJsonlOptions(ref, options),
+      )) {
         consumeClaudeEvent(event, ctx, state)
       }
       const parsed = finishClaudeStream(state)

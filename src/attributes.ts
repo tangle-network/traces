@@ -40,6 +40,12 @@ export const ATTR = {
   UPLOADER: 'tangle.uploader',
   REDACTION_VERSION: 'redaction.version',
   REDACTION_COUNT: 'redaction.count',
+  /** Upload contract: degraded source status and location-only corruption receipts.
+   *  Receipt hashes are deliberate integrity evidence; raw malformed bytes never upload. */
+  SESSION_INTEGRITY: 'traces.session.integrity',
+  CORRUPTION_COUNT: 'traces.session.corruption_count',
+  CORRUPTION_RECEIPTS: 'traces.session.corruption_receipts',
+  RAW_SOURCE_RETENTION: 'traces.session.raw_source_retention',
 } as const
 
 /** `tangle.ingest_source` value for CLI-uploaded traces. Wire contract. */

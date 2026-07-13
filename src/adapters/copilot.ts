@@ -8,19 +8,20 @@
  * `assistant.usage` (ephemeral: `model`, `inputTokens`, `outputTokens`).
  *
  * Sub-agents interleave in the same stream — tool calls/results are joined by
- * `toolCallId`, never adjacency. Lines may contain stray newlines/separators;
- * parse line-tolerant. Schema from GitHub docs (high conf); parse unverified
- * against local data.
+ * `toolCallId`, never adjacency. Isolated invalid records produce corruption
+ * receipts while valid records continue. Schema from GitHub docs (high conf);
+ * parse unverified against local data.
  */
 
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingPathError } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'github-copilot'
@@ -79,7 +80,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     const traceId = ref.sessionId
     const rootId = `root:${traceId}`
     const spans: OtlpSpan[] = []
@@ -91,7 +92,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
     let lastLlm = rootId
     let pendingInputTokens: number | null = null
 
-    for await (const ev of readJsonl<CopilotEvent>(ref.path)) {
+    for await (const ev of readJsonl<CopilotEvent>(ref.path, sessionJsonlOptions(ref, options))) {
       if (!sawEvent) {
         firstTimestamp = ev.timestamp
         sawEvent = true

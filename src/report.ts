@@ -10,6 +10,7 @@ import type { AnalystFinding, AnalystRunResult } from '@tangle-network/agent-eva
 import type { AdoptionReport } from './adoption.js'
 import type { PipelineReport } from './pipelines.js'
 import type { ReactionReport } from './reactions.js'
+import type { SessionCorruptionReceipt } from './types.js'
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 const SEVERITY_BADGE: Record<string, string> = {
@@ -35,6 +36,8 @@ export interface ReportSource {
   subject: string
   role: 'operator' | 'child' | 'unknown'
   parentSessionId?: string
+  integrity?: 'complete' | 'degraded_not_lossless'
+  corruptions?: readonly SessionCorruptionReceipt[]
 }
 
 export interface DeterministicSummary {
@@ -100,12 +103,17 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   if (meta.sources && meta.sources.length > 0) {
     lines.push('## Selected sessions')
     lines.push('')
-    lines.push('| Role | Session ID | Parent session | Subject (first prompt line) | Source path |')
-    lines.push('|---|---|---|---|---|')
+    lines.push('| Role | Session ID | Parent session | Integrity | Subject (first prompt line) | Source path |')
+    lines.push('|---|---|---|---|---|---|')
     for (const source of meta.sources) {
+      const corruptionCount = source.corruptions?.length ?? 0
+      const integrity = source.integrity === 'degraded_not_lossless'
+        ? `degraded, not lossless (${corruptionCount} corrupt ${plural(corruptionCount, 'record')})`
+        : 'complete'
       lines.push(
         `| ${source.role} | \`${tableCell(source.sessionId)}\` | ` +
           `${source.parentSessionId ? `\`${tableCell(source.parentSessionId)}\`` : '—'} | ` +
+          `${integrity} | ` +
           `${tableCell(source.subject) || '(no prompt captured)'} | \`${tableCell(source.path)}\` |`,
       )
     }
@@ -116,6 +124,28 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
         `> Scope: ${childCount}/${meta.sources.length} selected session(s) are children. ` +
           'Counts below describe only the selected files, not their parent operator sessions.',
       )
+      lines.push('')
+    }
+
+    const corruptions = meta.sources.flatMap((source) => source.corruptions ?? [])
+    if (corruptions.length > 0) {
+      lines.push('## Source corruption receipts')
+      lines.push('')
+      lines.push(
+        '> Degraded, not lossless: every valid JSONL record was analyzed. ' +
+          'Malformed content is fingerprinted, not retained; exact bytes are retrievable only while ' +
+          'the local source file still contains that byte range.',
+      )
+      lines.push('')
+      lines.push('| Session ID | Source path | Line | Byte offset | Byte length | SHA-256 | Raw bytes |')
+      lines.push('|---|---|---:|---:|---:|---|---|')
+      for (const receipt of corruptions) {
+        lines.push(
+          `| \`${tableCell(receipt.sessionId)}\` | \`${tableCell(receipt.sourcePath)}\` | ` +
+            `${receipt.lineNumber} | ${receipt.byteOffset} | ${receipt.byteLength} | ` +
+            `\`${receipt.sha256}\` | local source only |`,
+        )
+      }
       lines.push('')
     }
   }

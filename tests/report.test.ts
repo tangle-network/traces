@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { AnalystRunResult } from '@tangle-network/agent-eval/analyst'
 import { describe, expect, it } from 'vitest'
 import type { PipelineReport } from '../src/pipelines.js'
@@ -70,6 +71,7 @@ describe('renderReport', () => {
         sessionId: '019f5aea-d6b4-7451-a3eb-60289875a357',
         parentSessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
         role: 'child',
+        integrity: 'complete',
         path: '/home/drew/.codex/sessions/2026/07/13/rollout-child.jsonl',
         subject: 'Own direct-streaming conversion for the remaining JSONL adapters.',
       }],
@@ -82,6 +84,45 @@ describe('renderReport', () => {
     expect(report).toContain('/home/drew/.codex/sessions/2026/07/13/rollout-child.jsonl')
     expect(report).toContain('| child |')
     expect(report).toContain('Counts below describe only the selected files, not their parent operator sessions.')
+  })
+
+  it('shows degraded source provenance without exposing malformed content', () => {
+    const rawSecret = 'secret-malformed-record'
+    const sha256 = createHash('sha256').update(rawSecret).digest('hex')
+    const sourcePath = '/home/drew/.codex/sessions/operator.jsonl'
+    const report = renderReport(emptyResult(), {
+      harness: 'codex',
+      sessionCount: 1,
+      spanCount: 76_400,
+      otlpPath: '/tmp/operator.openinference.jsonl',
+      sources: [{
+        sessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
+        role: 'operator',
+        integrity: 'degraded_not_lossless',
+        path: sourcePath,
+        subject: 'Operator task',
+        corruptions: [{
+          receiptVersion: 1,
+          kind: 'jsonl_corruption',
+          status: 'degraded_not_lossless',
+          harness: 'codex',
+          sessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
+          sourcePath,
+          lineNumber: 8558,
+          byteOffset: 22_424_907,
+          byteLength: Buffer.byteLength(rawSecret),
+          sha256,
+          rawBytes: 'local_source_only',
+        }],
+      }],
+    })
+
+    expect(report).toContain('degraded, not lossless (1 corrupt record)')
+    expect(report).toContain('## Source corruption receipts')
+    expect(report).toContain('| 8558 | 22424907 |')
+    expect(report).toContain(sha256)
+    expect(report).toContain('exact bytes are retrievable only while the local source file still contains that byte range')
+    expect(report).not.toContain(rawSecret)
   })
 })
 

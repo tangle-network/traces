@@ -85,6 +85,54 @@ describe('scanSessions', () => {
     await expect(scanIds({ adapters: [failingLocate] })).rejects.toThrow('locate boom')
   })
 
+  it('forwards strict corruption mode to adapters', async () => {
+    let received: string | undefined
+    const strictAdapter: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return [ref('strict')]
+      },
+      async parse(_ref, options) {
+        received = options?.corruptionMode
+        return oneSpan()
+      },
+    }
+
+    await expect(scanIds({ adapters: [strictAdapter], corruptionMode: 'strict' })).resolves.toEqual(['strict'])
+    expect(received).toBe('strict')
+  })
+
+  it('does not hide a degraded unknown-cwd session behind the cwd filter', async () => {
+    const degraded = ref('degraded')
+    degraded.integrity = {
+      status: 'degraded_not_lossless',
+      corruptions: [{
+        receiptVersion: 1,
+        kind: 'jsonl_corruption',
+        status: 'degraded_not_lossless',
+        harness: degraded.harness,
+        sessionId: degraded.sessionId,
+        sourcePath: degraded.path,
+        lineNumber: 1,
+        byteOffset: 0,
+        byteLength: 3,
+        sha256: '0'.repeat(64),
+        rawBytes: 'local_source_only',
+      }],
+    }
+    const degradedAdapter: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return [degraded]
+      },
+      async parse() {
+        return oneSpan()
+      },
+    }
+
+    await expect(scanIds({ adapters: [degradedAdapter], cwd: '/expected/repo' })).resolves.toEqual(['degraded'])
+  })
+
   it('rejects a discovered session that parses to zero spans', async () => {
     const error = await scanIds({ adapters: [adapter({ s2: [] })] }).then(
       () => undefined,
