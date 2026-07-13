@@ -207,6 +207,136 @@ describe('conversation capture — JSONL adapters', () => {
 })
 
 describe('codex current tool and subagent events', () => {
+  it('drops fork-replayed history while preserving current Codex events and actor labels', async () => {
+    const path = join(dir, 'rollout-codex-fork-replay.jsonl')
+    const sessionTimestamp = '2026-07-13T05:33:02.042Z'
+    const sessionStartedAt = Math.floor(Date.parse(sessionTimestamp) / 1_000)
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: sessionTimestamp, payload: { id: 'fork-current', cwd: '/x' } },
+        { type: 'session_meta', timestamp: sessionTimestamp, payload: { id: 'fork-parent', cwd: '/x' } },
+        {
+          type: 'event_msg',
+          timestamp: sessionTimestamp,
+          payload: { type: 'task_started', started_at: sessionStartedAt - 60, turn_id: 'parent-turn' },
+        },
+        { type: 'turn_context', timestamp: sessionTimestamp, payload: { model: 'inherited-model' } },
+        {
+          type: 'response_item',
+          timestamp: sessionTimestamp,
+          payload: {
+            type: 'message',
+            role: 'user',
+            content: '<codex_internal_context source="goal">inherited goal</codex_internal_context>',
+          },
+        },
+        {
+          type: 'event_msg',
+          timestamp: sessionTimestamp,
+          payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10_000, output_tokens: 500 } } },
+        },
+        {
+          type: 'response_item',
+          timestamp: sessionTimestamp,
+          payload: { type: 'function_call', call_id: 'inherited-tool', name: 'exec_command', arguments: '{"cmd":"old"}' },
+        },
+        {
+          type: 'response_item',
+          timestamp: sessionTimestamp,
+          payload: { type: 'function_call_output', call_id: 'inherited-tool', output: 'old output' },
+        },
+        {
+          type: 'event_msg',
+          timestamp: sessionTimestamp,
+          payload: {
+            type: 'sub_agent_activity',
+            agent_thread_id: 'inherited-thread',
+            agent_path: '/root/inherited',
+            kind: 'started',
+          },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-13T05:33:02.371Z',
+          payload: { type: 'task_started', started_at: sessionStartedAt, turn_id: 'current-turn' },
+        },
+        { type: 'turn_context', timestamp: '2026-07-13T05:33:02.371Z', payload: { model: 'current-model' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-13T05:33:02.372Z',
+          payload: {
+            type: 'message',
+            role: 'user',
+            content: '<codex_internal_context source="goal">current goal</codex_internal_context>',
+          },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-13T05:33:02.373Z',
+          payload: { type: 'message', role: 'user', content: 'real follow-up' },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-13T05:33:03.000Z',
+          payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 4 } } },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-13T05:33:04.000Z',
+          payload: { type: 'function_call', call_id: 'current-tool', name: 'exec_command', arguments: '{"cmd":"new"}' },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-13T05:33:05.000Z',
+          payload: { type: 'function_call_output', call_id: 'current-tool', output: 'new output' },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-13T05:33:06.000Z',
+          payload: {
+            type: 'sub_agent_activity',
+            agent_thread_id: 'current-thread',
+            agent_path: '/root/current',
+            kind: 'started',
+          },
+        },
+        {
+          type: 'event_msg',
+          timestamp: '2026-07-13T05:33:07.000Z',
+          payload: {
+            type: 'sub_agent_activity',
+            agent_thread_id: 'current-thread',
+            agent_path: '/root/current',
+            kind: 'completed',
+          },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    expect(spans[0]!.attributes['llm.model_name']).toBe('current-model')
+    const llmSpans = spans.filter((item) => item.name === 'llm.turn')
+    expect(llmSpans).toHaveLength(1)
+    expect(llmSpans[0]!.attributes['llm.input_tokens']).toBe(20)
+
+    const tools = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    expect(tools).toHaveLength(2)
+    expect(tools.map((item) => item.attributes['tool.name'])).toEqual(['exec_command', 'Agent'])
+    expect(tools[0]!.attributes.content).toContain('new')
+    expect(tools[0]!.status.code).toBe('OK')
+    expect(tools[1]!.attributes.content).toContain('/root/current')
+    expect(tools[1]!.status.code).toBe('OK')
+
+    const prompts = spans.filter((item) => item.name === 'user.prompt')
+    expect(prompts).toHaveLength(2)
+    expect(prompts.map((item) => item.attributes.content)).toEqual([
+      '<codex_internal_context source="goal">current goal</codex_internal_context>',
+      'real follow-up',
+    ])
+    expect(prompts.map((item) => item.attributes['tangle.actor'])).toEqual(['injected', 'human'])
+  })
+
   it('captures custom tool calls, joins their outputs, and tracks subagent lifecycles', async () => {
     const path = join(dir, 'rollout-codex-current.jsonl')
     const startedAt = Date.parse('2026-07-11T09:00:05.000Z')
