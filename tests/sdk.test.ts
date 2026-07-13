@@ -126,7 +126,8 @@ describe('executeUpload (pluggable backend)', () => {
     expect(res.acceptedSpans).toBe(spans.length)
     expect(calls).toHaveLength(1)
     expect(calls[0]!.key).toContain('sess-x')
-    expect(plan.state['synthetic:sess-x']!.hash).toBe('hash1')
+    expect(plan.state['synthetic:sess-x']!.hash).toBe(calls[0]!.key!.split(':').at(-1))
+    expect(plan.state['synthetic:sess-x']!.hash).not.toBe('hash1')
   })
 })
 

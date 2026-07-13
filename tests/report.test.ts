@@ -2,7 +2,7 @@ import type { AnalystRunResult } from '@tangle-network/agent-eval/analyst'
 import { describe, expect, it } from 'vitest'
 import type { PipelineReport } from '../src/pipelines.js'
 import type { ReactionReport } from '../src/reactions.js'
-import { renderReport, summarizeDeterministicSignals } from '../src/report.js'
+import { renderPipelines, renderReport, summarizeDeterministicSignals } from '../src/report.js'
 
 function emptyResult(): AnalystRunResult {
   return {
@@ -58,6 +58,51 @@ describe('renderReport', () => {
     expect(report).toContain('1 session(s), 10 spans')
     expect(report).toContain('**0 findings**')
     expect(report).toContain('no behavioral inefficiencies or failure modes detected')
+  })
+
+  it('shows the exact selected child session and its operator provenance', () => {
+    const report = renderReport(emptyResult(), {
+      harness: 'codex',
+      sessionCount: 1,
+      spanCount: 817,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      sources: [{
+        sessionId: '019f5aea-d6b4-7451-a3eb-60289875a357',
+        parentSessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
+        role: 'child',
+        path: '/home/drew/.codex/sessions/2026/07/13/rollout-child.jsonl',
+        subject: 'Own direct-streaming conversion for the remaining JSONL adapters.',
+      }],
+    })
+
+    expect(report).toContain('## Selected sessions')
+    expect(report).toContain('019f5aea-d6b4-7451-a3eb-60289875a357')
+    expect(report).toContain('019f24d6-b5ec-7173-acc1-f957de216ee5')
+    expect(report).toContain('Own direct-streaming conversion')
+    expect(report).toContain('/home/drew/.codex/sessions/2026/07/13/rollout-child.jsonl')
+    expect(report).toContain('| child |')
+    expect(report).toContain('Counts below describe only the selected files, not their parent operator sessions.')
+  })
+})
+
+describe('renderPipelines', () => {
+  it('labels retries as a fraction of failed calls and prints raw counts', () => {
+    const report = renderPipelines({
+      stuckLoops: { findings: [], affectedRunRatio: 0, totalRuns: 1 },
+      toolUse: [{
+        runId: 'run-report-test',
+        totalCalls: 358,
+        byTool: { bash: { calls: 358, errors: 53, duplicates: 36, avgLatencyMs: 5 } },
+        duplicateRate: 36 / 358,
+        errorRate: 53 / 358,
+        retryRate: 52 / 53,
+      }],
+    })
+
+    expect(report).toContain('36/358 repeated exactly')
+    expect(report).toContain('53/358 failed')
+    expect(report).toContain('98% of failed calls retried with the same tool (52/53)')
+    expect(report).not.toContain('98% retry')
   })
 })
 

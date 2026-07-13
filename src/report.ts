@@ -26,6 +26,15 @@ export interface ReportMeta {
   spanCount: number
   otlpPath: string
   deterministic?: DeterministicSummary
+  sources?: readonly ReportSource[]
+}
+
+export interface ReportSource {
+  sessionId: string
+  path: string
+  subject: string
+  role: 'operator' | 'child' | 'unknown'
+  parentSessionId?: string
 }
 
 export interface DeterministicSummary {
@@ -47,6 +56,10 @@ function deterministicSummaryText(summary: DeterministicSummary): string {
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return count === 1 ? singular : pluralForm
+}
+
+function tableCell(value: string): string {
+  return value.replace(/\s+/g, ' ').replaceAll('|', '\\|').trim()
 }
 
 export function summarizeDeterministicSignals(
@@ -83,6 +96,29 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
       `across ${result.per_analyst.length} analyst(s). Cost: $${result.total_cost_usd.toFixed(4)}.`,
   )
   lines.push('')
+
+  if (meta.sources && meta.sources.length > 0) {
+    lines.push('## Selected sessions')
+    lines.push('')
+    lines.push('| Role | Session ID | Parent session | Subject (first prompt line) | Source path |')
+    lines.push('|---|---|---|---|---|')
+    for (const source of meta.sources) {
+      lines.push(
+        `| ${source.role} | \`${tableCell(source.sessionId)}\` | ` +
+          `${source.parentSessionId ? `\`${tableCell(source.parentSessionId)}\`` : '—'} | ` +
+          `${tableCell(source.subject) || '(no prompt captured)'} | \`${tableCell(source.path)}\` |`,
+      )
+    }
+    lines.push('')
+    const childCount = meta.sources.filter((source) => source.role === 'child').length
+    if (childCount > 0) {
+      lines.push(
+        `> Scope: ${childCount}/${meta.sources.length} selected session(s) are children. ` +
+          'Counts below describe only the selected files, not their parent operator sessions.',
+      )
+      lines.push('')
+    }
+  }
 
   // Analyst run summary.
   lines.push('| Analyst | Status | Findings | Latency |')
@@ -147,11 +183,18 @@ export function renderPipelines(pr: PipelineReport): string {
 
   for (const m of pr.toolUse) {
     if (m.totalCalls === 0) continue
-    const duplicateCalls = Math.round(m.duplicateRate * m.totalCalls)
-    const errorCalls = Math.round(m.errorRate * m.totalCalls)
+    const toolStats = Object.values(m.byTool)
+    const duplicateCalls = toolStats.length > 0
+      ? toolStats.reduce((total, stats) => total + stats.duplicates, 0)
+      : Math.round(m.duplicateRate * m.totalCalls)
+    const errorCalls = toolStats.length > 0
+      ? toolStats.reduce((total, stats) => total + stats.errors, 0)
+      : Math.round(m.errorRate * m.totalCalls)
     const retriedFailures = Math.round(m.retryRate * errorCalls)
     const failureFollowUp =
-      errorCalls > 0 ? `; ${retriedFailures}/${errorCalls} failed calls were followed by another call to that tool` : ''
+      errorCalls > 0
+        ? `; ${(m.retryRate * 100).toFixed(0)}% of failed calls retried with the same tool (${retriedFailures}/${errorCalls})`
+        : ''
     lines.push(
       `- **Tool use:** ${m.totalCalls} calls; ${duplicateCalls}/${m.totalCalls} repeated exactly; ` +
         `${errorCalls}/${m.totalCalls} failed${failureFollowUp}`,

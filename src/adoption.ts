@@ -44,8 +44,7 @@ export interface AdoptionReport {
   skillRunFilesRead: number
 }
 
-/** A tool span the otlp emitter wrote as `tool.<Name>`, carrying the tool's
- *  input JSON on `content`. */
+/** A tool span the OTLP emitter wrote as `tool.<Name>`. */
 function toolName(s: OtlpSpan): string | null {
   const n = s.attributes['tool.name']
   if (typeof n === 'string') return n
@@ -54,7 +53,7 @@ function toolName(s: OtlpSpan): string | null {
 }
 
 function parseInput(s: OtlpSpan): Record<string, unknown> {
-  const c = s.attributes.content
+  const c = s.attributes['input.value'] ?? s.attributes.content
   if (typeof c !== 'string') return {}
   try {
     const v = JSON.parse(c)

@@ -10,10 +10,12 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isMissingPathError } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { capText, userPromptSpan } from './conversation.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'pi'
@@ -30,6 +32,9 @@ interface PiContentBlock {
   args?: unknown
   isError?: boolean
   is_error?: boolean
+  content?: unknown
+  output?: unknown
+  result?: unknown
 }
 
 interface PiLine {
@@ -78,8 +83,9 @@ export class PiAdapter implements HarnessTraceAdapter {
     let dirs: string[]
     try {
       dirs = await readdir(root)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const dir of dirs) {
@@ -87,8 +93,9 @@ export class PiAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(dp)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       // Encoded cwd: leading/trailing `--`, separators as `-`.
       const cwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
@@ -99,8 +106,9 @@ export class PiAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
         const id = basename(f, '.jsonl').replace(/^[\dTZ.-]+_/, '')
@@ -194,7 +202,7 @@ export class PiAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: name,
             step,
-            content: (b.input ?? b.args) != null ? JSON.stringify(b.input ?? b.args) : null,
+            extra: toolIoAttributes({ input: b.input ?? b.args }),
           })
           spans.push(toolSpan)
           toolByCallId.set(callId, toolSpan)
@@ -206,6 +214,7 @@ export class PiAdapter implements HarnessTraceAdapter {
             const err = b.isError === true || b.is_error === true
             t.end_time = ts
             t.status = err ? { code: 'ERROR', message: 'tool result reported error' } : { code: 'OK' }
+            recordToolOutput(t, b.output ?? b.result ?? b.content ?? b.text)
           }
         }
       }

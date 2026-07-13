@@ -1,7 +1,7 @@
 /**
  * One place for "walk the selected harnesses, locate sessions, parse each to
  * spans." The observer, batch collector, and uploader all need the same
- * locate → parse → skip-empty loop with non-fatal per-adapter error handling;
+ * locate → parse loop with explicit per-adapter error handling;
  * `scanSessions` is that loop, so each caller only writes what it does with the
  * spans.
  */
@@ -19,11 +19,22 @@ import type { HarnessTraceAdapter, SessionRef } from './types.js'
  */
 export async function parseSession(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<OtlpSpan[]> {
   const spans = await adapter.parse(ref)
+  if (spans.length === 0) throw new EmptySessionError(ref.path)
   const repo = await resolveSessionRepoAttrs(ref.cwd, spans)
   if (repo.cwd) ref.cwd = repo.cwd
   stampRepoAttrs(spans, repo.attrs)
   await stampSpanWorkdirRepoAttrs(spans)
   return spans
+}
+
+export class EmptySessionError extends Error {
+  readonly sourcePath: string
+
+  constructor(sourcePath: string) {
+    super(`Session parser produced no spans at ${sourcePath}`)
+    this.name = 'EmptySessionError'
+    this.sourcePath = sourcePath
+  }
 }
 
 function refKey(ref: SessionRef): string {
@@ -57,19 +68,19 @@ export interface ScanOptions extends AdapterSelection {
   last?: number
   /** Cancel the scan; iteration stops between sessions. */
   signal?: AbortSignal
-  /** Per-adapter locate/parse failure (the scan continues). */
+  /** Handle a locate/parse failure and continue. Without this callback, failures propagate. */
   onError?: (error: unknown, ref?: SessionRef) => void
 }
 
 export interface ScannedSession {
   adapter: import('./types.js').HarnessTraceAdapter
   ref: SessionRef
-  /** Non-empty parsed spans for the session. */
+  /** Parsed spans for the session. */
   spans: OtlpSpan[]
 }
 
-/** Yield every non-empty session across the selected adapters. Locate/parse
- *  errors route to `onError` and skip that adapter/session, never aborting. */
+/** Yield every session across the selected adapters. Locate/parse errors
+ *  propagate unless an explicit `onError` callback handles them. */
 export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSession> {
   for (const adapter of selectAdapters(opts)) {
     if (opts.signal?.aborted) return
@@ -77,7 +88,8 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
     try {
       refs = await locateSessions(adapter, { cwd: opts.cwd, sinceMs: opts.sinceMs })
     } catch (err) {
-      opts.onError?.(err)
+      if (!opts.onError) throw err
+      opts.onError(err)
       continue
     }
     if (opts.last && opts.last > 0) refs = refs.slice(0, opts.last)
@@ -87,10 +99,10 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
       try {
         spans = await parseSession(adapter, ref)
       } catch (err) {
-        opts.onError?.(err, ref)
+        if (!opts.onError) throw err
+        opts.onError(err, ref)
         continue
       }
-      if (spans.length === 0) continue
       yield { adapter, ref, spans }
     }
   }

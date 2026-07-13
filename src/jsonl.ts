@@ -1,5 +1,4 @@
 import { createReadStream } from 'node:fs'
-import { createInterface } from 'node:readline'
 
 export class JsonlParseError extends SyntaxError {
   readonly sourcePath: string
@@ -13,25 +12,43 @@ export class JsonlParseError extends SyntaxError {
   }
 }
 
+function parseLine<T>(line: string, path: string, lineNumber: number): T {
+  try {
+    return JSON.parse(line) as T
+  } catch {
+    throw new JsonlParseError(path, lineNumber)
+  }
+}
+
 /** Stream JSONL rows without retaining the source file. */
 export async function* readJsonl<T>(path: string): AsyncGenerator<T> {
   const input = createReadStream(path, { encoding: 'utf8' })
-  const lines = createInterface({ input, crlfDelay: Infinity })
   let lineNumber = 0
+  let fragments: string[] = []
   try {
-    for await (const line of lines) {
-      lineNumber += 1
-      if (!line) continue
-      let row: T
-      try {
-        row = JSON.parse(line) as T
-      } catch {
-        throw new JsonlParseError(path, lineNumber)
+    for await (const chunk of input) {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+      let start = 0
+      let newline = text.indexOf('\n')
+      while (newline !== -1) {
+        const tail = text.slice(start, newline)
+        let line = fragments.length > 0 ? fragments.join('') + tail : tail
+        fragments = []
+        lineNumber += 1
+        if (line.endsWith('\r')) line = line.slice(0, -1)
+        if (line) yield parseLine<T>(line, path, lineNumber)
+        start = newline + 1
+        newline = text.indexOf('\n', start)
       }
-      yield row
+      if (start < text.length) fragments.push(text.slice(start))
+    }
+    if (fragments.length > 0) {
+      let line = fragments.join('')
+      lineNumber += 1
+      if (line.endsWith('\r')) line = line.slice(0, -1)
+      if (line) yield parseLine<T>(line, path, lineNumber)
     }
   } finally {
-    lines.close()
     input.destroy()
   }
 }

@@ -87,6 +87,64 @@ describe('traces CLI', () => {
     expect(outputRows[1]!.parent_span_id).toBe('trace_cli:root')
   })
 
+  it('identifies an explicitly analyzed Codex child session in the report', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-child-'))
+    const session = join(dir, 'rollout-child.jsonl')
+    const report = join(dir, 'report.md')
+    const otlp = join(dir, 'spans.openinference.jsonl')
+    const parentId = '019f24d6-b5ec-7173-acc1-f957de216ee5'
+    const childId = '019f5aea-d6b4-7451-a3eb-60289875a357'
+    await writeFile(session, [
+      {
+        timestamp: '2026-07-13T09:59:27.791Z',
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          cwd: '/home/drew/code/agent-dev-container',
+          parent_thread_id: parentId,
+          thread_source: 'subagent',
+          agent_role: 'worker',
+        },
+      },
+      {
+        timestamp: '2026-07-13T09:59:28.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: 'Own direct-streaming conversion for the remaining JSONL adapters.',
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'analyze',
+      '--harness',
+      'codex',
+      '--session',
+      session,
+      '--out',
+      report,
+      '--otlp',
+      otlp,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const text = await readFile(report, 'utf8')
+    expect(text).toContain('| child |')
+    expect(text).toContain(childId)
+    expect(text).toContain(parentId)
+    expect(text).toContain(session)
+    expect(text).toContain('Own direct-streaming conversion')
+  })
+
   it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-stream-'))
     const input = join(dir, 'spans.openinference.jsonl')

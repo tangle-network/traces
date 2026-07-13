@@ -21,9 +21,8 @@ function toolCall(
     status,
     service: 'claude-code',
     tool: name,
-    content: JSON.stringify(input),
     step: i,
-    extra,
+    extra: { 'input.value': JSON.stringify(input), ...extra },
   })
 }
 
@@ -94,7 +93,7 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
 
     const text = renderPipelines(await runPipelines(spans))
 
-    expect(text).toContain('1/3 failed; 1/1 failed calls were followed by another call to that tool')
+    expect(text).toContain('1/3 failed; 100% of failed calls retried with the same tool (1/1)')
     expect(text).not.toContain('% retry')
   })
 })

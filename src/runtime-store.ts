@@ -8,9 +8,8 @@
  * harness — so traces reuses those shipped detectors instead of
  * reimplementing loop/stall detection.
  *
- * Tool `args` is the verbatim tool input we stored on the span's `content`;
- * `stuckLoopView` hashes it (`argHash`) so identical repeated calls collapse
- * to one loop finding.
+ * Tool `args` is the captured OpenInference input value; `stuckLoopView`
+ * hashes it (`argHash`) so identical repeated calls collapse to one finding.
  */
 
 import { InMemoryTraceStore } from '@tangle-network/agent-eval'
@@ -60,7 +59,7 @@ export async function toRuntimeStore(spans: readonly OtlpSpan[]): Promise<Runtim
             ...base,
             kind: 'tool',
             toolName: String(s.attributes['tool.name'] ?? 'tool'),
-            args: s.attributes.content ?? '',
+            args: s.attributes['input.value'] ?? s.attributes.content ?? '',
           } as Span)
         : ({ ...base, kind } as Span)
 

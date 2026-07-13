@@ -11,13 +11,15 @@
  * field names medium-conf; parse unverified against local data.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isMissingPathError, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 import { CONTENT_CAP, capText, userPromptSpan } from './conversation.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'amp'
 
@@ -41,6 +43,8 @@ interface AmpBlock {
   input?: unknown
   tool_use_id?: string
   is_error?: boolean
+  content?: unknown
+  output?: unknown
 }
 
 interface AmpMessage {
@@ -74,8 +78,9 @@ export class AmpAdapter implements HarnessTraceAdapter {
     let files: string[]
     try {
       files = await readdir(this.threadsRoot())
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const f of files) {
@@ -84,8 +89,9 @@ export class AmpAdapter implements HarnessTraceAdapter {
       let st: Awaited<ReturnType<typeof stat>>
       try {
         st = await stat(path)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
       if (opts.cwd) continue // threads don't record cwd
@@ -95,12 +101,7 @@ export class AmpAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    let thread: AmpThread
-    try {
-      thread = JSON.parse(await readFile(ref.path, 'utf8')) as AmpThread
-    } catch {
-      return []
-    }
+    const thread = await readJsonFile<AmpThread>(ref.path)
     const traceId = thread.id ?? ref.sessionId
     const rootId = `root:${traceId}`
     const start = new Date(thread.created ?? 0).toISOString()
@@ -174,14 +175,17 @@ export class AmpAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: b.name,
             step,
-            content: b.input != null ? JSON.stringify(b.input) : null,
+            extra: toolIoAttributes({ input: b.input }),
           })
           spans.push(t)
           if (b.id) toolByUseId.set(b.id, t)
           step += 1
         } else if (b.type === 'tool_result' && b.tool_use_id) {
           const t = toolByUseId.get(b.tool_use_id)
-          if (t) t.status = b.is_error === true ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
+          if (t) {
+            t.status = b.is_error === true ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
+            recordToolOutput(t, b.content ?? b.output)
+          }
         }
       }
     }

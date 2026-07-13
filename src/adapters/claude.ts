@@ -13,14 +13,16 @@
  * write the same transcript shape.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
 import { claudeActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'claude-code'
@@ -164,7 +166,7 @@ function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: Cl
         agent: ctx.agent,
         tool: block.name,
         step: state.step,
-        content: block.input != null ? JSON.stringify(block.input) : null,
+        extra: toolIoAttributes({ input: block.input }),
       })
       state.spans.push(toolSpan)
       if (block.id) state.toolSpanByUseId.set(block.id, toolSpan)
@@ -202,7 +204,7 @@ function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: Cl
         state.toolSpanByUseId.get(block.tool_use_id),
         ts,
         block.is_error === true,
-        stringifyToolResult(block.content),
+        block.content,
       )
     }
   } else if (ev.type === 'attachment' && ev.attachment?.type === 'tool_result' && ev.attachment.toolUseID) {
@@ -226,11 +228,13 @@ export function parseClaudeStream(events: readonly ClaudeEvent[], ctx: ClaudeStr
   return finishClaudeStream(state)
 }
 
-function backfillResult(s: OtlpSpan | undefined, endTime: string, isError: boolean, message: string): void {
+function backfillResult(s: OtlpSpan | undefined, endTime: string, isError: boolean, output: unknown): void {
   if (!s) return
   s.end_time = endTime
   const code: OtlpStatusCode = isError ? 'ERROR' : 'OK'
   s.status = { code }
+  recordToolOutput(s, output)
+  const message = stringifyToolResult(output)
   if (isError && message) s.status.message = message.slice(0, 500)
 }
 
@@ -253,8 +257,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     let projectDirs: string[]
     try {
       projectDirs = await readdir(root)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const dir of projectDirs) {
@@ -262,8 +267,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(dirPath)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue
@@ -271,8 +277,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (!st.isFile()) continue
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
@@ -344,7 +351,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     try {
       files = await readdir(subDir)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      if (isMissingPathError(error)) return
       throw error
     }
     let step = main.nextStep
@@ -354,14 +361,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       const metaPath = join(subDir, `${hash}.meta.json`)
       let meta: SubagentMeta = {}
       try {
-        const raw = await readFile(metaPath, 'utf8')
-        try {
-          meta = JSON.parse(raw) as SubagentMeta
-        } catch {
-          throw new SyntaxError(`Invalid Claude subagent metadata at ${metaPath}`)
-        }
+        meta = await readJsonFile<SubagentMeta>(metaPath)
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        if (!isMissingJsonSource(error)) throw error
       }
       const parent = (meta.toolUseId && main.toolSpanByUseId.get(meta.toolUseId)?.span_id) || `root:${traceId}`
       const ctx: ClaudeStreamContext = {

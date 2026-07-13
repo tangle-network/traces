@@ -16,10 +16,12 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isMissingPathError } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'github-copilot'
 
@@ -38,6 +40,8 @@ interface CopilotEvent {
     arguments?: unknown
     success?: boolean
     error?: { message?: string }
+    output?: unknown
+    result?: unknown
   }
 }
 
@@ -53,8 +57,9 @@ export class CopilotAdapter implements HarnessTraceAdapter {
     let dirs: string[]
     try {
       dirs = await readdir(this.root())
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const id of dirs) {
@@ -62,8 +67,9 @@ export class CopilotAdapter implements HarnessTraceAdapter {
       let st: Awaited<ReturnType<typeof stat>>
       try {
         st = await stat(path)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       if (!st.isFile()) continue
       if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
@@ -134,7 +140,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
           agent: SERVICE,
           tool: name,
           step,
-          content: d.arguments != null ? JSON.stringify(d.arguments) : null,
+          extra: toolIoAttributes({ input: d.arguments }),
         })
         spans.push(t)
         toolByCallId.set(d.toolCallId, t)
@@ -145,6 +151,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
           t.end_time = ts
           const err = d.success === false
           t.status = err ? { code: 'ERROR', message: (d.error?.message ?? '').slice(0, 500) } : { code: 'OK' }
+          recordToolOutput(t, d.output ?? d.result ?? d.error?.message)
         }
       }
     }

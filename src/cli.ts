@@ -27,6 +27,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
+import { ACTOR_ATTR } from './adapters/conversation.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -222,7 +223,44 @@ async function cmdList(args: Args): Promise<void> {
   }
 }
 
-async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: string; sessionCount: number; cwds: string[] }> {
+interface SelectedSessionSource {
+  sessionId: string
+  path: string
+  subject: string
+  role: 'operator' | 'child' | 'unknown'
+  parentSessionId?: string
+}
+
+interface CollectedSpans {
+  spans: OtlpSpan[]
+  harness: string
+  sessionCount: number
+  cwds: string[]
+  sources: SelectedSessionSource[]
+}
+
+function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): SelectedSessionSource {
+  const root = spans.find((item) => item.parent_span_id === null)
+  const prompt = spans.find(
+    (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
+  ) ?? spans.find((item) => item.name === 'user.prompt')
+  const content = typeof prompt?.attributes.content === 'string' ? prompt.attributes.content : ''
+  const firstLine = content.split(/\r?\n/, 1)[0]!.trim()
+  const subject = firstLine.length > 240
+    ? `${firstLine.slice(0, 240)}… [+${firstLine.length - 240} chars]`
+    : firstLine
+  const role = root?.attributes['traces.session.role']
+  const parentSessionId = root?.attributes['traces.parent_session_id']
+  return {
+    sessionId: root?.trace_id ?? ref.sessionId,
+    path: ref.path,
+    subject,
+    role: role === 'operator' || role === 'child' ? role : 'unknown',
+    ...(typeof parentSessionId === 'string' ? { parentSessionId } : {}),
+  }
+}
+
+async function collectSpans(args: Args): Promise<CollectedSpans> {
   if (args.session) {
     const adapter = resolveAdapter(args.harness)
     if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
@@ -237,22 +275,31 @@ async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: s
       mtimeMs: st.mtimeMs,
     }
     const spans = await parseSession(adapter, ref)
-    return { spans, harness: adapter.harness, sessionCount: 1, cwds: ref.cwd ? [ref.cwd] : [] }
+    return {
+      spans,
+      harness: adapter.harness,
+      sessionCount: 1,
+      cwds: ref.cwd ? [ref.cwd] : [],
+      sources: [selectedSessionSource(ref, spans)],
+    }
   }
   const groups = await discover({ ...args, last: args.last || 1 })
   const spans: OtlpSpan[] = []
   let sessionCount = 0
   const harnesses: string[] = []
   const cwds: string[] = []
+  const sources: SelectedSessionSource[] = []
   for (const { adapter, refs } of groups) {
     if (refs.length > 0) harnesses.push(adapter.harness)
     for (const ref of refs) {
-      spans.push(...(await parseSession(adapter, ref)))
+      const parsed = await parseSession(adapter, ref)
+      spans.push(...parsed)
+      sources.push(selectedSessionSource(ref, parsed))
       if (ref.cwd) cwds.push(ref.cwd)
       sessionCount += 1
     }
   }
-  return { spans, harness: harnesses.join('+') || args.harness, sessionCount, cwds }
+  return { spans, harness: harnesses.join('+') || args.harness, sessionCount, cwds, sources }
 }
 
 async function cmdConvert(args: Args): Promise<void> {
@@ -399,7 +446,7 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds } = args.input
+  const { spans, harness, sessionCount, cwds, sources } = args.input
     ? await collectImportedSpans(args)
     : await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
@@ -416,7 +463,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   const adoption = await analyzeAdoption(spans, { cwds })
   const deterministic = summarizeDeterministicSignals(pipelines, reactions)
   let report =
-    `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath, deterministic })}\n` +
+    `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath, deterministic, sources })}\n` +
     `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
   if (args.analyzers.length > 0 && otlpPath) {
     const engines = externalAnalyzersFromArgs(args)
@@ -433,7 +480,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   }
 }
 
-async function collectImportedSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: string; sessionCount: number; cwds: string[] }> {
+async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
   if (!args.input) throw new Error('analyze input missing')
   const attributes = await loadExportAttributes(args)
   const result = await exportTraceEvidenceFile(args.input, {
@@ -446,6 +493,12 @@ async function collectImportedSpans(args: Args): Promise<{ spans: OtlpSpan[]; ha
     harness: result.format,
     sessionCount: traceIds.size || 1,
     cwds: [],
+    sources: [...traceIds].map((sessionId) => ({
+      sessionId,
+      path: args.input!,
+      subject: '',
+      role: 'unknown',
+    })),
   }
 }
 
@@ -681,37 +734,37 @@ async function cmdUpload(args: Args): Promise<void> {
   const redactorParts = args.redactorCmd?.split(/\s+/).filter(Boolean) ?? []
   const redactor = redactorParts[0] ? commandRedactor({ command: redactorParts[0], args: redactorParts.slice(1) }) : undefined
 
-  const newItems = plan.items.filter((i) => i.isNew)
+  const candidates = plan.items
   const byRule: Record<string, number> = {}
   let totalRedactions = 0
-  for (const i of newItems) {
+  for (const i of candidates) {
     totalRedactions += i.redaction.redactionCount
     for (const [r, n] of Object.entries(i.redaction.byRule)) byRule[r] = (byRule[r] ?? 0) + n
   }
 
   const w = (s: string) => process.stderr.write(s)
   w(`\nWindow: since ${new Date(sinceMs).toISOString()}\n`)
-  w(`Sessions found: ${plan.items.length}  ·  new: ${newItems.length}  ·  already uploaded: ${plan.items.length - newItems.length}\n`)
+  w(`Sessions found: ${plan.items.length}  ·  final privacy-mode dedup runs before upload\n`)
   w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byRule).length ? ` (${Object.entries(byRule).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
-  for (const i of newItems.slice(0, 25)) {
+  for (const i of candidates.slice(0, 25)) {
     w(`  + [${i.ref.harness}] ${i.ref.sessionId.slice(0, 8)}  ${i.spans.length} spans  ${i.redaction.redactionCount} redacted  ${i.ref.cwd ?? ''}\n`)
   }
-  if (newItems.length > 25) w(`  … and ${newItems.length - 25} more\n`)
+  if (candidates.length > 25) w(`  … and ${candidates.length - 25} more\n`)
 
-  if (newItems.length === 0) {
-    console.log('Nothing new to upload.')
+  if (candidates.length === 0) {
+    console.log('No sessions found to upload.')
     return
   }
 
   if (args.dryRun) {
     const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlp, stripContent: args.noContent, redactor })
-    console.log(`dry run: ${newItems.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
+    console.log(`dry run: ${candidates.length - res.skippedSessions} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
   }
 
   if (!args.yes) {
-    const ok = await confirm(`Upload ${newItems.length} redacted session(s) to the Tangle Intelligence Platform?`)
+    const ok = await confirm(`Process ${candidates.length} redacted session(s) for upload to the Tangle Intelligence Platform?`)
     if (!ok) {
       console.log('Aborted (use --yes to skip the prompt, or --dry-run to preview).')
       return

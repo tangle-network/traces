@@ -15,11 +15,13 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isMissingPathError } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import { capText, userPromptSpan } from './conversation.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'qwen'
 
@@ -58,8 +60,9 @@ export class QwenAdapter implements HarnessTraceAdapter {
     let projectDirs: string[]
     try {
       projectDirs = await readdir(root)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const pd of projectDirs) {
@@ -67,8 +70,9 @@ export class QwenAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(chatsDir)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       // dashed-cwd is lossy ([^a-zA-Z0-9]→-); not reversible to a real path.
       if (opts.cwd) continue
@@ -78,8 +82,9 @@ export class QwenAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
         refs.push({ harness: this.harness, sessionId: basename(f, '.jsonl'), path, cwd: null, mtimeMs: st.mtimeMs })
@@ -144,7 +149,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: name,
             step,
-            content: p.functionCall.args != null ? JSON.stringify(p.functionCall.args) : null,
+            extra: toolIoAttributes({ input: p.functionCall.args }),
           })
           spans.push(t)
           const q = openToolsByName.get(name) ?? []
@@ -182,6 +187,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
           if (t) {
             t.end_time = ts
             t.status = err ? { code: 'ERROR', message: 'tool result reported error' } : { code: 'OK' }
+            recordToolOutput(t, p.functionResponse?.response ?? r.toolCallResult?.error)
           }
         }
       }

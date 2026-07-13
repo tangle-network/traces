@@ -17,11 +17,13 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isMissingPathError } from '../json.js'
 import { readJsonl, takeJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { codexActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'codex'
@@ -33,6 +35,7 @@ interface CodexLine {
   payload?: {
     type?: string
     id?: string
+    session_id?: string
     cwd?: string
     cli_version?: string
     model?: string
@@ -48,6 +51,21 @@ interface CodexLine {
     agent_thread_id?: string
     agent_path?: string
     kind?: string
+    parent_thread_id?: string
+    thread_source?: string
+    agent_nickname?: string
+    agent_role?: string
+    source?: {
+      subagent?: {
+        thread_spawn?: {
+          parent_thread_id?: string
+          depth?: number
+          agent_path?: string | null
+          agent_nickname?: string
+          agent_role?: string
+        }
+      }
+    }
     info?: { last_token_usage?: { input_tokens?: number; output_tokens?: number }; model_context_window?: number }
   }
 }
@@ -88,6 +106,35 @@ function toolInputToString(input: unknown): string | undefined {
   return JSON.stringify(input)
 }
 
+const CODEX_SESSION_ID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
+
+function sessionIds(value: unknown): string[] {
+  return [...new Set(contentToString(value).match(CODEX_SESSION_ID) ?? [])]
+}
+
+function spawnedSessionIds(output: unknown): string[] {
+  const text = contentToString(output)
+  const ids = [...text.matchAll(/["']?agent_id["']?\s*:\s*["']([0-9a-f-]{36})["']/gi)]
+    .map((match) => match[1]!)
+    .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))
+  return [...new Set(ids)]
+}
+
+function multiAgentOperation(name: string): string | null {
+  const prefix = 'multi_agent_v1__'
+  return name.startsWith(prefix) ? name.slice(prefix.length) : null
+}
+
+function setAgentSessionIds(toolSpan: OtlpSpan, ids: readonly string[]): void {
+  if (ids.length === 0) return
+  const unique = [...new Set(ids)]
+  toolSpan.attributes['traces.codex.agent_session_ids'] = JSON.stringify(unique)
+  toolSpan.attributes['traces.codex.agent_session_count'] = unique.length
+  if (toolSpan.attributes['traces.codex.agent_operation'] === 'spawn_agent') {
+    toolSpan.attributes['traces.child_session_ids'] = JSON.stringify(unique)
+  }
+}
+
 const verificationCommand =
   /\b(?:pnpm|npm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9:_-]+)?\b|\b(?:vitest|jest|pytest|tsc|biome|eslint|sha256sum|pdfinfo|pdftotext)\b|\bgo\s+test\b|\bcargo\s+(?:test|check|clippy|build)\b|\bgit\s+(?:status|diff|show|merge-tree)\b|\bgh-drew\s+pr\s+(?:view|checks)\b/i
 
@@ -117,32 +164,36 @@ async function* walkRollouts(root: string): AsyncGenerator<string> {
   let years: string[]
   try {
     years = await readdir(root)
-  } catch {
-    return
+  } catch (error) {
+    if (isMissingPathError(error)) return
+    throw error
   }
   for (const y of years) {
     const yp = join(root, y)
     let months: string[]
     try {
       months = await readdir(yp)
-    } catch {
-      continue
+    } catch (error) {
+      if (isMissingPathError(error)) continue
+      throw error
     }
     for (const m of months) {
       const mp = join(yp, m)
       let days: string[]
       try {
         days = await readdir(mp)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       for (const d of days) {
         const dp = join(mp, d)
         let files: string[]
         try {
           files = await readdir(dp)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         for (const f of files) {
           if (f.startsWith('rollout-') && f.endsWith('.jsonl')) yield join(dp, f)
@@ -168,20 +219,16 @@ export class CodexAdapter implements HarnessTraceAdapter {
       let st: Awaited<ReturnType<typeof stat>>
       try {
         st = await stat(path)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
       // cwd usually rides the first line's session_meta, but a *continuation*
       // session leads with a turn_context (or a meta without cwd). Both line
       // types carry `payload.cwd`, so scan a bounded head for the first one —
       // otherwise these sessions come back cwd:null and lose their repo labels.
-      let head: CodexLine[]
-      try {
-        head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES)
-      } catch {
-        continue
-      }
+      const head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES)
       let cwd: string | null = null
       let id = basename(path).replace(/^rollout-[\dT-]+-/, '').replace(/\.jsonl$/, '')
       for (const parsed of head) {
@@ -209,6 +256,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
       }
     }
     const traceId = meta?.payload?.id ?? ref.sessionId
+    const spawnMeta = meta?.payload?.source?.subagent?.thread_spawn
+    const parentSessionId = meta?.payload?.parent_thread_id ?? spawnMeta?.parent_thread_id
+    const sessionRole = parentSessionId || meta?.payload?.thread_source === 'subagent' ? 'child' : 'operator'
 
     const rootId = `root:${traceId}`
     const root = span({
@@ -221,6 +271,18 @@ export class CodexAdapter implements HarnessTraceAdapter {
       service: SERVICE,
       agent: SERVICE,
       model,
+      extra: {
+        'traces.session.role': sessionRole,
+        ...(parentSessionId ? { 'traces.parent_session_id': parentSessionId } : {}),
+        ...(spawnMeta?.depth != null ? { 'traces.codex.agent_depth': spawnMeta.depth } : {}),
+        ...(meta?.payload?.agent_nickname ?? spawnMeta?.agent_nickname
+          ? { 'traces.codex.agent_nickname': meta?.payload?.agent_nickname ?? spawnMeta?.agent_nickname }
+          : {}),
+        ...(meta?.payload?.agent_role ?? spawnMeta?.agent_role
+          ? { 'traces.codex.agent_role': meta?.payload?.agent_role ?? spawnMeta?.agent_role }
+          : {}),
+        ...(spawnMeta?.agent_path ? { 'traces.codex.agent_path': spawnMeta.agent_path } : {}),
+      },
     })
     const spans: OtlpSpan[] = [root]
 
@@ -273,6 +335,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
         )
         const nestedName = l.payload.type === 'custom_tool_call' ? singleNestedToolName(input) : null
         const name = classifyNestedTool(nestedName ?? outerName, input)
+        const agentOperation = multiAgentOperation(nestedName ?? outerName)
         const toolSpan = span({
           traceId,
           spanId: `tool:${callId}`,
@@ -284,14 +347,16 @@ export class CodexAdapter implements HarnessTraceAdapter {
           agent: SERVICE,
           tool: name,
           step,
-          content: input ?? null,
           extra: {
+            ...toolIoAttributes({ input }),
             'traces.codex.call_type': l.payload.type,
             ...(name !== outerName ? { 'traces.codex.outer_tool_name': outerName } : {}),
             ...(nestedName ? { 'traces.codex.nested_tool_name': nestedName } : {}),
             ...(isExpectedBlockingTool(name, input) ? { 'traces.expected_blocking': true } : {}),
+            ...(agentOperation ? { 'traces.codex.agent_operation': agentOperation } : {}),
           },
         })
+        if (agentOperation && agentOperation !== 'spawn_agent') setAgentSessionIds(toolSpan, sessionIds(input))
         spans.push(toolSpan)
         toolByCallId.set(callId, toolSpan)
         step += 1
@@ -304,6 +369,10 @@ export class CodexAdapter implements HarnessTraceAdapter {
           const { error, message } = outputIsError(l.payload.output)
           t.end_time = ts
           t.status = error ? { code: 'ERROR', message } : { code: 'OK' }
+          recordToolOutput(t, l.payload.output)
+          if (t.attributes['traces.codex.agent_operation'] === 'spawn_agent') {
+            setAgentSessionIds(t, spawnedSessionIds(l.payload.output))
+          }
         }
       } else if (l.type === 'event_msg' && l.payload?.type === 'sub_agent_activity') {
         const threadId = l.payload.agent_thread_id
@@ -325,12 +394,14 @@ export class CodexAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: 'Agent',
             step,
-            content: JSON.stringify({
-              subagent_type: subagentType,
-              agent_path: agentPath,
-              agent_thread_id: threadId,
-            }),
             extra: {
+              ...toolIoAttributes({
+                input: {
+                  subagent_type: subagentType,
+                  agent_path: agentPath,
+                  agent_thread_id: threadId,
+                },
+              }),
               'traces.codex.subagent_path': agentPath,
               'traces.codex.subagent_thread_id': threadId,
             },

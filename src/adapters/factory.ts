@@ -11,14 +11,16 @@
  * flag (`is_error`) is inferred (Anthropic convention), not source-confirmed.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 import { capText, userPromptSpan } from './conversation.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'factory'
 
@@ -30,6 +32,7 @@ interface FactoryBlock {
   input?: unknown
   tool_use_id?: string
   is_error?: boolean
+  content?: unknown
 }
 
 interface FactoryLine {
@@ -69,8 +72,9 @@ export class FactoryAdapter implements HarnessTraceAdapter {
     let dirs: string[]
     try {
       dirs = await readdir(root)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const dir of dirs) {
@@ -78,8 +82,9 @@ export class FactoryAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(dp)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       const cwd = dir.replace(/-/g, '/')
       if (opts.cwd && !cwd.startsWith(opts.cwd)) continue
@@ -89,8 +94,9 @@ export class FactoryAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
         refs.push({ harness: this.harness, sessionId: basename(f, '.jsonl'), path, cwd, mtimeMs: st.mtimeMs })
@@ -103,9 +109,9 @@ export class FactoryAdapter implements HarnessTraceAdapter {
     // Sidecar holds model + session-total tokens.
     let settings: FactorySettings = {}
     try {
-      settings = JSON.parse(await readFile(ref.path.replace(/\.jsonl$/, '.settings.json'), 'utf8')) as FactorySettings
-    } catch {
-      // no sidecar → model/tokens unknown
+      settings = await readJsonFile<FactorySettings>(ref.path.replace(/\.jsonl$/, '.settings.json'))
+    } catch (error) {
+      if (!isMissingJsonSource(error)) throw error
     }
 
     const sourceTraceId = ref.sessionId
@@ -185,14 +191,17 @@ export class FactoryAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: b.name,
             step,
-            content: b.input != null ? JSON.stringify(b.input) : null,
+            extra: toolIoAttributes({ input: b.input }),
           })
           spans.push(t)
           if (b.id) toolByUseId.set(b.id, t)
           step += 1
         } else if (b.type === 'tool_result' && b.tool_use_id) {
           const t = toolByUseId.get(b.tool_use_id)
-          if (t) t.status = b.is_error === true ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
+          if (t) {
+            t.status = b.is_error === true ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
+            recordToolOutput(t, b.content)
+          }
         }
       }
     }

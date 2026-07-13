@@ -212,7 +212,7 @@ function skillTool(i: number, traceId: string, skill: string): OtlpSpan {
     startTime: new Date(1000 + i * 1000).toISOString(),
     step: i,
     tool: 'Skill',
-    content: JSON.stringify({ skill }),
+    extra: { 'input.value': JSON.stringify({ skill }) },
   })
 }
 function taskTool(i: number, traceId: string, type: string): OtlpSpan {
@@ -225,7 +225,7 @@ function taskTool(i: number, traceId: string, type: string): OtlpSpan {
     startTime: new Date(1000 + i * 1000).toISOString(),
     step: i,
     tool: 'Task',
-    content: JSON.stringify({ subagent_type: type }),
+    extra: { 'input.value': JSON.stringify({ subagent_type: type }) },
   })
 }
 
@@ -266,7 +266,7 @@ describe('analyzeAdoption', () => {
         startTime: new Date(5000).toISOString(),
         step: 4,
         tool: 'spawn_agent',
-        content: JSON.stringify({ agent_type: 'duplicate' }),
+        extra: { 'input.value': JSON.stringify({ agent_type: 'duplicate' }) },
       }),
       span({ traceId: 's2', spanId: 'root2', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'claude-code' }),
       span({
@@ -277,7 +277,7 @@ describe('analyzeAdoption', () => {
         startTime: new Date(2000).toISOString(),
         step: 1,
         tool: 'spawn_agent',
-        content: JSON.stringify({ agent_type: 'explorer' }),
+        extra: { 'input.value': JSON.stringify({ agent_type: 'explorer' }) },
       }),
       span({
         traceId: 's2',
@@ -287,7 +287,7 @@ describe('analyzeAdoption', () => {
         startTime: new Date(3000).toISOString(),
         step: 2,
         tool: 'multi_agent_v1__spawn_agent',
-        content: JSON.stringify({ subagent_type: 'reviewer' }),
+        extra: { 'input.value': JSON.stringify({ subagent_type: 'reviewer' }) },
       }),
       // s2 invokes no skill → penetration is 1/2, but its spawn tools count.
     ]
