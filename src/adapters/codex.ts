@@ -43,6 +43,7 @@ interface CodexLine {
     output?: unknown
     event_id?: string
     occurred_at_ms?: number
+    started_at?: number
     agent_thread_id?: string
     agent_path?: string
     kind?: string
@@ -61,6 +62,23 @@ function parseLines(raw: string): CodexLine[] {
     }
   }
   return out
+}
+
+/**
+ * Codex fork rollouts prepend a timestamp-rewritten copy of inherited history.
+ * The current task's `started_at` remains tied to the new session metadata, so
+ * it is the stable boundary between replayed rows and events produced here.
+ */
+function currentSessionLines(lines: readonly CodexLine[], meta: CodexLine | undefined): readonly CodexLine[] {
+  const sessionStartedAtMs = Date.parse(meta?.timestamp ?? '')
+  if (!Number.isFinite(sessionStartedAtMs)) return lines
+  const sessionStartedAt = Math.floor(sessionStartedAtMs / 1_000)
+  const currentTaskIndex = lines.findIndex((line) =>
+    line.type === 'event_msg'
+      && line.payload?.type === 'task_started'
+      && line.payload.started_at === sessionStartedAt,
+  )
+  return currentTaskIndex === -1 ? lines : lines.slice(currentTaskIndex)
 }
 
 function contentToString(content: unknown): string {
@@ -210,8 +228,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
     const lines = parseLines(await readFile(ref.path, 'utf8'))
     const meta = lines.find((l) => l.type === 'session_meta')
+    const sessionLines = currentSessionLines(lines, meta)
     const traceId = meta?.payload?.id ?? ref.sessionId
-    const model = lines.find((l) => l.type === 'turn_context')?.payload?.model ?? null
+    const model = sessionLines.find((l) => l.type === 'turn_context')?.payload?.model ?? null
 
     const rootId = `root:${traceId}`
     const spans: OtlpSpan[] = [
@@ -235,7 +254,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let lastLlm = rootId
     let sawUserTurn = false
 
-    for (const l of lines) {
+    for (const l of sessionLines) {
       const ts = l.timestamp ?? new Date(0).toISOString()
       if (l.type === 'event_msg' && l.payload?.type === 'token_count') {
         const u = l.payload.info?.last_token_usage
