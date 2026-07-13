@@ -101,6 +101,22 @@ describe('actor derivation', () => {
     expect(ups[0]!.attributes[ACTOR_ATTR]).toBe('injected')
     expect(ups[1]!.attributes[ACTOR_ATTR]).toBe('human')
   })
+
+  it('applies a delayed Codex model without a metadata pre-scan', async () => {
+    const path = join(dir, 'rollout-delayed-model.jsonl')
+    const rows = [
+      { type: 'session_meta', timestamp: '2026-06-20T00:00:00Z', payload: { id: 'late-model', cwd: '/x' } },
+      { type: 'event_msg', timestamp: '2026-06-20T00:00:01Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } } } },
+      ...Array.from({ length: 40 }, (_, index) => ({ type: 'event_msg', timestamp: `2026-06-20T00:00:${String(index + 2).padStart(2, '0')}Z`, payload: { type: 'progress' } })),
+      { type: 'turn_context', timestamp: '2026-06-20T00:01:00Z', payload: { model: 'gpt-late' } },
+    ]
+    writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+
+    expect(spans[0]!.attributes['llm.model_name']).toBe('gpt-late')
+    expect(spans.find((item) => item.name === 'llm.turn')?.attributes['llm.model_name']).toBe('gpt-late')
+  })
 })
 
 // ── Feature 2: user-reaction analyst ─────────────────────────────────────────

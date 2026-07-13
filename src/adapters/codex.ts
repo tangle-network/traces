@@ -200,12 +200,12 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let first = head[0]
     let meta = head.find((line) => line.type === 'session_meta')
     let model = head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
-    if (!first || !meta || !model) {
+    if (!first || !meta) {
       for await (const line of readJsonl<CodexLine>(ref.path)) {
         first ??= line
         if (!meta && line.type === 'session_meta') meta = line
         if (!model && line.type === 'turn_context') model = line.payload?.model ?? null
-        if (first && meta && model) break
+        if (first && meta) break
       }
     }
     const traceId = meta?.payload?.id ?? ref.sessionId
@@ -230,30 +230,35 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let lastLlm = rootId
     let sawUserTurn = false
     let lastTimestamp: string | undefined
+    const awaitingModel = model ? [] : [root]
 
     for await (const l of readJsonl<CodexLine>(ref.path)) {
       lastTimestamp = l.timestamp
       const ts = l.timestamp ?? new Date(0).toISOString()
-      if (l.type === 'event_msg' && l.payload?.type === 'token_count') {
+      if (!model && l.type === 'turn_context' && l.payload?.model) {
+        model = l.payload.model
+        for (const pending of awaitingModel) pending.attributes['llm.model_name'] = model
+        awaitingModel.length = 0
+      } else if (l.type === 'event_msg' && l.payload?.type === 'token_count') {
         const u = l.payload.info?.last_token_usage
         if (u && (u.input_tokens || u.output_tokens)) {
           const id = `llm:${step}`
-          spans.push(
-            span({
-              traceId,
-              spanId: id,
-              parentSpanId: rootId,
-              name: 'llm.turn',
-              kind: 'LLM',
-              startTime: ts,
-              service: SERVICE,
-              agent: SERVICE,
-              model,
-              inputTokens: u.input_tokens ?? null,
-              outputTokens: u.output_tokens ?? null,
-              step,
-            }),
-          )
+          const llm = span({
+            traceId,
+            spanId: id,
+            parentSpanId: rootId,
+            name: 'llm.turn',
+            kind: 'LLM',
+            startTime: ts,
+            service: SERVICE,
+            agent: SERVICE,
+            model,
+            inputTokens: u.input_tokens ?? null,
+            outputTokens: u.output_tokens ?? null,
+            step,
+          })
+          spans.push(llm)
+          if (!model) awaitingModel.push(llm)
           lastLlm = id
           step += 1
         }
