@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { AmpAdapter } from '../src/adapters/amp.js'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
 import { capText, CONTENT_CAP } from '../src/adapters/conversation.js'
-import { CodexAdapter, readCodexSessionHead } from '../src/adapters/codex.js'
+import { CodexAdapter } from '../src/adapters/codex.js'
 import { CopilotAdapter } from '../src/adapters/copilot.js'
 import { FactoryAdapter } from '../src/adapters/factory.js'
 import { ForgeAdapter } from '../src/adapters/forge.js'
@@ -598,16 +598,6 @@ describe('codex cwd recovery — continuation sessions', () => {
       if (prev === undefined) delete process.env.CODEX_HOME
       else process.env.CODEX_HOME = prev
     }
-  })
-
-  it('reads only the bounded session header', async () => {
-    const base = mkdtempSync(join(tmpdir(), 'tt-codex-head-'))
-    const path = join(base, 'rollout-large.jsonl')
-    const first = JSON.stringify({ type: 'session_meta', payload: { id: 'large' } })
-    const second = JSON.stringify({ type: 'turn_context', payload: { cwd: '/repo' } })
-    writeFileSync(path, `${first}\n${second}\n${'x'.repeat(1024 * 1024)}`)
-
-    expect(await readCodexSessionHead(path, 2, 256)).toEqual([first, second])
   })
 })
 

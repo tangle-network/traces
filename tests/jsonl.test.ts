@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { collectJsonl, readJsonl } from '../src/jsonl.js'
+import { collectJsonl, readJsonl, takeJsonl } from '../src/jsonl.js'
 
 describe('readJsonl', () => {
   it('streams valid rows and skips malformed rows', async () => {
@@ -15,5 +15,8 @@ describe('readJsonl', () => {
 
     expect(rows).toEqual([{ id: 1 }, { id: 2, text: 'café' }])
     await expect(collectJsonl(path)).resolves.toEqual(rows)
+    await expect(takeJsonl(path, 1)).resolves.toEqual([{ id: 1 }])
+    await expect(takeJsonl(path, 0)).resolves.toEqual([])
+    await expect(takeJsonl(path, -1)).rejects.toThrow('limit must be a non-negative integer')
   })
 })

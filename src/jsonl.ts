@@ -25,3 +25,14 @@ export async function collectJsonl<T>(path: string): Promise<T[]> {
   for await (const row of readJsonl<T>(path)) rows.push(row)
   return rows
 }
+
+export async function takeJsonl<T>(path: string, limit: number): Promise<T[]> {
+  if (!Number.isInteger(limit) || limit < 0) throw new RangeError('limit must be a non-negative integer')
+  const rows: T[] = []
+  if (limit === 0) return rows
+  for await (const row of readJsonl<T>(path)) {
+    rows.push(row)
+    if (rows.length === limit) break
+  }
+  return rows
+}

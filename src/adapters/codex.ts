@@ -14,10 +14,10 @@
  * Shared by the codex-acp wrapper via alias (same rollout format).
  */
 
-import { open, readdir, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { readJsonl } from '../jsonl.js'
+import { readJsonl, takeJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { codexActor } from './actor.js'
@@ -26,7 +26,6 @@ import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js
 
 const SERVICE = 'codex'
 const SESSION_HEAD_LINES = 40
-const SESSION_HEAD_BYTES = 256 * 1024
 
 interface CodexLine {
   timestamp?: string
@@ -50,36 +49,6 @@ interface CodexLine {
     agent_path?: string
     kind?: string
     info?: { last_token_usage?: { input_tokens?: number; output_tokens?: number }; model_context_window?: number }
-  }
-}
-
-function parseCodexLine(line: string): CodexLine | null {
-  if (!line) return null
-  try {
-    return JSON.parse(line) as CodexLine
-  } catch {
-    return null
-  }
-}
-
-/** Read only enough of a rollout to identify it; session files can be hundreds of megabytes. */
-export async function readCodexSessionHead(
-  path: string,
-  maxLines = SESSION_HEAD_LINES,
-  maxBytes = SESSION_HEAD_BYTES,
-): Promise<string[]> {
-  if (maxLines <= 0 || maxBytes <= 0) return []
-
-  let file: Awaited<ReturnType<typeof open>> | undefined
-  try {
-    file = await open(path, 'r')
-    const buffer = Buffer.allocUnsafe(maxBytes)
-    const { bytesRead } = await file.read(buffer, 0, maxBytes, 0)
-    return buffer.subarray(0, bytesRead).toString('utf8').split('\n', maxLines)
-  } catch {
-    return []
-  } finally {
-    await file?.close()
   }
 }
 
@@ -207,12 +176,15 @@ export class CodexAdapter implements HarnessTraceAdapter {
       // session leads with a turn_context (or a meta without cwd). Both line
       // types carry `payload.cwd`, so scan a bounded head for the first one —
       // otherwise these sessions come back cwd:null and lose their repo labels.
-      const head = await readCodexSessionHead(path)
+      let head: CodexLine[]
+      try {
+        head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES)
+      } catch {
+        continue
+      }
       let cwd: string | null = null
       let id = basename(path).replace(/^rollout-[\dT-]+-/, '').replace(/\.jsonl$/, '')
-      for (const line of head) {
-        const parsed = parseCodexLine(line)
-        if (!parsed) continue
+      for (const parsed of head) {
         if (parsed.type === 'session_meta' && parsed.payload?.id) id = parsed.payload.id
         if (!cwd && parsed.payload?.cwd) cwd = parsed.payload.cwd
         if (cwd) break
@@ -224,7 +196,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const head = (await readCodexSessionHead(ref.path)).map(parseCodexLine).filter((line) => line !== null)
+    const head = await takeJsonl<CodexLine>(ref.path, SESSION_HEAD_LINES)
     let first = head[0]
     let meta = head.find((line) => line.type === 'session_meta')
     let model = head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
