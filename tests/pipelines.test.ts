@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { span } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
+import { renderPipelines } from '../src/report.js'
 
 /** Build a tool call span with given name + identical input (→ same argHash). */
 function toolCall(
@@ -81,5 +82,19 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
     expect(r.stuckLoops.findings).toHaveLength(1)
     expect(r.stuckLoops.findings[0]!.toolName).toBe('wait')
     expect(r.stuckLoops.findings[0]!.occurrences).toBe(3)
+  })
+
+  it('reports retry follow-through against failed calls, not all calls', async () => {
+    const spans = [
+      span({ traceId: 'sess', spanId: 'root', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'other' }),
+      toolCall(1, 'bash', { cmd: 'false' }, 'ERROR'),
+      toolCall(2, 'read', { path: 'a' }),
+      toolCall(3, 'bash', { cmd: 'true' }),
+    ]
+
+    const text = renderPipelines(await runPipelines(spans))
+
+    expect(text).toContain('1/3 failed; 1/1 failed calls were followed by another call to that tool')
+    expect(text).not.toContain('% retry')
   })
 })

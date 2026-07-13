@@ -16,6 +16,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { collectJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
 import { claudeActor } from './actor.js'
@@ -52,19 +53,6 @@ interface ClaudeEvent {
     exitCode?: number
     stderr?: string
   }
-}
-
-function parseLines(raw: string): ClaudeEvent[] {
-  const out: ClaudeEvent[] = []
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    try {
-      out.push(JSON.parse(line) as ClaudeEvent)
-    } catch {
-      // Skip malformed lines; one bad line must not nuke the session.
-    }
-  }
-  return out
 }
 
 /** Total input tokens billed for an assistant turn (fresh + cache). */
@@ -283,8 +271,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const raw = await readFile(ref.path, 'utf8')
-    const events = parseLines(raw)
+    const events = await collectJsonl<ClaudeEvent>(ref.path)
     const traceId = events.find((e) => e.sessionId)?.sessionId ?? ref.sessionId
 
     const rootId = `root:${traceId}`
@@ -335,13 +322,13 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         // No meta → still parse, just orphaned under the session root.
       }
       const parent = (meta.toolUseId && main.toolSpanByUseId.get(meta.toolUseId)?.span_id) || `root:${traceId}`
-      let raw: string
+      let events: ClaudeEvent[]
       try {
-        raw = await readFile(join(subDir, f), 'utf8')
+        events = await collectJsonl<ClaudeEvent>(join(subDir, f))
       } catch {
         continue
       }
-      const parsed = parseClaudeStream(parseLines(raw), {
+      const parsed = parseClaudeStream(events, {
         traceId,
         agent: meta.agentType ? `subagent:${meta.agentType}` : 'subagent',
         startStep: step,

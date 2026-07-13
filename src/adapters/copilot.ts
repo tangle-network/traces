@@ -13,9 +13,10 @@
  * against local data.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { collectJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
@@ -38,19 +39,6 @@ interface CopilotEvent {
     success?: boolean
     error?: { message?: string }
   }
-}
-
-function parseLines(raw: string): CopilotEvent[] {
-  const out: CopilotEvent[] = []
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue
-    try {
-      out.push(JSON.parse(line) as CopilotEvent)
-    } catch {
-      // GitHub's writer has shipped lines with raw separators — skip tolerantly.
-    }
-  }
-  return out
 }
 
 export class CopilotAdapter implements HarnessTraceAdapter {
@@ -86,7 +74,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const events = parseLines(await readFile(ref.path, 'utf8'))
+    const events = await collectJsonl<CopilotEvent>(ref.path)
     const traceId = ref.sessionId
     const rootId = `root:${traceId}`
     const spans: OtlpSpan[] = [

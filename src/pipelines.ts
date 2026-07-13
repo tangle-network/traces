@@ -3,7 +3,7 @@
  *
  * These are the deterministic loop/thrash detectors that already exist in
  * `@tangle-network/agent-eval`:
- *   - stuckLoopView         — same tool + same args ≥ N times (the loop signal)
+ *   - stuckLoopView         — same tool + same args ≥ N times in a short interval
  *   - computeToolUseMetrics — duplicate-call / retry / error rates per run
  *
  * `toolWasteView` is intentionally NOT used: its default heuristic needs

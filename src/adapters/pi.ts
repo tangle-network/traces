@@ -7,9 +7,10 @@
  * ride inside `message.content[]` as tool blocks.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { collectJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { capText, userPromptSpan } from './conversation.js'
@@ -45,19 +46,6 @@ interface PiLine {
     errorMessage?: string
     usage?: { input?: number; output?: number }
   }
-}
-
-function parseLines(raw: string): PiLine[] {
-  const out: PiLine[] = []
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    try {
-      out.push(JSON.parse(line) as PiLine)
-    } catch {
-      // skip malformed
-    }
-  }
-  return out
 }
 
 function isToolBlock(b: PiContentBlock): boolean {
@@ -123,7 +111,7 @@ export class PiAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const lines = parseLines(await readFile(ref.path, 'utf8'))
+    const lines = await collectJsonl<PiLine>(ref.path)
     const sessionLine = lines.find((l) => l.type === 'session')
     const traceId = sessionLine?.id ?? ref.sessionId
     const rootId = `root:${traceId}`

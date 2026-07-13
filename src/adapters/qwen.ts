@@ -12,9 +12,10 @@
  * sessions on this machine).
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { collectJsonl } from '../jsonl.js'
 import { capText, userPromptSpan } from './conversation.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
@@ -37,19 +38,6 @@ interface QwenRecord {
   message?: { role?: string; parts?: GenaiPart[] }
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number }
   toolCallResult?: { status?: string; error?: unknown }
-}
-
-function parseLines(raw: string): QwenRecord[] {
-  const out: QwenRecord[] = []
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    try {
-      out.push(JSON.parse(line) as QwenRecord)
-    } catch {
-      // skip malformed
-    }
-  }
-  return out
 }
 
 function textOf(parts: GenaiPart[] | undefined): string {
@@ -101,7 +89,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const records = parseLines(await readFile(ref.path, 'utf8'))
+    const records = await collectJsonl<QwenRecord>(ref.path)
     const traceId = records.find((r) => r.sessionId)?.sessionId ?? ref.sessionId
     const rootId = `root:${traceId}`
 

@@ -14,6 +14,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { collectJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
@@ -53,19 +54,6 @@ function textOf(content: FactoryBlock[] | undefined): string {
       .map((b) => b.text)
       .join(''),
   )
-}
-
-function parseLines(raw: string): FactoryLine[] {
-  const out: FactoryLine[] = []
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    try {
-      out.push(JSON.parse(line) as FactoryLine)
-    } catch {
-      // skip malformed
-    }
-  }
-  return out
 }
 
 export class FactoryAdapter implements HarnessTraceAdapter {
@@ -112,7 +100,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const lines = parseLines(await readFile(ref.path, 'utf8'))
+    const lines = await collectJsonl<FactoryLine>(ref.path)
     const start = lines.find((l) => l.type === 'session_start')
     const traceId = start?.id ?? ref.sessionId
     const rootId = `root:${traceId}`

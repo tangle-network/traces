@@ -14,9 +14,10 @@
  * Shared by the codex-acp wrapper via alias (same rollout format).
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { open, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { codexActor } from './actor.js'
@@ -24,6 +25,8 @@ import { capText, userPromptSpan } from './conversation.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'codex'
+const SESSION_HEAD_LINES = 40
+const SESSION_HEAD_BYTES = 256 * 1024
 
 interface CodexLine {
   timestamp?: string
@@ -50,17 +53,34 @@ interface CodexLine {
   }
 }
 
-function parseLines(raw: string): CodexLine[] {
-  const out: CodexLine[] = []
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    try {
-      out.push(JSON.parse(line) as CodexLine)
-    } catch {
-      // skip malformed
-    }
+function parseCodexLine(line: string): CodexLine | null {
+  if (!line) return null
+  try {
+    return JSON.parse(line) as CodexLine
+  } catch {
+    return null
   }
-  return out
+}
+
+/** Read only enough of a rollout to identify it; session files can be hundreds of megabytes. */
+export async function readCodexSessionHead(
+  path: string,
+  maxLines = SESSION_HEAD_LINES,
+  maxBytes = SESSION_HEAD_BYTES,
+): Promise<string[]> {
+  if (maxLines <= 0 || maxBytes <= 0) return []
+
+  let file: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    file = await open(path, 'r')
+    const buffer = Buffer.allocUnsafe(maxBytes)
+    const { bytesRead } = await file.read(buffer, 0, maxBytes, 0)
+    return buffer.subarray(0, bytesRead).toString('utf8').split('\n', maxLines)
+  } catch {
+    return []
+  } finally {
+    await file?.close()
+  }
 }
 
 function contentToString(content: unknown): string {
@@ -187,18 +207,14 @@ export class CodexAdapter implements HarnessTraceAdapter {
       // session leads with a turn_context (or a meta without cwd). Both line
       // types carry `payload.cwd`, so scan a bounded head for the first one —
       // otherwise these sessions come back cwd:null and lose their repo labels.
-      const head = (await readFile(path, 'utf8').catch(() => '')).split('\n', 40)
+      const head = await readCodexSessionHead(path)
       let cwd: string | null = null
       let id = basename(path).replace(/^rollout-[\dT-]+-/, '').replace(/\.jsonl$/, '')
       for (const line of head) {
-        if (!line) continue
-        try {
-          const l = JSON.parse(line) as CodexLine
-          if (l.type === 'session_meta' && l.payload?.id) id = l.payload.id
-          if (!cwd && l.payload?.cwd) cwd = l.payload.cwd
-        } catch {
-          // skip an unparseable line; keep scanning
-        }
+        const parsed = parseCodexLine(line)
+        if (!parsed) continue
+        if (parsed.type === 'session_meta' && parsed.payload?.id) id = parsed.payload.id
+        if (!cwd && parsed.payload?.cwd) cwd = parsed.payload.cwd
         if (cwd) break
       }
       if (opts.cwd && (!cwd || !cwd.startsWith(opts.cwd))) continue
@@ -208,34 +224,43 @@ export class CodexAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const lines = parseLines(await readFile(ref.path, 'utf8'))
-    const meta = lines.find((l) => l.type === 'session_meta')
+    const head = (await readCodexSessionHead(ref.path)).map(parseCodexLine).filter((line) => line !== null)
+    let first = head[0]
+    let meta = head.find((line) => line.type === 'session_meta')
+    let model = head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
+    if (!first || !meta || !model) {
+      for await (const line of readJsonl<CodexLine>(ref.path)) {
+        first ??= line
+        if (!meta && line.type === 'session_meta') meta = line
+        if (!model && line.type === 'turn_context') model = line.payload?.model ?? null
+        if (first && meta && model) break
+      }
+    }
     const traceId = meta?.payload?.id ?? ref.sessionId
-    const model = lines.find((l) => l.type === 'turn_context')?.payload?.model ?? null
 
     const rootId = `root:${traceId}`
-    const spans: OtlpSpan[] = [
-      span({
-        traceId,
-        spanId: rootId,
-        parentSpanId: null,
-        name: 'session',
-        kind: 'AGENT',
-        startTime: meta?.timestamp ?? lines[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: lines.at(-1)?.timestamp,
-        service: SERVICE,
-        agent: SERVICE,
-        model,
-      }),
-    ]
+    const root = span({
+      traceId,
+      spanId: rootId,
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: meta?.timestamp ?? first?.timestamp ?? new Date(0).toISOString(),
+      service: SERVICE,
+      agent: SERVICE,
+      model,
+    })
+    const spans: OtlpSpan[] = [root]
 
     const toolByCallId = new Map<string, OtlpSpan>()
     const subagentByThreadId = new Map<string, OtlpSpan>()
     let step = 0
     let lastLlm = rootId
     let sawUserTurn = false
+    let lastTimestamp: string | undefined
 
-    for (const l of lines) {
+    for await (const l of readJsonl<CodexLine>(ref.path)) {
+      lastTimestamp = l.timestamp
       const ts = l.timestamp ?? new Date(0).toISOString()
       if (l.type === 'event_msg' && l.payload?.type === 'token_count') {
         const u = l.payload.info?.last_token_usage
@@ -398,6 +423,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
         }
       }
     }
+    root.end_time = lastTimestamp ?? root.start_time
     return spans
   }
 }

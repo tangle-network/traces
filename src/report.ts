@@ -137,7 +137,7 @@ export function renderPipelines(pr: PipelineReport): string {
   const lines: string[] = ['## loops & waste (deterministic)', '']
 
   if (pr.stuckLoops.findings.length === 0) {
-    lines.push('- **Stuck loops:** none (no tool called ≥3× with identical args).')
+    lines.push('- **Stuck loops:** none (no tool called ≥3× with identical args in a short interval).')
   } else {
     lines.push(`- **Stuck loops:** ${pr.stuckLoops.findings.length} (${(pr.stuckLoops.affectedRunRatio * 100).toFixed(0)}% of runs affected)`)
     for (const f of pr.stuckLoops.findings.sort((a, b) => b.occurrences - a.occurrences).slice(0, 10)) {
@@ -147,9 +147,14 @@ export function renderPipelines(pr: PipelineReport): string {
 
   for (const m of pr.toolUse) {
     if (m.totalCalls === 0) continue
+    const duplicateCalls = Math.round(m.duplicateRate * m.totalCalls)
+    const errorCalls = Math.round(m.errorRate * m.totalCalls)
+    const retriedFailures = Math.round(m.retryRate * errorCalls)
+    const failureFollowUp =
+      errorCalls > 0 ? `; ${retriedFailures}/${errorCalls} failed calls were followed by another call to that tool` : ''
     lines.push(
-      `- **Tool use** (${m.totalCalls} calls): ${(m.duplicateRate * 100).toFixed(0)}% duplicate, ` +
-        `${(m.retryRate * 100).toFixed(0)}% retry, ${(m.errorRate * 100).toFixed(0)}% error`,
+      `- **Tool use:** ${m.totalCalls} calls; ${duplicateCalls}/${m.totalCalls} repeated exactly; ` +
+        `${errorCalls}/${m.totalCalls} failed${failureFollowUp}`,
     )
   }
   lines.push('')
