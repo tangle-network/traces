@@ -57,11 +57,12 @@ export * from './reactions.js' // analyzeReactions() — human-reaction analyst
 export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
+export * from './execution.js' // shared execution accounting over normalized spans
 export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog
 export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
-export * from './improvement.js' // runTraceInvestigation()/runTraceImprovementLoop() artifact pack
+export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
 
 // ── External engines (NOT bundled — shell out to tools you install) ────────
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor

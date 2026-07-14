@@ -59,9 +59,8 @@ function policySpans(): OtlpSpan[] {
         startTime: `2026-06-26T00:00:0${i + 1}.000Z`,
         service: 'codex',
         tool: 'bash',
-        content: JSON.stringify({ cmd: 'pnpm test' }),
         status: 'ERROR',
-        extra: repo,
+        extra: { ...repo, 'input.value': JSON.stringify({ cmd: 'pnpm test' }) },
       })),
   ]
 }
@@ -84,7 +83,7 @@ describe('policy evidence export', () => {
     expect(record.metrics.erroredToolCallCount).toBe(3)
     expect(record.metrics.inputTokens).toBe(100)
     expect(record.metrics.outputTokens).toBe(20)
-    expect(record.metrics.models).toEqual(['glm-5.2'])
+    expect(record.metrics.models).toEqual(['glm-5.2@otlp'])
     expect(record.metrics.tools).toEqual([{ name: 'bash', calls: 3, errors: 3 }])
     expect(record.signals.stuckLoopCount).toBe(1)
     expect(record.signals.stuckLoops[0]).toEqual({ toolName: 'bash', occurrences: 3 })

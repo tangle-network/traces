@@ -72,8 +72,10 @@ function parseLine<T>(
   const jsonBytes = rawLine.at(-1) === 0x0d ? rawLine.subarray(0, -1) : rawLine
   if (jsonBytes.length === 0) return undefined
   if (!isUtf8(jsonBytes)) return handleCorruption(rawLine, path, lineNumber, byteOffset, options)
+  const json = jsonBytes.toString('utf8')
+  if (json.trim().length === 0) return undefined
   try {
-    return JSON.parse(jsonBytes.toString('utf8')) as T
+    return JSON.parse(json) as T
   } catch {
     return handleCorruption(rawLine, path, lineNumber, byteOffset, options)
   }

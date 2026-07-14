@@ -1,5 +1,5 @@
 /**
- * BYO analyst/proposal config for:
+ * BYO analyst config for:
  *
  *   traces improve --last 5 --config examples/improvement-config.mjs --dir .traces/improvement
  *   traces stream --mode agent --config examples/improvement-config.mjs
@@ -47,16 +47,4 @@ export default {
       })]
     },
   }],
-  improvementAdapter: {
-    async propose(input) {
-      return input.recommendations.slice(0, 3).map((recommendation, index) => ({
-        id: `example-proposal-${index + 1}`,
-        title: recommendation.title,
-        description: recommendation.action,
-        recommendationIds: [recommendation.id],
-        validationCommand: 'traces improve --last 5',
-        evidenceRefs: recommendation.evidenceRefs,
-      }))
-    },
-  },
 }

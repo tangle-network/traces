@@ -60,3 +60,78 @@ export const INGEST_SOURCE_CLI = 'cli'
 
 /** Harness used when none is specified on a single-harness command. */
 export const DEFAULT_HARNESS = 'claude-code'
+
+const SESSION_ID_ATTRIBUTE_KEYS = [ATTR.SESSION_ID, 'session.id', 'traces.session.id'] as const
+
+export function sessionIdFromAttributes(
+  attributes: Readonly<Record<string, unknown>>,
+): string | undefined {
+  return SESSION_ID_ATTRIBUTE_KEYS.map((key) => attributes[key]).find(
+    (value): value is string => typeof value === 'string' && value.length > 0,
+  )
+}
+
+export interface SessionIdentityConflict {
+  readonly traceId: string
+  readonly sessionIds: readonly string[]
+}
+
+export interface SessionIdentityIndex {
+  readonly sessionByTrace: Map<string, string>
+  readonly conflicts: readonly SessionIdentityConflict[]
+}
+
+export function indexSessionIdsByTrace(
+  spans: readonly {
+    trace_id: string
+    attributes: Readonly<Record<string, unknown>>
+  }[],
+): SessionIdentityIndex {
+  const candidatesByTrace = new Map<string, Set<string>>()
+  for (const span of spans) {
+    const candidates = candidatesByTrace.get(span.trace_id) ?? new Set<string>()
+    for (const key of SESSION_ID_ATTRIBUTE_KEYS) {
+      const value = span.attributes[key]
+      if (typeof value === 'string' && value.length > 0) candidates.add(value)
+    }
+    if (candidates.size > 0) candidatesByTrace.set(span.trace_id, candidates)
+  }
+
+  const sessionByTrace = new Map<string, string>()
+  const conflicts: SessionIdentityConflict[] = []
+  for (const [traceId, candidates] of candidatesByTrace) {
+    const sessionIds = [...candidates].sort()
+    if (sessionIds.length === 1) {
+      sessionByTrace.set(traceId, sessionIds[0]!)
+    } else {
+      conflicts.push({ traceId, sessionIds })
+    }
+  }
+  conflicts.sort((a, b) => a.traceId.localeCompare(b.traceId))
+  return { sessionByTrace, conflicts }
+}
+
+/**
+ * Ensure every locally parsed trace has one session identity without hiding
+ * source conflicts. Existing stable identities win; otherwise the local
+ * session reference is stamped on every span in that trace.
+ */
+export function stampSessionIdentity(
+  spans: {
+    trace_id: string
+    attributes: Record<string, unknown>
+  }[],
+  fallbackSessionId: string,
+): void {
+  const { sessionByTrace, conflicts } = indexSessionIdsByTrace(spans)
+  const conflictingTraceIds = new Set(conflicts.map((conflict) => conflict.traceId))
+  const traceIds = new Set(spans.map((span) => span.trace_id))
+  const singleTraceId = traceIds.size === 1 ? traceIds.values().next().value : undefined
+  for (const span of spans) {
+    if (conflictingTraceIds.has(span.trace_id)) continue
+    const sessionId = sessionByTrace.get(span.trace_id) ?? singleTraceId ?? fallbackSessionId
+    if (!sessionIdFromAttributes(span.attributes)) {
+      span.attributes[ATTR.SESSION_ID] = sessionId
+    }
+  }
+}

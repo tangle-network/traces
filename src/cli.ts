@@ -5,8 +5,8 @@
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
- *   traces investigate [--harness claude-code] [--last 10] [--out report.md]
- *   traces improve [--all] [--since 24h] --dir .traces/improvement
+ *   traces investigate [input.jsonl] [--format auto] [--out report.md]
+ *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces inspect session-index.json [--out inspection-report.md]
@@ -16,9 +16,9 @@
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
  *
  * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
- * repeated-call/tool-use pipelines; +agentic RLM kinds with `--llm`). `watch` is the
+ * loop/waste pipelines; +agentic RLM kinds with `--llm`). `watch` is the
  * online observer: it tails active sessions and prints notifications when a
- * repeated-call group or semantic live finding appears. `stream` emits the same live
+ * stuck loop or semantic live finding appears. `stream` emits the same live
  * feed as JSONL for visualizers, dashboards, and external agents.
  */
 
@@ -28,7 +28,7 @@ import { basename, resolve } from 'node:path'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
-import { ATTR } from './attributes.js'
+import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -36,7 +36,7 @@ import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writ
 import {
   loadTracesConfig,
   mergeTracesConfig,
-  runTraceImprovementLoop,
+  runTraceImprovement,
   runTraceInvestigation,
   saveReport,
 } from './improvement.js'
@@ -63,8 +63,9 @@ import {
   renderReport,
   summarizeDeterministicSignals,
 } from './report.js'
+import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
-import type { HarnessTraceAdapter, SessionCorruptionReceipt, SessionRef } from './types.js'
+import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
 
 interface Args {
@@ -231,31 +232,26 @@ async function cmdList(args: Args): Promise<void> {
   }
 }
 
-interface SelectedSessionSource {
-  sessionId: string
-  path: string
-  subject: string
-  role: 'operator' | 'child' | 'unknown'
-  parentSessionId?: string
-  integrity: 'complete' | 'degraded_not_lossless'
-  corruptionCount?: number
-  corruptionDigest?: string
-  corruptions?: readonly SessionCorruptionReceipt[]
-}
+type SelectedSessionSource = ReportSource
 
 interface CollectedSpans {
   spans: OtlpSpan[]
   harness: string
-  sessionCount: number
   cwds: string[]
   sources: SelectedSessionSource[]
 }
 
-function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): SelectedSessionSource {
+function selectedSessionSource(
+  ref: SessionRef,
+  spans: readonly OtlpSpan[],
+  sessionIdOverride?: string,
+): SelectedSessionSource {
   const root = spans.find((item) => item.parent_span_id === null) ?? spans[0]
   const prompt = spans.find(
     (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
-  ) ?? spans.find((item) => item.name === 'user.prompt')
+  ) ?? spans.find((item) => item.name === 'user.prompt') ?? spans.find(
+    (item) => item.attributes['span.type'] === 'interaction' && typeof item.attributes.content === 'string',
+  )
   const content = typeof prompt?.attributes.content === 'string' ? prompt.attributes.content : ''
   const firstLine = content.split(/\r?\n/, 1)[0]!.trim()
   const subject = firstLine.length > 240
@@ -264,8 +260,14 @@ function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): Sel
   const role = root?.attributes['traces.session.role']
   const parentSessionId = root?.attributes['traces.parent_session_id']
   const corruptionDigest = root?.attributes[ATTR.CORRUPTION_DIGEST]
+  const sessionId = [
+    sessionIdOverride,
+    root ? sessionIdFromAttributes(root.attributes) : undefined,
+    root?.trace_id,
+    ref.sessionId,
+  ].find((value): value is string => typeof value === 'string' && value.length > 0)!
   return {
-    sessionId: root?.trace_id ?? ref.sessionId,
+    sessionId,
     path: ref.path,
     subject,
     role: role === 'operator' || role === 'child' ? role : 'unknown',
@@ -280,6 +282,7 @@ function selectedSessionSource(ref: SessionRef, spans: readonly OtlpSpan[]): Sel
 }
 
 async function collectSpans(args: Args): Promise<CollectedSpans> {
+  if (args.input) return collectImportedSpans(args)
   if (args.session) {
     const adapter = resolveAdapter(args.harness)
     if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
@@ -297,14 +300,12 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
     return {
       spans,
       harness: adapter.harness,
-      sessionCount: 1,
       cwds: ref.cwd ? [ref.cwd] : [],
       sources: [selectedSessionSource(ref, spans)],
     }
   }
   const groups = await discover({ ...args, last: args.last || 1 })
   const spans: OtlpSpan[] = []
-  let sessionCount = 0
   const harnesses: string[] = []
   const cwds: string[] = []
   const sources: SelectedSessionSource[] = []
@@ -315,10 +316,9 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
       spans.push(...parsed)
       sources.push(selectedSessionSource(ref, parsed))
       if (ref.cwd) cwds.push(ref.cwd)
-      sessionCount += 1
     }
   }
-  return { spans, harness: harnesses.join('+') || args.harness, sessionCount, cwds, sources }
+  return { spans, harness: harnesses.join('+') || args.harness, cwds, sources }
 }
 
 async function cmdConvert(args: Args): Promise<void> {
@@ -465,12 +465,10 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds, sources } = args.input
-    ? await collectImportedSpans(args)
-    : await collectSpans(args)
+  const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const ai = args.llm ? await buildAxService() : undefined
-  const { otlpPath, result } = await analyzeSpans(spans, {
+  const { otlpPath, execution, result } = await analyzeSpans(spans, {
     ai,
     model: args.model,
     budgetUsd: args.budget,
@@ -482,7 +480,16 @@ async function cmdAnalyze(args: Args): Promise<void> {
   const adoption = await analyzeAdoption(spans, { cwds })
   const deterministic = summarizeDeterministicSignals(pipelines, reactions)
   let report =
-    `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath, deterministic, sources })}\n` +
+    `${renderReport(result, {
+      harness,
+      sessionCount: adoption.identifiedSessionCount,
+      unassignedTraceCount: adoption.unassignedTraceCount,
+      spanCount: spans.length,
+      otlpPath,
+      execution,
+      deterministic,
+      sources,
+    })}\n` +
     `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
   if (args.analyzers.length > 0 && otlpPath) {
     const engines = externalAnalyzersFromArgs(args)
@@ -495,7 +502,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
     await writeFile(args.out, report, 'utf8')
     console.log(
       `report → ${args.out}  (${result.findings.length} findings, ` +
-        `${pipelines.stuckLoops.findings.length} full-session repeated-call groups, OTLP: ${otlpPath})`,
+        `${pipelines.stuckLoops.findings.length} loops, OTLP: ${otlpPath})`,
     )
   } else {
     console.log(report)
@@ -503,25 +510,32 @@ async function cmdAnalyze(args: Args): Promise<void> {
 }
 
 async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
-  if (!args.input) throw new Error('analyze input missing')
+  if (!args.input) throw new Error('input file missing')
   const attributes = await loadExportAttributes(args)
   const result = await exportTraceEvidenceFile(args.input, {
     format: traceEvidenceFormat(args.format),
     attributes,
   })
-  const traceIds = new Set(result.spans.map((s) => s.trace_id).filter(Boolean))
+  const { sessionByTrace } = indexSessionIdsByTrace(result.spans)
+  const sessions = new Map<string, OtlpSpan[]>()
+  for (const span of result.spans) {
+    const sessionId = sessionByTrace.get(span.trace_id)
+    if (!sessionId) continue
+    const grouped = sessions.get(sessionId) ?? []
+    grouped.push(span)
+    sessions.set(sessionId, grouped)
+  }
   return {
     spans: result.spans,
     harness: result.format,
-    sessionCount: traceIds.size || 1,
     cwds: [],
-    sources: [...traceIds].map((sessionId) => ({
+    sources: [...sessions].map(([sessionId, spans]) => selectedSessionSource({
+      harness: result.format,
       sessionId,
       path: args.input!,
-      subject: '',
-      role: 'unknown',
-      integrity: 'complete',
-    })),
+      cwd: null,
+      mtimeMs: 0,
+    }, spans, sessionId)),
   }
 }
 
@@ -534,14 +548,14 @@ function externalAnalyzersFromArgs(args: Args) {
 }
 
 async function cmdInvestigate(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
+  const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const ai = args.llm ? await buildAxService() : undefined
   const result = await runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
-    sessionCount,
+    sources,
     cwds,
     minLoopOccurrences: args.minLoop,
     ai,
@@ -554,22 +568,22 @@ async function cmdInvestigate(args: Args): Promise<void> {
   }, config))
   if (args.out) {
     await saveReport(args.out, result.report)
-    console.log(`investigation report → ${args.out}  (${result.findings.length} findings, ${result.recommendations.length} recommendations, OTLP: ${result.otlpPath})`)
+    console.log(`investigation report → ${args.out}  (${result.findings.length} findings with actions, OTLP: ${result.otlpPath})`)
   } else {
     console.log(result.report)
   }
 }
 
 async function cmdImprove(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
+  const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const ai = args.llm ? await buildAxService() : undefined
-  const result = await runTraceImprovementLoop({
+  const result = await runTraceImprovement({
     ...mergeTracesConfig({
       spans,
       harness,
-      sessionCount,
+      sources,
       cwds,
       minLoopOccurrences: args.minLoop,
       ai,
@@ -580,14 +594,13 @@ async function cmdImprove(args: Args): Promise<void> {
       analyzerPrompt: args.analyzerPrompt,
       log: (msg) => process.stderr.write(`${msg}\n`),
     }, config),
-    adapter: config?.improvementAdapter,
     outDir: args.dir ?? args.out,
   })
   const dir = result.artifacts?.directory
   if (!dir) throw new Error('improve did not produce an artifact directory')
   console.log(
     `improvement artifacts → ${dir}  ` +
-      `(${result.findings.length} findings, ${result.recommendations.length} recommendations, ${result.proposals.length} proposal(s), OTLP: ${result.otlpPath})`,
+      `(${result.findings.length} findings with actions and checks, OTLP: ${result.otlpPath})`,
   )
 }
 
@@ -719,7 +732,7 @@ async function cmdWatch(args: Args): Promise<void> {
   process.stderr.write(
     `traces watch: observing ${all ? 'all harnesses' : args.harness}, ` +
       `sessions active in the last ${args.window}m, every ${args.interval}s. ` +
-      `Full-session repeated-call groups + semantic live findings; read-only; Ctrl-C to stop.\n`,
+      `Loop + semantic live findings; read-only; Ctrl-C to stop.\n`,
   )
   await watchSessions({
     all,
@@ -732,7 +745,7 @@ async function cmdWatch(args: Args): Promise<void> {
     onLoop: (l) => {
       const ts = new Date().toISOString().slice(11, 19)
       process.stdout.write(
-        `${ts} REPEATED-GROUP [full-session, not time-bounded] [${l.harness}] ${l.sessionId.slice(0, 8)}: ` +
+        `${ts} LOOP [${l.harness}] ${l.sessionId.slice(0, 8)}: ` +
           `\`${l.toolName}\` repeated ×${l.occurrences} with identical args ` +
           `(${(l.windowMs / 1000).toFixed(0)}s)${l.cwd ? ` · ${l.cwd}` : ''}\n`,
       )
@@ -835,16 +848,16 @@ function usage(): void {
 
 Commands:
   list      List discovered sessions
-  analyze   Run analyst suite + repeated-call/tool-use pipelines over sessions or an input file
-  investigate Run typed investigation flow, including BYO config + recommendations
-  improve   Write a full improvement artifact directory for review/apply/rerun
+  analyze   Run analyst suite + loop/waste pipelines over sessions or an input file
+  investigate Run typed investigation flow, including BYO config + evidence-backed actions
+  improve   Write findings, evidence, report, and canonical trace artifacts
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
   inspect   Read a session index and print ranked improvement findings
   export    Convert evidence/events files to OpenInference JSONL for HALO
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
-  watch     Online observer: tail active sessions, notify on repeated-call groups + semantic findings
+  watch     Online observer: tail active sessions, notify on loops + semantic findings
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
 Options:
@@ -866,13 +879,13 @@ Options:
   --no-findings    stream: omit semantic live-finding events
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
-  --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, external analyzers, or proposal adapter
+  --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
   --budget <usd>   USD cap for agentic analysts
   --analyzer <cmd> analyze: also run an external engine over the OTLP (repeatable; "halo" or any command)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
   --interval <s>   watch/stream: poll interval seconds (default 5)
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
-  --min-loop <n>   Min identical calls in a full-session group (default 3)
+  --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
   --no-content     upload: strip prompt/response text; send metadata only
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass

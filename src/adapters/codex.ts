@@ -67,7 +67,15 @@ interface CodexLine {
         }
       }
     }
-    info?: { last_token_usage?: { input_tokens?: number; output_tokens?: number }; model_context_window?: number }
+    info?: {
+      last_token_usage?: {
+        input_tokens?: number
+        cached_input_tokens?: number
+        output_tokens?: number
+        reasoning_output_tokens?: number
+      }
+      model_context_window?: number
+    }
   }
 }
 
@@ -326,6 +334,8 @@ export class CodexAdapter implements HarnessTraceAdapter {
             model,
             inputTokens: u.input_tokens ?? null,
             outputTokens: u.output_tokens ?? null,
+            reasoningTokens: u.reasoning_output_tokens ?? null,
+            cachedInputTokens: u.cached_input_tokens ?? null,
             step,
           })
           spans.push(llm)

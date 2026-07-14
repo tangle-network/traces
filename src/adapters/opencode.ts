@@ -24,7 +24,12 @@ interface OcMessage {
   id?: string
   role?: string
   modelID?: string
-  tokens?: { input?: number; output?: number }
+  tokens?: {
+    input?: number
+    output?: number
+    reasoning?: number
+    cache?: { read?: number; write?: number }
+  }
   time?: { created?: number; completed?: number }
 }
 
@@ -167,6 +172,9 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
             model: msg.modelID ?? null,
             inputTokens: msg.tokens?.input ?? null,
             outputTokens: msg.tokens?.output ?? null,
+            reasoningTokens: msg.tokens?.reasoning ?? null,
+            cachedInputTokens: msg.tokens?.cache?.read ?? null,
+            cacheWriteInputTokens: msg.tokens?.cache?.write ?? null,
             step,
             content: turnText || null,
           }),

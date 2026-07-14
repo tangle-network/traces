@@ -1,6 +1,7 @@
 import { mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   buildPolicyEvidenceRecord,
   type BuildPolicyEvidenceOptions,
@@ -29,6 +30,7 @@ export interface TraceSessionIndexRow {
   readonly models: readonly string[]
   readonly tools: PolicyEvidenceRecord['metrics']['tools']
   readonly signals: PolicyEvidenceRecord['signals']
+  readonly execution: ExecutionReport
 }
 
 export interface TraceIndexedFile {
@@ -118,6 +120,7 @@ function indexRow(record: PolicyEvidenceRecord): TraceSessionIndexRow {
     models: record.metrics.models,
     tools: record.metrics.tools,
     signals: record.signals,
+    execution: record.execution,
   }
 }
 

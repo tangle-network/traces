@@ -68,9 +68,8 @@ function indexSpans(cwd = '/work/traces'): OtlpSpan[] {
         startTime: `2026-01-01T00:00:0${i + 1}.000Z`,
         service: 'synthetic',
         tool: 'bash',
-        content: 'pnpm test',
         status: i === 3 ? 'ERROR' : 'OK',
-        extra: repo,
+        extra: { ...repo, 'input.value': 'pnpm test' },
       })),
   ]
 }
@@ -103,7 +102,7 @@ describe('session index', () => {
     expect(index.totals.erroredToolCalls).toBe(1)
     expect(index.totals.stuckLoopSessions).toBe(1)
     expect(index.totals.repos).toEqual(['github.com/tangle-network/traces'])
-    expect(index.totals.models).toEqual(['gpt-test'])
+    expect(index.totals.models).toEqual(['gpt-test@otlp'])
     expect(index.totals.tools).toEqual(['bash'])
 
     const row = index.sessions[0]!

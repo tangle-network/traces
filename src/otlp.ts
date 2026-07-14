@@ -13,10 +13,16 @@
  *   - `service.name`             → harness id (claude-code, codex, …)
  *   - `agent.name`               → agent / subagent name
  *   - `llm.model_name`           → model
- *   - `llm.input_tokens` / `llm.output_tokens` → behavioral token trajectories
+ *   - shared `llm.token_count.*` keys → input, output, reasoning, and cache usage
  *   - `tool.name`                → tool histogram (monoculture / no-verify)
  *   - `step`                     → run order (falls back to start_time)
  */
+
+import {
+  applyLlmSpanOtlpAttributes,
+  OPENINFERENCE_SPAN_KIND,
+  TOOL_NAME,
+} from '@tangle-network/agent-eval/trace-attributes'
 
 export type OtlpSpanKind = 'AGENT' | 'LLM' | 'TOOL' | 'CHAIN' | 'SPAN'
 
@@ -50,6 +56,11 @@ export interface SpanInput {
   tool?: string | null
   inputTokens?: number | null
   outputTokens?: number | null
+  /** Reasoning subset of output tokens. */
+  reasoningTokens?: number | null
+  cachedInputTokens?: number | null
+  cacheWriteInputTokens?: number | null
+  costUsd?: number | null
   /** Run-order pivot; the behavioral analyst orders trajectories by this. */
   step?: number
   /** Verbatim content the agentic analysts read via regex search. */
@@ -65,14 +76,20 @@ export interface SpanInput {
  */
 export function span(input: SpanInput): OtlpSpan {
   const attributes: Record<string, unknown> = {
-    'openinference.span.kind': input.kind,
+    [OPENINFERENCE_SPAN_KIND]: input.kind,
   }
   if (input.service != null) attributes['service.name'] = input.service
   if (input.agent != null) attributes['agent.name'] = input.agent
-  if (input.model != null) attributes['llm.model_name'] = input.model
-  if (input.tool != null) attributes['tool.name'] = input.tool
-  if (input.inputTokens != null) attributes['llm.input_tokens'] = input.inputTokens
-  if (input.outputTokens != null) attributes['llm.output_tokens'] = input.outputTokens
+  if (input.tool != null) attributes[TOOL_NAME] = input.tool
+  applyLlmSpanOtlpAttributes(attributes, {
+    model: input.model ?? undefined,
+    inputTokens: input.inputTokens ?? undefined,
+    outputTokens: input.outputTokens ?? undefined,
+    reasoningTokens: input.reasoningTokens ?? undefined,
+    cachedTokens: input.cachedInputTokens ?? undefined,
+    cacheWriteTokens: input.cacheWriteInputTokens ?? undefined,
+    costUsd: input.costUsd ?? undefined,
+  })
   if (input.step != null) attributes.step = input.step
   if (input.content != null && input.content.length > 0) attributes['content'] = input.content
   if (input.extra) Object.assign(attributes, input.extra)
@@ -112,7 +129,7 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
     span_id: s.span_id,
     parent_span_id: s.parent_span_id ?? '',
     name: s.name,
-    kind: (typeof a['openinference.span.kind'] === 'string' ? a['openinference.span.kind'] : 'CHAIN'),
+    kind: (typeof a[OPENINFERENCE_SPAN_KIND] === 'string' ? a[OPENINFERENCE_SPAN_KIND] : 'CHAIN'),
     start_time: s.start_time,
     end_time: s.end_time,
     status: { code: s.status.code, message: s.status.message ?? '' },

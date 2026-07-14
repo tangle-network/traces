@@ -55,7 +55,9 @@ Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowled
 
 Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo`. See [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
 
-`traces improve` is the reviewable action path. It writes typed artifacts: findings, recommendations, proposal-only artifacts, evidence rows, claims, report, and before/after replay metadata. Another agent, CI job, or hosted product can consume the result without scraping prose.
+`traces improve` is the reviewable action path.
+It writes one typed result, one report, flattened evidence rows, and the canonical OTLP trace.
+Each finding already contains the claim, evidence, recommended action, confidence, and validation plan.
 
 ## What it finds
 
@@ -95,7 +97,7 @@ Every adapter captures the full conversation: the **user's prompt** and the **as
 ```bash
 traces list     --harness claude-code --last 20    # discover sessions
 traces analyze  --harness codex --last 1           # $0 deterministic report
-traces investigate --all --last 10 --out report.md  # typed findings + recommendations
+traces investigate --all --last 10 --out report.md  # typed findings with actions + checks
 traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
@@ -124,7 +126,7 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | `export` / file `stream`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
-| `--config <path>` | `investigate` / `improve` / `stream`: load BYO analysts, live analysts, external analyzers, and proposal adapters |
+| `--config <path>` | `investigate` / `improve` / `stream`: load BYO analysts, live analysts, and external analyzers |
 | `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |
@@ -195,15 +197,12 @@ The directory contains:
 
 | File | Purpose |
 |---|---|
-| `findings.json` | typed `AnalystFinding[]`; finding ids, severity, evidence refs, recommended action, validation plan |
-| `recommendations.json` | ranked actions derived from analyst, deterministic, and external findings |
-| `proposals.json` | reviewable proposal-only artifacts linked to recommendation ids and evidence refs |
+| `result.json` | findings, actions, checks, execution facts, and adoption data |
 | `evidence.jsonl` | one row per evidence ref, suitable for downstream mining |
-| `claims.json` | compact claim list for review agents and dashboards |
 | `report.md` | human-readable report rendered from the typed data |
-| `replay-before-after.json` | baseline counts plus proposal-only replay metadata |
+| `traces.otlp.jsonl` | canonical trace used by the analysts and execution accounting |
 
-Bring your own analysts and proposal writer with a config file:
+Bring your own analysts with a config file:
 
 ```bash
 traces improve --last 5 --config examples/improvement-config.mjs --dir .traces/improvement
@@ -215,9 +214,8 @@ The config can export:
 - `liveAnalysts`: deterministic online analysts that implement the `TraceLiveAnalyst` contract for `traces stream`
 - `registry`: a prebuilt `AnalystRegistry`
 - `externalAnalyzers`: HALO or any command/model adapter that reads the OTLP artifact
-- `improvementAdapter`: a proposal writer that replaces the default proposal set with product-specific patches, profile edits, prompts, or validation commands
-
-`traces` does not apply patches or open PRs by default. The public engine produces reviewable artifacts; hosted products can decide how to deliver, approve, or apply them.
+Traces does not pretend that an action is a measured candidate.
+Use `agent-eval` to propose and compare candidate changes, `agent-runtime` to package an approved improvement, and `agent-interface` to represent profile edits.
 
 ## Session index
 
@@ -344,11 +342,11 @@ The CLI is a thin consumer of these exports.
 | Export | Signature | Use |
 |---|---|---|
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run built-in analysts, or **your own** via `registry` |
-| `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings, recommendations, claims, external analyzer output, and report |
-| `runTraceImprovementLoop` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full improvement artifact pack and proposal-only output |
-| `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | turn any `AnalystFinding[]` into recommendations, claims, and a report |
+| `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings with actions/checks, execution facts, external analyzer output, and report |
+| `runTraceImprovement` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full findings, evidence, report, and trace artifact pack |
+| `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | render any `AnalystFinding[]` without changing its schema |
 | `runTraceStoreInvestigation` | `({ traceStore }) → TraceStoreInvestigationResult` | run the same packet layer over a hosted/custom `TraceAnalysisStore` |
-| `loadTracesConfig` | `(path?) → TracesConfig \| undefined` | load BYO analysts, external analyzers, and proposal adapters |
+| `loadTracesConfig` | `(path?) → TracesConfig \| undefined` | load BYO analysts and external analyzers |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
 | `streamSessions` | `(TraceStreamOptions) → Promise<void>` | live JSONL-ready event stream over active sessions |
 | `traceStreamEventsFromSpans` | `(spans, opts?) → TraceStreamEvent[]` | replay an existing span list as stream events |

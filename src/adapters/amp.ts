@@ -139,9 +139,6 @@ export class AmpAdapter implements HarnessTraceAdapter {
         }
       } else {
         const u = m.usage
-        const inputTokens = u
-          ? (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0) || null
-          : null
         spans.push(
           span({
             traceId,
@@ -153,8 +150,10 @@ export class AmpAdapter implements HarnessTraceAdapter {
             service: SERVICE,
             agent: SERVICE,
             model: u?.model ?? null,
-            inputTokens,
+            inputTokens: u?.inputTokens ?? null,
             outputTokens: u?.outputTokens ?? null,
+            cachedInputTokens: u?.cacheReadInputTokens ?? null,
+            cacheWriteInputTokens: u?.cacheCreationInputTokens ?? null,
             step,
             content: textOf(m.content) || null,
           }),

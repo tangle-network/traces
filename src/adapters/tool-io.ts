@@ -7,6 +7,12 @@ export const TOOL_IO_VALUE_KEYS = ['input.value', 'output.value'] as const
 interface ToolIoInput {
   input?: unknown
   output?: unknown
+  argsCaptured?: boolean
+}
+
+export interface ToolArgumentCapture {
+  args: unknown
+  argsCaptured: boolean
 }
 
 const TOOL_IO_SIDES = ['input', 'output'] as const
@@ -86,7 +92,30 @@ function valueAttributes(side: 'input' | 'output', raw: unknown): Record<string,
 }
 
 export function toolIoAttributes(io: ToolIoInput): Record<string, unknown> {
-  return { ...valueAttributes('input', io.input), ...valueAttributes('output', io.output) }
+  return {
+    ...valueAttributes('input', io.input),
+    ...valueAttributes('output', io.output),
+    ...(io.argsCaptured === undefined ? {} : { 'tool.args_captured': io.argsCaptured }),
+  }
+}
+
+export function toolArgumentsFromAttributes(
+  attributes: Readonly<Record<string, unknown>>,
+): ToolArgumentCapture {
+  const declared = attributes['tool.args_captured']
+  const explicit =
+    typeof declared === 'boolean'
+      ? declared
+      : declared === 'true'
+        ? true
+        : declared === 'false'
+          ? false
+          : undefined
+  const argsCaptured = explicit ?? attributes['input.value'] !== undefined
+  return {
+    args: argsCaptured ? attributes['input.value'] : undefined,
+    argsCaptured,
+  }
 }
 
 /** Make all tool metadata describe only the value that remains after redaction. */

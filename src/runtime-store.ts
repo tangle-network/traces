@@ -12,8 +12,8 @@
  * hashes it (`argHash`) so identical repeated calls collapse to one finding.
  */
 
-import { InMemoryTraceStore } from '@tangle-network/agent-eval'
-import type { Run, Span } from '@tangle-network/agent-eval'
+import { InMemoryTraceStore, type Span } from '@tangle-network/agent-eval'
+import { toolArgumentsFromAttributes } from './adapters/tool-io.js'
 import type { OtlpSpan, OtlpSpanKind } from './otlp.js'
 import { parseIsoToEpochMs as ms } from './time.js'
 
@@ -32,39 +32,62 @@ export interface RuntimeTrace {
 
 export async function toRuntimeStore(spans: readonly OtlpSpan[]): Promise<RuntimeTrace> {
   const store = new InMemoryTraceStore()
-  const runIds = new Set<string>()
+  const runs = new Map<string, { startedAt: number; endedAt: number; failed: boolean }>()
+
+  for (const item of spans) {
+    const startedAt = ms(item.start_time)
+    const endedAt = ms(item.end_time)
+    const current = runs.get(item.trace_id)
+    runs.set(item.trace_id, current
+      ? {
+          startedAt: Math.min(current.startedAt, startedAt),
+          endedAt: Math.max(current.endedAt, endedAt),
+          failed: current.failed || item.status.code === 'ERROR',
+        }
+      : { startedAt, endedAt, failed: item.status.code === 'ERROR' })
+  }
+
+  for (const [runId, run] of runs) {
+    await store.appendRun({
+      runId,
+      scenarioId: 'session',
+      startedAt: run.startedAt,
+      endedAt: run.endedAt,
+      status: run.failed ? 'failed' : 'completed',
+    })
+  }
 
   for (const s of spans) {
-    if (!runIds.has(s.trace_id)) {
-      runIds.add(s.trace_id)
-      await store.appendRun({ runId: s.trace_id, scenarioId: 'session' } as Run)
-    }
-
     const kind = KIND[s.attributes['openinference.span.kind'] as OtlpSpanKind] ?? 'custom'
+    const startedAt = ms(s.start_time)
+    const endedAt = ms(s.end_time)
     const base = {
       spanId: s.span_id,
       parentSpanId: s.parent_span_id ?? undefined,
       runId: s.trace_id,
       name: s.name,
-      startedAt: ms(s.start_time),
-      endedAt: ms(s.end_time),
+      startedAt,
+      endedAt,
       status: s.status.code === 'ERROR' ? ('error' as const) : ('ok' as const),
       error: s.status.message,
       attributes: s.attributes,
     }
 
+    const tool = kind === 'tool' ? toolArgumentsFromAttributes(s.attributes) : undefined
     const span: Span =
       kind === 'tool'
         ? ({
             ...base,
             kind: 'tool',
             toolName: String(s.attributes['tool.name'] ?? 'tool'),
-            args: s.attributes['input.value'] ?? s.attributes.content ?? '',
+            args: tool!.args,
+            argsCaptured: tool!.argsCaptured,
+            latencyMs: Math.max(0, endedAt - startedAt),
           } as Span)
         : ({ ...base, kind } as Span)
 
     await store.appendSpan(span)
   }
 
-  return { store, runIds: [...runIds] }
+  return { store, runIds: [...runs.keys()] }
 }

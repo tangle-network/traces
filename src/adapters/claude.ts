@@ -58,13 +58,6 @@ interface ClaudeEvent {
   }
 }
 
-/** Total input tokens billed for an assistant turn (fresh + cache). */
-function inputTokens(u: NonNullable<ClaudeEvent['message']>['usage']): number | null {
-  if (!u) return null
-  const v = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
-  return v > 0 ? v : null
-}
-
 interface BlockText {
   type?: string
   id?: string
@@ -145,8 +138,10 @@ function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: Cl
         service: SERVICE,
         agent: ctx.agent,
         model: ev.message.model ?? null,
-        inputTokens: inputTokens(ev.message.usage),
+        inputTokens: ev.message.usage?.input_tokens ?? null,
         outputTokens: ev.message.usage?.output_tokens ?? null,
+        cachedInputTokens: ev.message.usage?.cache_read_input_tokens ?? null,
+        cacheWriteInputTokens: ev.message.usage?.cache_creation_input_tokens ?? null,
         step: state.step,
         content: textOf(ev.message.content) || null,
       }),

@@ -17,10 +17,20 @@
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { toolArgumentsFromAttributes } from './adapters/tool-io.js'
+import {
+  indexSessionIdsByTrace,
+  type SessionIdentityConflict,
+} from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 
 export interface AdoptionReport {
-  sessionCount: number
+  /** Identified sessions plus traces that lack session identity. */
+  executionGroupCount: number
+  identifiedSessionCount: number
+  unassignedTraceCount: number
+  /** Traces omitted from session grouping because their source IDs disagree. */
+  sessionIdentityConflicts: readonly SessionIdentityConflict[]
   /** Sessions that invoked ≥1 skill (explicitly, via the Skill tool). */
   sessionsWithSkill: number
   /** sessionsWithSkill / skillTelemetrySessions; null when invocation is not measurable. */
@@ -61,10 +71,14 @@ function toolName(s: OtlpSpan): string | null {
 }
 
 function parseInput(s: OtlpSpan): Record<string, unknown> {
-  const c = s.attributes['input.value'] ?? s.attributes.content
-  if (typeof c !== 'string') return {}
+  const captured = toolArgumentsFromAttributes(s.attributes)
+  if (!captured.argsCaptured) return {}
+  if (captured.args && typeof captured.args === 'object') {
+    return captured.args as Record<string, unknown>
+  }
+  if (typeof captured.args !== 'string') return {}
   try {
-    const v = JSON.parse(c)
+    const v = JSON.parse(captured.args)
     return v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
   } catch {
     return {}
@@ -180,6 +194,13 @@ export interface AdoptionOptions {
 }
 
 export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: AdoptionOptions = {}): Promise<AdoptionReport> {
+  const { sessionByTrace, conflicts } = indexSessionIdsByTrace(spans)
+  const identifiedSessions = new Set(sessionByTrace.values())
+  const unassignedTraceIds = new Set(
+    spans.map((span) => span.trace_id).filter((traceId) => !sessionByTrace.has(traceId)),
+  )
+  const executionGroup = (span: OtlpSpan) =>
+    sessionByTrace.get(span.trace_id) ?? `trace:${span.trace_id}`
   const sessions = new Set<string>()
   const sessionsWithSkill = new Set<string>()
   const sessionsWithSubagent = new Set<string>()
@@ -192,29 +213,30 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
   const sessionCapabilities = new Map<string, SkillTelemetryCapability>()
 
   for (const s of spans) {
-    sessions.add(s.trace_id)
+    const group = executionGroup(s)
+    sessions.add(group)
     const observedCapability = skillTelemetryCapability(s.attributes['service.name'])
-    const currentCapability = sessionCapabilities.get(s.trace_id) ?? 'unknown'
+    const currentCapability = sessionCapabilities.get(group) ?? 'unknown'
     if (observedCapability === 'supported' || currentCapability === 'unknown') {
-      sessionCapabilities.set(s.trace_id, observedCapability)
+      sessionCapabilities.set(group, observedCapability)
     }
-    if (hasMaterializedSkillEvidence(s)) sessionsWithMaterializedSkills.add(s.trace_id)
-    if (hasSkillFileReference(s)) sessionsWithSkillFileReference.add(s.trace_id)
+    if (hasMaterializedSkillEvidence(s)) sessionsWithMaterializedSkills.add(group)
+    if (hasSkillFileReference(s)) sessionsWithSkillFileReference.add(group)
     const tn = toolName(s)
     if (tn === 'Skill') {
-      sessionCapabilities.set(s.trace_id, 'supported')
+      sessionCapabilities.set(group, 'supported')
       const name = skillNameOf(parseInput(s))
       skillInvocations[name] = (skillInvocations[name] ?? 0) + 1
-      sessionsWithSkill.add(s.trace_id)
+      sessionsWithSkill.add(group)
     } else if (tn === 'Task' || tn === 'Agent') {
       const type = subagentTypeOf(parseInput(s))
       subagentSpawns[type] = (subagentSpawns[type] ?? 0) + 1
-      sessionsWithSubagent.add(s.trace_id)
-      canonicalSubagentSessions.add(s.trace_id)
+      sessionsWithSubagent.add(group)
+      canonicalSubagentSessions.add(group)
     } else if (tn && isSpawnAgentTool(tn)) {
-      const types = fallbackSubagents.get(s.trace_id) ?? []
+      const types = fallbackSubagents.get(group) ?? []
       types.push(subagentTypeOf(parseInput(s)))
-      fallbackSubagents.set(s.trace_id, types)
+      fallbackSubagents.set(group, types)
     }
   }
 
@@ -242,7 +264,10 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
   }
 
   return {
-    sessionCount: sessions.size,
+    executionGroupCount: sessions.size,
+    identifiedSessionCount: identifiedSessions.size,
+    unassignedTraceCount: unassignedTraceIds.size,
+    sessionIdentityConflicts: conflicts,
     sessionsWithSkill: sessionsWithSkill.size,
     skillPenetration: skillTelemetrySessions === 0 ? null : sessionsWithSkill.size / skillTelemetrySessions,
     skillTelemetryStatus: telemetryStatus(

@@ -293,7 +293,9 @@ describe('analyzeAdoption', () => {
       // s2 invokes no skill → penetration is 1/2, but its spawn tools count.
     ]
     const r = await analyzeAdoption(spans, { cwds: [cwd] })
-    expect(r.sessionCount).toBe(2)
+    expect(r.executionGroupCount).toBe(2)
+    expect(r.identifiedSessionCount).toBe(0)
+    expect(r.unassignedTraceCount).toBe(2)
     expect(r.sessionsWithSkill).toBe(1)
     expect(r.skillPenetration).toBe(0.5)
     expect(r.skillTelemetryStatus).toBe('measured')
@@ -369,7 +371,8 @@ describe('analyzeAdoption', () => {
     expect(rendered).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
     expect(rendered).toContain('Materialized skill catalogs/instructions:** 1/1')
     expect(rendered).toContain('SKILL.md tool references:** 1/1')
-    expect(rendered).toContain('Subagent spawns:** 1')
+    expect(rendered).toContain('Subagent spawns observed:** 1')
+    expect(rendered).toContain('Prompt, tools, MCP, hooks, and full agent profile:** not assessed')
     expect(rendered).not.toContain('Skill penetration')
     expect(rendered).not.toContain('0%')
   })
@@ -398,7 +401,86 @@ describe('analyzeAdoption', () => {
     expect(report.skillTelemetryStatus).toBe('partial')
     expect(report.skillTelemetrySessions).toBe(1)
     expect(report.skillPenetration).toBe(0)
-    expect(rendered).toContain('0/1 measurable session(s); 1 unmeasurable session(s) excluded')
+    expect(rendered).toContain('0/1 measurable group(s); 1 unmeasurable group(s) excluded')
+  })
+
+  it('collapses many traces under their shared session identity', async () => {
+    const spans = [
+      span({
+        traceId: 'trace-1',
+        spanId: 'root-1',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+        extra: { 'tangle.sessionId': 'shared-session' },
+      }),
+      span({
+        traceId: 'trace-2',
+        spanId: 'root-2',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(1).toISOString(),
+        service: 'claude-code',
+        extra: { 'session.id': 'shared-session' },
+      }),
+      span({
+        traceId: 'trace-without-session',
+        spanId: 'root-3',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(2).toISOString(),
+        service: 'claude-code',
+      }),
+    ]
+
+    const report = await analyzeAdoption(spans)
+
+    expect(report).toMatchObject({
+      executionGroupCount: 2,
+      identifiedSessionCount: 1,
+      unassignedTraceCount: 1,
+      sessionIdentityConflicts: [],
+      skillTelemetrySessions: 2,
+    })
+    expect(renderAdoption(report)).toContain(
+      '1 identified session(s) + 1 trace(s) without a single stable session identity',
+    )
+  })
+
+  it('preserves traces with conflicting session identities as unassigned evidence', async () => {
+    const report = await analyzeAdoption([
+      span({
+        traceId: 'trace-conflict',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+        extra: { 'tangle.sessionId': 'session-a' },
+      }),
+      span({
+        traceId: 'trace-conflict',
+        spanId: 'child',
+        name: 'message',
+        kind: 'CHAIN',
+        startTime: new Date(1).toISOString(),
+        service: 'claude-code',
+        extra: { 'session.id': 'session-b' },
+      }),
+    ])
+
+    expect(report).toMatchObject({
+      executionGroupCount: 1,
+      identifiedSessionCount: 0,
+      unassignedTraceCount: 1,
+      sessionIdentityConflicts: [
+        { traceId: 'trace-conflict', sessionIds: ['session-a', 'session-b'] },
+      ],
+    })
+    expect(renderAdoption(report)).toContain(
+      'Conflicting session identity:** 1 trace(s): `trace-conflict` (`session-a`, `session-b`)',
+    )
   })
 
   it('handles a corpus with no skill-runs files (loop counts stay zero, not crash)', async () => {

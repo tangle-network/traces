@@ -9,7 +9,7 @@ describe('readJsonl', () => {
   it('streams valid rows and skips blank lines', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'traces-jsonl-'))
     const path = join(directory, 'events.jsonl')
-    await writeFile(path, '{"id":1}\n\n{"id":2,"text":"café"}\n', 'utf8')
+    await writeFile(path, '{"id":1}\n\n  \t\r\n{"id":2,"text":"café"}\n', 'utf8')
 
     const rows: Array<{ id: number; text?: string }> = []
     for await (const row of readJsonl<{ id: number; text?: string }>(path)) rows.push(row)

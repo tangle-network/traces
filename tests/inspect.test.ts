@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { summarizeExecution } from '@tangle-network/agent-eval/contract'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   inspectSessionIndex,
@@ -17,6 +18,7 @@ afterAll(async () => {
 })
 
 function fixtureIndex(): TraceSessionIndex {
+  const execution = summarizeExecution({ runs: [] })
   return {
     schemaVersion: 1,
     kind: 'traces.session_index',
@@ -128,6 +130,7 @@ function fixtureIndex(): TraceSessionIndex {
           stuckLoopsOmitted: 11,
           toolErrorRate: 0.3,
         },
+        execution,
       },
       {
         session: {
@@ -160,6 +163,7 @@ function fixtureIndex(): TraceSessionIndex {
           stuckLoopsOmitted: 0,
           toolErrorRate: 0,
         },
+        execution,
       },
     ],
   }
@@ -173,12 +177,12 @@ describe('session index inspection', () => {
     expect(report.kind).toBe('traces.inspection_report')
     expect(report.source.sessions).toBe(2)
     expect(report.source.contextFiles).toBe(4)
-    expect(report.totals.high).toBe(3)
+    expect(report.totals.high).toBe(4)
     expect(ids.slice(0, 4)).toEqual([
       'session.tool-errors',
+      'session.repeated-call-loops',
       'context.invalid-jsonl',
       'repo.missing-attribution',
-      'session.large-token-runs',
     ])
     expect(ids).toContain('session.large-token-runs')
     expect(ids).toContain('context.long-docs-without-toc')
@@ -199,9 +203,8 @@ describe('session index inspection', () => {
     const report = inspectSessionIndex(loaded, { generatedAt: '2026-01-01T02:00:00.000Z' })
     const rendered = renderInspectionReport(report)
     expect(rendered).toContain('traces inspect - 8 finding(s) from 2 session(s), 4 context file(s)')
-    expect(rendered).toContain('[low] Identical-call groups (full-session, not time-bounded) in 1/2 session(s)')
-    expect(rendered).toContain('Inspect timestamps before classifying a group as a loop')
-    expect(rendered).toContain('this detector version does not bound the interval between matching calls')
+    expect(rendered).toContain('[high] Repeated tool-call loops in 1/2 session(s)')
+    expect(rendered).toContain('Next: Inspect the repeated commands')
 
     const outPath = await writeInspectionReportFile(report, join(dir, 'report.md'))
     expect(await readFile(outPath, 'utf8')).toBe(rendered)

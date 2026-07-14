@@ -2,7 +2,7 @@
  * Forge adapter (antinomyhq/forge) — `/dump` JSON exports.
  *
  * Forge's primary store is SQLite (`~/.forge/.forge.db`, `conversations.context`
- * column). Reading it live needs a native sqlite dep, so v1 parses the
+ * column). Reading it live needs a native sqlite dep, so this adapter parses the
  * dependency-free `/dump` artifact instead: `<cwd>/YYYY-MM-DD_HH-MM-SS-dump.json`,
  * a single flattened `Context{ conversation_id, messages[] }`.
  *

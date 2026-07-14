@@ -25,15 +25,15 @@ export interface ObserverOptions {
   windowMs?: number
   /** Poll interval (ms). Default 5 s. */
   intervalMs?: number
-  /** Min identical calls before a full-session group is reported. Default 3. */
+  /** Min identical repeated calls before a loop is reported. Default 3. */
   minLoopOccurrences?: number
   /** Cancel the observer; `watchSessions` resolves when this aborts. */
   signal?: AbortSignal
-  /** Fired once per identical-call group the first time it reaches threshold,
-   *  and again when its count grows. The current upstream grouping is not time-bounded. */
+  /** Fired once per stuck loop the first time it reaches threshold, and again
+   *  each time its occurrence count grows — deduped so you only see new signal. */
   onLoop?: (loop: ObservedLoop) => void | Promise<void>
   /** Fired for every observed session each tick, with its full pipeline report
-   *  (repeated-call groups + tool-use metrics). */
+   *  (stuck loops + tool-use metrics) — react to anything, not just loops. */
   onReport?: (ref: SessionRef, report: PipelineReport) => void | Promise<void>
   /** Fired for every observed session each tick, after semantic live analysis. */
   onBatch?: (ref: SessionRef, batch: TraceLiveBatch) => void | Promise<void>

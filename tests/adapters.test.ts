@@ -508,7 +508,7 @@ describe('tool I/O capture', () => {
 })
 
 describe('amp adapter (thread JSON, camelCase usage)', () => {
-  it('sums cache+fresh input tokens and flags tool errors', async () => {
+  it('keeps fresh, cache-read, and cache-write tokens separate and flags tool errors', async () => {
     const path = join(dir, 'T-x.json')
     writeFileSync(
       path,
@@ -528,8 +528,10 @@ describe('amp adapter (thread JSON, camelCase usage)', () => {
       }),
     )
     const spans = await new AmpAdapter().parse(refFor(path, 'amp'))
-    expect(llm(spans)?.attributes['llm.input_tokens']).toBe(175)
-    expect(llm(spans)?.attributes['llm.output_tokens']).toBe(10)
+    expect(llm(spans)?.attributes['llm.token_count.prompt']).toBe(100)
+    expect(llm(spans)?.attributes['llm.token_count.prompt_cache_hit']).toBe(50)
+    expect(llm(spans)?.attributes['llm.token_count.prompt_cache_write']).toBe(25)
+    expect(llm(spans)?.attributes['llm.token_count.completion']).toBe(10)
     expect(tool(spans)?.status.code).toBe('ERROR')
     expect(tool(spans)?.attributes.content).toBeUndefined()
     expect(tool(spans)?.attributes['input.value']).toBe('{"cmd":"ls"}')
@@ -555,9 +557,9 @@ describe('copilot adapter (event envelope, toolCallId join)', () => {
         .join('\n'),
     )
     const spans = await new CopilotAdapter().parse(refFor(path, 'github-copilot'))
-    expect(traceShapeDigest(spans)).toBe('83fc1a5d63e8647e482debe90c34ac0ab9da8b6c7def12823eb6c60564a617e1')
-    expect(llm(spans)?.attributes['llm.input_tokens']).toBe(900)
-    expect(llm(spans)?.attributes['llm.output_tokens']).toBe(30)
+    expect(traceShapeDigest(spans)).toBe('40b451bb5b5584126e8e7f1f7f3c3e349a44fbfc30b3032de703e414a1e20a9e')
+    expect(llm(spans)?.attributes['llm.token_count.prompt']).toBe(900)
+    expect(llm(spans)?.attributes['llm.token_count.completion']).toBe(30)
     expect(tool(spans)?.status.code).toBe('ERROR')
     expect(tool(spans)?.status.message).toContain('boom')
     expect(tool(spans)?.attributes.content).toBeUndefined()
@@ -589,9 +591,9 @@ describe('qwen adapter (flat ChatRecord, genai parts)', () => {
         .join('\n'),
     )
     const spans = await new QwenAdapter().parse(refFor(path, 'qwen'))
-    expect(traceShapeDigest(spans)).toBe('9d0304d4741d3c6c744b25df59a9e641cfa6c94b4dabd801a94320be19261275')
-    expect(llm(spans)?.attributes['llm.input_tokens']).toBe(500)
-    expect(llm(spans)?.attributes['llm.output_tokens']).toBe(40)
+    expect(traceShapeDigest(spans)).toBe('0d1fad0c2e55e211946360ddab009276834fae3d9e1f9667b2425b975e01b0d7')
+    expect(llm(spans)?.attributes['llm.token_count.prompt']).toBe(500)
+    expect(llm(spans)?.attributes['llm.token_count.completion']).toBe(40)
     expect(tool(spans)?.attributes['tool.name']).toBe('read_file')
     expect(tool(spans)?.status.code).toBe('ERROR')
     expect(tool(spans)?.attributes.content).toBeUndefined()
@@ -663,10 +665,14 @@ describe('claude adapter (conversation capture)', () => {
     writeFileSync(join(subDir, 'agent-a.meta.json'), JSON.stringify({ agentType: 'Explore', toolUseId: 'agent-call' }))
 
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    expect(traceShapeDigest(spans)).toBe('bf834776b0018e59f1c6e0da3db5a1398c3f18369062a4dd730f1b7501fec619')
+    expect(traceShapeDigest(spans)).toBe('2c4db02efac123b97015db82dd79a91df220abbcb700773735bb0ec660272694')
     expect(spans.map((item) => item.name)).toEqual(['session', 'user.prompt', 'llm.turn', 'tool.Agent', 'user.prompt', 'llm.turn'])
     expect(spans.every((item) => item.trace_id === 'claude-trace')).toBe(true)
     expect(spans[0]).toMatchObject({ start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:00:02Z' })
+    const mainTurn = llm(spans)
+    expect(mainTurn?.attributes['llm.token_count.prompt']).toBe(10)
+    expect(mainTurn?.attributes['llm.token_count.prompt_cache_hit']).toBe(5)
+    expect(mainTurn?.attributes['llm.token_count.completion']).toBe(3)
     const agentCall = tool(spans)
     expect(agentCall).toMatchObject({ end_time: '2026-01-01T00:00:02Z', status: { code: 'OK' } })
     expect(agentCall?.attributes.content).toBeUndefined()

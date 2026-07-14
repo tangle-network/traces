@@ -29,7 +29,7 @@ function adapterOf(spans: OtlpSpan[]): HarnessTraceAdapter {
   return { harness: 'synthetic', async locate() { return [ref] }, async parse() { return spans } }
 }
 
-/** A root + N identical bash calls that agent-eval groups together. */
+/** A root + N identical bash calls that the loop detector flags. */
 function loopSpans(n: number): OtlpSpan[] {
   const base = Date.parse('2026-01-01T00:00:00.000Z')
   const out: OtlpSpan[] = [
@@ -44,9 +44,10 @@ function loopSpans(n: number): OtlpSpan[] {
         name: 'tool.bash',
         kind: 'TOOL',
         startTime: new Date(base + (i + 1) * 1000).toISOString(),
+        endTime: new Date(base + (i + 1) * 1000 + 100).toISOString(),
         service: 'synthetic',
         tool: 'bash',
-        content: 'ls -la',
+        extra: { 'input.value': 'ls -la' },
       }),
     )
   }
@@ -74,7 +75,8 @@ function tokenTrajectorySpans(
         parentSpanId: 'root',
         name: 'llm.turn',
         kind: 'LLM',
-        startTime: new Date(base + index + 1).toISOString(),
+        startTime: new Date(base + (index + 1) * 1000).toISOString(),
+        endTime: new Date(base + (index + 1) * 1000 + 100).toISOString(),
         service: 'synthetic',
         inputTokens,
         outputTokens: outputs[index],

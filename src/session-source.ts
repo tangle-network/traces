@@ -7,6 +7,7 @@
  */
 
 import type { OtlpSpan } from './otlp.js'
+import { stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
 import { cwdMatchesSelection, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
@@ -26,6 +27,7 @@ export async function parseSession(
   const spans = await adapter.parse(ref, options)
   if (spans.length === 0) throw new EmptySessionError(ref.path)
   stampSessionIntegrity(ref, spans)
+  stampSessionIdentity(spans, ref.sessionId)
   const repo = await resolveSessionRepoAttrs(ref.cwd, spans)
   if (repo.cwd) ref.cwd = repo.cwd
   stampRepoAttrs(spans, repo.attrs)
