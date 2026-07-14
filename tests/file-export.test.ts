@@ -1,14 +1,17 @@
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { summarizeExecution } from '@tangle-network/agent-eval/contract'
 import { describe, expect, it } from 'vitest'
 import type { PolicyEvidenceRecord } from '../src/evidence.js'
 import {
   exportTraceEvidenceRows,
+  exportTraceEvidenceFile,
   exportTraceEvidenceText,
   writeTraceEvidenceExportFile,
 } from '../src/file-export.js'
 import { serializeSpans } from '../src/otlp.js'
+import { runPipelines } from '../src/pipelines.js'
 
 function parseRows(jsonl: string): Record<string, unknown>[] {
   return jsonl.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
@@ -30,6 +33,7 @@ const policyRecord: PolicyEvidenceRecord = {
   schemaVersion: 1,
   kind: 'traces.policy_evidence.session',
   generatedAt: '2026-06-27T12:00:00.000Z',
+  execution: summarizeExecution({ runs: [] }),
   session: {
     harness: 'codex',
     sessionId: 'sess-r115',
@@ -73,6 +77,30 @@ const policyRecord: PolicyEvidenceRecord = {
 }
 
 describe('trace evidence export', () => {
+  it('refuses to reinterpret complete OpenInference rows as partial Intelligence rows', () => {
+    const complete = {
+      trace_id: 'trace-1',
+      span_id: 'span-1',
+      parent_span_id: '',
+      name: 'tool.failed',
+      kind: 'CHAIN',
+      start_time: '2026-01-01T00:00:00.000Z',
+      end_time: '2026-01-01T00:00:01.000Z',
+      status: { code: 'ERROR', message: 'failed' },
+      resource: { attributes: {} },
+      scope: { name: 'test' },
+      attributes: { 'openinference.span.kind': 'CHAIN' },
+    }
+
+    expect(() => exportTraceEvidenceRows([complete], { format: 'intelligence-spans' })).toThrow(
+      /already complete OpenInference/,
+    )
+    expect(exportTraceEvidenceRows([complete]).spans[0]?.status).toEqual({
+      code: 'ERROR',
+      message: 'failed',
+    })
+  })
+
   it('converts compact policy evidence rows to HALO-readable OpenInference JSONL', () => {
     const result = exportTraceEvidenceRows([policyRecord])
     expect(result.format).toBe('policy-evidence')
@@ -129,15 +157,51 @@ describe('trace evidence export', () => {
     expect(rows[0]!.name).toBe('sandbox.events')
     expect(rows[0]!.start_time).toBe('2026-06-27T12:00:00.000Z')
     expect(rows[0]!.end_time).toBe('2026-06-27T12:00:03.000Z')
-    expect(rows.some((row) => row.name === 'tool.bash')).toBe(true)
+    const tool = rows.find((row) => row.name === 'tool.bash')
+    expect(tool?.attributes).toEqual(expect.objectContaining({
+      'tool.args_captured': true,
+      'input.value': expect.stringContaining('[redacted'),
+    }))
     for (const row of rows) {
       expect(row.attributes).toEqual(expect.objectContaining({
+        'tangle.sessionId': 'sandbox-r115',
         'research.task_id': 'aec-001',
         'research.score': 1,
         'research.tags': ['aec', 'smoke'],
         'research.config': '{"arm":"command-contract"}',
       }))
     }
+  })
+
+  it('does not invent tool arguments from unrelated nested input fields', () => {
+    const result = exportTraceEvidenceRows([{
+      type: 'tool-invocation',
+      toolName: 'bash',
+      data: {
+        metadata: { config: { input: 'not tool arguments' } },
+      },
+    }], { format: 'sandbox-events' })
+    const tool = result.spans.find((item) => item.attributes['tool.name'] === 'bash')
+
+    expect(tool?.attributes['tool.args_captured']).toBe(false)
+    expect(tool?.attributes['input.value']).toBeUndefined()
+  })
+
+  it('keeps explicit event session identity separate from trace identity', () => {
+    const session = exportTraceEvidenceText(JSON.stringify({
+      session_id: 'session-r116',
+      trace_id: 'trace-r116',
+      events: [{ type: 'start', timestamp: '2026-06-27T12:00:00.000Z' }],
+    }), { format: 'sandbox-events' })
+    expect(session.spans.every((item) => item.trace_id === 'trace-r116')).toBe(true)
+    expect(session.spans.every((item) => item.attributes['tangle.sessionId'] === 'session-r116')).toBe(true)
+
+    const traceOnly = exportTraceEvidenceText(JSON.stringify({
+      trace_id: 'trace-only',
+      events: [{ type: 'start', timestamp: '2026-06-27T12:00:00.000Z' }],
+    }), { format: 'sandbox-events' })
+    expect(traceOnly.spans.every((item) => item.trace_id === 'trace-only')).toBe(true)
+    expect(traceOnly.spans.every((item) => item.attributes['tangle.sessionId'] === undefined)).toBe(true)
   })
 
   it('writes an exported file from JSONL input', async () => {
@@ -166,6 +230,23 @@ describe('trace evidence export', () => {
     expect(result.spans).toHaveLength(2)
   })
 
+  it('streams multi-row JSONL files through the same strict conversion', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-stream-export-test-'))
+    const input = join(dir, 'policy.jsonl')
+    const second = {
+      ...policyRecord,
+      session: { ...policyRecord.session, sessionId: 'sess-streamed' },
+    }
+    const source = `${JSON.stringify(policyRecord)}\n${JSON.stringify(second)}\n`
+    await writeFile(input, source, 'utf8')
+
+    const result = await exportTraceEvidenceFile(input)
+
+    expect(result).toEqual(exportTraceEvidenceText(source))
+    expect(result.format).toBe('policy-evidence')
+    expect(result.spans.map((item) => item.trace_id)).toEqual(['sess-r115', 'sess-streamed'])
+  })
+
   it('converts Tangle Intelligence span rows to OpenInference JSONL', () => {
     const rows = [
       {
@@ -181,7 +262,7 @@ describe('trace evidence export', () => {
           'service.name': 'claude-code',
           'openinference.span.kind': 'TOOL',
           content: 'raw provider content should not override the normalized prompt',
-          'session.id': 'session_uri',
+          'tangle.sessionId': 'session_uri',
           user_prompt: 'Use skill add-validation-rule and the mcp__linear__linear_graphql tool.',
           'symphony.issue.identifier': 'EO-50',
           'git.repository': 'lightblocks/symphony',
@@ -198,7 +279,7 @@ describe('trace evidence export', () => {
         scenario_id: null,
         generation: null,
         cell_id: null,
-        session_id: 'session_uri',
+        session_id: null,
         thread_id: null,
         received_at: '2026-06-25 22:44:52.146637',
       },
@@ -214,8 +295,12 @@ describe('trace evidence export', () => {
           'span.type': 'llm_request',
           'service.name': 'claude-code',
           model: 'claude-opus-4-8',
-          input_tokens: 25,
-          output_tokens: 739,
+          'gen_ai.usage.input_tokens': 25,
+          'gen_ai.usage.output_tokens': 739,
+          'gen_ai.usage.reasoning_tokens': 33,
+          'gen_ai.usage.cache_read_input_tokens': 100,
+          'gen_ai.usage.cache_creation_input_tokens': 50,
+          'gen_ai.usage.cost': 0.25,
           'symphony.issue.identifier': 'EO-50',
         },
         status_code: 'UNSET',
@@ -263,11 +348,26 @@ describe('trace evidence export', () => {
         thread_id: null,
         received_at: '2026-06-25 22:44:52.146637',
       },
+      {
+        id: 'trace_uri:execution',
+        tenant_id: 'tenant_uri',
+        trace_id: 'trace_uri',
+        parent_span_id: 'trace_uri:tool',
+        name: 'claude_code.tool.execution',
+        start_unix_nano: '1782427464481000000',
+        end_unix_nano: '1782427464489000000',
+        attributes: {
+          'span.type': 'tool.execution',
+          'service.name': 'claude-code',
+        },
+        status_code: 'OK',
+        session_id: 'session_uri',
+      },
     ]
 
     const result = exportTraceEvidenceRows(rows)
     expect(result.format).toBe('intelligence-spans')
-    expect(result.spans).toHaveLength(3)
+    expect(result.spans).toHaveLength(4)
     expect(result.redactionCount).toBeGreaterThanOrEqual(1)
 
     const output = serializeSpans(result.spans)
@@ -298,14 +398,89 @@ describe('trace evidence export', () => {
     expect(outputRows[1]!.parent_span_id).toBe('trace_uri:root')
     expect(outputRows[1]!.attributes).toEqual(expect.objectContaining({
       'llm.model_name': 'claude-opus-4-8',
-      'llm.input_tokens': 25,
-      'llm.output_tokens': 739,
+      'llm.token_count.prompt': 25,
+      'llm.token_count.completion': 739,
+      'llm.token_count.reasoning': 33,
+      'llm.token_count.prompt_cache_hit': 100,
+      'llm.token_count.prompt_cache_write': 50,
+      'tangle.llm.context_tokens': 175,
+      'llm.cost_usd': 0.25,
     }))
     expect(outputRows[2]!.kind).toBe('TOOL')
     expect(outputRows[2]!.parent_span_id).toBe('trace_uri:root')
     expect(outputRows[2]!.attributes).toEqual(expect.objectContaining({
       'tool.name': 'mcp__linear__linear_graphql',
       'tool.input': expect.stringContaining('[redacted'),
+      'input.value': expect.stringContaining('[redacted'),
     }))
+    expect(outputRows[3]!.kind).toBe('CHAIN')
+  })
+
+  it('normalizes complete tool input without inventing arguments from partial fields', async () => {
+    const base = {
+      trace_id: 'trace-uri',
+      parent_span_id: 'root',
+      start_time: '2026-06-25T22:44:24.458Z',
+      end_time: '2026-06-25T22:44:25.458Z',
+      status: { code: 'OK', message: '' },
+      resource: { attributes: { 'service.name': 'claude-code' } },
+      scope: { name: 'tangle-traces', version: '' },
+    }
+    const result = exportTraceEvidenceRows([
+      {
+        ...base,
+        span_id: 'tool',
+        name: 'claude_code.tool_call',
+        kind: 'TOOL',
+        attributes: {
+          'openinference.span.kind': 'TOOL',
+          'span.type': 'tool',
+          'tool.name': 'Bash',
+          full_command: 'pnpm test --filter api',
+        },
+      },
+      {
+        ...base,
+        span_id: 'execution',
+        parent_span_id: 'tool',
+        name: 'claude_code.tool.execution',
+        kind: 'TOOL',
+        attributes: {
+          'openinference.span.kind': 'TOOL',
+          'span.type': 'tool.execution',
+        },
+      },
+    ], { format: 'openinference' })
+
+    expect(result.spans[0]!.attributes).toEqual(expect.objectContaining({
+      'openinference.span.kind': 'TOOL',
+      'input.value': 'pnpm test --filter api',
+      'tool.args_captured': true,
+    }))
+    expect(result.spans[1]!.attributes).toEqual(expect.objectContaining({
+      'openinference.span.kind': 'CHAIN',
+      'traces.raw_attribute.openinference.span.kind': 'TOOL',
+    }))
+
+    const partialReads = exportTraceEvidenceRows([0, 1, 2].map((offset) => ({
+      ...base,
+      span_id: `read-${offset}`,
+      name: 'claude_code.tool_call',
+      kind: 'TOOL',
+      start_time: `2026-06-25T22:44:2${offset}.000Z`,
+      end_time: `2026-06-25T22:44:2${offset}.100Z`,
+      attributes: {
+        'openinference.span.kind': 'TOOL',
+        'span.type': 'tool',
+        'tool.name': 'Read',
+        file_path: '/tmp/a',
+        offset,
+      },
+    })), { format: 'openinference' })
+    expect(partialReads.spans.every((item) => item.attributes.file_path === '/tmp/a')).toBe(true)
+    expect(partialReads.spans.every((item) => item.attributes.offset !== undefined)).toBe(true)
+    expect(partialReads.spans.every((item) => item.attributes['input.value'] === undefined)).toBe(true)
+    expect(partialReads.spans.every((item) => item.attributes['tool.args_captured'] === false)).toBe(true)
+    expect((await runPipelines(partialReads.spans)).stuckLoops.findings).toHaveLength(0)
   })
 })

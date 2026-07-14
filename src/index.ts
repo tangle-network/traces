@@ -15,6 +15,14 @@ export * from './types.js' // HarnessTraceAdapter, SessionRef, LocateOptions
 export * from './otlp.js' // OtlpSpan, span(), serializeSpans(), writeOtlpFile()
 export * from './attributes.js' // ATTR keys, INGEST_SOURCE_CLI, DEFAULT_HARNESS
 export * from './time.js' // parseIsoToEpochMs(), parseSince()
+export { JsonSourceError, readJsonFile } from './json.js'
+export { JsonlParseError, readJsonl, takeJsonl } from './jsonl.js'
+export type { JsonlCorruptionReceipt, JsonlReadOptions } from './jsonl.js'
+export {
+  recordSessionCorruption,
+  sessionIntegrityAttributes,
+  stampSessionIntegrity,
+} from './integrity.js'
 export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp
 export * from './repo.js' // resolveRepoAttrs() — per-session repo/git resource labels
@@ -44,16 +52,17 @@ export {
 export type { Reaction } from './adapters/actor.js'
 
 // ── Detection / analysis (built-in, or bring your own analysts) ───────────
-export * from './pipelines.js' // runPipelines() — stuck-loop + tool-use
+export * from './pipelines.js' // runPipelines() — repeated-call + tool-use
 export * from './reactions.js' // analyzeReactions() — human-reaction analyst
 export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
+export * from './execution.js' // shared execution accounting over normalized spans
 export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog
 export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
-export * from './improvement.js' // runTraceInvestigation()/runTraceImprovementLoop() artifact pack
+export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
 
 // ── External engines (NOT bundled — shell out to tools you install) ────────
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor

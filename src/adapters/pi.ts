@@ -7,13 +7,17 @@
  * ride inside `message.content[]` as tool blocks.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
+import { isMissingPathError } from '../json.js'
+import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { capText, userPromptSpan } from './conversation.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'pi'
 
@@ -29,6 +33,9 @@ interface PiContentBlock {
   args?: unknown
   isError?: boolean
   is_error?: boolean
+  content?: unknown
+  output?: unknown
+  result?: unknown
 }
 
 interface PiLine {
@@ -45,19 +52,6 @@ interface PiLine {
     errorMessage?: string
     usage?: { input?: number; output?: number }
   }
-}
-
-function parseLines(raw: string): PiLine[] {
-  const out: PiLine[] = []
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    try {
-      out.push(JSON.parse(line) as PiLine)
-    } catch {
-      // skip malformed
-    }
-  }
-  return out
 }
 
 function isToolBlock(b: PiContentBlock): boolean {
@@ -90,8 +84,9 @@ export class PiAdapter implements HarnessTraceAdapter {
     let dirs: string[]
     try {
       dirs = await readdir(root)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const dir of dirs) {
@@ -99,8 +94,9 @@ export class PiAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(dp)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       // Encoded cwd: leading/trailing `--`, separators as `-`.
       const cwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
@@ -111,8 +107,9 @@ export class PiAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
         const id = basename(f, '.jsonl').replace(/^[\dTZ.-]+_/, '')
@@ -122,31 +119,28 @@ export class PiAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const lines = parseLines(await readFile(ref.path, 'utf8'))
-    const sessionLine = lines.find((l) => l.type === 'session')
-    const traceId = sessionLine?.id ?? ref.sessionId
-    const rootId = `root:${traceId}`
-
-    const spans: OtlpSpan[] = [
-      span({
-        traceId,
-        spanId: rootId,
-        parentSpanId: null,
-        name: 'session',
-        kind: 'AGENT',
-        startTime: sessionLine?.timestamp ?? lines[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: lines.at(-1)?.timestamp,
-        service: SERVICE,
-        agent: SERVICE,
-      }),
-    ]
-
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    const sourceTraceId = ref.sessionId
+    const sourceRootId = `root:${sourceTraceId}`
+    const spans: OtlpSpan[] = []
     const toolByCallId = new Map<string, OtlpSpan>()
+    let firstTimestamp: string | undefined
+    let lastTimestamp: string | undefined
+    let sessionLine: Pick<PiLine, 'id' | 'timestamp'> | undefined
+    let sawLine = false
     let step = 0
 
-    for (const l of lines) {
+    for await (const l of readJsonl<PiLine>(ref.path, sessionJsonlOptions(ref, options))) {
+      if (!sawLine) {
+        firstTimestamp = l.timestamp
+        sawLine = true
+      }
+      lastTimestamp = l.timestamp
+      if (!sessionLine && l.type === 'session') {
+        sessionLine = { id: l.id, timestamp: l.timestamp }
+      }
       if (l.type !== 'message' || !l.message) continue
+
       const ts = l.timestamp ?? new Date(0).toISOString()
       const mid = l.id ?? `m${step}`
       const msg = l.message
@@ -158,9 +152,9 @@ export class PiAdapter implements HarnessTraceAdapter {
         if (prompt) {
           spans.push(
             userPromptSpan({
-              traceId,
+              traceId: sourceTraceId,
               spanId: `${mid}:user`,
-              parentSpanId: rootId,
+              parentSpanId: sourceRootId,
               startTime: ts,
               service: SERVICE,
               agent: SERVICE,
@@ -174,9 +168,9 @@ export class PiAdapter implements HarnessTraceAdapter {
         const errored = !!msg.errorMessage
         spans.push(
           span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: llmId,
-            parentSpanId: rootId,
+            parentSpanId: sourceRootId,
             name: `message.${msg.role ?? 'unknown'}`,
             kind: 'LLM',
             startTime: ts,
@@ -199,7 +193,7 @@ export class PiAdapter implements HarnessTraceAdapter {
           const name = b.toolName ?? b.name ?? 'tool'
           const callId = b.id ?? b.callId ?? b.toolCallId ?? `${mid}:${step}`
           const toolSpan = span({
-            traceId,
+            traceId: sourceTraceId,
             spanId: `tool:${callId}`,
             parentSpanId: llmId,
             name: `tool.${name}`,
@@ -209,7 +203,7 @@ export class PiAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: name,
             step,
-            content: (b.input ?? b.args) != null ? JSON.stringify(b.input ?? b.args) : null,
+            extra: toolIoAttributes({ input: b.input ?? b.args }),
           })
           spans.push(toolSpan)
           toolByCallId.set(callId, toolSpan)
@@ -221,10 +215,29 @@ export class PiAdapter implements HarnessTraceAdapter {
             const err = b.isError === true || b.is_error === true
             t.end_time = ts
             t.status = err ? { code: 'ERROR', message: 'tool result reported error' } : { code: 'OK' }
+            recordToolOutput(t, b.output ?? b.result ?? b.content ?? b.text)
           }
         }
       }
     }
-    return spans
+
+    const traceId = sessionLine?.id ?? sourceTraceId
+    const rootId = `root:${traceId}`
+    for (const item of spans) {
+      item.trace_id = traceId
+      if (item.parent_span_id === sourceRootId) item.parent_span_id = rootId
+    }
+    const root = span({
+      traceId,
+      spanId: rootId,
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: sessionLine?.timestamp ?? firstTimestamp ?? new Date(0).toISOString(),
+      endTime: lastTimestamp,
+      service: SERVICE,
+      agent: SERVICE,
+    })
+    return [root, ...spans]
   }
 }

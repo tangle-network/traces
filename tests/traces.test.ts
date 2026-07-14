@@ -14,20 +14,29 @@ describe('otlp span builder', () => {
       model: 'claude-opus-4-8',
       inputTokens: 100,
       outputTokens: 20,
+      reasoningTokens: 5,
+      cachedInputTokens: 50,
+      cacheWriteInputTokens: 10,
+      costUsd: 0.02,
       step: 0,
     })
     expect(s.attributes['openinference.span.kind']).toBe('LLM')
     expect(s.attributes['service.name']).toBe('claude-code')
     expect(s.attributes['llm.model_name']).toBe('claude-opus-4-8')
-    expect(s.attributes['llm.input_tokens']).toBe(100)
-    expect(s.attributes['llm.output_tokens']).toBe(20)
+    expect(s.attributes['llm.token_count.prompt']).toBe(100)
+    expect(s.attributes['llm.token_count.completion']).toBe(20)
+    expect(s.attributes['llm.token_count.reasoning']).toBe(5)
+    expect(s.attributes['llm.token_count.prompt_cache_hit']).toBe(50)
+    expect(s.attributes['llm.token_count.prompt_cache_write']).toBe(10)
+    expect(s.attributes['tangle.llm.context_tokens']).toBe(160)
+    expect(s.attributes['llm.cost_usd']).toBe(0.02)
     expect(s.attributes.step).toBe(0)
   })
 
   it('omits absent token counts rather than zeroing them', () => {
     const s = span({ traceId: 't', spanId: 's', name: 'x', kind: 'LLM', startTime: 'now' })
-    expect('llm.input_tokens' in s.attributes).toBe(false)
-    expect('llm.output_tokens' in s.attributes).toBe(false)
+    expect('llm.token_count.prompt' in s.attributes).toBe(false)
+    expect('llm.token_count.completion' in s.attributes).toBe(false)
   })
 
   it('serializes one span per line with a trailing newline', () => {
@@ -71,8 +80,10 @@ describe('claude transcript → spans', () => {
     })
 
     const llm = spans.find((s) => s.attributes['openinference.span.kind'] === 'LLM')
-    expect(llm?.attributes['llm.input_tokens']).toBe(1200) // fresh + cache read
-    expect(llm?.attributes['llm.output_tokens']).toBe(50)
+    expect(llm?.attributes['llm.token_count.prompt']).toBe(1000)
+    expect(llm?.attributes['llm.token_count.prompt_cache_hit']).toBe(200)
+    expect(llm?.attributes['tangle.llm.context_tokens']).toBe(1200)
+    expect(llm?.attributes['llm.token_count.completion']).toBe(50)
 
     const tool = toolSpanByUseId.get('call-1')
     expect(tool?.attributes['tool.name']).toBe('Bash')

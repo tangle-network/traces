@@ -9,12 +9,14 @@
  * JSONL under `~/.qwen/projects/`); it has its own adapter.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { capText, userPromptSpan } from './conversation.js'
+import { toolIoAttributes } from './tool-io.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 interface GeminiToolCall {
@@ -22,6 +24,7 @@ interface GeminiToolCall {
   name?: string
   args?: unknown
   status?: string
+  result?: unknown
 }
 
 interface GeminiMessage {
@@ -91,11 +94,14 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
   private async loadProjectCwds(): Promise<Map<string, string>> {
     const nameToPath = new Map<string, string>()
     try {
-      const raw = await readFile(join(homedir(), this.homeDirName, 'projects.json'), 'utf8')
-      const projects = (JSON.parse(raw) as { projects?: Record<string, string> }).projects ?? {}
+      const projects = (
+        await readJsonFile<{ projects?: Record<string, string> }>(
+          join(homedir(), this.homeDirName, 'projects.json'),
+        )
+      ).projects ?? {}
       for (const [path, name] of Object.entries(projects)) nameToPath.set(name, path)
-    } catch {
-      // no registry — cwd stays null (unchanged behavior)
+    } catch (error) {
+      if (!isMissingJsonSource(error)) throw error
     }
     return nameToPath
   }
@@ -105,8 +111,9 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
     let projectDirs: string[]
     try {
       projectDirs = await readdir(root)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const projectCwds = await this.loadProjectCwds()
     const refs: SessionRef[] = []
@@ -116,8 +123,9 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(chatsDir)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       for (const f of files) {
         if (!f.startsWith('session-') || !f.endsWith('.json')) continue
@@ -125,8 +133,9 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
         if (opts.cwd && (!cwd || !cwd.startsWith(opts.cwd))) continue
@@ -137,12 +146,7 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    let session: GeminiSession
-    try {
-      session = JSON.parse(await readFile(ref.path, 'utf8')) as GeminiSession
-    } catch {
-      return []
-    }
+    const session = await readJsonFile<GeminiSession>(ref.path)
     const traceId = session.sessionId ?? ref.sessionId
     const messages = session.messages ?? []
     const rootId = `root:${traceId}`
@@ -221,7 +225,7 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
             agent: this.service,
             tool: tc.name ?? 'tool',
             step,
-            content: tc.args != null ? JSON.stringify(tc.args) : null,
+            extra: toolIoAttributes({ input: tc.args, output: tc.result }),
           }),
         )
         step += 1

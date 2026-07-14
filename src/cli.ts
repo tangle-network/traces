@@ -5,8 +5,8 @@
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
- *   traces investigate [--harness claude-code] [--last 10] [--out report.md]
- *   traces improve [--all] [--since 24h] --dir .traces/improvement
+ *   traces investigate [input.jsonl] [--format auto] [--out report.md]
+ *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
  *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces inspect session-index.json [--out inspection-report.md]
@@ -27,6 +27,8 @@ import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { analyzeAdoption } from './adoption.js'
 import { analyzeSpans } from './analyze.js'
+import { ACTOR_ATTR } from './adapters/conversation.js'
+import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -34,7 +36,7 @@ import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writ
 import {
   loadTracesConfig,
   mergeTracesConfig,
-  runTraceImprovementLoop,
+  runTraceImprovement,
   runTraceInvestigation,
   saveReport,
 } from './improvement.js'
@@ -53,7 +55,15 @@ import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { analyzeReactions } from './reactions.js'
 import { locateSessions, parseSession } from './session-source.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
-import { renderAdoption, renderPipelines, renderReactions, renderReport, summarizeDeterministicSignals } from './report.js'
+import {
+  CORRUPTION_RECEIPT_DISPLAY_LIMIT,
+  renderAdoption,
+  renderPipelines,
+  renderReactions,
+  renderReport,
+  summarizeDeterministicSignals,
+} from './report.js'
+import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
@@ -222,7 +232,57 @@ async function cmdList(args: Args): Promise<void> {
   }
 }
 
-async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: string; sessionCount: number; cwds: string[] }> {
+type SelectedSessionSource = ReportSource
+
+interface CollectedSpans {
+  spans: OtlpSpan[]
+  harness: string
+  cwds: string[]
+  sources: SelectedSessionSource[]
+}
+
+function selectedSessionSource(
+  ref: SessionRef,
+  spans: readonly OtlpSpan[],
+  sessionIdOverride?: string,
+): SelectedSessionSource {
+  const root = spans.find((item) => item.parent_span_id === null) ?? spans[0]
+  const prompt = spans.find(
+    (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
+  ) ?? spans.find((item) => item.name === 'user.prompt') ?? spans.find(
+    (item) => item.attributes['span.type'] === 'interaction' && typeof item.attributes.content === 'string',
+  )
+  const content = typeof prompt?.attributes.content === 'string' ? prompt.attributes.content : ''
+  const firstLine = content.split(/\r?\n/, 1)[0]!.trim()
+  const subject = firstLine.length > 240
+    ? `${firstLine.slice(0, 240)}… [+${firstLine.length - 240} chars]`
+    : firstLine
+  const role = root?.attributes['traces.session.role']
+  const parentSessionId = root?.attributes['traces.parent_session_id']
+  const corruptionDigest = root?.attributes[ATTR.CORRUPTION_DIGEST]
+  const sessionId = [
+    sessionIdOverride,
+    root ? sessionIdFromAttributes(root.attributes) : undefined,
+    root?.trace_id,
+    ref.sessionId,
+  ].find((value): value is string => typeof value === 'string' && value.length > 0)!
+  return {
+    sessionId,
+    path: ref.path,
+    subject,
+    role: role === 'operator' || role === 'child' ? role : 'unknown',
+    ...(typeof parentSessionId === 'string' ? { parentSessionId } : {}),
+    integrity: ref.integrity?.status ?? 'complete',
+    ...(ref.integrity ? {
+      corruptionCount: ref.integrity.corruptions.length,
+      ...(typeof corruptionDigest === 'string' ? { corruptionDigest } : {}),
+      corruptions: ref.integrity.corruptions.slice(0, CORRUPTION_RECEIPT_DISPLAY_LIMIT),
+    } : {}),
+  }
+}
+
+async function collectSpans(args: Args): Promise<CollectedSpans> {
+  if (args.input) return collectImportedSpans(args)
   if (args.session) {
     const adapter = resolveAdapter(args.harness)
     if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
@@ -237,22 +297,28 @@ async function collectSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: s
       mtimeMs: st.mtimeMs,
     }
     const spans = await parseSession(adapter, ref)
-    return { spans, harness: adapter.harness, sessionCount: 1, cwds: ref.cwd ? [ref.cwd] : [] }
+    return {
+      spans,
+      harness: adapter.harness,
+      cwds: ref.cwd ? [ref.cwd] : [],
+      sources: [selectedSessionSource(ref, spans)],
+    }
   }
   const groups = await discover({ ...args, last: args.last || 1 })
   const spans: OtlpSpan[] = []
-  let sessionCount = 0
   const harnesses: string[] = []
   const cwds: string[] = []
+  const sources: SelectedSessionSource[] = []
   for (const { adapter, refs } of groups) {
     if (refs.length > 0) harnesses.push(adapter.harness)
     for (const ref of refs) {
-      spans.push(...(await parseSession(adapter, ref)))
+      const parsed = await parseSession(adapter, ref)
+      spans.push(...parsed)
+      sources.push(selectedSessionSource(ref, parsed))
       if (ref.cwd) cwds.push(ref.cwd)
-      sessionCount += 1
     }
   }
-  return { spans, harness: harnesses.join('+') || args.harness, sessionCount, cwds }
+  return { spans, harness: harnesses.join('+') || args.harness, cwds, sources }
 }
 
 async function cmdConvert(args: Args): Promise<void> {
@@ -399,12 +465,10 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds } = args.input
-    ? await collectImportedSpans(args)
-    : await collectSpans(args)
+  const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const ai = args.llm ? await buildAxService() : undefined
-  const { otlpPath, result } = await analyzeSpans(spans, {
+  const { otlpPath, execution, result } = await analyzeSpans(spans, {
     ai,
     model: args.model,
     budgetUsd: args.budget,
@@ -416,7 +480,16 @@ async function cmdAnalyze(args: Args): Promise<void> {
   const adoption = await analyzeAdoption(spans, { cwds })
   const deterministic = summarizeDeterministicSignals(pipelines, reactions)
   let report =
-    `${renderReport(result, { harness, sessionCount, spanCount: spans.length, otlpPath, deterministic })}\n` +
+    `${renderReport(result, {
+      harness,
+      sessionCount: adoption.identifiedSessionCount,
+      unassignedTraceCount: adoption.unassignedTraceCount,
+      spanCount: spans.length,
+      otlpPath,
+      execution,
+      deterministic,
+      sources,
+    })}\n` +
     `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
   if (args.analyzers.length > 0 && otlpPath) {
     const engines = externalAnalyzersFromArgs(args)
@@ -427,25 +500,42 @@ async function cmdAnalyze(args: Args): Promise<void> {
   }
   if (args.out) {
     await writeFile(args.out, report, 'utf8')
-    console.log(`report → ${args.out}  (${result.findings.length} findings, ${pipelines.stuckLoops.findings.length} loops, OTLP: ${otlpPath})`)
+    console.log(
+      `report → ${args.out}  (${result.findings.length} findings, ` +
+        `${pipelines.stuckLoops.findings.length} loops, OTLP: ${otlpPath})`,
+    )
   } else {
     console.log(report)
   }
 }
 
-async function collectImportedSpans(args: Args): Promise<{ spans: OtlpSpan[]; harness: string; sessionCount: number; cwds: string[] }> {
-  if (!args.input) throw new Error('analyze input missing')
+async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
+  if (!args.input) throw new Error('input file missing')
   const attributes = await loadExportAttributes(args)
   const result = await exportTraceEvidenceFile(args.input, {
     format: traceEvidenceFormat(args.format),
     attributes,
   })
-  const traceIds = new Set(result.spans.map((s) => s.trace_id).filter(Boolean))
+  const { sessionByTrace } = indexSessionIdsByTrace(result.spans)
+  const sessions = new Map<string, OtlpSpan[]>()
+  for (const span of result.spans) {
+    const sessionId = sessionByTrace.get(span.trace_id)
+    if (!sessionId) continue
+    const grouped = sessions.get(sessionId) ?? []
+    grouped.push(span)
+    sessions.set(sessionId, grouped)
+  }
   return {
     spans: result.spans,
     harness: result.format,
-    sessionCount: traceIds.size || 1,
     cwds: [],
+    sources: [...sessions].map(([sessionId, spans]) => selectedSessionSource({
+      harness: result.format,
+      sessionId,
+      path: args.input!,
+      cwd: null,
+      mtimeMs: 0,
+    }, spans, sessionId)),
   }
 }
 
@@ -458,14 +548,14 @@ function externalAnalyzersFromArgs(args: Args) {
 }
 
 async function cmdInvestigate(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
+  const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const ai = args.llm ? await buildAxService() : undefined
   const result = await runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
-    sessionCount,
+    sources,
     cwds,
     minLoopOccurrences: args.minLoop,
     ai,
@@ -478,22 +568,22 @@ async function cmdInvestigate(args: Args): Promise<void> {
   }, config))
   if (args.out) {
     await saveReport(args.out, result.report)
-    console.log(`investigation report → ${args.out}  (${result.findings.length} findings, ${result.recommendations.length} recommendations, OTLP: ${result.otlpPath})`)
+    console.log(`investigation report → ${args.out}  (${result.findings.length} findings with actions, OTLP: ${result.otlpPath})`)
   } else {
     console.log(result.report)
   }
 }
 
 async function cmdImprove(args: Args): Promise<void> {
-  const { spans, harness, sessionCount, cwds } = await collectSpans(args)
+  const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const ai = args.llm ? await buildAxService() : undefined
-  const result = await runTraceImprovementLoop({
+  const result = await runTraceImprovement({
     ...mergeTracesConfig({
       spans,
       harness,
-      sessionCount,
+      sources,
       cwds,
       minLoopOccurrences: args.minLoop,
       ai,
@@ -504,14 +594,13 @@ async function cmdImprove(args: Args): Promise<void> {
       analyzerPrompt: args.analyzerPrompt,
       log: (msg) => process.stderr.write(`${msg}\n`),
     }, config),
-    adapter: config?.improvementAdapter,
     outDir: args.dir ?? args.out,
   })
   const dir = result.artifacts?.directory
   if (!dir) throw new Error('improve did not produce an artifact directory')
   console.log(
     `improvement artifacts → ${dir}  ` +
-      `(${result.findings.length} findings, ${result.recommendations.length} recommendations, ${result.proposals.length} proposal(s), OTLP: ${result.otlpPath})`,
+      `(${result.findings.length} findings with actions and checks, OTLP: ${result.otlpPath})`,
   )
 }
 
@@ -681,37 +770,37 @@ async function cmdUpload(args: Args): Promise<void> {
   const redactorParts = args.redactorCmd?.split(/\s+/).filter(Boolean) ?? []
   const redactor = redactorParts[0] ? commandRedactor({ command: redactorParts[0], args: redactorParts.slice(1) }) : undefined
 
-  const newItems = plan.items.filter((i) => i.isNew)
+  const candidates = plan.items
   const byRule: Record<string, number> = {}
   let totalRedactions = 0
-  for (const i of newItems) {
+  for (const i of candidates) {
     totalRedactions += i.redaction.redactionCount
     for (const [r, n] of Object.entries(i.redaction.byRule)) byRule[r] = (byRule[r] ?? 0) + n
   }
 
   const w = (s: string) => process.stderr.write(s)
   w(`\nWindow: since ${new Date(sinceMs).toISOString()}\n`)
-  w(`Sessions found: ${plan.items.length}  ·  new: ${newItems.length}  ·  already uploaded: ${plan.items.length - newItems.length}\n`)
+  w(`Sessions found: ${plan.items.length}  ·  final privacy-mode dedup runs before upload\n`)
   w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byRule).length ? ` (${Object.entries(byRule).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
-  for (const i of newItems.slice(0, 25)) {
+  for (const i of candidates.slice(0, 25)) {
     w(`  + [${i.ref.harness}] ${i.ref.sessionId.slice(0, 8)}  ${i.spans.length} spans  ${i.redaction.redactionCount} redacted  ${i.ref.cwd ?? ''}\n`)
   }
-  if (newItems.length > 25) w(`  … and ${newItems.length - 25} more\n`)
+  if (candidates.length > 25) w(`  … and ${candidates.length - 25} more\n`)
 
-  if (newItems.length === 0) {
-    console.log('Nothing new to upload.')
+  if (candidates.length === 0) {
+    console.log('No sessions found to upload.')
     return
   }
 
   if (args.dryRun) {
     const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlp, stripContent: args.noContent, redactor })
-    console.log(`dry run: ${newItems.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
+    console.log(`dry run: ${candidates.length - res.skippedSessions} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
   }
 
   if (!args.yes) {
-    const ok = await confirm(`Upload ${newItems.length} redacted session(s) to the Tangle Intelligence Platform?`)
+    const ok = await confirm(`Process ${candidates.length} redacted session(s) for upload to the Tangle Intelligence Platform?`)
     if (!ok) {
       console.log('Aborted (use --yes to skip the prompt, or --dry-run to preview).')
       return
@@ -760,8 +849,8 @@ function usage(): void {
 Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines over sessions or an input file
-  investigate Run typed investigation flow, including BYO config + recommendations
-  improve   Write a full improvement artifact directory for review/apply/rerun
+  investigate Run typed investigation flow, including BYO config + evidence-backed actions
+  improve   Write findings, evidence, report, and canonical trace artifacts
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
   inspect   Read a session index and print ranked improvement findings
@@ -790,7 +879,7 @@ Options:
   --no-findings    stream: omit semantic live-finding events
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
   --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
-  --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, external analyzers, or proposal adapter
+  --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
   --budget <usd>   USD cap for agentic analysts
   --analyzer <cmd> analyze: also run an external engine over the OTLP (repeatable; "halo" or any command)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)

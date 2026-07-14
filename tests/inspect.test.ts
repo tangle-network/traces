@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { summarizeExecution } from '@tangle-network/agent-eval/contract'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   inspectSessionIndex,
@@ -17,6 +18,7 @@ afterAll(async () => {
 })
 
 function fixtureIndex(): TraceSessionIndex {
+  const execution = summarizeExecution({ runs: [] })
   return {
     schemaVersion: 1,
     kind: 'traces.session_index',
@@ -128,6 +130,7 @@ function fixtureIndex(): TraceSessionIndex {
           stuckLoopsOmitted: 11,
           toolErrorRate: 0.3,
         },
+        execution,
       },
       {
         session: {
@@ -160,6 +163,7 @@ function fixtureIndex(): TraceSessionIndex {
           stuckLoopsOmitted: 0,
           toolErrorRate: 0,
         },
+        execution,
       },
     ],
   }

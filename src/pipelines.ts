@@ -3,7 +3,7 @@
  *
  * These are the deterministic loop/thrash detectors that already exist in
  * `@tangle-network/agent-eval`:
- *   - stuckLoopView         — same tool + same args ≥ N times (the loop signal)
+ *   - stuckLoopView         — same tool + same args ≥ N times in a short interval
  *   - computeToolUseMetrics — duplicate-call / retry / error rates per run
  *
  * `toolWasteView` is intentionally NOT used: its default heuristic needs
@@ -20,13 +20,18 @@
 
 import { computeToolUseMetrics } from '@tangle-network/agent-eval'
 import type { ToolUseMetrics } from '@tangle-network/agent-eval'
-import { stuckLoopView } from '@tangle-network/agent-eval/pipelines'
-import type { StuckLoopReport } from '@tangle-network/agent-eval/pipelines'
+import {
+  failureClusterView,
+  stuckLoopView,
+  type FailureClusterReport,
+  type StuckLoopReport,
+} from '@tangle-network/agent-eval/pipelines'
 import type { OtlpSpan } from './otlp.js'
 import { toRuntimeStore } from './runtime-store.js'
 
 export interface PipelineReport {
   stuckLoops: StuckLoopReport
+  failureClusters: FailureClusterReport
   toolUse: ToolUseMetrics[]
 }
 
@@ -39,7 +44,10 @@ export async function runPipelines(spans: readonly OtlpSpan[], opts: PipelineOpt
   const { store, runIds } = await toRuntimeStore(spans)
   const loopEligible = spans.filter((item) => item.attributes['traces.expected_blocking'] !== true)
   const { store: loopStore } = await toRuntimeStore(loopEligible)
-  const stuckLoops = await stuckLoopView(loopStore, { minOccurrences: opts.minLoopOccurrences ?? 3 })
-  const toolUse = await Promise.all(runIds.map((runId) => computeToolUseMetrics(store, runId)))
-  return { stuckLoops, toolUse }
+  const [stuckLoops, failureClusters, toolUse] = await Promise.all([
+    stuckLoopView(loopStore, { minOccurrences: opts.minLoopOccurrences ?? 3 }),
+    failureClusterView(store),
+    Promise.all(runIds.map((runId) => computeToolUseMetrics(store, runId))),
+  ])
+  return { stuckLoops, failureClusters, toolUse }
 }

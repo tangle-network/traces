@@ -29,7 +29,7 @@ function adapterOf(spans: OtlpSpan[]): HarnessTraceAdapter {
   return { harness: 'synthetic', async locate() { return [ref] }, async parse() { return spans } }
 }
 
-/** A root + N identical bash calls → a stuck loop the detector flags. */
+/** A root + N identical bash calls that the loop detector flags. */
 function loopSpans(n: number): OtlpSpan[] {
   const base = Date.parse('2026-01-01T00:00:00.000Z')
   const out: OtlpSpan[] = [
@@ -44,13 +44,45 @@ function loopSpans(n: number): OtlpSpan[] {
         name: 'tool.bash',
         kind: 'TOOL',
         startTime: new Date(base + (i + 1) * 1000).toISOString(),
+        endTime: new Date(base + (i + 1) * 1000 + 100).toISOString(),
         service: 'synthetic',
         tool: 'bash',
-        content: 'ls -la',
+        extra: { 'input.value': 'ls -la' },
       }),
     )
   }
   return out
+}
+
+function tokenTrajectorySpans(
+  inputs: readonly (number | null)[],
+  outputs: readonly (number | null)[],
+): OtlpSpan[] {
+  const base = Date.parse('2026-01-01T00:00:00.000Z')
+  return [
+    span({
+      traceId: 'token-trend',
+      spanId: 'root',
+      name: 'session',
+      kind: 'AGENT',
+      startTime: new Date(base).toISOString(),
+      service: 'synthetic',
+    }),
+    ...inputs.map((inputTokens, index) =>
+      span({
+        traceId: 'token-trend',
+        spanId: `llm-${index}`,
+        parentSpanId: 'root',
+        name: 'llm.turn',
+        kind: 'LLM',
+        startTime: new Date(base + (index + 1) * 1000).toISOString(),
+        endTime: new Date(base + (index + 1) * 1000 + 100).toISOString(),
+        service: 'synthetic',
+        inputTokens,
+        outputTokens: outputs[index],
+        step: index,
+      })),
+  ]
 }
 
 describe('watchSessions (observer event API)', () => {
@@ -126,7 +158,8 @@ describe('executeUpload (pluggable backend)', () => {
     expect(res.acceptedSpans).toBe(spans.length)
     expect(calls).toHaveLength(1)
     expect(calls[0]!.key).toContain('sess-x')
-    expect(plan.state['synthetic:sess-x']!.hash).toBe('hash1')
+    expect(plan.state['synthetic:sess-x']!.hash).toBe(calls[0]!.key!.split(':').at(-1))
+    expect(plan.state['synthetic:sess-x']!.hash).not.toBe('hash1')
   })
 })
 
@@ -145,5 +178,39 @@ describe('analyzeSpans (bring-your-own analysts)', () => {
     })
     const { result } = await analyzeSpans(loopSpans(2), { registry })
     expect(result.findings.some((f) => f.claim === 'hello from my analyst')).toBe(true)
+  })
+
+  it('rejects endpoint-only token trends when the session contains compaction resets and output increases', async () => {
+    const inputs = [25_073, 100_000, 240_000, 30_000, 120_000, 210_878]
+    const outputs = [934, 150, 1_200, 120, 900, 137]
+    expect(inputs.at(-1)! / inputs[0]!).toBeGreaterThan(3)
+    expect(outputs.at(-1)).toBeLessThan(outputs[0]!)
+    expect(inputs.some((value, index) => index > 0 && value < inputs[index - 1]!)).toBe(true)
+    expect(outputs.some((value, index) => index > 0 && value > outputs[index - 1]!)).toBe(true)
+
+    const { result } = await analyzeSpans(tokenTrajectorySpans(inputs, outputs))
+    const subjects = result.findings.map((finding) => finding.subject)
+    expect(subjects).not.toContain('monotonic-input-growth')
+    expect(subjects).not.toContain('output-length-decay')
+    const behavioral = result.per_analyst.find((item) => item.analyst_id === 'efficiency-behavioral')
+    expect(behavioral?.findings_count).toBe(
+      result.findings.filter((finding) => finding.analyst_id === 'efficiency-behavioral').length,
+    )
+  })
+
+  it('retains token findings when every paired transition supports the stated trend', async () => {
+    const { result } = await analyzeSpans(
+      tokenTrajectorySpans([100, 200, 300, 400], [400, 300, 200, 100]),
+    )
+    const subjects = result.findings.map((finding) => finding.subject)
+    expect(subjects).toContain('monotonic-input-growth')
+    expect(subjects).toContain('output-length-decay')
+  })
+
+  it('rejects output decay when no paired input trajectory supports the context claim', async () => {
+    const { result } = await analyzeSpans(
+      tokenTrajectorySpans([null, null, null], [400, 200, 100]),
+    )
+    expect(result.findings.map((finding) => finding.subject)).not.toContain('output-length-decay')
   })
 })

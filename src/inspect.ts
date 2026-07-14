@@ -398,7 +398,7 @@ function assertSessionIndex(value: unknown): asserts value is TraceSessionIndex 
   }
   const candidate = value as { kind?: unknown; schemaVersion?: unknown; sessions?: unknown; totals?: unknown }
   if (candidate.kind !== 'traces.session_index' || candidate.schemaVersion !== 1 || !Array.isArray(candidate.sessions)) {
-    throw new Error('input is not a traces.session_index v1 file')
+    throw new Error('input is not a traces.session_index file with schemaVersion 1')
   }
   if (!candidate.totals || typeof candidate.totals !== 'object') {
     throw new Error('session index is missing totals')

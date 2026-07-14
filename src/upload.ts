@@ -2,13 +2,13 @@
  * Upload local coding-session traces to the Tangle Intelligence Platform.
  *
  * Pipeline per session: locate (time window) → parse to OTLP spans → REDACT
- * (PII/secrets) → augment with metadata → dedup (skip unchanged, already-sent
- * sessions) → POST via the hosted `ingestTraces` client. The redaction happens
+ * (PII/secrets) → apply the selected privacy mode → augment with metadata →
+ * dedup the final events → POST via the hosted `ingestTraces` client. Redaction happens
  * before anything leaves the machine; the dedup is local-state + server
  * idempotency-key.
  *
- * `planUpload` is read-only (select + redact + dedup); `executeUpload` does the
- * actual send (or, with `dryRun`, writes the redacted OTLP it *would* send).
+ * `planUpload` is read-only (select + regex redact); `executeUpload` applies
+ * final privacy options, deduplicates, and sends or writes a dry-run preview.
  */
 
 import { readFile } from 'node:fs/promises'
@@ -19,6 +19,7 @@ import { hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 import type { TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
 import { REDACTION_VERSION } from '@tangle-network/agent-eval/traces'
 import type { RedactionReport } from '@tangle-network/agent-eval/traces'
+import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-io.js'
 import { ATTR, INGEST_SOURCE_CLI } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
@@ -27,7 +28,16 @@ import { applyRedactor, redactSpans } from './redact.js'
 import { type ScanOptions, scanSessions } from './session-source.js'
 import { parseIsoToEpochMs } from './time.js'
 import type { SessionRef } from './types.js'
-import { alreadyUploaded, loadState, saveState, sessionHash, type UploadState, uploadKey } from './upload-state.js'
+import {
+  alreadyUploaded,
+  loadState,
+  outboundHash,
+  saveState,
+  sessionHash,
+  type UploadIdentity,
+  type UploadState,
+  uploadKey,
+} from './upload-state.js'
 
 const require = createRequire(import.meta.url)
 const TRACES_VERSION: string = (require('../package.json') as { version: string }).version
@@ -37,7 +47,9 @@ export interface UploadItem {
   /** Redacted spans (safe to send). */
   spans: OtlpSpan[]
   redaction: RedactionReport
+  /** Source-span hash for inspection. Final outbound hashing happens in executeUpload. */
   hash: string
+  /** Candidate marker retained for API compatibility; final freshness depends on execute options. */
   isNew: boolean
 }
 
@@ -49,7 +61,7 @@ export interface UploadPlan {
 
 export type PlanOptions = ScanOptions
 
-/** Read-only: select sessions in the window, redact, and mark which are new. */
+/** Read-only: select sessions in the window and apply the built-in regex redaction. */
 export async function planUpload(opts: PlanOptions = {}): Promise<UploadPlan> {
   const state = await loadState()
   const items: UploadItem[] = []
@@ -61,7 +73,7 @@ export async function planUpload(opts: PlanOptions = {}): Promise<UploadPlan> {
       spans,
       redaction: report,
       hash,
-      isNew: !alreadyUploaded(state, ref.harness, ref.sessionId, hash),
+      isNew: true,
     })
   }
   return { items, state, sinceMs: opts.sinceMs }
@@ -80,12 +92,11 @@ async function gitBranch(cwd: string | null): Promise<string | undefined> {
 }
 
 /** Resource metadata attached to a session's root span — the "augmentation". */
-async function sessionMeta(item: UploadItem, uploadedAt: string): Promise<Record<string, string | number | boolean>> {
+async function sessionMeta(item: UploadItem): Promise<Record<string, string | number | boolean>> {
   const meta: Record<string, string | number | boolean> = {
     [ATTR.HARNESS]: item.ref.harness,
     [ATTR.SESSION_FILE]: basename(item.ref.path),
     [ATTR.HOST]: hostname(),
-    [ATTR.UPLOADED_AT]: uploadedAt,
     [ATTR.UPLOADER]: `tangle-traces@${TRACES_VERSION}`,
     [ATTR.REDACTION_VERSION]: REDACTION_VERSION,
     [ATTR.REDACTION_COUNT]: item.redaction.redactionCount,
@@ -150,45 +161,105 @@ export interface UploadBackend {
   ingestTraces(spans: TraceSpanEvent[], idempotencyKey?: string): Promise<{ accepted: number }>
 }
 
+export class PartialUploadError extends Error {
+  readonly sessionKey: string
+  readonly accepted: number
+  readonly expected: number
+
+  constructor(sessionKey: string, accepted: number, expected: number) {
+    super(`upload: backend accepted ${accepted} of ${expected} spans for ${sessionKey}`)
+    this.name = 'PartialUploadError'
+    this.sessionKey = sessionKey
+    this.accepted = accepted
+    this.expected = expected
+  }
+}
+
 export interface ExecuteOptions {
   dryRun?: boolean
   /** Where to write the redacted OTLP-JSONL on a dry run. */
   otlpOut?: string
   /** Custom sink. Defaults to the hosted Tangle Intelligence client from env. */
   backend?: UploadBackend
-  /** Metadata-only upload: drop captured prompt/response `content` from every
-   *  span before it leaves the machine (still keeps tool calls, tokens, timing,
-   *  loop signal). The strongest privacy posture when prose can't leave. */
+  /** Metadata-only upload: drop captured prompt/response/tool values before the
+   *  spans leave the machine (still keeps tool names, tokens, timing, and loop signal). */
   stripContent?: boolean
-  /** External PII scrubber applied to `content` AFTER the regex pass — catches
-   *  free-form PII (names, addresses) the rules miss. Ignored if stripContent. */
+  /** External PII scrubber applied to captured conversation and tool values
+   *  AFTER the regex pass. Ignored if stripContent. */
   redactor?: Redactor
   log?: (msg: string) => void
 }
 
-/** Drop captured conversation `content` from spans (metadata-only upload). */
+/** Drop captured conversation and tool values from metadata-only uploads. */
 function stripSpanContent(spans: readonly OtlpSpan[]): OtlpSpan[] {
   return spans.map((s) => {
-    if (s.attributes['content'] == null) return s
-    const { content: _drop, ...attributes } = s.attributes
-    return { ...s, attributes }
+    const attributes = { ...s.attributes }
+    delete attributes.content
+    for (const key of TOOL_IO_VALUE_KEYS) delete attributes[key]
+    normalizeToolIoAttributes(attributes)
+    const status = s.status.message ? { code: s.status.code } : s.status
+    return { ...s, attributes, status }
   })
 }
 
-/** Send the NEW items (or, on dryRun, write the redacted OTLP that would send). */
-export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {}): Promise<UploadResult> {
-  let newItems = plan.items.filter((i) => i.isNew)
+interface OutboundItem {
+  item: UploadItem
+  events: TraceSpanEvent[]
+  hash: string
+}
+
+async function prepareOutbound(
+  plan: UploadPlan,
+  opts: ExecuteOptions,
+  uploadedAt: string,
+): Promise<{ items: OutboundItem[]; skipped: number }> {
+  let candidates = plan.items
   if (opts.redactor && !opts.stripContent) {
-    const r = opts.redactor
-    newItems = await Promise.all(newItems.map(async (i) => ({ ...i, spans: (await applyRedactor(i.spans, r)).spans })))
+    const redactor = opts.redactor
+    candidates = await Promise.all(
+      candidates.map(async (item) => ({ ...item, spans: (await applyRedactor(item.spans, redactor)).spans })),
+    )
   }
-  if (opts.stripContent) newItems = newItems.map((i) => ({ ...i, spans: stripSpanContent(i.spans) }))
-  const skipped = plan.items.length - newItems.length
-  const redactionCount = newItems.reduce((n, i) => n + i.redaction.redactionCount, 0)
+  if (opts.stripContent) {
+    candidates = candidates.map((item) => ({ ...item, spans: stripSpanContent(item.spans) }))
+  }
+
+  const identity: UploadIdentity = {
+    stripContent: opts.stripContent === true,
+    redactor: opts.stripContent ? null : (opts.redactor?.name ?? null),
+    redactionVersion: REDACTION_VERSION,
+  }
+  const items: OutboundItem[] = []
+  for (const item of candidates) {
+    const key = uploadKey(item.ref.harness, item.ref.sessionId)
+    const previous = plan.state[key]
+    const meta = await sessionMeta(item)
+    const eventsAt = (timestamp: string) =>
+      toTraceSpanEvents(item.spans, { ...meta, [ATTR.UPLOADED_AT]: timestamp })
+
+    let eventTimestamp = previous?.uploadedAt ?? uploadedAt
+    let events = eventsAt(eventTimestamp)
+    let hash = outboundHash(events, identity)
+    if (alreadyUploaded(plan.state, item.ref.harness, item.ref.sessionId, hash)) continue
+
+    if (eventTimestamp !== uploadedAt) {
+      eventTimestamp = uploadedAt
+      events = eventsAt(eventTimestamp)
+      hash = outboundHash(events, identity)
+    }
+    items.push({ item, events, hash })
+  }
+  return { items, skipped: plan.items.length - items.length }
+}
+
+/** Send the final, new outbound items (or write their dry-run OTLP). */
+export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {}): Promise<UploadResult> {
   const uploadedAt = new Date().toISOString()
+  const { items, skipped } = await prepareOutbound(plan, opts, uploadedAt)
+  const redactionCount = items.reduce((n, { item }) => n + item.redaction.redactionCount, 0)
 
   if (opts.dryRun) {
-    const allSpans = newItems.flatMap((i) => i.spans)
+    const allSpans = items.flatMap(({ item }) => item.spans)
     const path = await writeOtlpFile(allSpans, opts.otlpOut)
     return {
       uploadedSessions: 0,
@@ -197,6 +268,16 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
       redactionCount,
       dryRun: true,
       otlpPath: path,
+    }
+  }
+
+  if (items.length === 0) {
+    return {
+      uploadedSessions: 0,
+      skippedSessions: skipped,
+      acceptedSpans: 0,
+      redactionCount,
+      dryRun: false,
     }
   }
 
@@ -211,25 +292,30 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
 
   const state = plan.state
   let acceptedSpans = 0
-  for (const item of newItems) {
-    const meta = await sessionMeta(item, uploadedAt)
-    const events = toTraceSpanEvents(item.spans, meta)
+  const completed: Array<{ key: string; item: UploadItem; hash: string; spanCount: number }> = []
+  for (const outbound of items) {
+    const { item, events, hash } = outbound
+    const key = uploadKey(item.ref.harness, item.ref.sessionId)
     // idempotency-key = session + content hash → server-side retry-safe dedup.
-    const idempotencyKey = `${uploadKey(item.ref.harness, item.ref.sessionId)}:${item.hash}`
+    const idempotencyKey = `${key}:${hash}`
     const res = await client.ingestTraces(events, idempotencyKey)
+    if (res.accepted !== events.length) throw new PartialUploadError(key, res.accepted, events.length)
     acceptedSpans += res.accepted
-    state[uploadKey(item.ref.harness, item.ref.sessionId)] = {
-      hash: item.hash,
+    completed.push({ key, item, hash, spanCount: events.length })
+    opts.log?.(`uploaded ${item.ref.harness} ${item.ref.sessionId.slice(0, 8)} — ${res.accepted} spans`)
+  }
+  for (const { key, item, hash, spanCount } of completed) {
+    state[key] = {
+      hash,
       uploadedAt,
       harness: item.ref.harness,
-      spanCount: item.spans.length,
+      spanCount,
     }
-    opts.log?.(`uploaded ${item.ref.harness} ${item.ref.sessionId.slice(0, 8)} — ${res.accepted} spans`)
   }
   await saveState(state)
 
   return {
-    uploadedSessions: newItems.length,
+    uploadedSessions: items.length,
     skippedSessions: skipped,
     acceptedSpans,
     redactionCount,

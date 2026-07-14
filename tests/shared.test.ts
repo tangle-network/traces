@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  EmptySessionError,
   type HarnessTraceAdapter,
   listAdapters,
   type OtlpSpan,
@@ -29,6 +30,12 @@ const oneSpan = (): OtlpSpan[] => [
   span({ traceId: 't', spanId: 's', name: 'session', kind: 'AGENT', startTime: '2026-01-01T00:00:00.000Z' }),
 ]
 
+async function scanIds(options: Parameters<typeof scanSessions>[0]): Promise<string[]> {
+  const ids: string[] = []
+  for await (const session of scanSessions(options)) ids.push(session.ref.sessionId)
+  return ids
+}
+
 describe('selectAdapters', () => {
   it('explicit adapters win over all/harnesses', () => {
     const a = adapter({})
@@ -45,18 +52,95 @@ describe('selectAdapters', () => {
 })
 
 describe('scanSessions', () => {
-  it('yields non-empty sessions, skips empty, routes parse errors to onError', async () => {
-    const errors: unknown[] = []
-    const out: string[] = []
-    for await (const s of scanSessions({
+  it('continues only when onError explicitly handles empty and failed sessions', async () => {
+    const errors: Array<{ error: unknown; ref?: SessionRef }> = []
+    const out = await scanIds({
       adapters: [adapter({ s1: oneSpan(), s2: [], s3: 'throw' })],
-      onError: (e) => errors.push(e),
-    })) {
-      out.push(s.ref.sessionId)
-      expect(s.spans.length).toBeGreaterThan(0)
+      onError: (error, sessionRef) => errors.push({ error, ref: sessionRef }),
+    })
+
+    expect(out).toEqual(['s1'])
+    expect(errors).toHaveLength(2)
+    expect(errors[0]).toMatchObject({ ref: ref('s2') })
+    expect(errors[0]!.error).toBeInstanceOf(EmptySessionError)
+    expect(errors[1]).toMatchObject({ ref: ref('s3') })
+    expect(errors[1]!.error).toEqual(new Error('parse boom'))
+  })
+
+  it('rethrows parse failures by default', async () => {
+    await expect(scanIds({ adapters: [adapter({ s1: 'throw' })] })).rejects.toThrow('parse boom')
+  })
+
+  it('rethrows locate failures by default', async () => {
+    const failingLocate: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        throw new Error('locate boom')
+      },
+      async parse() {
+        return oneSpan()
+      },
     }
-    expect(out).toEqual(['s1']) // s2 empty → skipped, s3 threw → onError
-    expect(errors).toHaveLength(1)
+
+    await expect(scanIds({ adapters: [failingLocate] })).rejects.toThrow('locate boom')
+  })
+
+  it('forwards strict corruption mode to adapters', async () => {
+    let received: string | undefined
+    const strictAdapter: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return [ref('strict')]
+      },
+      async parse(_ref, options) {
+        received = options?.corruptionMode
+        return oneSpan()
+      },
+    }
+
+    await expect(scanIds({ adapters: [strictAdapter], corruptionMode: 'strict' })).resolves.toEqual(['strict'])
+    expect(received).toBe('strict')
+  })
+
+  it('does not hide a degraded unknown-cwd session behind the cwd filter', async () => {
+    const degraded = ref('degraded')
+    degraded.integrity = {
+      status: 'degraded_not_lossless',
+      corruptions: [{
+        receiptVersion: 1,
+        kind: 'jsonl_corruption',
+        status: 'degraded_not_lossless',
+        harness: degraded.harness,
+        sessionId: degraded.sessionId,
+        sourcePath: degraded.path,
+        lineNumber: 1,
+        byteOffset: 0,
+        byteLength: 3,
+        sha256: '0'.repeat(64),
+        rawBytes: 'local_source_only',
+      }],
+    }
+    const degradedAdapter: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return [degraded]
+      },
+      async parse() {
+        return oneSpan()
+      },
+    }
+
+    await expect(scanIds({ adapters: [degradedAdapter], cwd: '/expected/repo' })).resolves.toEqual(['degraded'])
+  })
+
+  it('rejects a discovered session that parses to zero spans', async () => {
+    const error = await scanIds({ adapters: [adapter({ s2: [] })] }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    expect(error).toBeInstanceOf(EmptySessionError)
+    expect(error).toMatchObject({ sourcePath: '/tmp/s2' })
   })
   it('stops immediately when the signal is already aborted', async () => {
     const c = new AbortController()

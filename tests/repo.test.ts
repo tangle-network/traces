@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
+import { analyzeAdoption } from '../src/adoption.js'
 import { ATTR } from '../src/attributes.js'
 import { serializeSpans, span, toOpenInferenceSpan } from '../src/otlp.js'
 import {
@@ -87,6 +88,18 @@ describe('normalizeRemote', () => {
       'github.com/tangle-network/agent-dev-container',
     )
     expect(normalizeRemote('https://user:tok@gitlab.com:443/a/b')).toBe('gitlab.com/a/b')
+  })
+})
+
+describe('parseSession identity', () => {
+  it('stamps one source-derived identity when the adapter omitted it', async () => {
+    const spans = await parseSession(adapter(), ref('sessIdentity', null))
+    const adoption = await analyzeAdoption(spans)
+
+    expect(spans.every((item) => item.attributes[ATTR.SESSION_ID] === 'sessIdentity')).toBe(true)
+    expect(adoption.identifiedSessionCount).toBe(1)
+    expect(adoption.unassignedTraceCount).toBe(0)
+    expect(adoption.executionGroupCount).toBe(1)
   })
 })
 

@@ -8,17 +8,21 @@
  * `assistant.usage` (ephemeral: `model`, `inputTokens`, `outputTokens`).
  *
  * Sub-agents interleave in the same stream — tool calls/results are joined by
- * `toolCallId`, never adjacency. Lines may contain stray newlines/separators;
- * parse line-tolerant. Schema from GitHub docs (high conf); parse unverified
- * against local data.
+ * `toolCallId`, never adjacency. Isolated invalid records produce corruption
+ * receipts while valid records continue. Schema from GitHub docs (high conf);
+ * parse unverified against local data.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
+import { isMissingPathError } from '../json.js'
+import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'github-copilot'
 
@@ -37,20 +41,9 @@ interface CopilotEvent {
     arguments?: unknown
     success?: boolean
     error?: { message?: string }
+    output?: unknown
+    result?: unknown
   }
-}
-
-function parseLines(raw: string): CopilotEvent[] {
-  const out: CopilotEvent[] = []
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue
-    try {
-      out.push(JSON.parse(line) as CopilotEvent)
-    } catch {
-      // GitHub's writer has shipped lines with raw separators — skip tolerantly.
-    }
-  }
-  return out
 }
 
 export class CopilotAdapter implements HarnessTraceAdapter {
@@ -65,8 +58,9 @@ export class CopilotAdapter implements HarnessTraceAdapter {
     let dirs: string[]
     try {
       dirs = await readdir(this.root())
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const id of dirs) {
@@ -74,8 +68,9 @@ export class CopilotAdapter implements HarnessTraceAdapter {
       let st: Awaited<ReturnType<typeof stat>>
       try {
         st = await stat(path)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       if (!st.isFile()) continue
       if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
@@ -85,30 +80,25 @@ export class CopilotAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const events = parseLines(await readFile(ref.path, 'utf8'))
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     const traceId = ref.sessionId
     const rootId = `root:${traceId}`
-    const spans: OtlpSpan[] = [
-      span({
-        traceId,
-        spanId: rootId,
-        parentSpanId: null,
-        name: 'session',
-        kind: 'AGENT',
-        startTime: events[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: events.at(-1)?.timestamp,
-        service: SERVICE,
-        agent: SERVICE,
-      }),
-    ]
-
+    const spans: OtlpSpan[] = []
     const toolByCallId = new Map<string, OtlpSpan>()
+    let firstTimestamp: string | undefined
+    let lastTimestamp: string | undefined
+    let sawEvent = false
     let step = 0
     let lastLlm = rootId
     let pendingInputTokens: number | null = null
 
-    for (const ev of events) {
+    for await (const ev of readJsonl<CopilotEvent>(ref.path, sessionJsonlOptions(ref, options))) {
+      if (!sawEvent) {
+        firstTimestamp = ev.timestamp
+        sawEvent = true
+      }
+      lastTimestamp = ev.timestamp
+
       const ts = ev.timestamp ?? new Date(0).toISOString()
       const d = ev.data ?? {}
       if (ev.type === 'assistant.usage') {
@@ -151,7 +141,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
           agent: SERVICE,
           tool: name,
           step,
-          content: d.arguments != null ? JSON.stringify(d.arguments) : null,
+          extra: toolIoAttributes({ input: d.arguments }),
         })
         spans.push(t)
         toolByCallId.set(d.toolCallId, t)
@@ -162,9 +152,22 @@ export class CopilotAdapter implements HarnessTraceAdapter {
           t.end_time = ts
           const err = d.success === false
           t.status = err ? { code: 'ERROR', message: (d.error?.message ?? '').slice(0, 500) } : { code: 'OK' }
+          recordToolOutput(t, d.output ?? d.result ?? d.error?.message)
         }
       }
     }
-    return spans
+
+    const root = span({
+      traceId,
+      spanId: rootId,
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: firstTimestamp ?? new Date(0).toISOString(),
+      endTime: lastTimestamp,
+      service: SERVICE,
+      agent: SERVICE,
+    })
+    return [root, ...spans]
   }
 }

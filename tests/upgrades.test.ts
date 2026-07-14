@@ -10,6 +10,7 @@ import { analyzeAdoption, countSkillRunsJsonl } from '../src/adoption.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import { span } from '../src/otlp.js'
 import { analyzeReactions } from '../src/reactions.js'
+import { renderAdoption } from '../src/report.js'
 import type { SessionRef } from '../src/types.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'tt-upgrades-'))
@@ -100,6 +101,22 @@ describe('actor derivation', () => {
     expect(ups).toHaveLength(2)
     expect(ups[0]!.attributes[ACTOR_ATTR]).toBe('injected')
     expect(ups[1]!.attributes[ACTOR_ATTR]).toBe('human')
+  })
+
+  it('applies a delayed Codex model without a metadata pre-scan', async () => {
+    const path = join(dir, 'rollout-delayed-model.jsonl')
+    const rows = [
+      { type: 'session_meta', timestamp: '2026-06-20T00:00:00Z', payload: { id: 'late-model', cwd: '/x' } },
+      { type: 'event_msg', timestamp: '2026-06-20T00:00:01Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } } } },
+      ...Array.from({ length: 40 }, (_, index) => ({ type: 'event_msg', timestamp: `2026-06-20T00:00:${String(index + 2).padStart(2, '0')}Z`, payload: { type: 'progress' } })),
+      { type: 'turn_context', timestamp: '2026-06-20T00:01:00Z', payload: { model: 'gpt-late' } },
+    ]
+    writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+
+    expect(spans[0]!.attributes['llm.model_name']).toBe('gpt-late')
+    expect(spans.find((item) => item.name === 'llm.turn')?.attributes['llm.model_name']).toBe('gpt-late')
   })
 })
 
@@ -196,7 +213,7 @@ function skillTool(i: number, traceId: string, skill: string): OtlpSpan {
     startTime: new Date(1000 + i * 1000).toISOString(),
     step: i,
     tool: 'Skill',
-    content: JSON.stringify({ skill }),
+    extra: { 'input.value': JSON.stringify({ skill }) },
   })
 }
 function taskTool(i: number, traceId: string, type: string): OtlpSpan {
@@ -209,7 +226,7 @@ function taskTool(i: number, traceId: string, type: string): OtlpSpan {
     startTime: new Date(1000 + i * 1000).toISOString(),
     step: i,
     tool: 'Task',
-    content: JSON.stringify({ subagent_type: type }),
+    extra: { 'input.value': JSON.stringify({ subagent_type: type }) },
   })
 }
 
@@ -250,7 +267,7 @@ describe('analyzeAdoption', () => {
         startTime: new Date(5000).toISOString(),
         step: 4,
         tool: 'spawn_agent',
-        content: JSON.stringify({ agent_type: 'duplicate' }),
+        extra: { 'input.value': JSON.stringify({ agent_type: 'duplicate' }) },
       }),
       span({ traceId: 's2', spanId: 'root2', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'claude-code' }),
       span({
@@ -261,7 +278,7 @@ describe('analyzeAdoption', () => {
         startTime: new Date(2000).toISOString(),
         step: 1,
         tool: 'spawn_agent',
-        content: JSON.stringify({ agent_type: 'explorer' }),
+        extra: { 'input.value': JSON.stringify({ agent_type: 'explorer' }) },
       }),
       span({
         traceId: 's2',
@@ -271,14 +288,18 @@ describe('analyzeAdoption', () => {
         startTime: new Date(3000).toISOString(),
         step: 2,
         tool: 'multi_agent_v1__spawn_agent',
-        content: JSON.stringify({ subagent_type: 'reviewer' }),
+        extra: { 'input.value': JSON.stringify({ subagent_type: 'reviewer' }) },
       }),
       // s2 invokes no skill → penetration is 1/2, but its spawn tools count.
     ]
     const r = await analyzeAdoption(spans, { cwds: [cwd] })
-    expect(r.sessionCount).toBe(2)
+    expect(r.executionGroupCount).toBe(2)
+    expect(r.identifiedSessionCount).toBe(0)
+    expect(r.unassignedTraceCount).toBe(2)
     expect(r.sessionsWithSkill).toBe(1)
     expect(r.skillPenetration).toBe(0.5)
+    expect(r.skillTelemetryStatus).toBe('measured')
+    expect(r.skillTelemetrySessions).toBe(2)
     expect(r.skillInvocations.evolve).toBe(1)
     expect(r.skillInvocations.polish).toBe(1)
     expect(r.totalSkillInvocations).toBe(2)
@@ -293,6 +314,173 @@ describe('analyzeAdoption', () => {
     expect(r.loopDispatchedRuns.converge).toBe(1)
     expect(r.totalLoopDispatchedRuns).toBe(3)
     expect(r.skillRunFilesRead).toBe(1)
+  })
+
+  it('reports Codex skill invocation as unsupported while preserving catalog, file, and subagent evidence', async () => {
+    const path = join(dir, 'rollout-codex-skill-evidence.jsonl')
+    const rows = [
+      { type: 'session_meta', timestamp: '2026-06-20T00:00:00Z', payload: { id: 'codex-skill-evidence', cwd: '/x' } },
+      {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:01Z',
+        payload: {
+          type: 'message',
+          role: 'developer',
+          content: '<skills_instructions>\n### Available skills\n- simplify: capability-preserving cleanup',
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:02Z',
+        payload: {
+          type: 'custom_tool_call',
+          call_id: 'skill-file',
+          name: 'exec',
+          input: 'const r = await tools.exec_command({cmd:"sed -n 1,80p /skills/simplify/SKILL.md"}); text(r.output)',
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:03Z',
+        payload: { type: 'custom_tool_call_output', call_id: 'skill-file', output: 'Script completed' },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-06-20T00:00:04Z',
+        payload: {
+          type: 'sub_agent_activity',
+          kind: 'started',
+          agent_thread_id: 'child-1',
+          agent_path: 'reviewer',
+        },
+      },
+    ]
+    writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const report = await analyzeAdoption(spans)
+    const rendered = renderAdoption(report)
+
+    expect(report.skillPenetration).toBeNull()
+    expect(report.skillTelemetryStatus).toBe('unsupported')
+    expect(report.skillTelemetrySessions).toBe(0)
+    expect(report.sessionsWithMaterializedSkills).toBe(1)
+    expect(report.sessionsWithSkillFileReference).toBe(1)
+    expect(report.totalSubagentSpawns).toBe(1)
+    expect(report.subagentSpawns.reviewer).toBe(1)
+    expect(rendered).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
+    expect(rendered).toContain('Materialized skill catalogs/instructions:** 1/1')
+    expect(rendered).toContain('SKILL.md tool references:** 1/1')
+    expect(rendered).toContain('Subagent spawns observed:** 1')
+    expect(rendered).toContain('Prompt, tools, MCP, hooks, and full agent profile:** not assessed')
+    expect(rendered).not.toContain('Skill penetration')
+    expect(rendered).not.toContain('0%')
+  })
+
+  it('excludes Codex from a mixed corpus explicit-invocation denominator', async () => {
+    const report = await analyzeAdoption([
+      span({
+        traceId: 'claude-session',
+        spanId: 'claude-root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+      }),
+      span({
+        traceId: 'codex-session',
+        spanId: 'codex-root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'codex',
+      }),
+    ])
+    const rendered = renderAdoption(report)
+
+    expect(report.skillTelemetryStatus).toBe('partial')
+    expect(report.skillTelemetrySessions).toBe(1)
+    expect(report.skillPenetration).toBe(0)
+    expect(rendered).toContain('0/1 measurable group(s); 1 unmeasurable group(s) excluded')
+  })
+
+  it('collapses many traces under their shared session identity', async () => {
+    const spans = [
+      span({
+        traceId: 'trace-1',
+        spanId: 'root-1',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+        extra: { 'tangle.sessionId': 'shared-session' },
+      }),
+      span({
+        traceId: 'trace-2',
+        spanId: 'root-2',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(1).toISOString(),
+        service: 'claude-code',
+        extra: { 'session.id': 'shared-session' },
+      }),
+      span({
+        traceId: 'trace-without-session',
+        spanId: 'root-3',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(2).toISOString(),
+        service: 'claude-code',
+      }),
+    ]
+
+    const report = await analyzeAdoption(spans)
+
+    expect(report).toMatchObject({
+      executionGroupCount: 2,
+      identifiedSessionCount: 1,
+      unassignedTraceCount: 1,
+      sessionIdentityConflicts: [],
+      skillTelemetrySessions: 2,
+    })
+    expect(renderAdoption(report)).toContain(
+      '1 identified session(s) + 1 trace(s) without a single stable session identity',
+    )
+  })
+
+  it('preserves traces with conflicting session identities as unassigned evidence', async () => {
+    const report = await analyzeAdoption([
+      span({
+        traceId: 'trace-conflict',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+        extra: { 'tangle.sessionId': 'session-a' },
+      }),
+      span({
+        traceId: 'trace-conflict',
+        spanId: 'child',
+        name: 'message',
+        kind: 'CHAIN',
+        startTime: new Date(1).toISOString(),
+        service: 'claude-code',
+        extra: { 'session.id': 'session-b' },
+      }),
+    ])
+
+    expect(report).toMatchObject({
+      executionGroupCount: 1,
+      identifiedSessionCount: 0,
+      unassignedTraceCount: 1,
+      sessionIdentityConflicts: [
+        { traceId: 'trace-conflict', sessionIds: ['session-a', 'session-b'] },
+      ],
+    })
+    expect(renderAdoption(report)).toContain(
+      'Conflicting session identity:** 1 trace(s): `trace-conflict` (`session-a`, `session-b`)',
+    )
   })
 
   it('handles a corpus with no skill-runs files (loop counts stay zero, not crash)', async () => {

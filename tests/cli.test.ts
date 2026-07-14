@@ -13,7 +13,7 @@ function parseRows(jsonl: string): Record<string, unknown>[] {
 }
 
 describe('traces CLI', () => {
-  it('analyzes an Intelligence span file through the positional analyze path', async () => {
+  it('routes an Intelligence span file through analyze, investigate, and improve', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-test-'))
     const input = join(dir, 'intelligence-spans.jsonl')
     const report = join(dir, 'report.md')
@@ -34,7 +34,6 @@ describe('traces CLI', () => {
         },
         status_code: 'UNSET',
         redaction_version: '1.0.0+tangle.3',
-        session_id: 'session_cli',
       },
       {
         id: 'trace_cli:llm',
@@ -52,7 +51,6 @@ describe('traces CLI', () => {
         },
         status_code: 'OK',
         redaction_version: '1.0.0+tangle.3',
-        session_id: 'session_cli',
       },
     ]
     await writeFile(input, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
@@ -77,7 +75,9 @@ describe('traces CLI', () => {
     })
 
     expect(stdout).toContain(`report → ${report}`)
-    expect(await readFile(report, 'utf8')).toContain('intelligence-spans')
+    const reportText = await readFile(report, 'utf8')
+    expect(reportText).toContain('intelligence-spans')
+    expect(reportText).toContain('1 session(s), 2 spans')
     const outputRows = parseRows(await readFile(otlp, 'utf8'))
     expect(outputRows).toHaveLength(2)
     expect(outputRows[0]!.attributes).toEqual(expect.objectContaining({
@@ -85,6 +85,176 @@ describe('traces CLI', () => {
       'content': 'Fix the Linear issue using the available tools.',
     }))
     expect(outputRows[1]!.parent_span_id).toBe('trace_cli:root')
+
+    const investigation = join(dir, 'investigation.md')
+    const investigated = await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'investigate',
+      input,
+      '--format',
+      'intelligence-spans',
+      '--out',
+      investigation,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+    expect(investigated.stdout).toContain(`investigation report → ${investigation}`)
+    expect(await readFile(investigation, 'utf8')).toContain('1 session(s), 2 spans')
+
+    const improvement = join(dir, 'improvement')
+    const improved = await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'improve',
+      input,
+      '--format',
+      'intelligence-spans',
+      '--dir',
+      improvement,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+    expect(improved.stdout).toContain(`improvement artifacts → ${improvement}`)
+    const result = JSON.parse(await readFile(join(improvement, 'result.json'), 'utf8')) as {
+      spanCount: number
+    }
+    expect(result.spanCount).toBe(2)
+    expect(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8')).not.toBe('')
+    expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain('1 session(s), 2 spans')
+  })
+
+  it('keeps a trace with conflicting session identities in improvement output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-session-conflict-'))
+    const input = join(dir, 'spans.openinference.jsonl')
+    const improvement = join(dir, 'improvement')
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace-conflict',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+        extra: { 'tangle.sessionId': 'session-a' },
+      }),
+      span({
+        traceId: 'trace-conflict',
+        spanId: 'child',
+        parentSpanId: 'root',
+        name: 'message',
+        kind: 'CHAIN',
+        startTime: new Date(1).toISOString(),
+        service: 'claude-code',
+        extra: { 'session.id': 'session-b' },
+      }),
+    ]), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'improve',
+      input,
+      '--format',
+      'openinference',
+      '--dir',
+      improvement,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const result = JSON.parse(await readFile(join(improvement, 'result.json'), 'utf8')) as {
+      spanCount: number
+      sessionCount: number
+      unassignedTraceCount: number
+      adoption: {
+        sessionIdentityConflicts: Array<{ traceId: string; sessionIds: string[] }>
+      }
+    }
+    expect(result).toMatchObject({
+      spanCount: 2,
+      sessionCount: 0,
+      unassignedTraceCount: 1,
+      adoption: {
+        sessionIdentityConflicts: [
+          { traceId: 'trace-conflict', sessionIds: ['session-a', 'session-b'] },
+        ],
+      },
+    })
+    expect(parseRows(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8'))).toHaveLength(2)
+    expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain(
+      'Conflicting session identity:** 1 trace(s): `trace-conflict` (`session-a`, `session-b`)',
+    )
+  })
+
+  it('identifies an explicitly analyzed Codex child session in the report', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-child-'))
+    const session = join(dir, 'rollout-child.jsonl')
+    const report = join(dir, 'report.md')
+    const otlp = join(dir, 'spans.openinference.jsonl')
+    const parentId = '019f24d6-b5ec-7173-acc1-f957de216ee5'
+    const childId = '019f5aea-d6b4-7451-a3eb-60289875a357'
+    await writeFile(session, [
+      {
+        timestamp: '2026-07-13T09:59:27.791Z',
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          cwd: '/home/drew/code/agent-dev-container',
+          parent_thread_id: parentId,
+          thread_source: 'subagent',
+          agent_role: 'worker',
+        },
+      },
+      {
+        timestamp: '2026-07-13T09:59:28.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: 'Own direct-streaming conversion for the remaining JSONL adapters.',
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'analyze',
+      '--harness',
+      'codex',
+      '--session',
+      session,
+      '--out',
+      report,
+      '--otlp',
+      otlp,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const text = await readFile(report, 'utf8')
+    expect(text).toContain('| child |')
+    expect(text).toContain(childId)
+    expect(text).toContain(parentId)
+    expect(text).toContain(session)
+    expect(text).toContain('Own direct-streaming conversion')
   })
 
   it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {

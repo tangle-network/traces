@@ -2,9 +2,26 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ATTR } from './attributes.js'
+import {
+  firstNumberAttr,
+  LLM_CACHED_TOKEN_ATTR_KEYS,
+  LLM_CACHED_TOKENS,
+  LLM_CACHE_WRITE_TOKEN_ATTR_KEYS,
+  LLM_CACHE_WRITE_TOKENS,
+  LLM_COST_ATTR_KEYS,
+  LLM_COST_USD,
+  LLM_INPUT_TOKEN_ATTR_KEYS,
+  LLM_INPUT_TOKENS,
+  LLM_OUTPUT_TOKEN_ATTR_KEYS,
+  LLM_OUTPUT_TOKENS,
+  LLM_REASONING_TOKEN_ATTR_KEYS,
+  LLM_REASONING_TOKENS,
+} from '@tangle-network/agent-eval/trace-attributes'
+import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { capText } from './adapters/conversation.js'
+import { toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
 import type { PolicyEvidenceRecord } from './evidence.js'
+import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
 import { serializeSpans, span } from './otlp.js'
 import { redactSpans } from './redact.js'
@@ -187,6 +204,11 @@ function requireOpenInferenceRows(rows: readonly unknown[]): readonly JsonObject
 }
 
 function requireIntelligenceSpanRows(rows: readonly unknown[]): readonly JsonObject[] {
+  if (rows.length > 0 && rows.every(isOpenInferenceRow)) {
+    throw new Error(
+      'intelligence-spans input is already complete OpenInference; use --format auto or --format openinference to preserve it losslessly',
+    )
+  }
   if (!rows.every(isIntelligenceSpanRow)) throw new Error('intelligence-spans input must contain only Intelligence span rows')
   return rows
 }
@@ -221,6 +243,7 @@ function policyEvidenceToSpans(records: readonly PolicyEvidenceRecord[]): OtlpSp
       'traces.metrics.errored_tool_call_count': record.metrics.erroredToolCallCount,
       'traces.metrics.input_tokens': record.metrics.inputTokens,
       'traces.metrics.output_tokens': record.metrics.outputTokens,
+      'traces.execution': stableJson(record.execution),
       'traces.metrics.models': record.metrics.models,
       'traces.metrics.tools': stableJson(record.metrics.tools),
       'traces.signals.stuck_loop_count': record.signals.stuckLoopCount,
@@ -248,6 +271,11 @@ function policyEvidenceToSpans(records: readonly PolicyEvidenceRecord[]): OtlpSp
       endTime: end,
       service: record.session.harness,
       agent: 'traces',
+      inputTokens: record.execution.execution.tokenUsage.totals.input,
+      outputTokens: record.execution.execution.tokenUsage.totals.output,
+      reasoningTokens: record.execution.execution.tokenUsage.totals.reasoning,
+      cachedInputTokens: record.execution.execution.tokenUsage.totals.cached,
+      cacheWriteInputTokens: record.execution.execution.tokenUsage.totals.cacheWrite,
       content: capText(stableJson({
         session: record.session,
         repo: record.repo,
@@ -275,6 +303,17 @@ function findStringKey(value: unknown, keys: readonly string[], depth = 4): stri
     for (const child of value) {
       const found = findStringKey(child, keys, depth - 1)
       if (found) return found
+    }
+  }
+  return undefined
+}
+
+function eventValue(row: JsonObject, keys: readonly string[]): unknown {
+  const scopes = [row, objectValue(row.data), objectValue(row.payload)]
+  for (const scope of scopes) {
+    if (!scope) continue
+    for (const key of keys) {
+      if (scope[key] !== undefined) return scope[key]
     }
   }
   return undefined
@@ -328,9 +367,15 @@ function eventKind(row: JsonObject, type: string): { kind: OtlpSpanKind; tool?: 
 
 function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject): OtlpSpan[] {
   const context = wrapper ?? {}
+  const sessionId =
+    findStringKey(context, ['session_id', 'sessionId'], 3) ??
+    findStringKey(rows, ['session_id', 'sessionId'], 4)
   const traceId =
-    findStringKey(context, ['trace_id', 'traceId', 'session_id', 'sessionId', 'run_id', 'runId'], 3) ??
-    findStringKey(rows, ['trace_id', 'traceId', 'session_id', 'sessionId', 'run_id', 'runId'], 4) ??
+    findStringKey(context, ['trace_id', 'traceId'], 3) ??
+    findStringKey(rows, ['trace_id', 'traceId'], 4) ??
+    sessionId ??
+    findStringKey(context, ['run_id', 'runId'], 3) ??
+    findStringKey(rows, ['run_id', 'runId'], 4) ??
     `sandbox:${hashId(rows, 32)}`
   const service = findStringKey(context, ['service', 'harness', 'source'], 2) ?? 'sandbox-opencode'
   const times = rows.flatMap((row) => {
@@ -368,10 +413,20 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
     const { status, message } = eventStatus(row, type)
     const { kind, tool } = eventKind(row, type)
     const name = kind === 'TOOL' && tool ? `tool.${tool}` : `event.${type}`
+    const toolInput = kind === 'TOOL'
+      ? eventValue(row, ['toolInput', 'tool_input', 'input', 'args', 'arguments', 'full_command'])
+      : undefined
     const extra: JsonObject = {
       'traces.source_format': 'sandbox-events',
       'traces.event.type': type,
       'traces.event.index': index,
+      ...(kind === 'TOOL'
+        ? toolIoAttributes({
+            input: toolInput,
+            output: eventValue(row, ['toolOutput', 'tool_output', 'output', 'result']),
+            argsCaptured: toolInput !== undefined,
+          })
+        : {}),
     }
     copyDefined(extra, {
       'traces.event.id': stringValue(row.id),
@@ -397,7 +452,11 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
     }))
   })
 
-  return spans
+  if (!sessionId) return spans
+  return spans.map((item) => ({
+    ...item,
+    attributes: { ...item.attributes, [ATTR.SESSION_ID]: sessionId },
+  }))
 }
 
 function statusCode(value: unknown): OtlpStatusCode {
@@ -425,8 +484,8 @@ function unixNanoTime(value: unknown): string | undefined {
 
 function firstNumber(row: JsonObject, attrs: JsonObject, keys: readonly string[]): number | undefined {
   for (const key of keys) {
-    const value = numberValue(row[key]) ?? numberValue(attrs[key])
-    if (value != null) return value
+    const value = firstNumberAttr(row, [key]) ?? firstNumberAttr(attrs, [key])
+    if (value !== null) return value
   }
   return undefined
 }
@@ -439,6 +498,12 @@ const COMPUTED_SPAN_ATTRIBUTES = new Set([
   'tool.name',
   'llm.input_tokens',
   'llm.output_tokens',
+  LLM_INPUT_TOKENS,
+  LLM_OUTPUT_TOKENS,
+  LLM_REASONING_TOKENS,
+  LLM_CACHED_TOKENS,
+  LLM_CACHE_WRITE_TOKENS,
+  LLM_COST_USD,
   'step',
   'content',
 ])
@@ -455,10 +520,41 @@ function preserveRawAttributes(attrs: JsonObject): JsonObject {
   return preserved
 }
 
+function capturedToolIo(attrs: JsonObject): ReturnType<typeof toolIoAttributes> {
+  const input =
+    attrs['input.value'] ??
+    attrs['tool.input'] ??
+    attrs.tool_input ??
+    attrs['tool.arguments'] ??
+    attrs.tool_arguments ??
+    attrs.arguments ??
+    attrs.args ??
+    attrs.full_command
+  const capture = toolArgumentsFromAttributes({ ...attrs, 'input.value': input })
+  return toolIoAttributes({
+    input: capture.args,
+    output: attrs['output.value'] ?? attrs['tool.output'] ?? attrs.tool_output,
+    argsCaptured: capture.argsCaptured,
+  })
+}
+
+function isToolTelemetrySpan(attrs: JsonObject): boolean {
+  const spanType = stringValue(attrs['span.type'])?.toLowerCase()
+  return spanType === 'tool.execution' || spanType === 'tool.blocked_on_user'
+}
+
+function otlpSpanKind(value: unknown): OtlpSpanKind | undefined {
+  return value === 'AGENT' || value === 'LLM' || value === 'TOOL' || value === 'CHAIN' || value === 'SPAN'
+    ? value
+    : undefined
+}
+
 function intelligenceSpanKind(name: string, attrs: JsonObject): OtlpSpanKind {
   const lowered = name.toLowerCase()
   const spanType = stringValue(attrs['span.type'])?.toLowerCase()
   if (spanType === 'llm_request' || lowered.includes('llm')) return 'LLM'
+  // Execution/wait children describe the parent tool call and must not count as another call.
+  if (isToolTelemetrySpan(attrs)) return 'CHAIN'
   if (
     spanType === 'tool' ||
     lowered.includes('tool') ||
@@ -498,9 +594,12 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
       stringValue(attrs['tool.name']) ??
       stringValue(attrs.tool_name) ??
       stringValue(attrs['mcp.tool.name'])
-    const sessionId = stringValue(row.session_id) ?? stringValue(attrs['session.id'])
+    const kind = intelligenceSpanKind(name, attrs)
+    const sourceStatus = objectValue(row.status)
+    const sessionId = stringValue(row.session_id) ?? sessionIdFromAttributes(attrs)
     const extra: JsonObject = {
       ...preserveRawAttributes(attrs),
+      ...(kind === 'TOOL' ? capturedToolIo(attrs) : {}),
       'traces.source_format': 'intelligence-spans',
       'traces.row.index': index,
     }
@@ -514,7 +613,6 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
       'generation.id': stringValue(row.generation),
       'cell.id': stringValue(row.cell_id),
       'project.key': stringValue(row.project_key),
-      'llm.cost_usd': numberValue(row.cost_usd),
       'redaction.version': stringValue(row.redaction_version),
       'traces.received_at': isoTime(row.received_at),
     })
@@ -523,17 +621,21 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
       spanId: stringValue(row.id) ?? hashId({ row, field: 'span' }),
       parentSpanId: stringValue(row.parent_span_id) ?? null,
       name,
-      kind: intelligenceSpanKind(name, attrs),
+      kind,
       startTime,
       endTime,
-      status: statusCode(row.status_code),
-      statusMessage: stringValue(row.status_message),
+      status: statusCode(row.status_code ?? sourceStatus?.code),
+      statusMessage: stringValue(row.status_message) ?? stringValue(sourceStatus?.message),
       service: stringValue(attrs['service.name']) ?? stringValue(attrs.service_name) ?? 'tangle-intelligence',
       agent: stringValue(attrs['agent.name']) ?? stringValue(attrs['service.name']) ?? null,
       model,
       tool,
-      inputTokens: firstNumber(row, attrs, ['input_tokens', 'llm.input_tokens']),
-      outputTokens: firstNumber(row, attrs, ['output_tokens', 'llm.output_tokens']),
+      inputTokens: firstNumber(row, attrs, ['input_tokens', ...LLM_INPUT_TOKEN_ATTR_KEYS]),
+      outputTokens: firstNumber(row, attrs, ['output_tokens', ...LLM_OUTPUT_TOKEN_ATTR_KEYS]),
+      reasoningTokens: firstNumber(row, attrs, LLM_REASONING_TOKEN_ATTR_KEYS),
+      cachedInputTokens: firstNumber(row, attrs, LLM_CACHED_TOKEN_ATTR_KEYS),
+      cacheWriteInputTokens: firstNumber(row, attrs, LLM_CACHE_WRITE_TOKEN_ATTR_KEYS),
+      costUsd: firstNumber(row, attrs, ['cost_usd', ...LLM_COST_ATTR_KEYS]),
       step: numberValue(attrs['interaction.sequence']) ?? index,
       content:
         stringValue(attrs.user_prompt) ??
@@ -551,15 +653,24 @@ function openInferenceToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
     const resource = objectValue(row.resource)
     const resourceAttrs = objectValue(resource?.attributes)
     if (resourceAttrs) copyDefined(attrs, resourceAttrs)
-    const kind = stringValue(row.kind)
-    if (kind && attrs['openinference.span.kind'] == null) attrs['openinference.span.kind'] = kind
+    const name = stringValue(row.name) ?? 'span'
+    const declaredKind =
+      otlpSpanKind(attrs['openinference.span.kind']) ?? otlpSpanKind(row.kind)
+    const kind = isToolTelemetrySpan(attrs)
+      ? 'CHAIN'
+      : declaredKind ?? intelligenceSpanKind(name, attrs)
+    if (declaredKind && declaredKind !== kind) {
+      attrs['traces.raw_attribute.openinference.span.kind'] = declaredKind
+    }
+    attrs['openinference.span.kind'] = kind
+    if (kind === 'TOOL') Object.assign(attrs, capturedToolIo(attrs))
     const status = objectValue(row.status)
     const message = stringValue(status?.message)
     return {
       trace_id: stringValue(row.trace_id) ?? hashId(row, 32),
       span_id: stringValue(row.span_id) ?? hashId({ row, field: 'span' }),
       parent_span_id: stringValue(row.parent_span_id) || null,
-      name: stringValue(row.name) ?? 'span',
+      name,
       start_time: stringValue(row.start_time) ?? new Date(0).toISOString(),
       end_time: stringValue(row.end_time) ?? stringValue(row.start_time) ?? new Date(0).toISOString(),
       status: { code: statusCode(status?.code), ...(message ? { message } : {}) },
@@ -625,6 +736,41 @@ export async function exportTraceEvidenceFile(
   inputPath: string,
   opts: TraceEvidenceExportOptions = {},
 ): Promise<TraceEvidenceExportResult> {
+  if (/\.(?:jsonl|ndjson)$/i.test(inputPath)) {
+    let format: TraceEvidenceInputFormat | undefined
+    const spans: OtlpSpan[] = []
+    const sandboxRows: unknown[] = []
+    let redactionCount = 0
+    const redactionsByRule: Record<string, number> = {}
+
+    for await (const row of readJsonl<unknown>(inputPath)) {
+      format ??= detectFormat([row], opts.format ?? 'auto')
+      if (format === 'sandbox-events') {
+        sandboxRows.push(row)
+        continue
+      }
+      const converted = exportTraceEvidenceRows([row], {
+        ...opts,
+        sourcePath: inputPath,
+        format,
+      })
+      spans.push(...converted.spans)
+      redactionCount += converted.redactionCount
+      for (const [rule, count] of Object.entries(converted.redactionsByRule)) {
+        redactionsByRule[rule] = (redactionsByRule[rule] ?? 0) + count
+      }
+    }
+
+    if (!format) throw new Error('input file is empty')
+    if (format === 'sandbox-events') {
+      return exportTraceEvidenceRows(sandboxRows, {
+        ...opts,
+        sourcePath: inputPath,
+        format,
+      })
+    }
+    return { format, spans, redactionCount, redactionsByRule }
+  }
   const text = await readFile(inputPath, 'utf8')
   return exportTraceEvidenceText(text, { ...opts, sourcePath: inputPath })
 }

@@ -13,14 +13,18 @@
  * write the same transcript shape.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { sessionJsonlOptions } from '../integrity.js'
+import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
+import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { claudeActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'claude-code'
 
@@ -52,26 +56,6 @@ interface ClaudeEvent {
     exitCode?: number
     stderr?: string
   }
-}
-
-function parseLines(raw: string): ClaudeEvent[] {
-  const out: ClaudeEvent[] = []
-  for (const line of raw.split('\n')) {
-    if (!line) continue
-    try {
-      out.push(JSON.parse(line) as ClaudeEvent)
-    } catch {
-      // Skip malformed lines; one bad line must not nuke the session.
-    }
-  }
-  return out
-}
-
-/** Total input tokens billed for an assistant turn (fresh + cache). */
-function inputTokens(u: NonNullable<ClaudeEvent['message']>['usage']): number | null {
-  if (!u) return null
-  const v = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
-  return v > 0 ? v : null
 }
 
 interface BlockText {
@@ -118,116 +102,135 @@ export interface ParsedStream {
   nextStep: number
 }
 
+interface ClaudeStreamContext {
+  traceId: string
+  agent: string
+  startStep: number
+  idPrefix: string
+  rootParent: string | null
+}
+
+interface ClaudeStreamState {
+  spans: OtlpSpan[]
+  toolSpanByUseId: Map<string, OtlpSpan>
+  step: number
+  sawUserTurn: boolean
+}
+
+function createClaudeStream(startStep: number): ClaudeStreamState {
+  return { spans: [], toolSpanByUseId: new Map(), step: startStep, sawUserTurn: false }
+}
+
+function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: ClaudeStreamState): void {
+  const ts = ev.timestamp ?? new Date(0).toISOString()
+  const uid = ev.uuid ?? `${ctx.idPrefix}step${state.step}`
+
+  if (ev.type === 'assistant' && ev.message) {
+    const llmId = `${ctx.idPrefix}${uid}`
+    state.spans.push(
+      span({
+        traceId: ctx.traceId,
+        spanId: llmId,
+        parentSpanId: ctx.rootParent,
+        name: 'llm.turn',
+        kind: 'LLM',
+        startTime: ts,
+        service: SERVICE,
+        agent: ctx.agent,
+        model: ev.message.model ?? null,
+        inputTokens: ev.message.usage?.input_tokens ?? null,
+        outputTokens: ev.message.usage?.output_tokens ?? null,
+        cachedInputTokens: ev.message.usage?.cache_read_input_tokens ?? null,
+        cacheWriteInputTokens: ev.message.usage?.cache_creation_input_tokens ?? null,
+        step: state.step,
+        content: textOf(ev.message.content) || null,
+      }),
+    )
+    state.step += 1
+
+    let toolIdx = 0
+    for (const block of asBlocks(ev.message.content)) {
+      if (block.type !== 'tool_use' || !block.name) continue
+      const toolSpan = span({
+        traceId: ctx.traceId,
+        spanId: `${ctx.idPrefix}${uid}:tool:${toolIdx}`,
+        parentSpanId: llmId,
+        name: `tool.${block.name}`,
+        kind: 'TOOL',
+        startTime: ts,
+        service: SERVICE,
+        agent: ctx.agent,
+        tool: block.name,
+        step: state.step,
+        extra: toolIoAttributes({ input: block.input }),
+      })
+      state.spans.push(toolSpan)
+      if (block.id) state.toolSpanByUseId.set(block.id, toolSpan)
+      toolIdx += 1
+      state.step += 1
+    }
+  } else if (ev.type === 'user' && ev.message) {
+    const prompt = textOf(ev.message.content)
+    if (prompt) {
+      const actor = claudeActor({
+        text: prompt,
+        isSidechain: ev.isSidechain,
+        userType: ev.userType ?? null,
+        isFirstUserTurn: !state.sawUserTurn,
+      })
+      state.sawUserTurn = true
+      state.spans.push(
+        userPromptSpan({
+          traceId: ctx.traceId,
+          spanId: `${ctx.idPrefix}${uid}:user`,
+          parentSpanId: ctx.rootParent,
+          startTime: ts,
+          service: SERVICE,
+          agent: ctx.agent,
+          step: state.step,
+          content: prompt,
+          actor,
+        }),
+      )
+      state.step += 1
+    }
+    for (const block of asBlocks(ev.message.content)) {
+      if (block.type !== 'tool_result' || !block.tool_use_id) continue
+      backfillResult(
+        state.toolSpanByUseId.get(block.tool_use_id),
+        ts,
+        block.is_error === true,
+        block.content,
+      )
+    }
+  } else if (ev.type === 'attachment' && ev.attachment?.type === 'tool_result' && ev.attachment.toolUseID) {
+    const err = typeof ev.attachment.exitCode === 'number' && ev.attachment.exitCode !== 0
+    backfillResult(state.toolSpanByUseId.get(ev.attachment.toolUseID), ts, err, ev.attachment.stderr ?? '')
+  }
+}
+
+function finishClaudeStream(state: ClaudeStreamState): ParsedStream {
+  return { spans: state.spans, toolSpanByUseId: state.toolSpanByUseId, nextStep: state.step }
+}
+
 /**
  * Project one event stream (a main session or a subagent sidechain) onto
  * spans. `idPrefix` keeps span ids unique when folding subagents into the
  * parent trace.
  */
-export function parseClaudeStream(
-  events: readonly ClaudeEvent[],
-  ctx: { traceId: string; agent: string; startStep: number; idPrefix: string; rootParent: string | null },
-): ParsedStream {
-  const spans: OtlpSpan[] = []
-  const toolSpanByUseId = new Map<string, OtlpSpan>()
-  let step = ctx.startStep
-  // First-turn detection for actor heuristics: the opening human turn of a
-  // sidechain/spawned run reads like an agent brief, not a person.
-  let sawUserTurn = false
-
-  for (const ev of events) {
-    const ts = ev.timestamp ?? new Date(0).toISOString()
-    const uid = ev.uuid ?? `${ctx.idPrefix}step${step}`
-
-    if (ev.type === 'assistant' && ev.message) {
-      const llmId = `${ctx.idPrefix}${uid}`
-      spans.push(
-        span({
-          traceId: ctx.traceId,
-          spanId: llmId,
-          parentSpanId: ctx.rootParent,
-          name: 'llm.turn',
-          kind: 'LLM',
-          startTime: ts,
-          service: SERVICE,
-          agent: ctx.agent,
-          model: ev.message.model ?? null,
-          inputTokens: inputTokens(ev.message.usage),
-          outputTokens: ev.message.usage?.output_tokens ?? null,
-          step,
-          content: textOf(ev.message.content) || null,
-        }),
-      )
-      step += 1
-
-      let toolIdx = 0
-      for (const block of asBlocks(ev.message.content)) {
-        if (block.type !== 'tool_use' || !block.name) continue
-        const toolSpan = span({
-          traceId: ctx.traceId,
-          spanId: `${ctx.idPrefix}${uid}:tool:${toolIdx}`,
-          parentSpanId: llmId,
-          name: `tool.${block.name}`,
-          kind: 'TOOL',
-          startTime: ts,
-          service: SERVICE,
-          agent: ctx.agent,
-          tool: block.name,
-          step,
-          content: block.input != null ? JSON.stringify(block.input) : null,
-        })
-        spans.push(toolSpan)
-        if (block.id) toolSpanByUseId.set(block.id, toolSpan)
-        toolIdx += 1
-        step += 1
-      }
-    } else if (ev.type === 'user' && ev.message) {
-      // The human's prompt text. (A user turn may instead/also carry tool_result
-      // blocks; a tool-result-only turn yields no text → no user.prompt span.)
-      const prompt = textOf(ev.message.content)
-      if (prompt) {
-        // Derive who produced this turn from the structural signals Claude Code
-        // already records, falling back to text heuristics for the first turn.
-        const actor = claudeActor({
-          text: prompt,
-          isSidechain: ev.isSidechain,
-          userType: ev.userType ?? null,
-          isFirstUserTurn: !sawUserTurn,
-        })
-        sawUserTurn = true
-        spans.push(
-          userPromptSpan({
-            traceId: ctx.traceId,
-            spanId: `${ctx.idPrefix}${uid}:user`,
-            parentSpanId: ctx.rootParent,
-            startTime: ts,
-            service: SERVICE,
-            agent: ctx.agent,
-            step,
-            content: prompt,
-            actor,
-          }),
-        )
-        step += 1
-      }
-      // Tool results ride as tool_result blocks in the user turn.
-      for (const block of asBlocks(ev.message.content)) {
-        if (block.type !== 'tool_result' || !block.tool_use_id) continue
-        backfillResult(toolSpanByUseId.get(block.tool_use_id), ts, block.is_error === true, stringifyToolResult(block.content))
-      }
-    } else if (ev.type === 'attachment' && ev.attachment?.type === 'tool_result' && ev.attachment.toolUseID) {
-      const err = typeof ev.attachment.exitCode === 'number' && ev.attachment.exitCode !== 0
-      backfillResult(toolSpanByUseId.get(ev.attachment.toolUseID), ts, err, ev.attachment.stderr ?? '')
-    }
-  }
-
-  return { spans, toolSpanByUseId, nextStep: step }
+export function parseClaudeStream(events: readonly ClaudeEvent[], ctx: ClaudeStreamContext): ParsedStream {
+  const state = createClaudeStream(ctx.startStep)
+  for (const event of events) consumeClaudeEvent(event, ctx, state)
+  return finishClaudeStream(state)
 }
 
-function backfillResult(s: OtlpSpan | undefined, endTime: string, isError: boolean, message: string): void {
+function backfillResult(s: OtlpSpan | undefined, endTime: string, isError: boolean, output: unknown): void {
   if (!s) return
   s.end_time = endTime
   const code: OtlpStatusCode = isError ? 'ERROR' : 'OK'
   s.status = { code }
+  recordToolOutput(s, output)
+  const message = stringifyToolResult(output)
   if (isError && message) s.status.message = message.slice(0, 500)
 }
 
@@ -250,8 +253,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     let projectDirs: string[]
     try {
       projectDirs = await readdir(root)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const dir of projectDirs) {
@@ -259,8 +263,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(dirPath)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue
@@ -268,8 +273,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (!st.isFile()) continue
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
@@ -282,12 +288,39 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const raw = await readFile(ref.path, 'utf8')
-    const events = parseLines(raw)
-    const traceId = events.find((e) => e.sessionId)?.sessionId ?? ref.sessionId
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    const sourceTraceId = ref.sessionId
+    const sourceRootId = `root:${sourceTraceId}`
+    const ctx: ClaudeStreamContext = {
+      traceId: sourceTraceId,
+      agent: SERVICE,
+      startStep: 0,
+      idPrefix: '',
+      rootParent: sourceRootId,
+    }
+    const state = createClaudeStream(ctx.startStep)
+    let discoveredTraceId: string | undefined
+    let firstTimestamp: string | undefined
+    let lastTimestamp: string | undefined
+    let sawEvent = false
 
+    for await (const event of readJsonl<ClaudeEvent>(ref.path, sessionJsonlOptions(ref, options))) {
+      if (!sawEvent) {
+        firstTimestamp = event.timestamp
+        sawEvent = true
+      }
+      lastTimestamp = event.timestamp
+      if (!discoveredTraceId && event.sessionId) discoveredTraceId = event.sessionId
+      consumeClaudeEvent(event, ctx, state)
+    }
+
+    const main = finishClaudeStream(state)
+    const traceId = discoveredTraceId ?? sourceTraceId
     const rootId = `root:${traceId}`
+    for (const item of main.spans) {
+      item.trace_id = traceId
+      if (item.parent_span_id === sourceRootId) item.parent_span_id = rootId
+    }
     const spans: OtlpSpan[] = [
       span({
         traceId,
@@ -295,59 +328,61 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         parentSpanId: null,
         name: 'session',
         kind: 'AGENT',
-        startTime: events[0]?.timestamp ?? new Date(0).toISOString(),
-        endTime: events.at(-1)?.timestamp,
+        startTime: firstTimestamp ?? new Date(0).toISOString(),
+        endTime: lastTimestamp,
         service: SERVICE,
         agent: SERVICE,
       }),
+      ...main.spans,
     ]
 
-    const main = parseClaudeStream(events, {
-      traceId,
-      agent: SERVICE,
-      startStep: 0,
-      idPrefix: '',
-      rootParent: rootId,
-    })
-    spans.push(...main.spans)
-
-    await this.foldSubagents(ref, traceId, main, spans)
+    await this.foldSubagents(ref, traceId, main, spans, options)
     return spans
   }
 
   /** Parse `<session>/subagents/agent-*.jsonl`, parenting each under its Agent call. */
-  private async foldSubagents(ref: SessionRef, traceId: string, main: ParsedStream, out: OtlpSpan[]): Promise<void> {
+  private async foldSubagents(
+    ref: SessionRef,
+    traceId: string,
+    main: ParsedStream,
+    out: OtlpSpan[],
+    options: ParseOptions,
+  ): Promise<void> {
     const subDir = join(ref.path.replace(/\.jsonl$/, ''), 'subagents')
     let files: string[]
     try {
       files = await readdir(subDir)
-    } catch {
-      return
+    } catch (error) {
+      if (isMissingPathError(error)) return
+      throw error
     }
     let step = main.nextStep
-    for (const f of files) {
-      if (!f.endsWith('.jsonl')) continue
-      const hash = basename(f, '.jsonl')
+    for (const file of files) {
+      if (!file.endsWith('.jsonl')) continue
+      const hash = basename(file, '.jsonl')
+      const metaPath = join(subDir, `${hash}.meta.json`)
       let meta: SubagentMeta = {}
       try {
-        meta = JSON.parse(await readFile(join(subDir, `${hash}.meta.json`), 'utf8')) as SubagentMeta
-      } catch {
-        // No meta → still parse, just orphaned under the session root.
+        meta = await readJsonFile<SubagentMeta>(metaPath)
+      } catch (error) {
+        if (!isMissingJsonSource(error)) throw error
       }
       const parent = (meta.toolUseId && main.toolSpanByUseId.get(meta.toolUseId)?.span_id) || `root:${traceId}`
-      let raw: string
-      try {
-        raw = await readFile(join(subDir, f), 'utf8')
-      } catch {
-        continue
-      }
-      const parsed = parseClaudeStream(parseLines(raw), {
+      const ctx: ClaudeStreamContext = {
         traceId,
         agent: meta.agentType ? `subagent:${meta.agentType}` : 'subagent',
         startStep: step,
         idPrefix: `${hash}:`,
         rootParent: parent,
-      })
+      }
+      const state = createClaudeStream(ctx.startStep)
+      for await (const event of readJsonl<ClaudeEvent>(
+        join(subDir, file),
+        sessionJsonlOptions(ref, options),
+      )) {
+        consumeClaudeEvent(event, ctx, state)
+      }
+      const parsed = finishClaudeStream(state)
       out.push(...parsed.spans)
       step = parsed.nextStep
     }

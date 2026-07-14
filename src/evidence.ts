@@ -1,7 +1,13 @@
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
+import {
+  OPENINFERENCE_SPAN_KIND,
+  TOOL_NAME,
+} from '@tangle-network/agent-eval/trace-attributes'
 import { ATTR } from './attributes.js'
+import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { runPipelines } from './pipelines.js'
 import { type ScanOptions, scanSessions } from './session-source.js'
@@ -22,6 +28,7 @@ export interface PolicyEvidenceRecord {
   readonly schemaVersion: 1
   readonly kind: 'traces.policy_evidence.session'
   readonly generatedAt: string
+  readonly execution: ExecutionReport
   readonly session: {
     readonly harness: string
     readonly sessionId: string
@@ -79,13 +86,8 @@ function stringAttr(span: OtlpSpan, key: string): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
-function numberAttr(span: OtlpSpan, key: string): number {
-  const value = span.attributes[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0
-}
-
 function spanKind(span: OtlpSpan): string | undefined {
-  return stringAttr(span, 'openinference.span.kind')
+  return stringAttr(span, OPENINFERENCE_SPAN_KIND)
 }
 
 function repoFromSpans(spans: readonly OtlpSpan[]): PolicyEvidenceRecord['repo'] {
@@ -124,7 +126,7 @@ function summarizeTools(spans: readonly OtlpSpan[]): PolicyEvidenceToolSummary[]
   const byTool = new Map<string, { calls: number; errors: number }>()
   for (const span of spans) {
     if (spanKind(span) !== 'TOOL') continue
-    const name = stringAttr(span, 'tool.name') ?? span.name.replace(/^tool\./, '')
+    const name = stringAttr(span, TOOL_NAME) ?? span.name.replace(/^tool\./, '')
     const current = byTool.get(name) ?? { calls: 0, errors: 0 }
     current.calls += 1
     if (span.status.code === 'ERROR') current.errors += 1
@@ -140,7 +142,6 @@ export async function buildPolicyEvidenceRecord(
   spans: readonly OtlpSpan[],
   opts: BuildPolicyEvidenceOptions = {},
 ): Promise<PolicyEvidenceRecord> {
-  const llmSpans = spans.filter((span) => spanKind(span) === 'LLM')
   const toolSpans = spans.filter((span) => spanKind(span) === 'TOOL')
   const erroredToolCallCount = toolSpans.filter((span) => span.status.code === 'ERROR').length
   const pipelines = await runPipelines(spans, { minLoopOccurrences: opts.minLoopOccurrences })
@@ -148,10 +149,14 @@ export async function buildPolicyEvidenceRecord(
   const loopFindings = pipelines.stuckLoops.findings
   const { firstSpanAt, lastSpanAt } = timeBounds(spans)
   const repo = repoFromSpans(spans)
+  const execution = summarizeSpanExecution(spans, {
+    experimentId: `traces-policy-evidence:${ref.sessionId}`,
+  })
   return {
     schemaVersion: 1,
     kind: 'traces.policy_evidence.session',
     generatedAt: opts.generatedAt ?? new Date().toISOString(),
+    execution,
     session: {
       harness: ref.harness,
       sessionId: ref.sessionId,
@@ -162,12 +167,12 @@ export async function buildPolicyEvidenceRecord(
     repo,
     metrics: {
       spanCount: spans.length,
-      llmTurnCount: llmSpans.length,
+      llmTurnCount: execution.execution.modelCalls.events,
       toolCallCount: toolSpans.length,
       erroredToolCallCount,
-      inputTokens: llmSpans.reduce((sum, span) => sum + numberAttr(span, 'llm.input_tokens'), 0),
-      outputTokens: llmSpans.reduce((sum, span) => sum + numberAttr(span, 'llm.output_tokens'), 0),
-      models: [...new Set(llmSpans.map((span) => stringAttr(span, 'llm.model_name')).filter((value): value is string => Boolean(value)))].sort(),
+      inputTokens: execution.execution.tokenUsage.totals.input,
+      outputTokens: execution.execution.tokenUsage.totals.output,
+      models: execution.execution.models.map(({ model }) => model),
       tools: summarizeTools(spans),
       firstSpanAt,
       lastSpanAt,

@@ -7,11 +7,9 @@ import type { ExternalAnalyzer } from '../src/external.js'
 import {
   buildTraceFindingPacket,
   loadTracesConfig,
-  runTraceImprovementLoop,
+  runTraceImprovement,
   runTraceInvestigation,
   type TraceEvidenceRow,
-  type ImprovementProposal,
-  type TraceRecommendation,
 } from '../src/improvement.js'
 import { type OtlpSpan, span } from '../src/otlp.js'
 import { makeFinding } from '../src/index.js'
@@ -64,7 +62,7 @@ function fixtureSpans(): OtlpSpan[] {
       step: 3 + i,
       status: 'ERROR',
       statusMessage: 'exit 1',
-      content: JSON.stringify({ cmd: 'npm test' }),
+      extra: { 'input.value': JSON.stringify({ cmd: 'npm test' }) },
     }))
   }
   return spans
@@ -93,11 +91,10 @@ function jsonAnalyzer(): ExternalAnalyzer {
 }
 
 describe('runTraceInvestigation', () => {
-  it('preserves typed findings and turns deterministic/external signals into recommendations', async () => {
+  it('preserves evidence, actions, and validation on one typed finding', async () => {
     const result = await runTraceInvestigation({
       spans: fixtureSpans(),
       harness: 'synthetic',
-      sessionCount: 1,
       externalAnalyzers: [jsonAnalyzer()],
       generatedAt: '2026-01-01T00:00:00.000Z',
     })
@@ -105,17 +102,59 @@ describe('runTraceInvestigation', () => {
     expect(result.kind).toBe('traces.investigation')
     expect(result.findings.some((finding) => finding.analyst_id === 'traces-deterministic')).toBe(true)
     expect(result.findings.some((finding) => finding.analyst_id === 'external:json-engine')).toBe(true)
+    expect(result.findings.some((finding) =>
+      finding.area === 'instrumentation' &&
+      finding.recommended_action?.includes('complete canonical tool arguments'))).toBe(true)
     expect(result.findings.every((finding) => finding.finding_id && Array.isArray(finding.evidence_refs))).toBe(true)
-    expect(result.recommendations.length).toBeGreaterThan(0)
-    expect(result.recommendations[0]!.validationPlan).toMatch(/Rerun|rerun|Run/)
-    expect(result.claims.length).toBe(result.findings.length)
-    expect(result.report).toContain('## recommendations')
+    expect(result.findings.some((finding) => finding.claim.includes('repeated tool-call loop'))).toBe(true)
+    expect(result.findings.some((finding) => finding.claim === 'No skill usage was observed in the selected sessions')).toBe(false)
+    expect(result.findings.some((finding) => finding.recommended_action)).toBe(true)
+    expect(result.findings.some((finding) => finding.validation_plan?.match(/Rerun|rerun|Run/))).toBe(true)
+    expect(result.findings.find((finding) => finding.area === 'reliability')?.evidence_refs).toContainEqual(
+      expect.objectContaining({ kind: 'span', uri: 'trace:trace-improve' }),
+    )
+    expect(result.report).toContain('**Check:**')
     expect(result.report).toContain('external engine found')
+    expect(result.report).toContain('Stuck loops')
+  })
+
+  it('does not recommend skill adoption when Codex has no dedicated Skill event', async () => {
+    const spans = [
+      span({
+        traceId: 'codex-skill-telemetry',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'codex',
+      }),
+      span({
+        traceId: 'codex-skill-telemetry',
+        spanId: 'developer',
+        parentSpanId: 'root',
+        name: 'message.developer',
+        kind: 'CHAIN',
+        startTime: '2026-01-01T00:00:01.000Z',
+        service: 'codex',
+        content: '<skills_instructions>### Available skills</skills_instructions>',
+      }),
+    ]
+
+    const result = await runTraceInvestigation({
+      spans,
+      harness: 'codex',
+      generatedAt: '2026-01-01T00:00:02.000Z',
+    })
+
+    expect(result.findings.some((finding) => finding.claim.includes('skill usage'))).toBe(false)
+    expect(result.report).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
+    expect(result.report).toContain('Materialized skill catalogs/instructions:** 1/1')
+    expect(result.report).not.toContain('Skill penetration')
   })
 })
 
 describe('buildTraceFindingPacket', () => {
-  it('builds recommendations and claims from typed findings without span input', () => {
+  it('keeps the analyst finding as the single action record', () => {
     const finding = makeFinding({
       analyst_id: 'hosted-postgres-analyst',
       area: 'verification',
@@ -135,87 +174,45 @@ describe('buildTraceFindingPacket', () => {
     })
 
     expect(packet.kind).toBe('traces.finding_packet')
-    expect(packet.recommendations).toHaveLength(1)
-    expect(packet.claims).toHaveLength(1)
-    expect(packet.recommendations[0]!.findingIds).toEqual([finding.finding_id])
+    expect(packet.findings).toEqual([finding])
+    expect(packet).not.toHaveProperty('recommendations')
+    expect(packet).not.toHaveProperty('claims')
     expect(packet.report).toContain('Hosted trace findings')
     expect(packet.report).toContain('Require a test/build command')
   })
 })
 
-describe('runTraceImprovementLoop', () => {
-  it('writes default proposal-only artifacts when no adapter is configured', async () => {
+describe('runTraceImprovement', () => {
+  it('writes one evidence-backed result without inventing candidate records', async () => {
     const outDir = await mkdtemp(join(tmpdir(), 'traces-improve-default-test-'))
-    const result = await runTraceImprovementLoop({
+    const result = await runTraceImprovement({
       spans: fixtureSpans(),
       harness: 'synthetic',
-      sessionCount: 1,
       generatedAt: '2026-01-01T00:00:00.000Z',
       outDir,
     })
 
     expect(result.kind).toBe('traces.improvement')
-    expect(result.recommendations.length).toBeGreaterThan(0)
-    expect(result.proposals.length).toBeGreaterThan(0)
-    expect(result.proposals[0]!.recommendationIds).toEqual([result.recommendations[0]!.id])
-    expect(result.proposals[0]!.description).toContain('proposal-only artifact')
-    expect(result.replay.status).toBe('proposal-only')
-    expect(result.replay.candidateApplied).toBe(false)
+    expect(result.findings.length).toBeGreaterThan(0)
 
-    const proposals = JSON.parse(await readFile(result.artifacts!.proposals, 'utf8')) as ImprovementProposal[]
-    const replay = JSON.parse(await readFile(result.artifacts!.replay, 'utf8')) as { proposals: unknown[]; baseline: { spanCount: number } }
-
-    expect(proposals).toHaveLength(result.proposals.length)
-    expect(proposals[0]!.evidenceRefs?.length).toBeGreaterThan(0)
-    expect(replay.proposals).toHaveLength(result.proposals.length)
-    expect(replay.baseline.spanCount).toBe(fixtureSpans().length)
-  })
-
-  it('lets a configured adapter replace the default proposal set', async () => {
-    const outDir = await mkdtemp(join(tmpdir(), 'traces-improve-test-'))
-    const result = await runTraceImprovementLoop({
-      spans: fixtureSpans(),
-      harness: 'synthetic',
-      sessionCount: 1,
-      generatedAt: '2026-01-01T00:00:00.000Z',
-      outDir,
-      adapter: {
-        async propose(input) {
-          return [{
-            id: 'proposal-loop-breaker',
-            title: 'Add a retry stop rule',
-            description: 'Stop after the same command fails twice with unchanged arguments.',
-            recommendationIds: input.recommendations.slice(0, 1).map((rec) => rec.id),
-            validationCommand: 'traces improve --last 3',
-            evidenceRefs: input.findings[0]?.evidence_refs ?? [],
-          }]
-        },
-      },
-    })
-
-    expect(result.kind).toBe('traces.improvement')
-    expect(result.proposals).toHaveLength(1)
-    expect(result.proposals[0]!.id).toBe('proposal-loop-breaker')
-    expect(result.replay.status).toBe('proposal-only')
-    expect(result.replay.candidateApplied).toBe(false)
+    const saved = JSON.parse(await readFile(result.artifacts!.result, 'utf8')) as {
+      findings: unknown[]
+      spanCount: number
+    }
+    expect(saved.findings).toHaveLength(result.findings.length)
+    expect(saved.spanCount).toBe(fixtureSpans().length)
+    expect(saved).not.toHaveProperty('proposals')
+    expect(saved).not.toHaveProperty('validation')
+    expect(result.artifacts!.traces).toBe(result.otlpPath)
     expect(result.artifacts?.directory).toBe(outDir)
 
-    const recommendations = JSON.parse(await readFile(result.artifacts!.recommendations, 'utf8')) as TraceRecommendation[]
-    const proposals = JSON.parse(await readFile(result.artifacts!.proposals, 'utf8')) as ImprovementProposal[]
     const evidence = (await readFile(result.artifacts!.evidence, 'utf8'))
       .trim()
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line) as TraceEvidenceRow)
-    const replay = JSON.parse(await readFile(result.artifacts!.replay, 'utf8')) as { proposals: unknown[]; baseline: { spanCount: number } }
-
-    expect(recommendations.length).toBeGreaterThan(0)
     expect(evidence.length).toBeGreaterThan(0)
     expect(evidence[0]!.kind).toBe('traces.improvement_evidence')
-    expect(replay.baseline.spanCount).toBe(fixtureSpans().length)
-    expect(replay.proposals).toHaveLength(1)
-    expect(proposals).toHaveLength(1)
-    expect(proposals[0]!.id).toBe('proposal-loop-breaker')
   })
 })
 

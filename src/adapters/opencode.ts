@@ -8,13 +8,15 @@
  * marks a failed call.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isMissingJsonSource, isMissingPathError, listJsonFiles, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 import { capText, userPromptSpan } from './conversation.js'
+import { toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'opencode'
 
@@ -22,7 +24,12 @@ interface OcMessage {
   id?: string
   role?: string
   modelID?: string
-  tokens?: { input?: number; output?: number }
+  tokens?: {
+    input?: number
+    output?: number
+    reasoning?: number
+    cache?: { read?: number; write?: number }
+  }
   time?: { created?: number; completed?: number }
 }
 
@@ -31,7 +38,7 @@ interface OcPart {
   tool?: string
   callID?: string
   text?: string
-  state?: { status?: string; error?: string; input?: unknown }
+  state?: { status?: string; error?: string; input?: unknown; output?: unknown }
 }
 
 function isoOf(ms: number | undefined): string {
@@ -62,8 +69,9 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
     let sessionDirs: string[]
     try {
       sessionDirs = await readdir(msgRoot)
-    } catch {
-      return []
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
     }
     const refs: SessionRef[] = []
     for (const sid of sessionDirs) {
@@ -71,8 +79,9 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
       let st: Awaited<ReturnType<typeof stat>>
       try {
         st = await stat(dir)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       if (!st.isDirectory()) continue
       if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
@@ -88,22 +97,13 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
     const rootId = `root:${traceId}`
     const partRoot = join(this.storage(), 'part')
 
-    let msgFiles: string[]
-    try {
-      msgFiles = (await readdir(ref.path)).filter((f) => f.endsWith('.json'))
-    } catch {
-      return []
-    }
+    const msgFiles = await listJsonFiles(ref.path)
 
-    const messages: { msg: OcMessage; file: string }[] = []
+    const messages: OcMessage[] = []
     for (const f of msgFiles) {
-      try {
-        messages.push({ msg: JSON.parse(await readFile(join(ref.path, f), 'utf8')) as OcMessage, file: f })
-      } catch {
-        // skip
-      }
+      messages.push(await readJsonFile<OcMessage>(join(ref.path, f)))
     }
-    messages.sort((a, b) => (a.msg.time?.created ?? 0) - (b.msg.time?.created ?? 0))
+    messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
 
     const spans: OtlpSpan[] = [
       span({
@@ -112,15 +112,15 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
         parentSpanId: null,
         name: 'session',
         kind: 'AGENT',
-        startTime: isoOf(messages[0]?.msg.time?.created),
-        endTime: isoOf(messages.at(-1)?.msg.time?.completed ?? messages.at(-1)?.msg.time?.created),
+        startTime: isoOf(messages[0]?.time?.created),
+        endTime: isoOf(messages.at(-1)?.time?.completed ?? messages.at(-1)?.time?.created),
         service: SERVICE,
         agent: SERVICE,
       }),
     ]
 
     let step = 0
-    for (const { msg } of messages) {
+    for (const msg of messages) {
       const mid = msg.id ?? `m${step}`
       const llmId = `llm:${mid}`
 
@@ -128,53 +128,55 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
       // text can ride on the LLM span (assistant prose) or a user.prompt span.
       const pdir = join(partRoot, mid)
       const parts: OcPart[] = []
+      let partFiles: string[] = []
       try {
-        const partFiles = (await readdir(pdir)).filter((f) => f.endsWith('.json'))
-        for (const pf of partFiles) {
-          try {
-            parts.push(JSON.parse(await readFile(join(pdir, pf), 'utf8')) as OcPart)
-          } catch {
-            // skip
-          }
-        }
-      } catch {
-        // No parts dir → still emit the message span.
+        partFiles = await listJsonFiles(pdir)
+      } catch (error) {
+        if (!isMissingJsonSource(error)) throw error
+      }
+      for (const pf of partFiles) {
+        parts.push(await readJsonFile<OcPart>(join(pdir, pf)))
       }
 
       const turnText = textOf(parts)
-      spans.push(
-        span({
-          traceId,
-          spanId: llmId,
-          parentSpanId: rootId,
-          name: `message.${msg.role ?? 'unknown'}`,
-          kind: 'LLM',
-          startTime: isoOf(msg.time?.created),
-          endTime: isoOf(msg.time?.completed ?? msg.time?.created),
-          service: SERVICE,
-          agent: SERVICE,
-          model: msg.modelID ?? null,
-          inputTokens: msg.tokens?.input ?? null,
-          outputTokens: msg.tokens?.output ?? null,
-          step,
-          content: turnText || null,
-        }),
-      )
-      step += 1
-
-      // The human's prompt text. (A tool-result-only user turn yields no text →
-      // no user.prompt span.)
-      if (msg.role === 'user' && turnText) {
+      const isUser = msg.role === 'user'
+      if (isUser) {
+        // A tool-result-only user turn has no prompt span.
+        if (turnText) {
+          spans.push(
+            userPromptSpan({
+              traceId,
+              spanId: `${llmId}:user`,
+              parentSpanId: rootId,
+              startTime: isoOf(msg.time?.created),
+              service: SERVICE,
+              agent: SERVICE,
+              step,
+              content: turnText,
+            }),
+          )
+          step += 1
+        }
+      } else {
         spans.push(
-          userPromptSpan({
+          span({
             traceId,
-            spanId: `${llmId}:user`,
+            spanId: llmId,
             parentSpanId: rootId,
+            name: `message.${msg.role ?? 'unknown'}`,
+            kind: 'LLM',
             startTime: isoOf(msg.time?.created),
+            endTime: isoOf(msg.time?.completed ?? msg.time?.created),
             service: SERVICE,
             agent: SERVICE,
+            model: msg.modelID ?? null,
+            inputTokens: msg.tokens?.input ?? null,
+            outputTokens: msg.tokens?.output ?? null,
+            reasoningTokens: msg.tokens?.reasoning ?? null,
+            cachedInputTokens: msg.tokens?.cache?.read ?? null,
+            cacheWriteInputTokens: msg.tokens?.cache?.write ?? null,
             step,
-            content: turnText,
+            content: turnText || null,
           }),
         )
         step += 1
@@ -187,7 +189,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
           span({
             traceId,
             spanId: `tool:${part.callID ?? `${mid}:${step}`}`,
-            parentSpanId: llmId,
+            parentSpanId: isUser ? rootId : llmId,
             name: `tool.${part.tool}`,
             kind: 'TOOL',
             startTime: isoOf(msg.time?.created),
@@ -198,7 +200,10 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: part.tool,
             step,
-            content: part.state?.input != null ? JSON.stringify(part.state.input) : null,
+            extra: toolIoAttributes({
+              input: part.state?.input,
+              output: part.state?.output ?? part.state?.error,
+            }),
           }),
         )
         step += 1

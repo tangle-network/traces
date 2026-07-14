@@ -2,7 +2,7 @@
  * Forge adapter (antinomyhq/forge) — `/dump` JSON exports.
  *
  * Forge's primary store is SQLite (`~/.forge/.forge.db`, `conversations.context`
- * column). Reading it live needs a native sqlite dep, so v1 parses the
+ * column). Reading it live needs a native sqlite dep, so this adapter parses the
  * dependency-free `/dump` artifact instead: `<cwd>/YYYY-MM-DD_HH-MM-SS-dump.json`,
  * a single flattened `Context{ conversation_id, messages[] }`.
  *
@@ -12,12 +12,14 @@
  * or `{approx:N}`. Parse unverified against local data.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isMissingPathError, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { capText, userPromptSpan } from './conversation.js'
+import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'forge'
@@ -40,7 +42,7 @@ interface ForgeText {
 interface ForgeToolResult {
   name?: string
   call_id?: string
-  output?: { is_error?: boolean }
+  output?: { is_error?: boolean; values?: unknown }
 }
 interface ForgeEntry {
   text?: ForgeText
@@ -80,8 +82,9 @@ export class ForgeAdapter implements HarnessTraceAdapter {
       let files: string[]
       try {
         files = await readdir(dir)
-      } catch {
-        continue
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
       }
       for (const f of files) {
         if (!f.endsWith('-dump.json')) continue
@@ -89,8 +92,9 @@ export class ForgeAdapter implements HarnessTraceAdapter {
         let st: Awaited<ReturnType<typeof stat>>
         try {
           st = await stat(path)
-        } catch {
-          continue
+        } catch (error) {
+          if (isMissingPathError(error)) continue
+          throw error
         }
         if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
         refs.push({ harness: this.harness, sessionId: basename(f, '.json'), path, cwd: dir, mtimeMs: st.mtimeMs })
@@ -100,12 +104,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    let dump: ForgeDump
-    try {
-      dump = JSON.parse(await readFile(ref.path, 'utf8')) as ForgeDump
-    } catch {
-      return []
-    }
+    const dump = await readJsonFile<ForgeDump>(ref.path)
     const ctx = dump.context ?? dump
     const traceId = ctx.conversation_id ?? ref.sessionId
     const rootId = `root:${traceId}`
@@ -174,7 +173,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: tc.name ?? 'tool',
             step,
-            content: tc.arguments != null ? JSON.stringify(tc.arguments) : null,
+            extra: toolIoAttributes({ input: tc.arguments }),
           })
           spans.push(t)
           toolByCallId.set(id, t)
@@ -182,7 +181,10 @@ export class ForgeAdapter implements HarnessTraceAdapter {
         }
       } else if (entry.tool) {
         const t = toolByCallId.get(entry.tool.call_id ?? '')
-        if (t) t.status = entry.tool.output?.is_error ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
+        if (t) {
+          t.status = entry.tool.output?.is_error ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
+          recordToolOutput(t, entry.tool.output?.values ?? entry.tool.output)
+        }
       }
     }
     return spans
