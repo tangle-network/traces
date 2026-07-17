@@ -630,6 +630,155 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
 })
 
 describe('claude adapter (conversation capture)', () => {
+  it('derives session bounds from timestamped records instead of an untimestamped envelope', async () => {
+    const path = join(dir, 'claude-session-bounds.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'system', uuid: 'untimestamped-start' },
+        { type: 'user', uuid: 'u1', timestamp: '2026-01-01T00:00:01Z', message: { role: 'user', content: 'start' } },
+        {
+          type: 'assistant',
+          uuid: 'a1',
+          sessionId: 'bounded-trace',
+          timestamp: '2026-01-01T00:00:02Z',
+          message: { id: 'message-1', role: 'assistant', model: 'opus', usage: { input_tokens: 10, output_tokens: 3 }, content: [{ type: 'text', text: 'done' }] },
+        },
+        { type: 'system', uuid: 'out-of-order-start', timestamp: '2026-01-01T00:00:00Z' },
+        { type: 'system', uuid: 'untimestamped-end' },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+    expect(spans[0]).toMatchObject({
+      name: 'session',
+      start_time: '2026-01-01T00:00:00Z',
+      end_time: '2026-01-01T00:00:02Z',
+    })
+  })
+
+  it('captures workflow agents nested below the direct subagent directory', async () => {
+    const path = join(dir, 'claude-nested-workflows.jsonl')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        sessionId: 'nested-trace',
+        timestamp: '2026-01-01T00:00:00Z',
+        message: { role: 'user', content: 'run workflow' },
+      }),
+    )
+    const workflowDir = join(dir, 'claude-nested-workflows', 'subagents', 'workflows', 'wf-1')
+    mkdirSync(workflowDir, { recursive: true })
+    writeFileSync(
+      join(workflowDir, 'agent-a.jsonl'),
+      [
+        { type: 'user', uuid: 'wu1', timestamp: '2026-01-01T00:00:01Z', isSidechain: true, message: { role: 'user', content: 'inspect' } },
+        {
+          type: 'assistant',
+          uuid: 'wa1',
+          timestamp: '2026-01-01T00:00:02Z',
+          message: { id: 'workflow-message', role: 'assistant', model: 'haiku', usage: { input_tokens: 4, output_tokens: 2 }, content: [{ type: 'text', text: 'workflow result' }] },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+    writeFileSync(
+      join(workflowDir, 'agent-a.meta.json'),
+      JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+    const workflowSpans = spans.filter(
+      (item) => item.attributes['agent.name'] === 'subagent:workflow-subagent',
+    )
+    expect(workflowSpans).toHaveLength(2)
+    expect(workflowSpans.some((item) => item.attributes.content === 'workflow result')).toBe(true)
+    expect(workflowSpans.every((item) => item.span_id.startsWith('workflows:wf-1:agent-a:'))).toBe(true)
+    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:02Z')
+  })
+
+  it('parents nested subagents under the tool call from their declared parent agent', async () => {
+    const path = join(dir, 'claude-nested-subagents.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'user', uuid: 'u1', sessionId: 'nested-subagents', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: 'delegate' } },
+        { type: 'assistant', uuid: 'a1', timestamp: '2026-01-01T00:00:01Z', message: { id: 'main-message', role: 'assistant', model: 'opus', usage: { input_tokens: 10, output_tokens: 3 }, content: [{ type: 'tool_use', id: 'parent-call', name: 'Agent', input: { task: 'parent' } }] } },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+    const subDir = join(dir, 'claude-nested-subagents', 'subagents')
+    mkdirSync(subDir, { recursive: true })
+    writeFileSync(
+      join(subDir, 'agent-parent.jsonl'),
+      JSON.stringify({ type: 'assistant', uuid: 'pa1', timestamp: '2026-01-01T00:00:02Z', message: { id: 'parent-message', role: 'assistant', model: 'sonnet', usage: { input_tokens: 5, output_tokens: 2 }, content: [{ type: 'tool_use', id: 'child-call', name: 'Agent', input: { task: 'child' } }] } }),
+    )
+    writeFileSync(
+      join(subDir, 'agent-parent.meta.json'),
+      JSON.stringify({ agentType: 'parent', spawnDepth: 1, toolUseId: 'parent-call' }),
+    )
+    writeFileSync(
+      join(subDir, 'agent-child.jsonl'),
+      JSON.stringify({ type: 'assistant', uuid: 'ca1', timestamp: '2026-01-01T00:00:03Z', message: { id: 'child-message', role: 'assistant', model: 'haiku', usage: { input_tokens: 2, output_tokens: 1 }, content: [{ type: 'text', text: 'child result' }] } }),
+    )
+    writeFileSync(
+      join(subDir, 'agent-child.meta.json'),
+      JSON.stringify({ agentType: 'child', parentAgentId: 'parent', spawnDepth: 2, toolUseId: 'child-call' }),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+    const child = spans.find((item) => item.attributes['agent.name'] === 'subagent:child')
+    const childCall = spans.find((item) => item.attributes['tool.name'] === 'Agent' && item.attributes['agent.name'] === 'subagent:parent')
+    expect(child?.parent_span_id).toBe(childCall?.span_id)
+    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:03Z')
+  })
+
+  it('rejects duplicate subagent ids instead of silently assigning the wrong parent', async () => {
+    const path = join(dir, 'claude-duplicate-subagents.jsonl')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        sessionId: 'duplicate-subagents',
+        timestamp: '2026-01-01T00:00:00Z',
+        message: { role: 'user', content: 'delegate' },
+      }),
+    )
+    const subDir = join(dir, 'claude-duplicate-subagents', 'subagents')
+    for (const workflow of ['workflow-a', 'workflow-b']) {
+      const workflowDir = join(subDir, workflow)
+      mkdirSync(workflowDir, { recursive: true })
+      writeFileSync(
+        join(workflowDir, 'agent-same.jsonl'),
+        JSON.stringify({
+          type: 'assistant',
+          uuid: `${workflow}-response`,
+          timestamp: '2026-01-01T00:00:01Z',
+          message: {
+            id: `${workflow}-message`,
+            role: 'assistant',
+            model: 'haiku',
+            usage: { input_tokens: 1, output_tokens: 1 },
+            content: [{ type: 'text', text: workflow }],
+          },
+        }),
+      )
+      writeFileSync(
+        join(workflowDir, 'agent-same.meta.json'),
+        JSON.stringify({ agentType: 'worker', spawnDepth: 1 }),
+      )
+    }
+
+    await expect(new ClaudeAdapter().parse(refFor(path, 'claude-code'))).rejects.toThrow(
+      'Duplicate Claude subagent id: same',
+    )
+  })
+
   it('preserves complete output while folding subagents under their Agent call', async () => {
     const path = join(dir, 'claude.jsonl')
     writeFileSync(
