@@ -91,4 +91,66 @@ describe('claude transcript → spans', () => {
     expect(tool?.status.code).toBe('ERROR')
     expect(tool?.status.message).toContain('boom')
   })
+
+  it('counts one provider response once while preserving its streamed text and tool fragments', () => {
+    const firstUsage = {
+      input_tokens: 1000,
+      output_tokens: 10,
+      cache_read_input_tokens: 200,
+      cache_creation_input_tokens: 25,
+    }
+    const finalUsage = { ...firstUsage, output_tokens: 50 }
+    const message = { id: 'message-1', model: 'claude-opus-4-8' }
+    const events = [
+      {
+        type: 'assistant',
+        uuid: 'thinking-fragment',
+        timestamp: '2026-01-01T00:00:00Z',
+        message: { ...message, usage: firstUsage, content: [{ type: 'thinking', thinking: 'internal' }] },
+      },
+      {
+        type: 'assistant',
+        uuid: 'text-fragment',
+        timestamp: '2026-01-01T00:00:01Z',
+        message: { ...message, usage: finalUsage, content: [{ type: 'text', text: 'running the check' }] },
+      },
+      {
+        type: 'assistant',
+        uuid: 'tool-fragment',
+        timestamp: '2026-01-01T00:00:02Z',
+        message: { ...message, usage: firstUsage, content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { cmd: 'date' } }] },
+      },
+      {
+        type: 'assistant',
+        uuid: 'tool-fragment',
+        timestamp: '2026-01-01T00:00:02Z',
+        message: { ...message, usage: firstUsage, content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { cmd: 'date' } }] },
+      },
+    ]
+
+    const { spans } = parseClaudeStream(events, {
+      traceId: 'sess',
+      agent: 'claude-code',
+      startStep: 0,
+      idPrefix: '',
+      rootParent: 'root',
+    })
+
+    const llmSpans = spans.filter((item) => item.attributes['openinference.span.kind'] === 'LLM')
+    const toolSpans = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    expect(llmSpans).toHaveLength(1)
+    expect(toolSpans).toHaveLength(1)
+    expect(llmSpans[0]).toMatchObject({
+      start_time: '2026-01-01T00:00:00Z',
+      end_time: '2026-01-01T00:00:02Z',
+      attributes: {
+        content: 'running the check',
+        'llm.token_count.prompt': 1000,
+        'llm.token_count.completion': 50,
+        'llm.token_count.prompt_cache_hit': 200,
+        'llm.token_count.prompt_cache_write': 25,
+      },
+    })
+    expect(toolSpans[0]?.parent_span_id).toBe(llmSpans[0]?.span_id)
+  })
 })
