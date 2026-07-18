@@ -94,11 +94,75 @@ function textOf(content: unknown): string {
   return capText(contentToString(content))
 }
 
-/** function_call_output is an error when it clearly reports a non-zero exit / failure. */
+function numericStatus(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) return Number(value)
+  return undefined
+}
+
+function explicitOutputError(value: unknown): boolean | undefined {
+  if (Array.isArray(value)) {
+    let observedSuccess = false
+    for (const item of value) {
+      const status = explicitOutputError(item)
+      if (status === true) return true
+      if (status === false) observedSuccess = true
+    }
+    return observedSuccess ? false : undefined
+  }
+
+  if (value && typeof value === 'object') {
+    const row = value as Record<string, unknown>
+    for (const key of ['exit_code', 'exitCode']) {
+      const code = numericStatus(row[key])
+      if (code !== undefined && ('output' in row || 'chunk_id' in row || 'wall_time_seconds' in row)) {
+        return code !== 0
+      }
+    }
+    for (const key of ['timed_out', 'timedOut']) {
+      if (row[key] === true) return true
+    }
+    if (typeof row.succeeded === 'boolean' && ('value' in row || 'error' in row)) {
+      return !row.succeeded
+    }
+    if ((row.type === 'input_text' || row.type === 'text') && typeof row.text === 'string') {
+      return explicitOutputError(row.text)
+    }
+    return undefined
+  }
+
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  if (!text) return undefined
+  if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+    try {
+      const parsedStatus = explicitOutputError(JSON.parse(text) as unknown)
+      if (parsedStatus !== undefined) return parsedStatus
+    } catch {
+      // Some tools return ordinary source text that begins with a brace.
+    }
+  }
+  const outputStart = text.indexOf('\nOutput:\n')
+  const header = outputStart >= 0 ? text.slice(0, outputStart) : text
+  if (/^Chunk ID:/i.test(header)) {
+    const exitCode = header.match(/^Process exited with code\s+(-?\d+)\b/im)?.[1]
+    if (exitCode !== undefined) return Number(exitCode) !== 0
+  }
+  if (/^Script completed\s*\nWall time:/i.test(header)) return false
+  if (/^Script failed\s*\nWall time:/i.test(header)) return true
+  const scriptExitCode = header.match(/^Script error:\s*\nExit code:\s*(-?\d+)\b/im)?.[1]
+  if (scriptExitCode !== undefined) return Number(scriptExitCode) !== 0
+  const commandExitCode = text.match(/^Command failed with exit code\s+(-?\d+)\.?$/i)?.[1]
+  if (commandExitCode !== undefined) return Number(commandExitCode) !== 0
+  if (/^<tool_error>[\s\S]*<\/tool_error>$/i.test(text)) return true
+  return undefined
+}
+
+/** Only protocol-level status fields count; arbitrary tool output may itself contain code or logs mentioning errors. */
 function outputIsError(output: unknown): { error: boolean; message: string } {
-  const s = typeof output === 'string' ? output : JSON.stringify(output ?? '')
-  const error = /"success"\s*:\s*false|exit(?:_| )code["\s:]+[1-9]|\bcommand failed\b|\bENOENT\b|\berror:/i.test(s)
-  return { error, message: error ? s.slice(0, 500) : '' }
+  const error = explicitOutputError(output) === true
+  const message = typeof output === 'string' ? output : JSON.stringify(output ?? '')
+  return { error, message: error ? message.slice(0, 500) : '' }
 }
 
 /** A custom `exec` call is a small JavaScript program around one or more real tools. */

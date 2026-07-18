@@ -756,6 +756,54 @@ describe('pi tool results', () => {
 })
 
 describe('codex current tool and subagent events', () => {
+  it('uses protocol status instead of error words inside successful output', async () => {
+    const path = join(dir, 'rollout-codex-tool-status.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: '2026-07-11T09:00:00.000Z', payload: { id: 'codex-tool-status', cwd: '/x' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:01.000Z', payload: { type: 'function_call', call_id: 'read-source', name: 'exec_command', arguments: '{"cmd":"sed -n 1,20p file.ts"}' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:02.000Z',
+          payload: {
+            type: 'function_call_output',
+            call_id: 'read-source',
+            output: 'Chunk ID: abc123\nProcess exited with code 0\nOutput:\nreturn { error: "not found" }',
+          },
+        },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:03.000Z', payload: { type: 'custom_tool_call', call_id: 'failed-command', name: 'exec', input: 'await tools.exec_command({ cmd: "false" })' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.000Z',
+          payload: {
+            type: 'custom_tool_call_output',
+            call_id: 'failed-command',
+            output: [{ type: 'input_text', text: '{"exit_code":2,"output":"error: expected failure"}' }],
+          },
+        },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:05.000Z', payload: { type: 'function_call', call_id: 'domain-result', name: 'lookup', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:06.000Z', payload: { type: 'function_call_output', call_id: 'domain-result', output: '{"error":"domain value, not execution status","value":42}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:07.000Z', payload: { type: 'function_call', call_id: 'captured-log', name: 'read_log', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:08.000Z', payload: { type: 'function_call_output', call_id: 'captured-log', output: [{ type: 'input_text', text: 'error: first line of the captured application log' }] } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:09.000Z', payload: { type: 'function_call', call_id: 'captured-exit', name: 'read_file', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:10.000Z', payload: { type: 'function_call_output', call_id: 'captured-exit', output: 'fixture text\nProcess exited with code 1\nnot a runner header' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:11.000Z', payload: { type: 'function_call', call_id: 'timed-out', name: 'wait', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:12.000Z', payload: { type: 'function_call_output', call_id: 'timed-out', output: '{"timed_out":true}' } },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const tools = (await new CodexAdapter().parse(refFor(path, 'codex')))
+      .filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    expect(tools).toHaveLength(6)
+    expect(tools.find((item) => item.span_id === 'tool:read-source')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:failed-command')?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === 'tool:domain-result')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:captured-log')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:captured-exit')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:timed-out')?.status.code).toBe('ERROR')
+  })
+
   it('captures custom tool calls, joins their outputs, and tracks subagent lifecycles', async () => {
     const path = join(dir, 'rollout-codex-current.jsonl')
     const startedAt = Date.parse('2026-07-11T09:00:05.000Z')
