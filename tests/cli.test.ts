@@ -132,6 +132,106 @@ describe('traces CLI', () => {
     expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain('1 session(s), 2 spans')
   })
 
+  it('turns deterministic analyze signals into actionable findings', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-actionable-'))
+    const input = join(dir, 'spans.openinference.jsonl')
+    const report = join(dir, 'report.md')
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace-actionable',
+        spanId: 'assistant',
+        name: 'llm.turn',
+        kind: 'LLM',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'codex',
+        step: 1,
+        content: 'I am done without checking the result.',
+        extra: { 'session.id': 'session-actionable' },
+      }),
+      span({
+        traceId: 'trace-actionable',
+        spanId: 'human',
+        name: 'user.prompt',
+        kind: 'CHAIN',
+        startTime: '2026-01-01T00:00:01.000Z',
+        service: 'codex',
+        step: 2,
+        content: 'no, that is wrong, verify it',
+        extra: { 'session.id': 'session-actionable', 'tangle.actor': 'human' },
+      }),
+    ]), 'utf8')
+
+    const analyzed = await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'analyze',
+      input,
+      '--format',
+      'openinference',
+      '--out',
+      report,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    expect(analyzed.stdout).toMatch(/\([1-9]\d* findings, 0 loops/)
+    const reportText = await readFile(report, 'utf8')
+    expect(reportText).toContain('1 corrective human reaction signal(s)')
+    expect(reportText).toContain('**Fix:** Turn the top correction pattern into an agent profile rule')
+    expect(reportText).toContain('**Check:** Rerun traces on fresh sessions')
+    expect(reportText).not.toContain('_No analyst findings.')
+  })
+
+  it('loads an analyze config only when --config is explicit', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-config-'))
+    const input = join(dir, 'spans.openinference.jsonl')
+    const defaultReport = join(dir, 'default-report.md')
+    const configuredReport = join(dir, 'configured-report.md')
+    const config = join(dir, 'traces.config.mjs')
+    const cli = join(process.cwd(), 'src', 'cli.ts')
+    const tsx = join(process.cwd(), 'node_modules', 'tsx', 'dist', 'loader.mjs')
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace-config',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'codex',
+        extra: { 'session.id': 'session-config' },
+      }),
+    ]), 'utf8')
+    await writeFile(config, `export default { externalAnalyzers: [{ name: 'configured', async analyze() { return { analyzer: 'configured', ok: true, output: JSON.stringify({ findings: [{ area: 'external', severity: 'high', claim: 'explicit config executed' }] }) } } }] }\n`, 'utf8')
+
+    const run = (report: string, extra: string[] = []) => execFileAsync(process.execPath, [
+      '--import',
+      tsx,
+      cli,
+      'analyze',
+      input,
+      '--format',
+      'openinference',
+      '--out',
+      report,
+      ...extra,
+    ], {
+      cwd: dir,
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    await run(defaultReport)
+    expect(await readFile(defaultReport, 'utf8')).not.toContain('explicit config executed')
+
+    await run(configuredReport, ['--config', config])
+    expect(await readFile(configuredReport, 'utf8')).toContain('explicit config executed')
+  })
+
   it('keeps a trace with conflicting session identities in improvement output', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-session-conflict-'))
     const input = join(dir, 'spans.openinference.jsonl')
