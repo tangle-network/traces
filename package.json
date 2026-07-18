@@ -54,8 +54,8 @@
     "prepublishOnly": "pnpm build && pnpm check:package"
   },
   "dependencies": {
-    "@ax-llm/ax": "^19.0.45",
-    "@tangle-network/agent-eval": "^0.118.3"
+    "@ax-llm/ax": "^23.0.1",
+    "@tangle-network/agent-eval": "^0.122.8"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
