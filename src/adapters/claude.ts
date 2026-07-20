@@ -17,6 +17,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { sessionJsonlOptions } from '../integrity.js'
+import { appendAll } from '../arrays.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
@@ -383,7 +384,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         consumeClaudeEvent(event, ctx, state)
       }
       const parsed = finishClaudeStream(state)
-      out.push(...parsed.spans)
+      appendAll(out, parsed.spans)
       step = parsed.nextStep
     }
   }

@@ -26,6 +26,7 @@ import { readFileSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
@@ -302,7 +303,7 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
     if (refs.length > 0) harnesses.push(adapter.harness)
     for (const ref of refs) {
       const parsed = await parseSession(adapter, ref)
-      spans.push(...parsed)
+      appendAll(spans, parsed)
       sources.push(selectedSessionSource(ref, parsed))
       if (ref.cwd) cwds.push(ref.cwd)
     }
