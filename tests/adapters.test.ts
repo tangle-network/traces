@@ -679,6 +679,37 @@ describe('claude adapter (conversation capture)', () => {
     expect(agentCall?.attributes['output.value']).toBe('done')
     expect(spans.filter((item) => item.attributes['agent.name'] === 'subagent:Explore').every((item) => item.parent_span_id === agentCall?.span_id)).toBe(true)
   })
+
+  it('parses a session with more than 65k spans without array spread overflow', async () => {
+    const path = join(dir, 'claude-large-span-count.jsonl')
+    const file = openSync(path, 'w')
+    try {
+      writeSync(file, `${JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        sessionId: 'claude-large-span-count',
+        timestamp: '2026-01-01T00:00:00Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'start' }] },
+      })}\n`)
+      for (let index = 0; index < 70_000; index += 1) {
+        writeSync(file, `${JSON.stringify({
+          type: 'assistant',
+          uuid: `a${index}`,
+          sessionId: 'claude-large-span-count',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+        })}\n`)
+      }
+    } finally {
+      closeSync(file)
+    }
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+
+    expect(spans).toHaveLength(70_002)
+    expect(spans[0]?.name).toBe('session')
+    expect(spans.at(-1)?.name).toBe('llm.turn')
+  })
 })
 
 // Conversation capture across every adapter: the user's prompt becomes a
@@ -756,6 +787,86 @@ describe('pi tool results', () => {
 })
 
 describe('codex current tool and subagent events', () => {
+  it('excludes inherited fork replay before the current task start', async () => {
+    const path = join(dir, 'rollout-codex-fork-replay.jsonl')
+    const sessionTimestamp = '2026-07-13T05:33:02.042Z'
+    const currentStartedAt = Math.floor(Date.parse(sessionTimestamp) / 1_000)
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: sessionTimestamp, payload: { id: 'fork-current', cwd: '/x', timestamp: '2026-07-13T05:33:01.500Z' } },
+        { type: 'event_msg', timestamp: sessionTimestamp, payload: { type: 'task_started', started_at: currentStartedAt - 60 } },
+        { type: 'turn_context', timestamp: sessionTimestamp, payload: { model: 'inherited-model' } },
+        { type: 'event_msg', timestamp: sessionTimestamp, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10_000, output_tokens: 500 } } } },
+        { type: 'response_item', timestamp: sessionTimestamp, payload: { type: 'function_call', call_id: 'inherited', name: 'exec_command', arguments: '{"cmd":"old"}' } },
+        { type: 'response_item', timestamp: sessionTimestamp, payload: { type: 'function_call_output', call_id: 'inherited', output: 'Script completed' } },
+        { type: 'event_msg', timestamp: '2026-07-13T05:33:02.371Z', payload: { type: 'task_started', started_at: currentStartedAt } },
+        { type: 'turn_context', timestamp: '2026-07-13T05:33:02.372Z', payload: { model: 'current-model' } },
+        { type: 'event_msg', timestamp: '2026-07-13T05:33:03.000Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 4 } } } },
+        { type: 'response_item', timestamp: '2026-07-13T05:33:04.000Z', payload: { type: 'function_call', call_id: 'current', name: 'exec_command', arguments: '{"cmd":"new"}' } },
+        { type: 'response_item', timestamp: '2026-07-13T05:33:05.000Z', payload: { type: 'function_call_output', call_id: 'current', output: 'Script completed' } },
+      ].map((row) => JSON.stringify(row)).join('\n'),
+    )
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const llms = spans.filter((span) => span.name === 'llm.turn')
+    const tools = spans.filter((span) => span.attributes['openinference.span.kind'] === 'TOOL')
+
+    expect(spans[0]?.attributes['llm.model_name']).toBe('current-model')
+    expect(llms).toHaveLength(1)
+    expect(llms[0]?.attributes['llm.token_count.prompt']).toBe(20)
+    expect(tools).toHaveLength(1)
+    expect(tools[0]?.attributes['input.value']).toContain('new')
+  })
+
+  it('uses protocol status instead of error words inside successful output', async () => {
+    const path = join(dir, 'rollout-codex-tool-status.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: '2026-07-11T09:00:00.000Z', payload: { id: 'codex-tool-status', cwd: '/x' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:01.000Z', payload: { type: 'function_call', call_id: 'read-source', name: 'exec_command', arguments: '{"cmd":"sed -n 1,20p file.ts"}' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:02.000Z',
+          payload: {
+            type: 'function_call_output',
+            call_id: 'read-source',
+            output: 'Chunk ID: abc123\nProcess exited with code 0\nOutput:\nreturn { error: "not found" }',
+          },
+        },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:03.000Z', payload: { type: 'custom_tool_call', call_id: 'failed-command', name: 'exec', input: 'await tools.exec_command({ cmd: "false" })' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.000Z',
+          payload: {
+            type: 'custom_tool_call_output',
+            call_id: 'failed-command',
+            output: [{ type: 'input_text', text: '{"exit_code":2,"output":"error: expected failure"}' }],
+          },
+        },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:05.000Z', payload: { type: 'function_call', call_id: 'domain-result', name: 'lookup', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:06.000Z', payload: { type: 'function_call_output', call_id: 'domain-result', output: '{"error":"domain value, not execution status","value":42}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:07.000Z', payload: { type: 'function_call', call_id: 'captured-log', name: 'read_log', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:08.000Z', payload: { type: 'function_call_output', call_id: 'captured-log', output: [{ type: 'input_text', text: 'error: first line of the captured application log' }] } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:09.000Z', payload: { type: 'function_call', call_id: 'captured-exit', name: 'read_file', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:10.000Z', payload: { type: 'function_call_output', call_id: 'captured-exit', output: 'fixture text\nProcess exited with code 1\nnot a runner header' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:11.000Z', payload: { type: 'function_call', call_id: 'timed-out', name: 'wait', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:12.000Z', payload: { type: 'function_call_output', call_id: 'timed-out', output: '{"timed_out":true}' } },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const tools = (await new CodexAdapter().parse(refFor(path, 'codex')))
+      .filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    expect(tools).toHaveLength(6)
+    expect(tools.find((item) => item.span_id === 'tool:read-source')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:failed-command')?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === 'tool:domain-result')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:captured-log')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:captured-exit')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:timed-out')?.status.code).toBe('ERROR')
+  })
+
   it('captures custom tool calls, joins their outputs, and tracks subagent lifecycles', async () => {
     const path = join(dir, 'rollout-codex-current.jsonl')
     const startedAt = Date.parse('2026-07-11T09:00:05.000Z')

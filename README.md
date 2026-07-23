@@ -49,7 +49,7 @@ traces watch --all
 traces stream --all --mode findings
 ```
 
-That's the command in the demo above. The **deterministic pass** checks stuck loops, token growth, output decay, missing self-verification, and tool monoculture. It needs no API key and costs nothing.
+That's the command in the demo above. The **deterministic pass** checks stuck loops, token growth, output decay, missing self-verification, tool failures, and human corrections. Each supported issue is returned as a finding with evidence, an action, confidence, and a validation plan. It needs no API key and costs nothing.
 
 Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowledge-poisoning / improvement); they call OpenAI and respect `--budget <usd>`.
 
@@ -96,8 +96,8 @@ Every adapter captures the full conversation: the **user's prompt** and the **as
 
 ```bash
 traces list     --harness claude-code --last 20    # discover sessions
-traces analyze  --harness codex --last 1           # $0 deterministic report
-traces investigate --all --last 10 --out report.md  # typed findings with actions + checks
+traces analyze  --harness codex --last 1           # $0 findings with actions + checks
+traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
 traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
@@ -126,7 +126,7 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | `export` / file `stream`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
-| `--config <path>` | `investigate` / `improve` / `stream`: load BYO analysts, live analysts, and external analyzers |
+| `--config <path>` | `analyze` / `investigate` / `improve` / `stream`: load BYO analysts, live analysts, and external analyzers |
 | `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (default 5) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |

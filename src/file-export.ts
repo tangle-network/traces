@@ -20,6 +20,7 @@ import {
 import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { capText } from './adapters/conversation.js'
 import { toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
+import { appendAll } from './arrays.js'
 import type { PolicyEvidenceRecord } from './evidence.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
@@ -754,7 +755,7 @@ export async function exportTraceEvidenceFile(
         sourcePath: inputPath,
         format,
       })
-      spans.push(...converted.spans)
+      appendAll(spans, converted.spans)
       redactionCount += converted.redactionCount
       for (const [rule, count] of Object.entries(converted.redactionsByRule)) {
         redactionsByRule[rule] = (redactionsByRule[rule] ?? 0) + count

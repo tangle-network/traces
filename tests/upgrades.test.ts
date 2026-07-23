@@ -58,6 +58,7 @@ describe('actor derivation', () => {
       'injected',
     )
     expect(codexActor({ text: '<subagent_notification>done</subagent_notification>' })).toBe('injected')
+    expect(codexActor({ text: '# AGENTS.md instructions\n<INSTRUCTIONS>' })).toBe('injected')
     expect(codexActor({ text: '# AGENTS.md instructions for /workspace\n<INSTRUCTIONS>' })).toBe('injected')
     // Slash-command skill bodies expand into a user turn without a <command-name> wrapper.
     expect(claudeActor({ text: 'Base directory for this skill: /x\nYou are…', userType: 'external' })).toBe(
@@ -247,15 +248,27 @@ describe('countSkillRunsJsonl', () => {
 })
 
 describe('analyzeAdoption', () => {
-  it('reports penetration, per-skill + subagent counts, and reads loop-dispatched runs separately', async () => {
+  it('separates session-linked loop runs from unlinked repository history', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'tt-adopt-cwd-'))
     mkdirSync(join(cwd, '.evolve'), { recursive: true })
     writeFileSync(
       join(cwd, '.evolve', 'skill-runs.jsonl'),
-      [JSON.stringify({ skill: 'evolve' }), JSON.stringify({ skills: ['evolve', 'converge'] })].join('\n'),
+      [
+        JSON.stringify({ skill: 'evolve', sessionId: 's1' }),
+        JSON.stringify({ skill: 'evolve' }),
+        JSON.stringify({ skills: ['evolve', 'converge'] }),
+      ].join('\n'),
     )
     const spans: OtlpSpan[] = [
-      span({ traceId: 's1', spanId: 'root', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'claude-code' }),
+      span({
+        traceId: 's1',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: new Date(0).toISOString(),
+        service: 'claude-code',
+        extra: { 'tangle.sessionId': 's1' },
+      }),
       skillTool(1, 's1', 'evolve'),
       skillTool(2, 's1', 'polish'),
       taskTool(3, 's1', 'Explore'),
@@ -294,8 +307,8 @@ describe('analyzeAdoption', () => {
     ]
     const r = await analyzeAdoption(spans, { cwds: [cwd] })
     expect(r.executionGroupCount).toBe(2)
-    expect(r.identifiedSessionCount).toBe(0)
-    expect(r.unassignedTraceCount).toBe(2)
+    expect(r.identifiedSessionCount).toBe(1)
+    expect(r.unassignedTraceCount).toBe(1)
     expect(r.sessionsWithSkill).toBe(1)
     expect(r.skillPenetration).toBe(0.5)
     expect(r.skillTelemetryStatus).toBe('measured')
@@ -309,10 +322,11 @@ describe('analyzeAdoption', () => {
     expect(r.subagentSpawns.duplicate).toBeUndefined()
     expect(r.totalSubagentSpawns).toBe(3)
     expect(r.sessionsWithSubagent).toBe(2)
-    // Loop-dispatched runs are counted SEPARATELY from explicit invocations.
-    expect(r.loopDispatchedRuns.evolve).toBe(2)
-    expect(r.loopDispatchedRuns.converge).toBe(1)
-    expect(r.totalLoopDispatchedRuns).toBe(3)
+    expect(r.loopDispatchedRuns.evolve).toBe(1)
+    expect(r.totalLoopDispatchedRuns).toBe(1)
+    expect(r.unlinkedLoopDispatchedRuns.evolve).toBe(2)
+    expect(r.unlinkedLoopDispatchedRuns.converge).toBe(1)
+    expect(r.totalUnlinkedLoopDispatchedRuns).toBe(3)
     expect(r.skillRunFilesRead).toBe(1)
   })
 
@@ -345,6 +359,21 @@ describe('analyzeAdoption', () => {
         payload: { type: 'custom_tool_call_output', call_id: 'skill-file', output: 'Script completed' },
       },
       {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:03.100Z',
+        payload: {
+          type: 'custom_tool_call',
+          call_id: 'skill-catalog',
+          name: 'exec',
+          input: 'const r = await tools.exec_command({cmd:"rg --files /skills/simplify/SKILL.md"}); text(r.output)',
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-06-20T00:00:03.200Z',
+        payload: { type: 'custom_tool_call_output', call_id: 'skill-catalog', output: 'Script completed' },
+      },
+      {
         type: 'event_msg',
         timestamp: '2026-06-20T00:00:04Z',
         payload: {
@@ -366,11 +395,13 @@ describe('analyzeAdoption', () => {
     expect(report.skillTelemetrySessions).toBe(0)
     expect(report.sessionsWithMaterializedSkills).toBe(1)
     expect(report.sessionsWithSkillFileReference).toBe(1)
+    expect(report.skillDocumentReads.simplify).toBe(1)
     expect(report.totalSubagentSpawns).toBe(1)
     expect(report.subagentSpawns.reviewer).toBe(1)
     expect(rendered).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
     expect(rendered).toContain('Materialized skill catalogs/instructions:** 1/1')
-    expect(rendered).toContain('SKILL.md tool references:** 1/1')
+    expect(rendered).toContain('Sessions with successful skill-document reads:** 1/1')
+    expect(rendered).toContain('Successful skill-document reads:** 1; inspection is not outcome evidence.')
     expect(rendered).toContain('Subagent spawns observed:** 1')
     expect(rendered).toContain('Prompt, tools, MCP, hooks, and full agent profile:** not assessed')
     expect(rendered).not.toContain('Skill penetration')

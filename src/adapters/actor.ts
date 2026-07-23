@@ -36,7 +36,7 @@ const INJECT_MARKERS = [
   // Prefix match: Codex adds attributes such as source="goal" to this tag.
   '<codex_internal_context',
   '<subagent_notification>',
-  '# AGENTS.md instructions for ',
+  '# AGENTS.md instructions',
   '<local-command-stdout>',
   'This session is being continued from a previous conversation',
   // Slash-command skill bodies are expanded into a user turn (no <command-name>

@@ -38,6 +38,7 @@ interface CodexLine {
     id?: string
     session_id?: string
     cwd?: string
+    timestamp?: string
     cli_version?: string
     model?: string
     role?: string
@@ -49,6 +50,7 @@ interface CodexLine {
     output?: unknown
     event_id?: string
     occurred_at_ms?: number
+    started_at?: number
     agent_thread_id?: string
     agent_path?: string
     kind?: string
@@ -94,11 +96,98 @@ function textOf(content: unknown): string {
   return capText(contentToString(content))
 }
 
-/** function_call_output is an error when it clearly reports a non-zero exit / failure. */
+function currentTaskStartedAt(meta: CodexLine | undefined): number | undefined {
+  const timestamp = Date.parse(meta?.payload?.timestamp ?? meta?.timestamp ?? '')
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1_000) : undefined
+}
+
+function isCurrentTaskStart(line: CodexLine, startedAt: number): boolean {
+  return line.type === 'event_msg'
+    && line.payload?.type === 'task_started'
+    && typeof line.payload.started_at === 'number'
+    && Math.abs(line.payload.started_at - startedAt) <= 2
+}
+
+/** A forked Codex session can prepend inherited rows with rewritten timestamps.
+ * The task-start epoch survives. Codex records the child metadata just before
+ * the task starts, so accept its nearest whole-second value. Probe first to
+ * avoid dropping ordinary sessions without that event. */
+async function hasCurrentTaskStart(path: string, options: ReturnType<typeof sessionJsonlOptions>, startedAt: number): Promise<boolean> {
+  for await (const line of readJsonl<CodexLine>(path, options)) {
+    if (isCurrentTaskStart(line, startedAt)) return true
+  }
+  return false
+}
+
+function numericStatus(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) return Number(value)
+  return undefined
+}
+
+function explicitOutputError(value: unknown): boolean | undefined {
+  if (Array.isArray(value)) {
+    let observedSuccess = false
+    for (const item of value) {
+      const status = explicitOutputError(item)
+      if (status === true) return true
+      if (status === false) observedSuccess = true
+    }
+    return observedSuccess ? false : undefined
+  }
+
+  if (value && typeof value === 'object') {
+    const row = value as Record<string, unknown>
+    for (const key of ['exit_code', 'exitCode']) {
+      const code = numericStatus(row[key])
+      if (code !== undefined && ('output' in row || 'chunk_id' in row || 'wall_time_seconds' in row)) {
+        return code !== 0
+      }
+    }
+    for (const key of ['timed_out', 'timedOut']) {
+      if (row[key] === true) return true
+    }
+    if (typeof row.succeeded === 'boolean' && ('value' in row || 'error' in row)) {
+      return !row.succeeded
+    }
+    if ((row.type === 'input_text' || row.type === 'text') && typeof row.text === 'string') {
+      return explicitOutputError(row.text)
+    }
+    return undefined
+  }
+
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  if (!text) return undefined
+  if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+    try {
+      const parsedStatus = explicitOutputError(JSON.parse(text) as unknown)
+      if (parsedStatus !== undefined) return parsedStatus
+    } catch {
+      // Some tools return ordinary source text that begins with a brace.
+    }
+  }
+  const outputStart = text.indexOf('\nOutput:\n')
+  const header = outputStart >= 0 ? text.slice(0, outputStart) : text
+  if (/^Chunk ID:/i.test(header)) {
+    const exitCode = header.match(/^Process exited with code\s+(-?\d+)\b/im)?.[1]
+    if (exitCode !== undefined) return Number(exitCode) !== 0
+  }
+  if (/^Script completed\s*\nWall time:/i.test(header)) return false
+  if (/^Script failed\s*\nWall time:/i.test(header)) return true
+  const scriptExitCode = header.match(/^Script error:\s*\nExit code:\s*(-?\d+)\b/im)?.[1]
+  if (scriptExitCode !== undefined) return Number(scriptExitCode) !== 0
+  const commandExitCode = text.match(/^Command failed with exit code\s+(-?\d+)\.?$/i)?.[1]
+  if (commandExitCode !== undefined) return Number(commandExitCode) !== 0
+  if (/^<tool_error>[\s\S]*<\/tool_error>$/i.test(text)) return true
+  return undefined
+}
+
+/** Only protocol-level status fields count; arbitrary tool output may itself contain code or logs mentioning errors. */
 function outputIsError(output: unknown): { error: boolean; message: string } {
-  const s = typeof output === 'string' ? output : JSON.stringify(output ?? '')
-  const error = /"success"\s*:\s*false|exit(?:_| )code["\s:]+[1-9]|\bcommand failed\b|\bENOENT\b|\berror:/i.test(s)
-  return { error, message: error ? s.slice(0, 500) : '' }
+  const error = explicitOutputError(output) === true
+  const message = typeof output === 'string' ? output : JSON.stringify(output ?? '')
+  return { error, message: error ? message.slice(0, 500) : '' }
 }
 
 /** A custom `exec` call is a small JavaScript program around one or more real tools. */
@@ -263,7 +352,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
     const head = await takeJsonl<CodexLine>(ref.path, SESSION_HEAD_LINES, jsonl)
     let first = head[0]
     let meta = head.find((line) => line.type === 'session_meta')
-    let model = head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
+    const taskStartedAt = currentTaskStartedAt(meta)
+    const hasTaskBoundary = taskStartedAt !== undefined && await hasCurrentTaskStart(ref.path, jsonl, taskStartedAt)
+    let model = hasTaskBoundary ? null : head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
     if (!first || !meta) {
       for await (const line of readJsonl<CodexLine>(ref.path, jsonl)) {
         first ??= line
@@ -311,7 +402,12 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let lastTimestamp: string | undefined
     const awaitingModel = model ? [] : [root]
 
+    let reachedCurrentTask = !hasTaskBoundary
     for await (const l of readJsonl<CodexLine>(ref.path, jsonl)) {
+      if (!reachedCurrentTask) {
+        if (isCurrentTaskStart(l, taskStartedAt!)) reachedCurrentTask = true
+        else continue
+      }
       lastTimestamp = l.timestamp
       const ts = l.timestamp ?? new Date(0).toISOString()
       if (!model && l.type === 'turn_context' && l.payload?.model) {

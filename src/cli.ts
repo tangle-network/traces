@@ -25,12 +25,11 @@
 import { readFileSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
-import { analyzeAdoption } from './adoption.js'
-import { analyzeSpans } from './analyze.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
-import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
+import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import {
@@ -50,19 +49,10 @@ import {
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
-import { runPipelines } from './pipelines.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
-import { analyzeReactions } from './reactions.js'
 import { locateSessions, parseSession } from './session-source.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
-import {
-  CORRUPTION_RECEIPT_DISPLAY_LIMIT,
-  renderAdoption,
-  renderPipelines,
-  renderReactions,
-  renderReport,
-  summarizeDeterministicSignals,
-} from './report.js'
+import { CORRUPTION_RECEIPT_DISPLAY_LIMIT } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -219,7 +209,7 @@ async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
   // (the Tangle router, a local proxy, …) instead of api.openai.com.
   const apiURL = process.env.OPENAI_BASE_URL || undefined
   const { AxAI } = await import('@ax-llm/ax')
-  return new AxAI({ name: 'openai', apiKey, ...(apiURL ? { apiURL } : {}) }) as unknown as import('@ax-llm/ax').AxAIService
+  return AxAI.create({ name: 'openai', apiKey, ...(apiURL ? { apiURL } : {}) })
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -313,7 +303,7 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
     if (refs.length > 0) harnesses.push(adapter.harness)
     for (const ref of refs) {
       const parsed = await parseSession(adapter, ref)
-      spans.push(...parsed)
+      appendAll(spans, parsed)
       sources.push(selectedSessionSource(ref, parsed))
       if (ref.cwd) cwds.push(ref.cwd)
     }
@@ -465,47 +455,15 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
-  const { spans, harness, cwds, sources } = await collectSpans(args)
-  if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const ai = args.llm ? await buildAxService() : undefined
-  const { otlpPath, execution, result } = await analyzeSpans(spans, {
-    ai,
-    model: args.model,
-    budgetUsd: args.budget,
-    otlpOutPath: args.otlp,
-    log: (msg) => process.stderr.write(`${msg}\n`),
-  })
-  const pipelines = await runPipelines(spans, { minLoopOccurrences: args.minLoop })
-  const reactions = analyzeReactions(spans)
-  const adoption = await analyzeAdoption(spans, { cwds })
-  const deterministic = summarizeDeterministicSignals(pipelines, reactions)
-  let report =
-    `${renderReport(result, {
-      harness,
-      sessionCount: adoption.identifiedSessionCount,
-      unassignedTraceCount: adoption.unassignedTraceCount,
-      spanCount: spans.length,
-      otlpPath,
-      execution,
-      deterministic,
-      sources,
-    })}\n` +
-    `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
-  if (args.analyzers.length > 0 && otlpPath) {
-    const engines = externalAnalyzersFromArgs(args)
-    const results = await runExternalAnalyzers(otlpPath, engines, { prompt: args.analyzerPrompt })
-    for (const r of results) {
-      report += `\n\n## ${r.analyzer} (external analyzer)\n\n${r.ok ? r.output || '(no output)' : `failed: ${r.error}`}`
-    }
-  }
+  const result = await investigate(args, { loadDefaultConfig: false })
   if (args.out) {
-    await writeFile(args.out, report, 'utf8')
+    await saveReport(args.out, result.report)
     console.log(
       `report → ${args.out}  (${result.findings.length} findings, ` +
-        `${pipelines.stuckLoops.findings.length} loops, OTLP: ${otlpPath})`,
+        `${result.pipelines.stuckLoops.findings.length} loops, OTLP: ${result.otlpPath})`,
     )
   } else {
-    console.log(report)
+    console.log(result.report)
   }
 }
 
@@ -548,11 +506,23 @@ function externalAnalyzersFromArgs(args: Args) {
 }
 
 async function cmdInvestigate(args: Args): Promise<void> {
+  const result = await investigate(args)
+  if (args.out) {
+    await saveReport(args.out, result.report)
+    console.log(`investigation report → ${args.out}  (${result.findings.length} findings with actions, OTLP: ${result.otlpPath})`)
+  } else {
+    console.log(result.report)
+  }
+}
+
+async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
   const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const config = await loadTracesConfig(args.config)
+  const config = args.config !== undefined || options.loadDefaultConfig !== false
+    ? await loadTracesConfig(args.config)
+    : undefined
   const ai = args.llm ? await buildAxService() : undefined
-  const result = await runTraceInvestigation(mergeTracesConfig({
+  return runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
     sources,
@@ -566,12 +536,6 @@ async function cmdInvestigate(args: Args): Promise<void> {
     analyzerPrompt: args.analyzerPrompt,
     log: (msg) => process.stderr.write(`${msg}\n`),
   }, config))
-  if (args.out) {
-    await saveReport(args.out, result.report)
-    console.log(`investigation report → ${args.out}  (${result.findings.length} findings with actions, OTLP: ${result.otlpPath})`)
-  } else {
-    console.log(result.report)
-  }
 }
 
 async function cmdImprove(args: Args): Promise<void> {
