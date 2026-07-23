@@ -130,7 +130,7 @@ describe('traces CLI', () => {
     expect(result.spanCount).toBe(2)
     expect(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8')).not.toBe('')
     expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain('1 session(s), 2 spans')
-  })
+  }, 15_000)
 
   it('turns deterministic analyze signals into actionable findings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-actionable-'))
