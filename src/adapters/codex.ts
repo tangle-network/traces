@@ -38,6 +38,7 @@ interface CodexLine {
     id?: string
     session_id?: string
     cwd?: string
+    timestamp?: string
     cli_version?: string
     model?: string
     role?: string
@@ -49,6 +50,7 @@ interface CodexLine {
     output?: unknown
     event_id?: string
     occurred_at_ms?: number
+    started_at?: number
     agent_thread_id?: string
     agent_path?: string
     kind?: string
@@ -92,6 +94,29 @@ function contentToString(content: unknown): string {
 /** A message's text (verbatim string body or joined text blocks), trimmed and capped. */
 function textOf(content: unknown): string {
   return capText(contentToString(content))
+}
+
+function currentTaskStartedAt(meta: CodexLine | undefined): number | undefined {
+  const timestamp = Date.parse(meta?.payload?.timestamp ?? meta?.timestamp ?? '')
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1_000) : undefined
+}
+
+function isCurrentTaskStart(line: CodexLine, startedAt: number): boolean {
+  return line.type === 'event_msg'
+    && line.payload?.type === 'task_started'
+    && typeof line.payload.started_at === 'number'
+    && Math.abs(line.payload.started_at - startedAt) <= 2
+}
+
+/** A forked Codex session can prepend inherited rows with rewritten timestamps.
+ * The task-start epoch survives. Codex records the child metadata just before
+ * the task starts, so accept its nearest whole-second value. Probe first to
+ * avoid dropping ordinary sessions without that event. */
+async function hasCurrentTaskStart(path: string, options: ReturnType<typeof sessionJsonlOptions>, startedAt: number): Promise<boolean> {
+  for await (const line of readJsonl<CodexLine>(path, options)) {
+    if (isCurrentTaskStart(line, startedAt)) return true
+  }
+  return false
 }
 
 function numericStatus(value: unknown): number | undefined {
@@ -327,7 +352,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
     const head = await takeJsonl<CodexLine>(ref.path, SESSION_HEAD_LINES, jsonl)
     let first = head[0]
     let meta = head.find((line) => line.type === 'session_meta')
-    let model = head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
+    const taskStartedAt = currentTaskStartedAt(meta)
+    const hasTaskBoundary = taskStartedAt !== undefined && await hasCurrentTaskStart(ref.path, jsonl, taskStartedAt)
+    let model = hasTaskBoundary ? null : head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
     if (!first || !meta) {
       for await (const line of readJsonl<CodexLine>(ref.path, jsonl)) {
         first ??= line
@@ -375,7 +402,12 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let lastTimestamp: string | undefined
     const awaitingModel = model ? [] : [root]
 
+    let reachedCurrentTask = !hasTaskBoundary
     for await (const l of readJsonl<CodexLine>(ref.path, jsonl)) {
+      if (!reachedCurrentTask) {
+        if (isCurrentTaskStart(l, taskStartedAt!)) reachedCurrentTask = true
+        else continue
+      }
       lastTimestamp = l.timestamp
       const ts = l.timestamp ?? new Date(0).toISOString()
       if (!model && l.type === 'turn_context' && l.payload?.model) {

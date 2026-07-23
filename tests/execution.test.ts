@@ -94,8 +94,8 @@ describe('execution accounting', () => {
   it('renders complete measured facts without inventing task quality', () => {
     const markdown = renderExecution(measuredExecution())
 
-    expect(markdown).toContain('**Runs:** 1')
-    expect(markdown).toContain('**Failed runs:** 1/1 (100.00%)')
+    expect(markdown).toContain('**Sessions:** 1')
+    expect(markdown).toContain('**Sessions with tool errors:** 1/1 (100.00%)')
     expect(markdown).toContain('**Task quality:** not measured')
     expect(markdown).toContain('| Input | 100 | 1 |')
     expect(markdown).toContain('| Reasoning (output subset) | 5 | 1 |')

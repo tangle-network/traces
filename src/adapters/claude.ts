@@ -334,8 +334,8 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         service: SERVICE,
         agent: SERVICE,
       }),
-      ...main.spans,
     ]
+    appendAll(spans, main.spans)
 
     await this.foldSubagents(ref, traceId, main, spans, options)
     return spans

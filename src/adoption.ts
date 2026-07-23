@@ -6,13 +6,9 @@
  *   2. per-skill invocation frequency
  *   3. subagent (Task/Agent) spawn frequency
  *
- * CRITICAL undercount fix: the trace-level `Skill` tool-use count only sees
- * skills a session invoked *interactively*. Skills dispatched inside an
- * automation loop (e.g. `/evolve`, `/converge`) are logged to
- * `.evolve/skill-runs.jsonl` under the session's cwd and never surface as a
- * `Skill` tool span — historically ~370× more runs than the trace count. So we
- * read those files too and report "explicit invocations" and "loop-dispatched
- * runs" SEPARATELY, so neither silently reads as zero.
+ * A repository's `.evolve/skill-runs.jsonl` is historical context, not session
+ * evidence, unless a row carries the selected session ID. This keeps old runs
+ * from being attributed to the current trace.
  */
 
 import { readFile } from 'node:fs/promises'
@@ -43,6 +39,11 @@ export interface AdoptionReport {
   sessionsWithMaterializedSkills: number
   /** Sessions with tool inputs that reference a SKILL.md path. */
   sessionsWithSkillFileReference: number
+  /** Skill documents opened by a successful captured shell-read command.
+   *  Inspection is not evidence that the skill changed the outcome. */
+  skillDocumentReads: Record<string, number>
+  /** Total observed skill-document reads. */
+  totalSkillDocumentReads: number
   /** Explicit `Skill` tool invocations per skill name, corpus-wide. */
   skillInvocations: Record<string, number>
   /** Total explicit `Skill` tool invocations. */
@@ -53,13 +54,17 @@ export interface AdoptionReport {
   totalSubagentSpawns: number
   /** Sessions that spawned ≥1 subagent. */
   sessionsWithSubagent: number
-  /** Loop-dispatched skill runs per skill, read from `.evolve/skill-runs.jsonl`
-   *  (NOT visible at trace level — counted separately to avoid silent zeros). */
+  /** Loop-dispatched skill runs whose row names a selected session ID. */
   loopDispatchedRuns: Record<string, number>
-  /** Total loop-dispatched skill runs. */
+  /** Total session-linked loop-dispatched skill runs. */
   totalLoopDispatchedRuns: number
   /** `.evolve/skill-runs.jsonl` files that were read. */
   skillRunFilesRead: number
+  /** Same-repository loop history without a selected session ID. Never treat
+   *  this as evidence that a selected session used a skill. */
+  unlinkedLoopDispatchedRuns: Record<string, number>
+  /** Total unlinked same-repository loop history rows. */
+  totalUnlinkedLoopDispatchedRuns: number
 }
 
 /** A tool span the OTLP emitter wrote as `tool.<Name>`. */
@@ -119,10 +124,19 @@ function hasMaterializedSkillEvidence(s: OtlpSpan): boolean {
   return typeof content === 'string' && MATERIALIZED_SKILL_RE.test(content)
 }
 
-function hasSkillFileReference(s: OtlpSpan): boolean {
-  if (s.attributes['openinference.span.kind'] !== 'TOOL') return false
+const SKILL_DOCUMENT_READ_COMMAND = /\b(?:cat|sed|head|tail|less|more|awk)\b/
+
+function skillDocumentNames(s: OtlpSpan): string[] {
+  if (s.attributes['openinference.span.kind'] !== 'TOOL') return []
+  if (s.status.code !== 'OK' || !SKILL_DOCUMENT_READ_COMMAND.test(String(s.attributes['input.value'] ?? ''))) return []
   const input = s.attributes['input.value']
-  return typeof input === 'string' && input.includes('SKILL.md')
+  if (typeof input !== 'string') return []
+  const names = new Set<string>()
+  for (const match of input.matchAll(/(?:^|[\\/'"])([^\\/'"\s]+)[\\/]SKILL\.md\b/g)) {
+    const name = match[1]!
+    if (/^[A-Za-z][A-Za-z0-9-]*$/.test(name)) names.add(name)
+  }
+  return [...names]
 }
 
 function telemetryStatus(
@@ -141,6 +155,26 @@ function telemetryStatus(
  * contents. Each line records one or more skills under `skills` (array) or
  * `skill` (string) — the schema varies across producers, so accept both.
  */
+function skillNamesFromRun(record: Record<string, unknown>): string[] {
+  const names: string[] = []
+  if (Array.isArray(record.skills)) {
+    for (const skill of record.skills) if (typeof skill === 'string' && skill) names.push(skill)
+  }
+  if (typeof record.skill === 'string' && record.skill) names.push(record.skill)
+  return names.length > 0 ? names : ['?']
+}
+
+function sessionIdFromRun(record: Record<string, unknown>): string | undefined {
+  for (const key of ['sessionId', 'session_id', 'traceId', 'trace_id']) {
+    if (typeof record[key] === 'string' && record[key]) return record[key]
+  }
+  return undefined
+}
+
+function addCounts(target: Record<string, number>, names: readonly string[]): void {
+  for (const name of names) target[name] = (target[name] ?? 0) + 1
+}
+
 export function countSkillRunsJsonl(raw: string): Record<string, number> {
   const out: Record<string, number> = {}
   for (const line of raw.split('\n')) {
@@ -154,21 +188,23 @@ export function countSkillRunsJsonl(raw: string): Record<string, number> {
     }
     if (!o || typeof o !== 'object') continue
     const rec = o as Record<string, unknown>
-    const names: string[] = []
-    if (Array.isArray(rec.skills)) {
-      for (const s of rec.skills) if (typeof s === 'string' && s) names.push(s)
-    }
-    if (typeof rec.skill === 'string' && rec.skill) names.push(rec.skill)
-    if (names.length === 0) names.push('?')
-    for (const n of names) out[n] = (out[n] ?? 0) + 1
+    addCounts(out, skillNamesFromRun(rec))
   }
   return out
 }
 
-/** Read + count loop-dispatched runs from the `.evolve/skill-runs.jsonl` under
- *  each given cwd. Missing files are skipped (most sessions have none). */
-async function readLoopRuns(cwds: Iterable<string>): Promise<{ counts: Record<string, number>; filesRead: number }> {
-  const counts: Record<string, number> = {}
+/** Read loop history from the current repository. Only rows that carry an
+ * analyzed session ID become session evidence; all other rows stay unlinked. */
+async function readLoopRuns(
+  cwds: Iterable<string>,
+  sessionIds: ReadonlySet<string>,
+): Promise<{
+  linkedCounts: Record<string, number>
+  unlinkedCounts: Record<string, number>
+  filesRead: number
+}> {
+  const linkedCounts: Record<string, number> = {}
+  const unlinkedCounts: Record<string, number> = {}
   let filesRead = 0
   const seen = new Set<string>()
   for (const cwd of cwds) {
@@ -182,9 +218,21 @@ async function readLoopRuns(cwds: Iterable<string>): Promise<{ counts: Record<st
       continue
     }
     filesRead += 1
-    for (const [k, v] of Object.entries(countSkillRunsJsonl(raw))) counts[k] = (counts[k] ?? 0) + v
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue
+      let value: unknown
+      try {
+        value = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (!value || typeof value !== 'object') continue
+      const record = value as Record<string, unknown>
+      const target = sessionIds.has(sessionIdFromRun(record) ?? '') ? linkedCounts : unlinkedCounts
+      addCounts(target, skillNamesFromRun(record))
+    }
   }
-  return { counts, filesRead }
+  return { linkedCounts, unlinkedCounts, filesRead }
 }
 
 export interface AdoptionOptions {
@@ -207,6 +255,7 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
   const sessionsWithMaterializedSkills = new Set<string>()
   const sessionsWithSkillFileReference = new Set<string>()
   const skillInvocations: Record<string, number> = {}
+  const skillDocumentReads: Record<string, number> = {}
   const subagentSpawns: Record<string, number> = {}
   const canonicalSubagentSessions = new Set<string>()
   const fallbackSubagents = new Map<string, string[]>()
@@ -221,7 +270,11 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
       sessionCapabilities.set(group, observedCapability)
     }
     if (hasMaterializedSkillEvidence(s)) sessionsWithMaterializedSkills.add(group)
-    if (hasSkillFileReference(s)) sessionsWithSkillFileReference.add(group)
+    const skillDocuments = skillDocumentNames(s)
+    if (skillDocuments.length > 0) {
+      sessionsWithSkillFileReference.add(group)
+      addCounts(skillDocumentReads, skillDocuments)
+    }
     const tn = toolName(s)
     if (tn === 'Skill') {
       sessionCapabilities.set(group, 'supported')
@@ -248,11 +301,17 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
     }
   }
 
-  const { counts: loopDispatchedRuns, filesRead } = await readLoopRuns(opts.cwds ?? [])
+  const {
+    linkedCounts: loopDispatchedRuns,
+    unlinkedCounts: unlinkedLoopDispatchedRuns,
+    filesRead,
+  } = await readLoopRuns(opts.cwds ?? [], identifiedSessions)
 
   const totalSkillInvocations = Object.values(skillInvocations).reduce((a, b) => a + b, 0)
+  const totalSkillDocumentReads = Object.values(skillDocumentReads).reduce((a, b) => a + b, 0)
   const totalSubagentSpawns = Object.values(subagentSpawns).reduce((a, b) => a + b, 0)
   const totalLoopDispatchedRuns = Object.values(loopDispatchedRuns).reduce((a, b) => a + b, 0)
+  const totalUnlinkedLoopDispatchedRuns = Object.values(unlinkedLoopDispatchedRuns).reduce((a, b) => a + b, 0)
   let skillTelemetrySessions = 0
   let skillTelemetryUnsupportedSessions = 0
   let skillTelemetryUnknownSessions = 0
@@ -278,6 +337,8 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
     skillTelemetrySessions,
     sessionsWithMaterializedSkills: sessionsWithMaterializedSkills.size,
     sessionsWithSkillFileReference: sessionsWithSkillFileReference.size,
+    skillDocumentReads,
+    totalSkillDocumentReads,
     skillInvocations,
     totalSkillInvocations,
     subagentSpawns,
@@ -286,5 +347,7 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
     loopDispatchedRuns,
     totalLoopDispatchedRuns,
     skillRunFilesRead: filesRead,
+    unlinkedLoopDispatchedRuns,
+    totalUnlinkedLoopDispatchedRuns,
   }
 }
