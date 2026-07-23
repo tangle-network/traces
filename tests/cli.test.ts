@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -355,6 +355,54 @@ describe('traces CLI', () => {
     expect(text).toContain(parentId)
     expect(text).toContain(session)
     expect(text).toContain('Own direct-streaming conversion')
+  })
+
+  it('resolves a listed Codex session ID instead of treating it as a file path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-session-id-'))
+    const codexHome = join(dir, 'codex')
+    const sessionId = '019f-session-id'
+    const sessions = join(codexHome, 'sessions', '2026', '07', '23')
+    const session = join(sessions, `rollout-2026-07-23T00-00-00-${sessionId}.jsonl`)
+    const index = join(dir, 'index.json')
+    await mkdir(sessions, { recursive: true })
+    await writeFile(session, [
+      {
+        timestamp: '2026-07-23T00:00:00.000Z',
+        type: 'session_meta',
+        payload: { id: sessionId, cwd: dir },
+      },
+      {
+        timestamp: '2026-07-23T00:00:01.000Z',
+        type: 'response_item',
+        payload: { type: 'message', role: 'user', content: 'Inspect this session by ID.' },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'index',
+      '--harness',
+      'codex',
+      '--session',
+      sessionId,
+      '--out',
+      index,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, CODEX_HOME: codexHome, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const output = JSON.parse(await readFile(index, 'utf8')) as {
+      sessions: Array<{ session: { sessionId: string; path: string } }>
+    }
+    expect(output.sessions).toHaveLength(1)
+    expect(output.sessions[0]).toMatchObject({
+      session: { sessionId, path: session },
+    })
   })
 
   it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {

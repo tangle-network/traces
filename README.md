@@ -96,6 +96,7 @@ Every adapter captures the full conversation: the **user's prompt** and the **as
 
 ```bash
 traces list     --harness claude-code --last 20    # discover sessions
+traces analyze  --harness codex --session <id>     # pin one ID printed by `list`
 traces analyze  --harness codex --last 1           # $0 findings with actions + checks
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
@@ -245,6 +246,9 @@ It is intentionally read-only: it points to repeated-call loops, high tool-error
 ```bash
 traces evidence --all --since 24h --out policy-evidence.jsonl --otlp spans.otlp.jsonl
 ```
+
+`--last` follows recent file activity and is useful for live inspection.
+For a reproducible report, run `traces list` first and pass its session ID with `--session`.
 
 Each JSONL row is one session:
 

@@ -197,6 +197,60 @@ async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref
   return out
 }
 
+function missingPath(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
+/** Resolve `--session` as either a concrete harness file or an ID printed by
+ * `traces list`. An ID is only accepted when it identifies one session under
+ * the selected harnesses, keeping reports reproducible as live files change. */
+async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref: SessionRef }> {
+  if (!args.session) throw new Error('resolveSelectedSession requires --session')
+
+  const adapter = resolveAdapter(args.harness)
+  if (!adapter && !args.all) throw new Error(`unknown harness "${args.harness}"`)
+
+  try {
+    const st = await stat(args.session)
+    if (!adapter) {
+      throw new Error('--session <path> requires --harness when --all is set')
+    }
+    return {
+      adapter,
+      ref: {
+        harness: adapter.harness,
+        sessionId: args.session,
+        path: args.session,
+        // --session is an explicit file; honor --cwd so adoption can find the
+        // project's .evolve/skill-runs.jsonl (locate() infers cwd in the scan path).
+        cwd: args.cwd ?? null,
+        mtimeMs: st.mtimeMs,
+      },
+    }
+  } catch (error) {
+    if (!missingPath(error)) throw error
+  }
+
+  const matches: Array<{ adapter: HarnessTraceAdapter; ref: SessionRef }> = []
+  for (const candidate of args.all ? adaptersFor(args) : [adapter!]) {
+    const refs = await locateSessions(candidate, { cwd: args.cwd })
+    for (const ref of refs) {
+      if (ref.sessionId === args.session) matches.push({ adapter: candidate, ref })
+    }
+  }
+  if (matches.length === 1) return matches[0]!
+  if (matches.length === 0) {
+    throw new Error(
+      `no ${args.all ? 'selected' : adapter!.harness} session with ID "${args.session}"; ` +
+        'run `traces list` to select an ID, or pass an explicit session path',
+    )
+  }
+  throw new Error(
+    `session ID "${args.session}" is ambiguous across ${matches.length} files; ` +
+      'select one harness or pass its explicit session path',
+  )
+}
+
 async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
@@ -274,18 +328,7 @@ function selectedSessionSource(
 async function collectSpans(args: Args): Promise<CollectedSpans> {
   if (args.input) return collectImportedSpans(args)
   if (args.session) {
-    const adapter = resolveAdapter(args.harness)
-    if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
-    const st = await stat(args.session)
-    const ref: SessionRef = {
-      harness: adapter.harness,
-      sessionId: args.session,
-      path: args.session,
-      // --session is an explicit file; honor --cwd so adoption can find the
-      // project's .evolve/skill-runs.jsonl (locate() infers cwd in the scan path).
-      cwd: args.cwd ?? null,
-      mtimeMs: st.mtimeMs,
-    }
+    const { adapter, ref } = await resolveSelectedSession(args)
     const spans = await parseSession(adapter, ref)
     return {
       spans,
@@ -320,16 +363,7 @@ async function cmdConvert(args: Args): Promise<void> {
 
 async function collectSessionRows(args: Args): Promise<Array<{ ref: SessionRef; spans: OtlpSpan[] }>> {
   if (args.session) {
-    const adapter = resolveAdapter(args.harness)
-    if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
-    const st = await stat(args.session)
-    const ref: SessionRef = {
-      harness: adapter.harness,
-      sessionId: args.session,
-      path: args.session,
-      cwd: args.cwd ?? null,
-      mtimeMs: st.mtimeMs,
-    }
+    const { adapter, ref } = await resolveSelectedSession(args)
     return [{ ref, spans: await parseSession(adapter, ref) }]
   }
   const groups = await discover({ ...args, last: args.last || 20 })
@@ -828,7 +862,7 @@ Options:
   --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
   --all            Sweep every known harness
   --last <n>       Most-recent N sessions
-  --session <path> Analyze/stream one explicit harness session file
+  --session <id|path> Analyze one listed session ID or one explicit harness session file
   --cwd <dir>      Filter sessions by working directory
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
