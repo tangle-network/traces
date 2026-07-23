@@ -51,7 +51,7 @@ traces stream --all --mode findings
 
 That's the command in the demo above. The **deterministic pass** checks stuck loops, token growth, output decay, missing self-verification, tool failures, and human corrections. Each supported issue is returned as a finding with evidence, an action, confidence, and a validation plan. It needs no API key and costs nothing.
 
-Add `--llm` for the **agentic analysts** (failure-mode / knowledge-gap / knowledge-poisoning / improvement); they call OpenAI and respect `--budget <usd>`.
+Add `--llm` for the **agentic analysts**. `traces` first uses free local signals to choose the smallest useful set: a failure review always runs, while knowledge and edit reviews run only when failures, repeated calls, or corrective feedback support them. They call OpenAI and respect `--budget <usd>`.
 
 Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo`. See [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
 
@@ -71,7 +71,7 @@ The deterministic pass (free, no key) surfaces:
 | **No self-verification** | state-mutating actions never followed by an eval/inspect/check |
 | **Tool mix / retry / error rates** | repeated, retried, and failed tool calls |
 
-`--llm` adds agentic analysts that read the conversation and cluster higher-order failure and improvement signals.
+`--llm` adds agentic analysts that read the conversation and cluster higher-order failure and improvement signals. They receive the compact deterministic findings first, then share their earlier findings with later analysts. With `traces improve`, the selected analysts and reasons are saved in `result.json` and the report, so another agent can reuse the packet without rereading the raw trace.
 
 ## Supported harnesses
 
@@ -198,7 +198,7 @@ The directory contains:
 
 | File | Purpose |
 |---|---|
-| `result.json` | findings, actions, checks, execution facts, and adoption data |
+| `result.json` | findings, actions, checks, execution facts, adoption data, and the chosen LLM analysis route |
 | `evidence.jsonl` | one row per evidence ref, suitable for downstream mining |
 | `report.md` | human-readable report rendered from the typed data |
 | `traces.otlp.jsonl` | canonical trace used by the analysts and execution accounting |
