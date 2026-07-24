@@ -534,4 +534,62 @@ describe('traces CLI', () => {
     expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding'])
     expect((rows.find((row) => row.event === 'finding')!.finding as Record<string, unknown>).ruleId).toBe('cfg-live')
   })
+
+  it('reports a supervision tree from --supervisor-run-dir, and rolls up a directory of runs', async () => {
+    // The rest of this CLI reports what happened inside ONE harness session. A supervision
+    // tree is the other axis — who spawned whom, was anyone steered mid-task, how much of the
+    // wall clock had no worker running. Every metric comes from
+    // @tangle-network/agent-eval/supervisor-run; this path only selects and prints.
+    const root = await mkdtemp(join(tmpdir(), 'traces-supervisor-'))
+    const runDir = join(root, 'runs', 'inst-1', 'ARM')
+    const sup = join(runDir, 'ws', '.loops', 'supervisor', 'sup-1')
+    await mkdir(join(sup, 'workers'), { recursive: true })
+    const at = (sec: number) => new Date(Date.parse('2026-07-23T00:00:00.000Z') + sec * 1000).toISOString()
+    await writeFile(join(sup, 'journal.jsonl'), [
+      JSON.stringify({ kind: 'spawned', id: 'sup-1', label: 'root', at: at(0) }),
+      JSON.stringify({ kind: 'spawned', id: 'sup-1:w0', parent: 'sup-1', label: 'w-0', at: at(10) }),
+      JSON.stringify({ kind: 'settled', id: 'sup-1:w0', status: 'done', at: at(100), spent: { tokens: { input: 5, output: 1 }, usd: 0.01 } }),
+    ].join('\n'))
+    await writeFile(join(sup, 'state.json'), JSON.stringify({
+      status: 'completed', startedAt: at(0), completedAt: at(200), result: { delivered: true, spentUsd: 0.02 },
+    }))
+    await writeFile(join(sup, 'workers', 'w-0.ndjson'), [
+      JSON.stringify({ kind: 'started', label: 'w-0', at: at(10), cwd: '/tmp/clone-w-0' }),
+      JSON.stringify({ kind: 'message', label: 'w-0', direction: 'down', message: 'narrow the fix', delivered: true, at: at(20) }),
+      JSON.stringify({ kind: 'finished', label: 'w-0', passed: true, patchBytes: 42, evidence: 'verify PASSED\n', at: at(100) }),
+    ].join('\n'))
+
+    const run = (args: string[]) => execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 60_000,
+    })
+
+    const single = await run(['analyze', '--supervisor-run-dir', runDir])
+    expect(single.stdout).toContain('# Run report — inst-1 [ARM]')
+    expect(single.stdout).toContain('steers=1 queued / 1 delivered')
+    expect(single.stdout).toContain('| Workers spawned | 1 |')
+    // UNAVAILABLE is not ZERO: nothing here wrote a judge verdict.
+    expect(single.stdout).toContain('unavailable —')
+
+    const rollup = await run(['analyze', '--supervisor-run-dir', root])
+    expect(rollup.stdout).toContain(`Supervisor rollup — ${root}`)
+    expect(rollup.stdout).toContain('Steers across all cells: 1')
+    expect(rollup.stdout).toContain('| inst-1 | ARM |')
+
+    const out = join(root, 'supervisor.md')
+    const written = await run(['analyze', '--supervisor-run-dir', runDir, '--out', out])
+    expect(written.stdout).toContain(`supervisor report → ${out}`)
+    expect(await readFile(out, 'utf8')).toContain('# Run report — inst-1 [ARM]')
+
+    // A path with no supervision journal analyzes cleanly into an all-unavailable
+    // report. Printing it would read as "the supervisor did nothing" instead of
+    // "wrong directory", so the command fails with the layout it expected.
+    const empty = join(root, 'not-a-run')
+    await mkdir(empty, { recursive: true })
+    await expect(run(['analyze', '--supervisor-run-dir', empty])).rejects.toThrow(
+      /no supervisor run found at .*not-a-run/,
+    )
+  }, 120_000)
 })

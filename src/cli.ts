@@ -46,6 +46,14 @@ import {
   type TraceLiveAnalyst,
   type TraceLiveFinding,
 } from './live.js'
+import {
+  analyzeSupervisorRun,
+  findSupervisorRunDirs,
+  isUnavailable,
+  renderSupervisorRollupMarkdown,
+  renderSupervisorRunMarkdown,
+  rollupSupervisorRuns,
+} from '@tangle-network/agent-eval/supervisor-run'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
@@ -92,6 +100,7 @@ interface Args {
   noFindings: boolean
   metadata?: string
   attrs: string[]
+  supervisorRunDir?: string
 }
 
 function packageVersion(): string {
@@ -130,6 +139,7 @@ function parseArgs(argv: string[]): Args {
       case '--last': a.last = Number(next()); break
       case '--session': a.session = next(); break
       case '--cwd': a.cwd = next(); break
+      case '--supervisor-run-dir': a.supervisorRunDir = next(); break
       case '--since': a.since = next(); break
       case '--out': a.out = next(); break
       case '--dir': a.dir = next(); break
@@ -489,6 +499,7 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
+  if (args.supervisorRunDir) return cmdAnalyzeSupervisorRun(args.supervisorRunDir, args)
   const result = await investigate(args, { loadDefaultConfig: false })
   if (args.out) {
     await saveReport(args.out, result.report)
@@ -498,6 +509,46 @@ async function cmdAnalyze(args: Args): Promise<void> {
     )
   } else {
     console.log(result.report)
+  }
+}
+
+/**
+ * Supervision-tree view: what the TREE did (steers, spawn waves, concurrency,
+ * idle wall, cost by role, accepted vs rejected), as opposed to the rest of
+ * this CLI, which reports what happened inside one harness session.
+ *
+ * Every metric comes from `@tangle-network/agent-eval/supervisor-run` — this
+ * function only picks single-run vs rollup and prints. No analysis is
+ * duplicated here, and none may be added.
+ */
+async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
+  const nested = await findSupervisorRunDirs(runDir)
+  let markdown: string
+  if (nested.length > 0) {
+    markdown = renderSupervisorRollupMarkdown(
+      rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
+      `Supervisor rollup — ${runDir}`,
+    )
+  } else {
+    const report = await analyzeSupervisorRun(runDir)
+    // A path with no supervision journal analyzes cleanly into a report whose
+    // every metric is unavailable. Printing that reads as "the supervisor did
+    // nothing" rather than "you pointed me at the wrong directory".
+    if (isUnavailable(report.orchestration.workersSpawned)) {
+      throw new Error(
+        `no supervisor run found at ${runDir} — expected <runDir>/ws/.loops/supervisor/<id>, ` +
+          'or a parent directory containing such runs',
+      )
+    }
+    markdown = renderSupervisorRunMarkdown(report)
+  }
+  if (args.out) {
+    await saveReport(args.out, markdown)
+    console.log(
+      `supervisor report → ${args.out}  (${nested.length > 0 ? `${nested.length} runs` : '1 run'})`,
+    )
+  } else {
+    console.log(markdown)
   }
 }
 
@@ -847,6 +898,7 @@ function usage(): void {
 Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines over sessions or an input file
+            (--supervisor-run-dir <dir> reports a supervision tree instead)
   investigate Run typed investigation flow, including BYO config + evidence-backed actions
   improve   Write findings, evidence, report, and canonical trace artifacts
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
@@ -864,6 +916,10 @@ Options:
   --last <n>       Most-recent N sessions
   --session <id|path> Analyze one listed session ID or one explicit harness session file
   --cwd <dir>      Filter sessions by working directory
+  --supervisor-run-dir <dir>
+                   analyze: report a SUPERVISION TREE instead of harness sessions —
+                   steers, spawn waves, concurrency, idle wall, cost by role,
+                   accepted vs rejected. Rolls up when the dir holds many runs.
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory
