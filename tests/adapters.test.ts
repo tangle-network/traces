@@ -193,7 +193,7 @@ describe('JSONL adapter streaming', () => {
     )
   })
 
-  it('recovers corruption while parsing a 100 MB file below 128 MB peak RSS', () => {
+  it('recovers corruption while parsing a 100 MB file within a bounded heap', () => {
     const path = join(dir, 'large-tool-inputs.jsonl')
     const suffix = 'x'.repeat(1024 * 1024)
     const file = openSync(path, 'w')
@@ -219,6 +219,29 @@ describe('JSONL adapter streaming', () => {
             },
           })}\n`,
         )
+        if (index === 50) {
+          writeSync(
+            file,
+            `${JSON.stringify({
+              type: 'assistant',
+              uuid: `large-${index}`,
+              parentUuid: 'replayed-parent',
+              sessionId: 'large',
+              timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+              message: {
+                role: 'assistant',
+                content: [
+                  {
+                    type: 'tool_use',
+                    id: `tool-${index}`,
+                    name: 'bash',
+                    input: { payload: `${index}:${suffix}` },
+                  },
+                ],
+              },
+            })}\n`,
+          )
+        }
         if (index === 50) writeSync(file, 'secret-large-middle-record\n')
       }
       writeSync(file, 'secret-large-final-record')
@@ -253,9 +276,12 @@ describe('JSONL adapter streaming', () => {
     `
     const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' }
     delete env.NODE_OPTIONS
+    // The V8 cap rejects retention of the 100 MB fixture; RSS includes Node and tsx native overhead.
+    const childHeapLimitMb = 64
+    const maxRssMb = 224
     const child = spawnSync(
       process.execPath,
-      ['--max-old-space-size=40', '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      [`--max-old-space-size=${childHeapLimitMb}`, '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
       { cwd: process.cwd(), encoding: 'utf8', env, timeout: 30_000 },
     )
 
@@ -274,7 +300,7 @@ describe('JSONL adapter streaming', () => {
       integrity: { status: 'degraded_not_lossless' },
     })
     expect(result.integrity?.corruptions).toHaveLength(2)
-    expect(result.maxRssKb).toBeLessThan(128 * 1024)
+    expect(result.maxRssKb).toBeLessThan(maxRssMb * 1024)
   })
 
   it('customer session parsing retains valid Codex records and stamps a degraded receipt', async () => {
@@ -630,6 +656,96 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
 })
 
 describe('claude adapter (conversation capture)', () => {
+  it('keeps a canonical session ID that first appears on an accepted duplicate', async () => {
+    const path = join(dir, 'claude-duplicate-session-id.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'assistant',
+          uuid: 'same',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'one turn' }] },
+        },
+        {
+          type: 'assistant',
+          uuid: 'same',
+          parentUuid: 'replayed-parent',
+          sessionId: 'canonical-session',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'one turn' }] },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+
+    expect(new Set(spans.map((span) => span.trace_id))).toEqual(new Set(['canonical-session']))
+  })
+
+  it('reports the source file for conflicting Claude events', async () => {
+    const path = join(dir, 'claude-conflicting-events.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'assistant',
+          uuid: 'same',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'first' }] },
+        },
+        {
+          type: 'assistant',
+          uuid: 'same',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'different' }] },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+
+    await expect(new ClaudeAdapter().parse(refFor(path, 'claude-code'))).rejects.toMatchObject({
+      name: 'ClaudeEventConflictError',
+      sourcePath: path,
+      eventId: 'same',
+    })
+  })
+
+  it('bounds the session to emitted spans instead of untimestamped metadata', async () => {
+    const path = join(dir, 'claude-session-bounds.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'mode', sessionId: 'bounded' },
+        {
+          type: 'assistant',
+          uuid: 'a1',
+          timestamp: '2026-01-01T00:00:05Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'later turn' }] },
+        },
+        {
+          type: 'user',
+          uuid: 'u1',
+          timestamp: '2026-01-01T00:00:02Z',
+          message: { role: 'user', content: [{ type: 'text', text: 'earlier turn' }] },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+
+    expect(spans[0]).toMatchObject({
+      name: 'session',
+      start_time: '2026-01-01T00:00:02Z',
+      end_time: '2026-01-01T00:00:05Z',
+    })
+  })
+
   it('preserves complete output while folding subagents under their Agent call', async () => {
     const path = join(dir, 'claude.jsonl')
     writeFileSync(
