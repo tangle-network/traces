@@ -582,5 +582,14 @@ describe('traces CLI', () => {
     const written = await run(['analyze', '--supervisor-run-dir', runDir, '--out', out])
     expect(written.stdout).toContain(`supervisor report → ${out}`)
     expect(await readFile(out, 'utf8')).toContain('# Run report — inst-1 [ARM]')
+
+    // A path with no supervision journal analyzes cleanly into an all-unavailable
+    // report. Printing it would read as "the supervisor did nothing" instead of
+    // "wrong directory", so the command fails with the layout it expected.
+    const empty = join(root, 'not-a-run')
+    await mkdir(empty, { recursive: true })
+    await expect(run(['analyze', '--supervisor-run-dir', empty])).rejects.toThrow(
+      /no supervisor run found at .*not-a-run/,
+    )
   }, 120_000)
 })

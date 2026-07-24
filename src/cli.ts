@@ -49,6 +49,7 @@ import {
 import {
   analyzeSupervisorRun,
   findSupervisorRunDirs,
+  isUnavailable,
   renderSupervisorRollupMarkdown,
   renderSupervisorRunMarkdown,
   rollupSupervisorRuns,
@@ -522,15 +523,25 @@ async function cmdAnalyze(args: Args): Promise<void> {
  */
 async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
   const nested = await findSupervisorRunDirs(runDir)
-  const markdown =
-    nested.length > 0
-      ? renderSupervisorRollupMarkdown(
-          rollupSupervisorRuns(
-            await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir))),
-          ),
-          `Supervisor rollup — ${runDir}`,
-        )
-      : renderSupervisorRunMarkdown(await analyzeSupervisorRun(runDir))
+  let markdown: string
+  if (nested.length > 0) {
+    markdown = renderSupervisorRollupMarkdown(
+      rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
+      `Supervisor rollup — ${runDir}`,
+    )
+  } else {
+    const report = await analyzeSupervisorRun(runDir)
+    // A path with no supervision journal analyzes cleanly into a report whose
+    // every metric is unavailable. Printing that reads as "the supervisor did
+    // nothing" rather than "you pointed me at the wrong directory".
+    if (isUnavailable(report.orchestration.workersSpawned)) {
+      throw new Error(
+        `no supervisor run found at ${runDir} — expected <runDir>/ws/.loops/supervisor/<id>, ` +
+          'or a parent directory containing such runs',
+      )
+    }
+    markdown = renderSupervisorRunMarkdown(report)
+  }
   if (args.out) {
     await saveReport(args.out, markdown)
     console.log(
