@@ -52,6 +52,63 @@ describe('otlp span builder', () => {
 })
 
 describe('claude transcript → spans', () => {
+  it('ignores a duplicate event UUID when only un-emitted metadata changes', () => {
+    const event = {
+      type: 'assistant',
+      uuid: 'duplicate',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'one logical turn' }],
+      },
+    }
+
+    const { spans } = parseClaudeStream([event, { ...event, parentUuid: 'replayed-parent' }], {
+      traceId: 'sess',
+      agent: 'claude-code',
+      startStep: 0,
+      idPrefix: '',
+      rootParent: 'root',
+    })
+
+    expect(spans.filter((span) => span.name === 'llm.turn')).toHaveLength(1)
+    expect(spans[0]?.span_id).toBe('duplicate')
+  })
+
+  it('rejects conflicting payloads for one event UUID', () => {
+    const context = {
+      traceId: 'sess',
+      agent: 'claude-code',
+      startStep: 0,
+      idPrefix: '',
+      rootParent: 'root',
+    }
+
+    expect(() =>
+      parseClaudeStream(
+        [
+          {
+            type: 'assistant',
+            uuid: 'duplicate',
+            timestamp: '2026-01-01T00:00:00Z',
+            message: {
+              content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { command: 'first' } }],
+            },
+          },
+          {
+            type: 'assistant',
+            uuid: 'duplicate',
+            timestamp: '2026-01-01T00:00:00Z',
+            message: {
+              content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { command: 'different' } }],
+            },
+          },
+        ],
+        context,
+      ),
+    ).toThrow('conflicting payloads')
+  })
+
   it('emits an LLM span with billed tokens and a child TOOL span, backfilling error status', () => {
     const events = [
       {
