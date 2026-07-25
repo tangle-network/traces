@@ -107,11 +107,7 @@ async function sessionMeta(item: UploadItem): Promise<Record<string, string | nu
   return meta
 }
 
-// TraceSpanEvent.*UnixNano is typed `number`, and our source resolution is
-// milliseconds. ms × 1e6 exceeds MAX_SAFE_INTEGER, so the low ~256ns are not
-// representable — but that's below our input resolution, and since both ends
-// are integer-ms × 1e6 the rounding preserves ordering (start ≤ end always).
-const msToNano = (iso: string): number => parseIsoToEpochMs(iso) * 1_000_000
+const msToNano = (epochMs: number): string => (BigInt(epochMs) * 1_000_000n).toString()
 
 /** Map redacted OtlpSpan[] → the hosted TraceSpanEvent[] wire shape, attaching
  *  session metadata to the root span(s). */
@@ -130,19 +126,20 @@ export function toTraceSpanEvents(
     attributes[ATTR.SESSION_ID] = s.trace_id
     attributes[ATTR.INGEST_SOURCE] = INGEST_SOURCE_CLI
     if (s.parent_span_id === null) Object.assign(attributes, rootMeta)
-    const startNano = msToNano(s.start_time)
+    const startMs = parseIsoToEpochMs(s.start_time)
+    const endMs = Math.max(startMs, parseIsoToEpochMs(s.end_time))
     return {
       traceId: s.trace_id,
       spanId: s.span_id,
       ...(s.parent_span_id ? { parentSpanId: s.parent_span_id } : {}),
       name: s.name,
-      startTimeUnixNano: startNano,
-      endTimeUnixNano: Math.max(startNano, msToNano(s.end_time)),
+      startTimeUnixNano: msToNano(startMs),
+      endTimeUnixNano: msToNano(endMs),
       attributes,
       ...(s.status.code === 'UNSET'
         ? {}
         : { status: { code: s.status.code, ...(s.status.message ? { message: s.status.message } : {}) } }),
-    } as TraceSpanEvent
+    }
   })
 }
 

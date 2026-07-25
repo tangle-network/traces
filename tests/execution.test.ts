@@ -77,11 +77,13 @@ describe('execution accounting', () => {
       cacheWrite: 0,
     })
     expect(report.execution.modelCalls).toEqual({ runs: 1, events: 1, reportingRuns: 1 })
-    expect(report.execution.failures).toEqual({
+    expect(report.execution.executionErrors).toMatchObject({
       runs: 1,
       fraction: 1,
-      reportedErrorEvents: 1,
+      events: 1,
       reportingRuns: 1,
+      errorSpanEvents: 1,
+      errorSpanReportingRuns: 1,
     })
     expect(report.costProvenance).toEqual({
       observed: { n: 1, totalUsd: 0.02 },
@@ -95,7 +97,7 @@ describe('execution accounting', () => {
     const markdown = renderExecution(measuredExecution())
 
     expect(markdown).toContain('**Sessions:** 1')
-    expect(markdown).toContain('**Sessions with tool errors:** 1/1 (100.00%)')
+    expect(markdown).toContain('**Sessions with execution errors:** 1/1 (100.00%)')
     expect(markdown).toContain('**Task quality:** not measured')
     expect(markdown).toContain('| Input | 100 | 1 |')
     expect(markdown).toContain('| Reasoning (output subset) | 5 | 1 |')

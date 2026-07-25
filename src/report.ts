@@ -87,9 +87,13 @@ function decimal(value: number, digits = 1): string {
   })
 }
 
+function measured(value: number | null, render: (captured: number) => string): string {
+  return value === null ? 'not captured' : render(value)
+}
+
 function distributionRow(label: string, distribution: ScalarDistribution, unit = ''): string {
   if (distribution.n === 0) return `| ${label} | 0 | not captured | not captured | not captured | not captured | not captured |`
-  const value = (number: number) => `${decimal(number)}${unit}`
+  const value = (number: number | null) => measured(number, (captured) => `${decimal(captured)}${unit}`)
   return `| ${label} | ${count(distribution.n)} | ${value(distribution.min)} | ${value(distribution.mean)} | ${value(distribution.p50)} | ${value(distribution.p95)} | ${value(distribution.max)} |`
 }
 
@@ -102,7 +106,7 @@ function tokenRows(usage: TokenUsageInsight): string[] {
     ['Cache write', usage.totals.cacheWrite, usage.cacheWrite],
   ]
   return rows.map(([label, total, values]) =>
-    `| ${label} | ${count(total)} | ${count(values.n)} | ${decimal(values.mean)} | ${decimal(values.p50)} | ${decimal(values.p95)} | ${count(values.max)} |`,
+    `| ${label} | ${count(total)} | ${count(values.n)} | ${measured(values.mean, decimal)} | ${measured(values.p50, decimal)} | ${measured(values.p95, decimal)} | ${measured(values.max, count)} |`,
   )
 }
 
@@ -113,8 +117,8 @@ export function renderExecution(report: ExecutionReport): string {
     `- **Sessions:** ${count(execution.durationMs.n)}  |  ` +
       `**Model-call runs:** ${count(execution.modelCalls.runs)}  |  ` +
       `**Model-call events:** ${count(execution.modelCalls.events)}  |  ` +
-      `**Sessions with tool errors:** ${count(execution.failures.runs)}/${count(execution.failures.reportingRuns)} ` +
-      `(${decimal(execution.failures.fraction * 100, 2)}%)`,
+      `**Sessions with execution errors:** ${count(execution.executionErrors.runs)}/${count(execution.executionErrors.reportingRuns)} ` +
+      `(${measured(execution.executionErrors.fraction, (fraction) => `${decimal(fraction * 100, 2)}%`)})`,
   )
   lines.push('- **Task quality:** not measured; these traces do not include comparable task outcome labels.')
   lines.push('')
