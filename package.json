@@ -57,7 +57,7 @@
     "@ax-llm/ax": "^23.0.1"
   },
   "devDependencies": {
-    "@tangle-network/agent-eval": "0.128.1",
+    "@tangle-network/agent-eval": "0.128.2",
     "@types/node": "^22.0.0",
     "tsup": "^8.0.0",
     "tsx": "^4.19.0",
@@ -66,6 +66,6 @@
     "vitest": "^4.1.9"
   },
   "peerDependencies": {
-    "@tangle-network/agent-eval": ">=0.128.1 <0.129.0"
+    "@tangle-network/agent-eval": ">=0.128.2 <0.129.0"
   }
 }

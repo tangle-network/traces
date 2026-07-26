@@ -16,10 +16,10 @@ importers:
       '@ax-llm/ax':
         specifier: ^23.0.1
         version: 23.0.1(zod@4.4.3)
-      '@tangle-network/agent-eval':
-        specifier: ^0.124.0
-        version: 0.124.0(typescript@5.9.3)
     devDependencies:
+      '@tangle-network/agent-eval':
+        specifier: 0.128.2
+        version: 0.128.2(typescript@5.9.3)
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.21
@@ -44,13 +44,22 @@ packages:
   '@adraffy/ens-normalize@1.11.1':
     resolution: {integrity: sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ==}
 
-  '@asteasolutions/zod-to-openapi@8.5.0':
-    resolution: {integrity: sha512-SABbKiObg5dLRiTFnqiW1WWwGcg1BJfmHtT2asIBnBHg6Smy/Ms2KHc650+JI4Hw7lSkdiNebEGXpwoxfben8Q==}
+  '@asteasolutions/zod-to-openapi@9.1.0':
+    resolution: {integrity: sha512-pLMeRgRYS7/vZIgAAkOe2P6+XGTifR1MT9pqDoxZ11EmcJJ+DPmdPqLN8ZZF4U8R9KHCCQCS9c2wtuE8wSrfkw==}
     peerDependencies:
       zod: ^4.0.0
 
   '@ax-llm/ax@23.0.1':
     resolution: {integrity: sha512-9glLBupY1XthY/WQGaUa3fK5BYYKTqc07Dxf4ZQmt0PDvX+s0XGyiua1jNnJGUlUeROyKN8k5IuVM84VXgS6Hw==}
+    hasBin: true
+    peerDependencies:
+      zod: ^3.24.0 || ^4.0.0
+    peerDependenciesMeta:
+      zod:
+        optional: true
+
+  '@ax-llm/ax@23.0.5':
+    resolution: {integrity: sha512-Kgs+P4hPHMyppOnlEQTSFUJTuuLVWfvvV4QakHwLv3VRlw2T98okZkiwicdN0AKGH/uTf0ktF0Kbq1s9c7AxcA==}
     hasBin: true
     peerDependencies:
       zod: ^3.24.0 || ^4.0.0
@@ -223,8 +232,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@hono/node-server@2.0.10':
-    resolution: {integrity: sha512-ZcnNVhKTmyDJeg0UlnZjvM73JBsTAuhrH/J4fjwGOw59PwOW51r4J+p6CsKZWXdKSme4MFqU62CZMOsdDrU4CA==}
+  '@hono/node-server@2.0.11':
+    resolution: {integrity: sha512-bjD221KPLoJTWUwso1J6fGKiTXEUFedG/s0visavY4zakFPkeGURMRNly+FhBHs7T8Dz4qHaZIMX9ZoJHSJtKA==}
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4
@@ -535,11 +544,11 @@ packages:
   '@tangle-network/agent-core@0.3.8':
     resolution: {integrity: sha512-bZfVpdiFjXbcQwSxSQABdtXEmUuapWChCcXrHkP6fAnwqEy9hWEfeZLlMZUy+1XaOfpTaMLUOEAwYhXfN018wQ==}
 
-  '@tangle-network/agent-core@0.4.19':
-    resolution: {integrity: sha512-GzygwJ6mmY4tgkFonc4yq2vU+kJSTo6JuZCUNsPQgjZigZeSpWjX+3r+ZxEi38VqAzt79MEn43/Txu+ZflqazQ==}
+  '@tangle-network/agent-core@0.4.21':
+    resolution: {integrity: sha512-i+fTC8TxpjSlZiq6qc8JY6JssfZcsPtJtt3V7pTGVaBCyuxOllW2C4E7Uho8HOz5AmExjFL5yN4AAJ3nmH1DGA==}
 
-  '@tangle-network/agent-eval@0.124.0':
-    resolution: {integrity: sha512-Q0ipkHdU4g3fNpxuxLDpkLLMuWl46uxNGaZMyE5qKJKxd7OwisRm4Nm56k3ujtJC6iyBADsvjJaUl6dtMZf+Kg==}
+  '@tangle-network/agent-eval@0.128.2':
+    resolution: {integrity: sha512-YRRu6Dmm5VVY2/Gvf5dQpoQyLLDCIfQIcliRWJxZq0zco0252uRYqIufgSgDoCCwrE1bkrXMKZF89TMiclYFdQ==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -549,8 +558,8 @@ packages:
   '@tangle-network/agent-interface@0.17.1':
     resolution: {integrity: sha512-B7dRJTo0HSUtgBCB1VMwkTFYkLUaRr/4BcRglrQuGhGUwOzKv1RYyMejOVh5M3a5AagY9N79f7GYbjcA3UmnIA==}
 
-  '@tangle-network/agent-interface@0.31.0':
-    resolution: {integrity: sha512-OvP8OebhbFd4d/Mxt1QDPAckJdBIA9omxoXU17dBbyEwhZKsiM6rbuOPaPDcv0Sf4koNLI25CfOYuzqlDR6ypQ==}
+  '@tangle-network/agent-interface@0.33.0':
+    resolution: {integrity: sha512-lRIzaZgiCs1lBjOuLt2a+LgExPxpNUMxQgi/RTY+WpKyrxLVmlgKkOlwcpk2IQLvh8rwe0oZJkHGAgU35DRUIQ==}
 
   '@tangle-network/sandbox@0.9.7':
     resolution: {integrity: sha512-9pCwJ5MlF7RUpp0AQKQDFyR0yu+E0udEhWkqhrlb/RuoJxlt72zVPuzO4FnMb1MZTkfjStmomC3k5xQyqi1YSA==}
@@ -732,8 +741,8 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
-  hono@4.12.30:
-    resolution: {integrity: sha512-emn+JoJjrN9YTpRDS5it/UI2SO9BAE37T6I3d963RxcZ81G9A4pr2SZTEiiaiKbzx+NKRg5BZ89fCL7gCJCUog==}
+  hono@4.12.32:
+    resolution: {integrity: sha512-XcuyW9qE2kJn07PkecMOBd5Vq/hMy7mmGw+idz1yblbg9N17ijJODrvPkn7/dwL3Kulj8LcRJ69DLOWf91dRUg==}
     engines: {node: '>=16.9.0'}
 
   isows@1.0.7:
@@ -1136,12 +1145,18 @@ snapshots:
 
   '@adraffy/ens-normalize@1.11.1': {}
 
-  '@asteasolutions/zod-to-openapi@8.5.0(zod@4.4.3)':
+  '@asteasolutions/zod-to-openapi@9.1.0(zod@4.4.3)':
     dependencies:
       openapi3-ts: 4.6.0
       zod: 4.4.3
 
   '@ax-llm/ax@23.0.1(zod@4.4.3)':
+    dependencies:
+      '@opentelemetry/api': 1.9.1
+    optionalDependencies:
+      zod: 4.4.3
+
+  '@ax-llm/ax@23.0.5(zod@4.4.3)':
     dependencies:
       '@opentelemetry/api': 1.9.1
     optionalDependencies:
@@ -1241,9 +1256,9 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@hono/node-server@2.0.10(hono@4.12.30)':
+  '@hono/node-server@2.0.11(hono@4.12.32)':
     dependencies:
-      hono: 4.12.30
+      hono: 4.12.32
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -1443,20 +1458,20 @@ snapshots:
       '@tangle-network/agent-interface': 0.17.1
       zod: 4.4.3
 
-  '@tangle-network/agent-core@0.4.19':
+  '@tangle-network/agent-core@0.4.21':
     dependencies:
-      '@tangle-network/agent-interface': 0.31.0
+      '@tangle-network/agent-interface': 0.33.0
       zod: 4.4.3
 
-  '@tangle-network/agent-eval@0.124.0(typescript@5.9.3)':
+  '@tangle-network/agent-eval@0.128.2(typescript@5.9.3)':
     dependencies:
-      '@asteasolutions/zod-to-openapi': 8.5.0(zod@4.4.3)
-      '@ax-llm/ax': 23.0.1(zod@4.4.3)
-      '@hono/node-server': 2.0.10(hono@4.12.30)
-      '@tangle-network/agent-core': 0.4.19
-      '@tangle-network/agent-interface': 0.31.0
+      '@asteasolutions/zod-to-openapi': 9.1.0(zod@4.4.3)
+      '@ax-llm/ax': 23.0.5(zod@4.4.3)
+      '@hono/node-server': 2.0.11(hono@4.12.32)
+      '@tangle-network/agent-core': 0.4.21
+      '@tangle-network/agent-interface': 0.33.0
       '@tangle-network/tcloud': 0.4.14(typescript@5.9.3)(zod@4.4.3)
-      hono: 4.12.30
+      hono: 4.12.32
       zod: 4.4.3
     transitivePeerDependencies:
       - '@mastra/core'
@@ -1475,7 +1490,7 @@ snapshots:
     dependencies:
       zod: 4.4.3
 
-  '@tangle-network/agent-interface@0.31.0':
+  '@tangle-network/agent-interface@0.33.0':
     dependencies:
       '@noble/hashes': 1.8.0
       zod: 4.4.3
@@ -1658,7 +1673,7 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  hono@4.12.30: {}
+  hono@4.12.32: {}
 
   isows@1.0.7(ws@8.21.1):
     dependencies:

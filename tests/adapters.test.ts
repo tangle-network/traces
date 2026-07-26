@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
+import { build } from 'tsup'
 import { afterAll, describe, expect, it } from 'vitest'
 import { analyzeAdoption } from '../src/adoption.js'
 import { AmpAdapter } from '../src/adapters/amp.js'
@@ -193,7 +194,7 @@ describe('JSONL adapter streaming', () => {
     )
   })
 
-  it('recovers corruption while parsing a 100 MB file below 128 MB peak RSS', () => {
+  it('recovers corruption while parsing a 100 MB file below 128 MB peak RSS', async () => {
     const path = join(dir, 'large-tool-inputs.jsonl')
     const suffix = 'x'.repeat(1024 * 1024)
     const file = openSync(path, 'w')
@@ -227,7 +228,21 @@ describe('JSONL adapter streaming', () => {
     }
     expect(statSync(path).size).toBeGreaterThan(100 * 1024 * 1024)
 
-    const adapterUrl = pathToFileURL(join(process.cwd(), 'src/adapters/claude.ts')).href
+    // Measure the shipped JavaScript path so loader overhead does not pollute the RSS limit.
+    const bundleDir = join(dir, 'large-adapter-bundle')
+    await build({
+      entry: { 'claude-adapter': join(process.cwd(), 'src/adapters/claude.ts') },
+      outDir: bundleDir,
+      format: 'esm',
+      target: 'node22',
+      bundle: true,
+      splitting: false,
+      clean: false,
+      dts: false,
+      sourcemap: false,
+      silent: true,
+    })
+    const adapterUrl = pathToFileURL(join(bundleDir, 'claude-adapter.js')).href
     const childSource = `
       import { ClaudeAdapter } from ${JSON.stringify(adapterUrl)}
       const ref = {
@@ -255,7 +270,7 @@ describe('JSONL adapter streaming', () => {
     delete env.NODE_OPTIONS
     const child = spawnSync(
       process.execPath,
-      ['--max-old-space-size=40', '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      ['--max-old-space-size=40', '--max-semi-space-size=1', '--input-type=module', '--eval', childSource],
       { cwd: process.cwd(), encoding: 'utf8', env, timeout: 30_000 },
     )
 
