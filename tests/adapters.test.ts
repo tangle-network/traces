@@ -682,6 +682,7 @@ describe('claude adapter (conversation capture)', () => {
 
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
 
+    expect(spans).toHaveLength(2)
     expect(new Set(spans.map((span) => span.trace_id))).toEqual(new Set(['canonical-session']))
   })
 
@@ -699,7 +700,7 @@ describe('claude adapter (conversation capture)', () => {
         {
           type: 'assistant',
           uuid: 'same',
-          timestamp: '2026-01-01T00:00:01Z',
+          timestamp: '2026-01-01T00:00:00Z',
           message: { role: 'assistant', content: [{ type: 'text', text: 'different' }] },
         },
       ]

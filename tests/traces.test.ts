@@ -63,7 +63,40 @@ describe('claude transcript → spans', () => {
       },
     }
 
-    const { spans } = parseClaudeStream([event, { ...event, parentUuid: 'replayed-parent' }], {
+    const { spans } = parseClaudeStream(
+      [
+        event,
+        {
+          ...event,
+          parentUuid: 'replayed-parent',
+          cwd: '/replayed',
+          sessionId: 'replayed-session-metadata',
+        },
+      ],
+      {
+        traceId: 'sess',
+        agent: 'claude-code',
+        startStep: 0,
+        idPrefix: '',
+        rootParent: 'root',
+      },
+    )
+
+    expect(spans.filter((span) => span.name === 'llm.turn')).toHaveLength(1)
+    expect(spans[0]?.span_id).toBe('duplicate')
+  })
+
+  it('normalizes an omitted sidechain flag and explicit false as the same user event', () => {
+    const event = {
+      type: 'user',
+      uuid: 'duplicate-user',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        content: [{ type: 'text', text: 'one logical prompt' }],
+      },
+    }
+
+    const { spans } = parseClaudeStream([event, { ...event, isSidechain: false }], {
       traceId: 'sess',
       agent: 'claude-code',
       startStep: 0,
@@ -71,8 +104,7 @@ describe('claude transcript → spans', () => {
       rootParent: 'root',
     })
 
-    expect(spans.filter((span) => span.name === 'llm.turn')).toHaveLength(1)
-    expect(spans[0]?.span_id).toBe('duplicate')
+    expect(spans.filter((span) => span.name === 'user.prompt')).toHaveLength(1)
   })
 
   it('rejects conflicting payloads for one event UUID', () => {
@@ -105,6 +137,40 @@ describe('claude transcript → spans', () => {
           },
         ],
         context,
+      ),
+    ).toThrow('conflicting payloads')
+  })
+
+  it('rejects conflicting billed tokens for one event UUID', () => {
+    const event = {
+      type: 'assistant',
+      uuid: 'duplicate',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        usage: { input_tokens: 100 },
+        content: [{ type: 'text', text: 'same content' }],
+      },
+    }
+
+    expect(() =>
+      parseClaudeStream(
+        [
+          event,
+          {
+            ...event,
+            message: {
+              ...event.message,
+              usage: { input_tokens: 200 },
+            },
+          },
+        ],
+        {
+          traceId: 'sess',
+          agent: 'claude-code',
+          startStep: 0,
+          idPrefix: '',
+          rootParent: 'root',
+        },
       ),
     ).toThrow('conflicting payloads')
   })

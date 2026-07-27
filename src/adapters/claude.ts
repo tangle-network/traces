@@ -208,7 +208,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       kind: 'user',
       timestamp,
       prompt: prompt || null,
-      ...(prompt ? { isSidechain: event.isSidechain, userType: event.userType ?? null } : {}),
+      ...(prompt ? { isSidechain: event.isSidechain === true, userType: event.userType ?? null } : {}),
       results,
     }
   }
