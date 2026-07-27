@@ -14,6 +14,11 @@ import {
 } from '@tangle-network/agent-eval/analyst'
 import type { TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
 import { analyzeAdoption, type AdoptionReport } from './adoption.js'
+import {
+  planTraceAgenticRoute,
+  traceAgenticKinds,
+  type TraceAgenticRoute,
+} from './agentic-routing.js'
 import { analyzeSpans } from './analyze.js'
 import type { ExternalAnalysisResult, ExternalAnalyzer } from './external.js'
 import { runExternalAnalyzers } from './external.js'
@@ -47,6 +52,8 @@ export interface TraceInvestigationOptions {
   readonly model?: string
   readonly budgetUsd?: number
   readonly registry?: AnalystRegistry
+  /** Agentic registry override for custom trace-analysis agents. */
+  readonly agenticRegistry?: AnalystRegistry
   readonly externalAnalyzers?: readonly ExternalAnalyzer[]
   readonly analyzerPrompt?: string
   readonly otlpOutPath?: string
@@ -89,6 +96,8 @@ export interface TraceInvestigationResult {
   readonly pipelines: PipelineReport
   readonly reactions: ReactionReport
   readonly adoption: AdoptionReport
+  /** Deterministic routing record for the agentic trace-analysis pass. */
+  readonly agenticRoute?: TraceAgenticRoute
   readonly external: readonly ExternalAnalysisResult[]
   readonly report: string
 }
@@ -470,6 +479,15 @@ function renderExternal(results: readonly ExternalAnalysisResult[]): string {
   return lines.join('\n')
 }
 
+function renderAgenticRoute(route: TraceAgenticRoute | undefined): string {
+  if (!route) return ''
+  const lines = ['## LLM trace analysis', '']
+  lines.push(`- **Selected analysts:** ${route.analystIds.map((id) => `\`${id}\``).join(', ')}`)
+  for (const reason of route.reasons) lines.push(`- **${reason.code}:** ${reason.detail}`)
+  lines.push('')
+  return lines.join('\n')
+}
+
 function renderInvestigationReport(result: TraceInvestigationResult, analystResult: Awaited<ReturnType<typeof analyzeSpans>>['result']): string {
   const base =
     `${renderReport({ ...analystResult, findings: [...result.findings] }, {
@@ -481,7 +499,7 @@ function renderInvestigationReport(result: TraceInvestigationResult, analystResu
       execution: result.execution,
       deterministic: summarizeDeterministicSignals(result.pipelines, result.reactions),
       sources: result.sources,
-    })}\n` +
+    })}\n${renderAgenticRoute(result.agenticRoute)}` +
     `${renderPipelines(result.pipelines)}\n${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
   const external = renderExternal(result.external)
   return external ? `${base}\n${external}` : base
@@ -540,26 +558,35 @@ export function mergeTracesConfig(opts: TraceInvestigationOptions, config?: Trac
 export async function runTraceInvestigation(opts: TraceInvestigationOptions): Promise<TraceInvestigationResult> {
   if (opts.spans.length === 0) throw new Error('runTraceInvestigation: no spans to analyze')
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const [analysis, pipelines, reactions, adoption] = await Promise.all([
-    analyzeSpans(opts.spans, {
-      ai: opts.ai,
-      model: opts.model,
-      budgetUsd: opts.budgetUsd,
-      registry: opts.registry,
-      otlpOutPath: opts.otlpOutPath,
-      runId: `traces-investigation-${Date.parse(generatedAt) || Date.now()}`,
-      log: opts.log,
-    }),
+  const [pipelines, reactions, adoption] = await Promise.all([
     runPipelines(opts.spans, { minLoopOccurrences: opts.minLoopOccurrences }),
     Promise.resolve(analyzeReactions(opts.spans)),
     analyzeAdoption(opts.spans, { cwds: opts.cwds }),
   ])
+  const deterministic = deterministicFindings(pipelines, reactions, adoption)
+  // A supplied registry owns its own composition. Only describe a route when
+  // this package builds the maintained agent-eval suite itself.
+  const agenticRoute = opts.ai && !opts.agenticRegistry
+    ? planTraceAgenticRoute(pipelines, reactions)
+    : undefined
+  const analysis = await analyzeSpans(opts.spans, {
+    ai: opts.ai,
+    model: opts.model,
+    budgetUsd: opts.budgetUsd,
+    registry: opts.registry,
+    agenticRegistry: opts.agenticRegistry,
+    agenticKinds: agenticRoute ? traceAgenticKinds(agenticRoute) : undefined,
+    agenticPriorFindings: deterministic,
+    otlpOutPath: opts.otlpOutPath,
+    runId: `traces-investigation-${Date.parse(generatedAt) || Date.now()}`,
+    log: opts.log,
+  })
   const external = opts.externalAnalyzers?.length
     ? await runExternalAnalyzers(analysis.otlpPath, opts.externalAnalyzers, { prompt: opts.analyzerPrompt })
     : []
   const findings = [
     ...analysis.result.findings,
-    ...deterministicFindings(pipelines, reactions, adoption),
+    ...deterministic,
     ...normalizeExternalFindings(external),
   ]
   const partial: Omit<TraceInvestigationResult, 'report'> = {
@@ -577,6 +604,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     pipelines,
     reactions,
     adoption,
+    ...(agenticRoute ? { agenticRoute } : {}),
     external,
   }
   const result = { ...partial, report: '' }
@@ -593,6 +621,7 @@ export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOp
   const runId = opts.runId ?? `traces-store-investigation-${Date.parse(generatedAt) || Date.now()}`
   const analystResult = await registry.run(runId, { traceStore: opts.traceStore }, {
     budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
+    chainFindings: true,
   })
   const packet = buildTraceFindingPacket({
     findings: analystResult.findings,

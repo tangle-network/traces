@@ -25,12 +25,11 @@
 import { readFileSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
-import { analyzeAdoption } from './adoption.js'
-import { analyzeSpans } from './analyze.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
-import { commandAnalyzer, commandRedactor, haloAnalyzer, runExternalAnalyzers } from './external.js'
+import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import {
@@ -47,22 +46,21 @@ import {
   type TraceLiveAnalyst,
   type TraceLiveFinding,
 } from './live.js'
+import {
+  analyzeSupervisorRun,
+  findSupervisorRunDirs,
+  isUnavailable,
+  renderSupervisorRollupMarkdown,
+  renderSupervisorRunMarkdown,
+  rollupSupervisorRuns,
+} from '@tangle-network/agent-eval/supervisor-run'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
-import { runPipelines } from './pipelines.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
-import { analyzeReactions } from './reactions.js'
 import { locateSessions, parseSession } from './session-source.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
-import {
-  CORRUPTION_RECEIPT_DISPLAY_LIMIT,
-  renderAdoption,
-  renderPipelines,
-  renderReactions,
-  renderReport,
-  summarizeDeterministicSignals,
-} from './report.js'
+import { CORRUPTION_RECEIPT_DISPLAY_LIMIT } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -102,6 +100,7 @@ interface Args {
   noFindings: boolean
   metadata?: string
   attrs: string[]
+  supervisorRunDir?: string
 }
 
 function packageVersion(): string {
@@ -140,6 +139,7 @@ function parseArgs(argv: string[]): Args {
       case '--last': a.last = Number(next()); break
       case '--session': a.session = next(); break
       case '--cwd': a.cwd = next(); break
+      case '--supervisor-run-dir': a.supervisorRunDir = next(); break
       case '--since': a.since = next(); break
       case '--out': a.out = next(); break
       case '--dir': a.dir = next(); break
@@ -207,6 +207,60 @@ async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref
   return out
 }
 
+function missingPath(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
+/** Resolve `--session` as either a concrete harness file or an ID printed by
+ * `traces list`. An ID is only accepted when it identifies one session under
+ * the selected harnesses, keeping reports reproducible as live files change. */
+async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref: SessionRef }> {
+  if (!args.session) throw new Error('resolveSelectedSession requires --session')
+
+  const adapter = resolveAdapter(args.harness)
+  if (!adapter && !args.all) throw new Error(`unknown harness "${args.harness}"`)
+
+  try {
+    const st = await stat(args.session)
+    if (!adapter) {
+      throw new Error('--session <path> requires --harness when --all is set')
+    }
+    return {
+      adapter,
+      ref: {
+        harness: adapter.harness,
+        sessionId: args.session,
+        path: args.session,
+        // --session is an explicit file; honor --cwd so adoption can find the
+        // project's .evolve/skill-runs.jsonl (locate() infers cwd in the scan path).
+        cwd: args.cwd ?? null,
+        mtimeMs: st.mtimeMs,
+      },
+    }
+  } catch (error) {
+    if (!missingPath(error)) throw error
+  }
+
+  const matches: Array<{ adapter: HarnessTraceAdapter; ref: SessionRef }> = []
+  for (const candidate of args.all ? adaptersFor(args) : [adapter!]) {
+    const refs = await locateSessions(candidate, { cwd: args.cwd })
+    for (const ref of refs) {
+      if (ref.sessionId === args.session) matches.push({ adapter: candidate, ref })
+    }
+  }
+  if (matches.length === 1) return matches[0]!
+  if (matches.length === 0) {
+    throw new Error(
+      `no ${args.all ? 'selected' : adapter!.harness} session with ID "${args.session}"; ` +
+        'run `traces list` to select an ID, or pass an explicit session path',
+    )
+  }
+  throw new Error(
+    `session ID "${args.session}" is ambiguous across ${matches.length} files; ` +
+      'select one harness or pass its explicit session path',
+  )
+}
+
 async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
@@ -219,7 +273,7 @@ async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
   // (the Tangle router, a local proxy, …) instead of api.openai.com.
   const apiURL = process.env.OPENAI_BASE_URL || undefined
   const { AxAI } = await import('@ax-llm/ax')
-  return new AxAI({ name: 'openai', apiKey, ...(apiURL ? { apiURL } : {}) }) as unknown as import('@ax-llm/ax').AxAIService
+  return AxAI.create({ name: 'openai', apiKey, ...(apiURL ? { apiURL } : {}) })
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -284,18 +338,7 @@ function selectedSessionSource(
 async function collectSpans(args: Args): Promise<CollectedSpans> {
   if (args.input) return collectImportedSpans(args)
   if (args.session) {
-    const adapter = resolveAdapter(args.harness)
-    if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
-    const st = await stat(args.session)
-    const ref: SessionRef = {
-      harness: adapter.harness,
-      sessionId: args.session,
-      path: args.session,
-      // --session is an explicit file; honor --cwd so adoption can find the
-      // project's .evolve/skill-runs.jsonl (locate() infers cwd in the scan path).
-      cwd: args.cwd ?? null,
-      mtimeMs: st.mtimeMs,
-    }
+    const { adapter, ref } = await resolveSelectedSession(args)
     const spans = await parseSession(adapter, ref)
     return {
       spans,
@@ -313,7 +356,7 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
     if (refs.length > 0) harnesses.push(adapter.harness)
     for (const ref of refs) {
       const parsed = await parseSession(adapter, ref)
-      spans.push(...parsed)
+      appendAll(spans, parsed)
       sources.push(selectedSessionSource(ref, parsed))
       if (ref.cwd) cwds.push(ref.cwd)
     }
@@ -330,16 +373,7 @@ async function cmdConvert(args: Args): Promise<void> {
 
 async function collectSessionRows(args: Args): Promise<Array<{ ref: SessionRef; spans: OtlpSpan[] }>> {
   if (args.session) {
-    const adapter = resolveAdapter(args.harness)
-    if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
-    const st = await stat(args.session)
-    const ref: SessionRef = {
-      harness: adapter.harness,
-      sessionId: args.session,
-      path: args.session,
-      cwd: args.cwd ?? null,
-      mtimeMs: st.mtimeMs,
-    }
+    const { adapter, ref } = await resolveSelectedSession(args)
     return [{ ref, spans: await parseSession(adapter, ref) }]
   }
   const groups = await discover({ ...args, last: args.last || 20 })
@@ -465,47 +499,56 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 }
 
 async function cmdAnalyze(args: Args): Promise<void> {
-  const { spans, harness, cwds, sources } = await collectSpans(args)
-  if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const ai = args.llm ? await buildAxService() : undefined
-  const { otlpPath, execution, result } = await analyzeSpans(spans, {
-    ai,
-    model: args.model,
-    budgetUsd: args.budget,
-    otlpOutPath: args.otlp,
-    log: (msg) => process.stderr.write(`${msg}\n`),
-  })
-  const pipelines = await runPipelines(spans, { minLoopOccurrences: args.minLoop })
-  const reactions = analyzeReactions(spans)
-  const adoption = await analyzeAdoption(spans, { cwds })
-  const deterministic = summarizeDeterministicSignals(pipelines, reactions)
-  let report =
-    `${renderReport(result, {
-      harness,
-      sessionCount: adoption.identifiedSessionCount,
-      unassignedTraceCount: adoption.unassignedTraceCount,
-      spanCount: spans.length,
-      otlpPath,
-      execution,
-      deterministic,
-      sources,
-    })}\n` +
-    `${renderPipelines(pipelines)}\n${renderReactions(reactions)}\n${renderAdoption(adoption)}`
-  if (args.analyzers.length > 0 && otlpPath) {
-    const engines = externalAnalyzersFromArgs(args)
-    const results = await runExternalAnalyzers(otlpPath, engines, { prompt: args.analyzerPrompt })
-    for (const r of results) {
-      report += `\n\n## ${r.analyzer} (external analyzer)\n\n${r.ok ? r.output || '(no output)' : `failed: ${r.error}`}`
-    }
-  }
+  if (args.supervisorRunDir) return cmdAnalyzeSupervisorRun(args.supervisorRunDir, args)
+  const result = await investigate(args, { loadDefaultConfig: false })
   if (args.out) {
-    await writeFile(args.out, report, 'utf8')
+    await saveReport(args.out, result.report)
     console.log(
       `report → ${args.out}  (${result.findings.length} findings, ` +
-        `${pipelines.stuckLoops.findings.length} loops, OTLP: ${otlpPath})`,
+        `${result.pipelines.stuckLoops.findings.length} loops, OTLP: ${result.otlpPath})`,
     )
   } else {
-    console.log(report)
+    console.log(result.report)
+  }
+}
+
+/**
+ * Supervision-tree view: what the TREE did (steers, spawn waves, concurrency,
+ * idle wall, cost by role, accepted vs rejected), as opposed to the rest of
+ * this CLI, which reports what happened inside one harness session.
+ *
+ * Every metric comes from `@tangle-network/agent-eval/supervisor-run` — this
+ * function only picks single-run vs rollup and prints. No analysis is
+ * duplicated here, and none may be added.
+ */
+async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
+  const nested = await findSupervisorRunDirs(runDir)
+  let markdown: string
+  if (nested.length > 0) {
+    markdown = renderSupervisorRollupMarkdown(
+      rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
+      `Supervisor rollup — ${runDir}`,
+    )
+  } else {
+    const report = await analyzeSupervisorRun(runDir)
+    // A path with no supervision journal analyzes cleanly into a report whose
+    // every metric is unavailable. Printing that reads as "the supervisor did
+    // nothing" rather than "you pointed me at the wrong directory".
+    if (isUnavailable(report.orchestration.workersSpawned)) {
+      throw new Error(
+        `no supervisor run found at ${runDir} — expected <runDir>/ws/.loops/supervisor/<id>, ` +
+          'or a parent directory containing such runs',
+      )
+    }
+    markdown = renderSupervisorRunMarkdown(report)
+  }
+  if (args.out) {
+    await saveReport(args.out, markdown)
+    console.log(
+      `supervisor report → ${args.out}  (${nested.length > 0 ? `${nested.length} runs` : '1 run'})`,
+    )
+  } else {
+    console.log(markdown)
   }
 }
 
@@ -548,11 +591,23 @@ function externalAnalyzersFromArgs(args: Args) {
 }
 
 async function cmdInvestigate(args: Args): Promise<void> {
+  const result = await investigate(args)
+  if (args.out) {
+    await saveReport(args.out, result.report)
+    console.log(`investigation report → ${args.out}  (${result.findings.length} findings with actions, OTLP: ${result.otlpPath})`)
+  } else {
+    console.log(result.report)
+  }
+}
+
+async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
   const { spans, harness, cwds, sources } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const config = await loadTracesConfig(args.config)
+  const config = args.config !== undefined || options.loadDefaultConfig !== false
+    ? await loadTracesConfig(args.config)
+    : undefined
   const ai = args.llm ? await buildAxService() : undefined
-  const result = await runTraceInvestigation(mergeTracesConfig({
+  return runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
     sources,
@@ -566,12 +621,6 @@ async function cmdInvestigate(args: Args): Promise<void> {
     analyzerPrompt: args.analyzerPrompt,
     log: (msg) => process.stderr.write(`${msg}\n`),
   }, config))
-  if (args.out) {
-    await saveReport(args.out, result.report)
-    console.log(`investigation report → ${args.out}  (${result.findings.length} findings with actions, OTLP: ${result.otlpPath})`)
-  } else {
-    console.log(result.report)
-  }
 }
 
 async function cmdImprove(args: Args): Promise<void> {
@@ -849,6 +898,7 @@ function usage(): void {
 Commands:
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines over sessions or an input file
+            (--supervisor-run-dir <dir> reports a supervision tree instead)
   investigate Run typed investigation flow, including BYO config + evidence-backed actions
   improve   Write findings, evidence, report, and canonical trace artifacts
   convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
@@ -864,8 +914,12 @@ Options:
   --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
   --all            Sweep every known harness
   --last <n>       Most-recent N sessions
-  --session <path> Analyze/stream one explicit harness session file
+  --session <id|path> Analyze one listed session ID or one explicit harness session file
   --cwd <dir>      Filter sessions by working directory
+  --supervisor-run-dir <dir>
+                   analyze: report a SUPERVISION TREE instead of harness sessions —
+                   steers, spawn waves, concurrency, idle wall, cost by role,
+                   accepted vs rejected. Rolls up when the dir holds many runs.
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory

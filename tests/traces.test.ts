@@ -52,6 +52,129 @@ describe('otlp span builder', () => {
 })
 
 describe('claude transcript → spans', () => {
+  it('ignores a duplicate event UUID when only un-emitted metadata changes', () => {
+    const event = {
+      type: 'assistant',
+      uuid: 'duplicate',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'one logical turn' }],
+      },
+    }
+
+    const { spans } = parseClaudeStream(
+      [
+        event,
+        {
+          ...event,
+          parentUuid: 'replayed-parent',
+          cwd: '/replayed',
+          sessionId: 'replayed-session-metadata',
+        },
+      ],
+      {
+        traceId: 'sess',
+        agent: 'claude-code',
+        startStep: 0,
+        idPrefix: '',
+        rootParent: 'root',
+      },
+    )
+
+    expect(spans.filter((span) => span.name === 'llm.turn')).toHaveLength(1)
+    expect(spans[0]?.span_id).toBe('duplicate')
+  })
+
+  it('normalizes an omitted sidechain flag and explicit false as the same user event', () => {
+    const event = {
+      type: 'user',
+      uuid: 'duplicate-user',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        content: [{ type: 'text', text: 'one logical prompt' }],
+      },
+    }
+
+    const { spans } = parseClaudeStream([event, { ...event, isSidechain: false }], {
+      traceId: 'sess',
+      agent: 'claude-code',
+      startStep: 0,
+      idPrefix: '',
+      rootParent: 'root',
+    })
+
+    expect(spans.filter((span) => span.name === 'user.prompt')).toHaveLength(1)
+  })
+
+  it('rejects conflicting payloads for one event UUID', () => {
+    const context = {
+      traceId: 'sess',
+      agent: 'claude-code',
+      startStep: 0,
+      idPrefix: '',
+      rootParent: 'root',
+    }
+
+    expect(() =>
+      parseClaudeStream(
+        [
+          {
+            type: 'assistant',
+            uuid: 'duplicate',
+            timestamp: '2026-01-01T00:00:00Z',
+            message: {
+              content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { command: 'first' } }],
+            },
+          },
+          {
+            type: 'assistant',
+            uuid: 'duplicate',
+            timestamp: '2026-01-01T00:00:00Z',
+            message: {
+              content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { command: 'different' } }],
+            },
+          },
+        ],
+        context,
+      ),
+    ).toThrow('conflicting payloads')
+  })
+
+  it('rejects conflicting billed tokens for one event UUID', () => {
+    const event = {
+      type: 'assistant',
+      uuid: 'duplicate',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        usage: { input_tokens: 100 },
+        content: [{ type: 'text', text: 'same content' }],
+      },
+    }
+
+    expect(() =>
+      parseClaudeStream(
+        [
+          event,
+          {
+            ...event,
+            message: {
+              ...event.message,
+              usage: { input_tokens: 200 },
+            },
+          },
+        ],
+        {
+          traceId: 'sess',
+          agent: 'claude-code',
+          startStep: 0,
+          idPrefix: '',
+          rootParent: 'root',
+        },
+      ),
+    ).toThrow('conflicting payloads')
+  })
+
   it('emits an LLM span with billed tokens and a child TOOL span, backfilling error status', () => {
     const events = [
       {
@@ -122,13 +245,13 @@ describe('claude transcript → spans', () => {
       },
       {
         type: 'assistant',
-        uuid: 'tool-fragment',
+        uuid: 'tool-fragment-update',
         timestamp: '2026-01-01T00:00:02Z',
-        message: { ...message, usage: firstUsage, content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { cmd: 'date' } }] },
+        message: { ...message, usage: firstUsage, content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { cmd: 'date -u' } }] },
       },
     ]
 
-    const { spans } = parseClaudeStream(events, {
+    const { spans, nextStep } = parseClaudeStream(events, {
       traceId: 'sess',
       agent: 'claude-code',
       startStep: 0,
@@ -140,6 +263,7 @@ describe('claude transcript → spans', () => {
     const toolSpans = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
     expect(llmSpans).toHaveLength(1)
     expect(toolSpans).toHaveLength(1)
+    expect(nextStep).toBe(2)
     expect(llmSpans[0]).toMatchObject({
       start_time: '2026-01-01T00:00:00Z',
       end_time: '2026-01-01T00:00:02Z',

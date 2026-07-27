@@ -55,6 +55,7 @@ export type { Reaction } from './adapters/actor.js'
 export * from './pipelines.js' // runPipelines() — repeated-call + tool-use
 export * from './reactions.js' // analyzeReactions() — human-reaction analyst
 export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics
+export * from './agentic-routing.js' // planTraceAgenticRoute(): deterministic LLM analyst routing
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
 export * from './execution.js' // shared execution accounting over normalized spans

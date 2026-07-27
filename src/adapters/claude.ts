@@ -6,13 +6,14 @@
  * (token trajectory) and `message.content[]` tool_use blocks; tool results
  * arrive as `tool_result` blocks in the following user message or as a
  * `tool_result` attachment. Subagent runs live in a sibling
- * `<session>/subagents/agent-*.jsonl` with a `.meta.json` carrying the
+ * nested `<session>/subagents/.../agent-*.jsonl` files with a `.meta.json` carrying the
  * spawning `toolUseId`, so we parent each subagent under its `Agent` call.
  *
  * Shared by the claudish / openclaw / nanoclaw forks via aliases — they
  * write the same transcript shape.
  */
 
+import { createHash } from 'node:crypto'
 import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -25,6 +26,7 @@ import {
   LLM_OUTPUT_TOKENS,
 } from '@tangle-network/agent-eval/trace-attributes'
 import { sessionJsonlOptions } from '../integrity.js'
+import { appendAll } from '../arrays.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
@@ -32,9 +34,10 @@ import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { claudeActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
-import { recordToolOutput, toolIoAttributes } from './tool-io.js'
+import { toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'claude-code'
+const EPOCH = new Date(0).toISOString()
 
 interface ClaudeEvent {
   type?: string
@@ -141,12 +144,150 @@ function createClaudeStream(startStep: number): ClaudeStreamState {
   }
 }
 
-function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: ClaudeStreamState): void {
-  const ts = ev.timestamp ?? new Date(0).toISOString()
-  const uid = ev.uuid ?? `step${state.step}`
+type SeenClaudeEvents = Map<string, string>
 
-  if (ev.type === 'assistant' && ev.message) {
-    const messageId = ev.message.id ?? uid
+class ClaudeEventConflictError extends Error {
+  readonly sourcePath: string
+  readonly eventId: string
+
+  constructor(sourcePath: string, eventId: string) {
+    super(`${sourcePath}: Claude transcript event ${JSON.stringify(eventId)} has conflicting payloads`)
+    this.name = 'ClaudeEventConflictError'
+    this.sourcePath = sourcePath
+    this.eventId = eventId
+  }
+}
+
+interface ToolResultProjection {
+  toolUseId: string
+  isError: boolean
+  attributes: Record<string, unknown>
+  message: string
+}
+
+type ClaudeEventProjection =
+  | {
+      kind: 'assistant'
+      timestamp: string
+      messageId: string | null
+      model: string | null
+      inputTokens: number | null
+      outputTokens: number | null
+      cachedInputTokens: number | null
+      cacheWriteInputTokens: number | null
+      content: string | null
+      tools: Array<{ id: string | null; name: string; attributes: Record<string, unknown> }>
+    }
+  | {
+      kind: 'user'
+      timestamp: string
+      prompt: string | null
+      isSidechain?: boolean
+      userType?: string | null
+      results: ToolResultProjection[]
+    }
+  | { kind: 'attachment'; timestamp: string; result: ToolResultProjection }
+  | { kind: 'ignored' }
+
+function projectToolResult(toolUseId: string, isError: boolean, output: unknown): ToolResultProjection {
+  return {
+    toolUseId,
+    isError,
+    attributes: toolIoAttributes({ output }),
+    message: stringifyToolResult(output).slice(0, 500),
+  }
+}
+
+function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
+  const timestamp = event.timestamp ?? EPOCH
+  if (event.type === 'assistant' && event.message) {
+    const tools: Array<{ id: string | null; name: string; attributes: Record<string, unknown> }> = []
+    for (const block of asBlocks(event.message.content)) {
+      if (block.type !== 'tool_use' || !block.name) continue
+      tools.push({ id: block.id || null, name: block.name, attributes: toolIoAttributes({ input: block.input }) })
+    }
+    return {
+      kind: 'assistant',
+      timestamp,
+      messageId: event.message.id ?? null,
+      model: event.message.model ?? null,
+      inputTokens: event.message.usage?.input_tokens ?? null,
+      outputTokens: event.message.usage?.output_tokens ?? null,
+      cachedInputTokens: event.message.usage?.cache_read_input_tokens ?? null,
+      cacheWriteInputTokens: event.message.usage?.cache_creation_input_tokens ?? null,
+      content: textOf(event.message.content) || null,
+      tools,
+    }
+  }
+  if (event.type === 'user' && event.message) {
+    const results: ToolResultProjection[] = []
+    for (const block of asBlocks(event.message.content)) {
+      if (block.type !== 'tool_result' || !block.tool_use_id) continue
+      results.push(projectToolResult(block.tool_use_id, block.is_error === true, block.content))
+    }
+    const prompt = textOf(event.message.content)
+    return {
+      kind: 'user',
+      timestamp,
+      prompt: prompt || null,
+      ...(prompt ? { isSidechain: event.isSidechain === true, userType: event.userType ?? null } : {}),
+      results,
+    }
+  }
+  if (event.type === 'attachment' && event.attachment?.type === 'tool_result' && event.attachment.toolUseID) {
+    return {
+      kind: 'attachment',
+      timestamp,
+      result: projectToolResult(
+        event.attachment.toolUseID,
+        typeof event.attachment.exitCode === 'number' && event.attachment.exitCode !== 0,
+        event.attachment.stderr ?? '',
+      ),
+    }
+  }
+  return { kind: 'ignored' }
+}
+
+function fingerprintClaudeEvent(event: ClaudeEventProjection): string {
+  return createHash('sha256').update(JSON.stringify(event)).digest('hex')
+}
+
+/**
+ * Claude occasionally persists the same event twice. A repeated UUID with the
+ * same span-producing fields is one logical event; a changed emitted field is
+ * corruption that must remain visible to callers.
+ */
+function consumeDistinctClaudeEvent(
+  event: ClaudeEvent,
+  ctx: ClaudeStreamContext,
+  state: ClaudeStreamState,
+  seen: SeenClaudeEvents,
+  sourcePath: string,
+): boolean {
+  const projection = projectClaudeEvent(event)
+  if (event.uuid) {
+    const fingerprint = fingerprintClaudeEvent(projection)
+    const previous = seen.get(event.uuid)
+    if (previous !== undefined) {
+      if (previous !== fingerprint) {
+        throw new ClaudeEventConflictError(sourcePath, event.uuid)
+      }
+      return false
+    }
+    seen.set(event.uuid, fingerprint)
+  }
+  consumeClaudeEvent(projection, event.uuid ?? `step${state.step}`, ctx, state)
+  return true
+}
+
+function consumeClaudeEvent(
+  event: ClaudeEventProjection,
+  uid: string,
+  ctx: ClaudeStreamContext,
+  state: ClaudeStreamState,
+): void {
+  if (event.kind === 'assistant') {
+    const messageId = event.messageId ?? uid
     let llmSpan = state.llmSpanByMessageId.get(messageId)
     if (!llmSpan) {
       llmSpan = span({
@@ -155,51 +296,50 @@ function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: Cl
         parentSpanId: ctx.rootParent,
         name: 'llm.turn',
         kind: 'LLM',
-        startTime: ts,
+        startTime: event.timestamp,
         service: SERVICE,
         agent: ctx.agent,
-        model: ev.message.model ?? null,
-        inputTokens: ev.message.usage?.input_tokens ?? null,
-        outputTokens: ev.message.usage?.output_tokens ?? null,
-        cachedInputTokens: ev.message.usage?.cache_read_input_tokens ?? null,
-        cacheWriteInputTokens: ev.message.usage?.cache_creation_input_tokens ?? null,
+        model: event.model,
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        cachedInputTokens: event.cachedInputTokens,
+        cacheWriteInputTokens: event.cacheWriteInputTokens,
         step: state.step,
       })
       state.spans.push(llmSpan)
       state.llmSpanByMessageId.set(messageId, llmSpan)
       state.step += 1
     } else {
-      includeSpanTimestamp(llmSpan, ev.timestamp)
+      includeSpanTimestamp(llmSpan, event.timestamp)
     }
 
     // Claude repeats cumulative usage as a response streams; preserve the highest captured total.
     applyLlmSpanOtlpAttributes(llmSpan.attributes, {
-      model: ev.message.model,
+      model: event.model ?? undefined,
       inputTokens: maxCapturedUsage(
         llmSpan.attributes[LLM_INPUT_TOKENS],
-        ev.message.usage?.input_tokens,
+        event.inputTokens,
       ),
       outputTokens: maxCapturedUsage(
         llmSpan.attributes[LLM_OUTPUT_TOKENS],
-        ev.message.usage?.output_tokens,
+        event.outputTokens,
       ),
       cachedTokens: maxCapturedUsage(
         llmSpan.attributes[LLM_CACHED_TOKENS],
-        ev.message.usage?.cache_read_input_tokens,
+        event.cachedInputTokens,
       ),
       cacheWriteTokens: maxCapturedUsage(
         llmSpan.attributes[LLM_CACHE_WRITE_TOKENS],
-        ev.message.usage?.cache_creation_input_tokens,
+        event.cacheWriteInputTokens,
       ),
     })
-    mergeMessageContent(llmSpan, messageId, textOf(ev.message.content), state)
+    mergeMessageContent(llmSpan, messageId, event.content, state)
 
-    for (const block of asBlocks(ev.message.content)) {
-      if (block.type !== 'tool_use' || !block.name) continue
-      const existingTool = block.id ? state.toolSpanByUseId.get(block.id) : undefined
+    for (const tool of event.tools) {
+      const existingTool = tool.id ? state.toolSpanByUseId.get(tool.id) : undefined
       if (existingTool) {
-        Object.assign(existingTool.attributes, toolIoAttributes({ input: block.input }))
-        includeSpanTimestamp(existingTool, ev.timestamp)
+        Object.assign(existingTool.attributes, tool.attributes)
+        includeSpanTimestamp(existingTool, event.timestamp)
         continue
       }
       const toolIdx = state.toolCountByMessageId.get(messageId) ?? 0
@@ -207,27 +347,26 @@ function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: Cl
         traceId: ctx.traceId,
         spanId: `${llmSpan.span_id}:tool:${toolIdx}`,
         parentSpanId: llmSpan.span_id,
-        name: `tool.${block.name}`,
+        name: `tool.${tool.name}`,
         kind: 'TOOL',
-        startTime: ts,
+        startTime: event.timestamp,
         service: SERVICE,
         agent: ctx.agent,
-        tool: block.name,
+        tool: tool.name,
         step: state.step,
-        extra: toolIoAttributes({ input: block.input }),
+        extra: tool.attributes,
       })
       state.spans.push(toolSpan)
-      if (block.id) state.toolSpanByUseId.set(block.id, toolSpan)
+      if (tool.id) state.toolSpanByUseId.set(tool.id, toolSpan)
       state.toolCountByMessageId.set(messageId, toolIdx + 1)
       state.step += 1
     }
-  } else if (ev.type === 'user' && ev.message) {
-    const prompt = textOf(ev.message.content)
-    if (prompt) {
+  } else if (event.kind === 'user') {
+    if (event.prompt) {
       const actor = claudeActor({
-        text: prompt,
-        isSidechain: ev.isSidechain,
-        userType: ev.userType ?? null,
+        text: event.prompt,
+        isSidechain: event.isSidechain,
+        userType: event.userType ?? null,
         isFirstUserTurn: !state.sawUserTurn,
       })
       state.sawUserTurn = true
@@ -236,34 +375,27 @@ function consumeClaudeEvent(ev: ClaudeEvent, ctx: ClaudeStreamContext, state: Cl
           traceId: ctx.traceId,
           spanId: `${ctx.idPrefix}${uid}:user`,
           parentSpanId: ctx.rootParent,
-          startTime: ts,
+          startTime: event.timestamp,
           service: SERVICE,
           agent: ctx.agent,
           step: state.step,
-          content: prompt,
+          content: event.prompt,
           actor,
         }),
       )
       state.step += 1
     }
-    for (const block of asBlocks(ev.message.content)) {
-      if (block.type !== 'tool_result' || !block.tool_use_id) continue
-      backfillResult(
-        state.toolSpanByUseId.get(block.tool_use_id),
-        ts,
-        block.is_error === true,
-        block.content,
-      )
+    for (const result of event.results) {
+      backfillResult(state.toolSpanByUseId.get(result.toolUseId), event.timestamp, result)
     }
-  } else if (ev.type === 'attachment' && ev.attachment?.type === 'tool_result' && ev.attachment.toolUseID) {
-    const err = typeof ev.attachment.exitCode === 'number' && ev.attachment.exitCode !== 0
-    backfillResult(state.toolSpanByUseId.get(ev.attachment.toolUseID), ts, err, ev.attachment.stderr ?? '')
+  } else if (event.kind === 'attachment') {
+    backfillResult(state.toolSpanByUseId.get(event.result.toolUseId), event.timestamp, event.result)
   }
 }
 
-function maxCapturedUsage(current: unknown, next: number | undefined): number | undefined {
+function maxCapturedUsage(current: unknown, next: number | null | undefined): number | undefined {
   const captured = typeof current === 'number' && Number.isFinite(current) ? current : undefined
-  if (next === undefined) return captured
+  if (next == null) return captured
   return captured === undefined ? next : Math.max(captured, next)
 }
 
@@ -280,7 +412,7 @@ function includeSpanTimestamp(target: OtlpSpan, timestamp: string | undefined): 
 function mergeMessageContent(
   llmSpan: OtlpSpan,
   messageId: string,
-  content: string,
+  content: string | null,
   state: ClaudeStreamState,
 ): void {
   if (!content) return
@@ -295,6 +427,25 @@ function finishClaudeStream(state: ClaudeStreamState): ParsedStream {
   return { spans: state.spans, toolSpanByUseId: state.toolSpanByUseId, nextStep: state.step }
 }
 
+function setRootTimeBounds(root: OtlpSpan, spans: readonly OtlpSpan[]): void {
+  let firstTimestamp: { value: number; source: string } | undefined
+  let lastTimestamp: { value: number; source: string } | undefined
+
+  for (const item of spans) {
+    if (item === root) continue
+    for (const source of [item.start_time, item.end_time]) {
+      if (!source) continue
+      const value = Date.parse(source)
+      if (!Number.isFinite(value)) continue
+      if (!firstTimestamp || value < firstTimestamp.value) firstTimestamp = { value, source }
+      if (!lastTimestamp || value > lastTimestamp.value) lastTimestamp = { value, source }
+    }
+  }
+
+  if (firstTimestamp) root.start_time = firstTimestamp.source
+  if (lastTimestamp) root.end_time = lastTimestamp.source
+}
+
 /**
  * Project one event stream (a main session or a subagent sidechain) onto
  * spans. `idPrefix` keeps span ids unique when folding subagents into the
@@ -302,18 +453,18 @@ function finishClaudeStream(state: ClaudeStreamState): ParsedStream {
  */
 export function parseClaudeStream(events: readonly ClaudeEvent[], ctx: ClaudeStreamContext): ParsedStream {
   const state = createClaudeStream(ctx.startStep)
-  for (const event of events) consumeClaudeEvent(event, ctx, state)
+  const seen = new Map<string, string>()
+  for (const event of events) consumeDistinctClaudeEvent(event, ctx, state, seen, '<stream>')
   return finishClaudeStream(state)
 }
 
-function backfillResult(s: OtlpSpan | undefined, endTime: string, isError: boolean, output: unknown): void {
+function backfillResult(s: OtlpSpan | undefined, endTime: string, result: ToolResultProjection): void {
   if (!s) return
   s.end_time = endTime
-  const code: OtlpStatusCode = isError ? 'ERROR' : 'OK'
+  const code: OtlpStatusCode = result.isError ? 'ERROR' : 'OK'
   s.status = { code }
-  recordToolOutput(s, output)
-  const message = stringifyToolResult(output)
-  if (isError && message) s.status.message = message.slice(0, 500)
+  Object.assign(s.attributes, result.attributes)
+  if (result.isError && result.message) s.status.message = result.message
 }
 
 interface SubagentMeta {
@@ -321,19 +472,6 @@ interface SubagentMeta {
   description?: string
   toolUseId?: string
   parentAgentId?: string
-}
-
-interface TimestampBounds {
-  start?: string
-  end?: string
-}
-
-function includeTimestamp(bounds: TimestampBounds, timestamp: string | undefined): void {
-  if (!timestamp) return
-  const time = Date.parse(timestamp)
-  if (!Number.isFinite(time)) return
-  if (!bounds.start || time < Date.parse(bounds.start)) bounds.start = timestamp
-  if (!bounds.end || time > Date.parse(bounds.end)) bounds.end = timestamp
 }
 
 async function listSubagentFiles(root: string): Promise<string[]> {
@@ -421,12 +559,11 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     }
     const state = createClaudeStream(ctx.startStep)
     let discoveredTraceId: string | undefined
-    const bounds: TimestampBounds = {}
+    const seen = new Map<string, string>()
 
     for await (const event of readJsonl<ClaudeEvent>(ref.path, sessionJsonlOptions(ref, options))) {
-      includeTimestamp(bounds, event.timestamp)
       if (!discoveredTraceId && event.sessionId) discoveredTraceId = event.sessionId
-      consumeClaudeEvent(event, ctx, state)
+      if (!consumeDistinctClaudeEvent(event, ctx, state, seen, ref.path)) continue
     }
 
     const main = finishClaudeStream(state)
@@ -442,26 +579,24 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       parentSpanId: null,
       name: 'session',
       kind: 'AGENT',
-      startTime: bounds.start ?? new Date(0).toISOString(),
-      endTime: bounds.end,
+      startTime: new Date(0).toISOString(),
       service: SERVICE,
       agent: SERVICE,
     })
-    const spans: OtlpSpan[] = [root, ...main.spans]
+    const spans: OtlpSpan[] = [root]
+    appendAll(spans, main.spans)
 
-    await this.foldSubagents(ref, traceId, main, spans, bounds, options)
-    root.start_time = bounds.start ?? root.start_time
-    root.end_time = bounds.end ?? root.start_time
+    await this.foldSubagents(ref, traceId, main, spans, options)
+    setRootTimeBounds(root, spans)
     return spans
   }
 
-  /** Parse `<session>/subagents/agent-*.jsonl`, parenting each under its Agent call. */
+  /** Parse nested `subagents/.../agent-*.jsonl`, parenting each under its Agent call. */
   private async foldSubagents(
     ref: SessionRef,
     traceId: string,
     main: ParsedStream,
     out: OtlpSpan[],
-    bounds: TimestampBounds,
     options: ParseOptions,
   ): Promise<void> {
     const subDir = join(ref.path.replace(/\.jsonl$/, ''), 'subagents')
@@ -493,12 +628,12 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         rootParent: `root:${traceId}`,
       }
       const state = createClaudeStream(ctx.startStep)
+      const seen = new Map<string, string>()
       for await (const event of readJsonl<ClaudeEvent>(
         file,
         sessionJsonlOptions(ref, options),
       )) {
-        includeTimestamp(bounds, event.timestamp)
-        consumeClaudeEvent(event, ctx, state)
+        consumeDistinctClaudeEvent(event, ctx, state, seen, file)
       }
       const parsed = finishClaudeStream(state)
       parsedAgents.push({
@@ -526,7 +661,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       for (const item of agent.parsed.spans) {
         if (item.parent_span_id === `root:${traceId}`) item.parent_span_id = parent
       }
-      out.push(...agent.parsed.spans)
+      appendAll(out, agent.parsed.spans)
     }
   }
 }

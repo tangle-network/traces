@@ -12,8 +12,14 @@
  */
 
 import type { AxAIService } from '@ax-llm/ax'
+import type { RunCostProvenance } from '@tangle-network/agent-eval'
 import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
-import { type AnalystRegistry, buildDefaultAnalystRegistry } from '@tangle-network/agent-eval/analyst'
+import {
+  type AnalystFinding,
+  type AnalystRegistry,
+  buildDefaultAnalystRegistry,
+  type TraceAnalystKindSpec,
+} from '@tangle-network/agent-eval/analyst'
 import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -32,6 +38,13 @@ export interface AnalyzeOptions {
    * `@tangle-network/agent-eval`'s `AnalystRegistry`.
    */
   registry?: AnalystRegistry
+  /** Agentic registry override. Unlike `registry`, this runs after the local
+   * deterministic pass and receives its compact findings as prior context. */
+  agenticRegistry?: AnalystRegistry
+  /** Select a subset of agent-eval's maintained trace analyst kinds. */
+  agenticKinds?: readonly TraceAnalystKindSpec[]
+  /** Compact deterministic findings that agents receive before reading spans. */
+  agenticPriorFindings?: readonly AnalystFinding[]
   /** Where to write the OTLP-JSONL artifact. Defaults to a temp file. */
   otlpOutPath?: string
   runId?: string
@@ -55,6 +68,19 @@ export interface AnalyzeResult {
  */
 const GENERATED_TRACE_FILE_CEILING = 512 * 1024 * 1024
 
+function mergeCostProvenance(
+  first: RunCostProvenance | undefined,
+  second: RunCostProvenance | undefined,
+  totalCostUsd: number,
+): RunCostProvenance {
+  if (!first || !second || first.kind === 'uncaptured' || second.kind === 'uncaptured') {
+    return { kind: 'uncaptured', usd: null }
+  }
+  return first.kind === 'estimated' || second.kind === 'estimated'
+    ? { kind: 'estimated', usd: totalCostUsd }
+    : { kind: 'observed', usd: totalCostUsd }
+}
+
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   const otlpPath = await writeOtlpFile(spans, opts.otlpOutPath)
@@ -77,21 +103,32 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
 
   // Agentic pass — default ceiling so each tool call stays context-bounded;
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
-  if (opts.ai) {
+  if (opts.ai || opts.agenticRegistry) {
     const agStore = new OtlpFileTraceStore({ path: otlpPath, maxFileBytes: GENERATED_TRACE_FILE_CEILING })
     await agStore.ensureIndexed()
-    const agRegistry = buildDefaultAnalystRegistry({
-      ai: opts.ai,
+    const agRegistry = opts.agenticRegistry ?? buildDefaultAnalystRegistry({
+      ai: opts.ai!,
       model: opts.model,
+      kinds: opts.agenticKinds,
       includeBehavioral: false,
       registry: { log: opts.log },
     })
     const agResult = await agRegistry.run(runId, { traceStore: agStore }, {
       budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
+      chainFindings: true,
+      ...(opts.agenticPriorFindings?.length
+        ? { priorFindings: { '*': opts.agenticPriorFindings } }
+        : {}),
     })
     result.findings.push(...agResult.findings)
     result.per_analyst.push(...agResult.per_analyst)
-    result.total_cost_usd += agResult.total_cost_usd
+    const totalCostUsd = result.total_cost_usd + agResult.total_cost_usd
+    result.total_cost_provenance = mergeCostProvenance(
+      result.total_cost_provenance,
+      agResult.total_cost_provenance,
+      totalCostUsd,
+    )
+    result.total_cost_usd = totalCostUsd
   }
 
   return { otlpPath, execution, result }

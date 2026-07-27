@@ -193,7 +193,7 @@ describe('JSONL adapter streaming', () => {
     )
   })
 
-  it('recovers corruption while parsing a 100 MB file below 128 MB peak RSS', () => {
+  it('recovers corruption while parsing a 100 MB file within a bounded heap', () => {
     const path = join(dir, 'large-tool-inputs.jsonl')
     const suffix = 'x'.repeat(1024 * 1024)
     const file = openSync(path, 'w')
@@ -219,6 +219,29 @@ describe('JSONL adapter streaming', () => {
             },
           })}\n`,
         )
+        if (index === 50) {
+          writeSync(
+            file,
+            `${JSON.stringify({
+              type: 'assistant',
+              uuid: `large-${index}`,
+              parentUuid: 'replayed-parent',
+              sessionId: 'large',
+              timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+              message: {
+                role: 'assistant',
+                content: [
+                  {
+                    type: 'tool_use',
+                    id: `tool-${index}`,
+                    name: 'bash',
+                    input: { payload: `${index}:${suffix}` },
+                  },
+                ],
+              },
+            })}\n`,
+          )
+        }
         if (index === 50) writeSync(file, 'secret-large-middle-record\n')
       }
       writeSync(file, 'secret-large-final-record')
@@ -253,9 +276,12 @@ describe('JSONL adapter streaming', () => {
     `
     const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' }
     delete env.NODE_OPTIONS
+    // The V8 cap rejects retention of the 100 MB fixture; RSS includes Node and tsx native overhead.
+    const childHeapLimitMb = 64
+    const maxRssMb = 224
     const child = spawnSync(
       process.execPath,
-      ['--max-old-space-size=40', '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      [`--max-old-space-size=${childHeapLimitMb}`, '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
       { cwd: process.cwd(), encoding: 'utf8', env, timeout: 30_000 },
     )
 
@@ -274,7 +300,7 @@ describe('JSONL adapter streaming', () => {
       integrity: { status: 'degraded_not_lossless' },
     })
     expect(result.integrity?.corruptions).toHaveLength(2)
-    expect(result.maxRssKb).toBeLessThan(128 * 1024)
+    expect(result.maxRssKb).toBeLessThan(maxRssMb * 1024)
   })
 
   it('customer session parsing retains valid Codex records and stamps a degraded receipt', async () => {
@@ -630,22 +656,83 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
 })
 
 describe('claude adapter (conversation capture)', () => {
-  it('derives session bounds from timestamped records instead of an untimestamped envelope', async () => {
+  it('keeps a canonical session ID that first appears on an accepted duplicate', async () => {
+    const path = join(dir, 'claude-duplicate-session-id.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'assistant',
+          uuid: 'same',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'one turn' }] },
+        },
+        {
+          type: 'assistant',
+          uuid: 'same',
+          parentUuid: 'replayed-parent',
+          sessionId: 'canonical-session',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'one turn' }] },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+
+    expect(spans).toHaveLength(2)
+    expect(new Set(spans.map((span) => span.trace_id))).toEqual(new Set(['canonical-session']))
+  })
+
+  it('reports the source file for conflicting Claude events', async () => {
+    const path = join(dir, 'claude-conflicting-events.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'assistant',
+          uuid: 'same',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'first' }] },
+        },
+        {
+          type: 'assistant',
+          uuid: 'same',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'different' }] },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n'),
+    )
+
+    await expect(new ClaudeAdapter().parse(refFor(path, 'claude-code'))).rejects.toMatchObject({
+      name: 'ClaudeEventConflictError',
+      sourcePath: path,
+      eventId: 'same',
+    })
+  })
+
+  it('bounds the session to emitted spans instead of untimestamped metadata', async () => {
     const path = join(dir, 'claude-session-bounds.jsonl')
     writeFileSync(
       path,
       [
-        { type: 'system', uuid: 'untimestamped-start' },
-        { type: 'user', uuid: 'u1', timestamp: '2026-01-01T00:00:01Z', message: { role: 'user', content: 'start' } },
+        { type: 'mode', sessionId: 'bounded' },
         {
           type: 'assistant',
           uuid: 'a1',
-          sessionId: 'bounded-trace',
-          timestamp: '2026-01-01T00:00:02Z',
-          message: { id: 'message-1', role: 'assistant', model: 'opus', usage: { input_tokens: 10, output_tokens: 3 }, content: [{ type: 'text', text: 'done' }] },
+          timestamp: '2026-01-01T00:00:05Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'later turn' }] },
         },
-        { type: 'system', uuid: 'out-of-order-start', timestamp: '2026-01-01T00:00:00Z' },
-        { type: 'system', uuid: 'untimestamped-end' },
+        {
+          type: 'user',
+          uuid: 'u1',
+          timestamp: '2026-01-01T00:00:02Z',
+          message: { role: 'user', content: [{ type: 'text', text: 'earlier turn' }] },
+        },
       ]
         .map((event) => JSON.stringify(event))
         .join('\n'),
@@ -654,8 +741,8 @@ describe('claude adapter (conversation capture)', () => {
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
     expect(spans[0]).toMatchObject({
       name: 'session',
-      start_time: '2026-01-01T00:00:00Z',
-      end_time: '2026-01-01T00:00:02Z',
+      start_time: '2026-01-01T00:00:02Z',
+      end_time: '2026-01-01T00:00:05Z',
     })
   })
 
@@ -828,6 +915,37 @@ describe('claude adapter (conversation capture)', () => {
     expect(agentCall?.attributes['output.value']).toBe('done')
     expect(spans.filter((item) => item.attributes['agent.name'] === 'subagent:Explore').every((item) => item.parent_span_id === agentCall?.span_id)).toBe(true)
   })
+
+  it('parses a session with more than 65k spans without array spread overflow', async () => {
+    const path = join(dir, 'claude-large-span-count.jsonl')
+    const file = openSync(path, 'w')
+    try {
+      writeSync(file, `${JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        sessionId: 'claude-large-span-count',
+        timestamp: '2026-01-01T00:00:00Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'start' }] },
+      })}\n`)
+      for (let index = 0; index < 70_000; index += 1) {
+        writeSync(file, `${JSON.stringify({
+          type: 'assistant',
+          uuid: `a${index}`,
+          sessionId: 'claude-large-span-count',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+        })}\n`)
+      }
+    } finally {
+      closeSync(file)
+    }
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+
+    expect(spans).toHaveLength(70_002)
+    expect(spans[0]?.name).toBe('session')
+    expect(spans.at(-1)?.name).toBe('llm.turn')
+  })
 })
 
 // Conversation capture across every adapter: the user's prompt becomes a
@@ -905,6 +1023,86 @@ describe('pi tool results', () => {
 })
 
 describe('codex current tool and subagent events', () => {
+  it('excludes inherited fork replay before the current task start', async () => {
+    const path = join(dir, 'rollout-codex-fork-replay.jsonl')
+    const sessionTimestamp = '2026-07-13T05:33:02.042Z'
+    const currentStartedAt = Math.floor(Date.parse(sessionTimestamp) / 1_000)
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: sessionTimestamp, payload: { id: 'fork-current', cwd: '/x', timestamp: '2026-07-13T05:33:01.500Z' } },
+        { type: 'event_msg', timestamp: sessionTimestamp, payload: { type: 'task_started', started_at: currentStartedAt - 60 } },
+        { type: 'turn_context', timestamp: sessionTimestamp, payload: { model: 'inherited-model' } },
+        { type: 'event_msg', timestamp: sessionTimestamp, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10_000, output_tokens: 500 } } } },
+        { type: 'response_item', timestamp: sessionTimestamp, payload: { type: 'function_call', call_id: 'inherited', name: 'exec_command', arguments: '{"cmd":"old"}' } },
+        { type: 'response_item', timestamp: sessionTimestamp, payload: { type: 'function_call_output', call_id: 'inherited', output: 'Script completed' } },
+        { type: 'event_msg', timestamp: '2026-07-13T05:33:02.371Z', payload: { type: 'task_started', started_at: currentStartedAt } },
+        { type: 'turn_context', timestamp: '2026-07-13T05:33:02.372Z', payload: { model: 'current-model' } },
+        { type: 'event_msg', timestamp: '2026-07-13T05:33:03.000Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 4 } } } },
+        { type: 'response_item', timestamp: '2026-07-13T05:33:04.000Z', payload: { type: 'function_call', call_id: 'current', name: 'exec_command', arguments: '{"cmd":"new"}' } },
+        { type: 'response_item', timestamp: '2026-07-13T05:33:05.000Z', payload: { type: 'function_call_output', call_id: 'current', output: 'Script completed' } },
+      ].map((row) => JSON.stringify(row)).join('\n'),
+    )
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const llms = spans.filter((span) => span.name === 'llm.turn')
+    const tools = spans.filter((span) => span.attributes['openinference.span.kind'] === 'TOOL')
+
+    expect(spans[0]?.attributes['llm.model_name']).toBe('current-model')
+    expect(llms).toHaveLength(1)
+    expect(llms[0]?.attributes['llm.token_count.prompt']).toBe(20)
+    expect(tools).toHaveLength(1)
+    expect(tools[0]?.attributes['input.value']).toContain('new')
+  })
+
+  it('uses protocol status instead of error words inside successful output', async () => {
+    const path = join(dir, 'rollout-codex-tool-status.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'session_meta', timestamp: '2026-07-11T09:00:00.000Z', payload: { id: 'codex-tool-status', cwd: '/x' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:01.000Z', payload: { type: 'function_call', call_id: 'read-source', name: 'exec_command', arguments: '{"cmd":"sed -n 1,20p file.ts"}' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:02.000Z',
+          payload: {
+            type: 'function_call_output',
+            call_id: 'read-source',
+            output: 'Chunk ID: abc123\nProcess exited with code 0\nOutput:\nreturn { error: "not found" }',
+          },
+        },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:03.000Z', payload: { type: 'custom_tool_call', call_id: 'failed-command', name: 'exec', input: 'await tools.exec_command({ cmd: "false" })' } },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-11T09:00:04.000Z',
+          payload: {
+            type: 'custom_tool_call_output',
+            call_id: 'failed-command',
+            output: [{ type: 'input_text', text: '{"exit_code":2,"output":"error: expected failure"}' }],
+          },
+        },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:05.000Z', payload: { type: 'function_call', call_id: 'domain-result', name: 'lookup', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:06.000Z', payload: { type: 'function_call_output', call_id: 'domain-result', output: '{"error":"domain value, not execution status","value":42}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:07.000Z', payload: { type: 'function_call', call_id: 'captured-log', name: 'read_log', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:08.000Z', payload: { type: 'function_call_output', call_id: 'captured-log', output: [{ type: 'input_text', text: 'error: first line of the captured application log' }] } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:09.000Z', payload: { type: 'function_call', call_id: 'captured-exit', name: 'read_file', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:10.000Z', payload: { type: 'function_call_output', call_id: 'captured-exit', output: 'fixture text\nProcess exited with code 1\nnot a runner header' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:11.000Z', payload: { type: 'function_call', call_id: 'timed-out', name: 'wait', arguments: '{}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:12.000Z', payload: { type: 'function_call_output', call_id: 'timed-out', output: '{"timed_out":true}' } },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const tools = (await new CodexAdapter().parse(refFor(path, 'codex')))
+      .filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    expect(tools).toHaveLength(6)
+    expect(tools.find((item) => item.span_id === 'tool:read-source')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:failed-command')?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === 'tool:domain-result')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:captured-log')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:captured-exit')?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === 'tool:timed-out')?.status.code).toBe('ERROR')
+  })
+
   it('captures custom tool calls, joins their outputs, and tracks subagent lifecycles', async () => {
     const path = join(dir, 'rollout-codex-current.jsonl')
     const startedAt = Date.parse('2026-07-11T09:00:05.000Z')

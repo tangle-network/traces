@@ -180,6 +180,86 @@ describe('analyzeSpans (bring-your-own analysts)', () => {
     expect(result.findings.some((f) => f.claim === 'hello from my analyst')).toBe(true)
   })
 
+  it('feeds compact deterministic findings to agentic analysts and chains their findings in order', async () => {
+    const agenticRegistry = new AnalystRegistry()
+    const prior = makeFinding({
+      analyst_id: 'traces-deterministic',
+      area: 'tool-use',
+      claim: 'three repeated calls were observed',
+      severity: 'high',
+      evidence_refs: [],
+      confidence: 1,
+    })
+    const first = makeFinding({
+      analyst_id: 'first-agentic',
+      area: 'failure-mode',
+      claim: 'the repeated calls share one failure mode',
+      severity: 'high',
+      evidence_refs: [],
+      confidence: 0.9,
+    })
+    agenticRegistry.register({
+      id: 'first-agentic',
+      description: 'first routed analyst',
+      inputKind: 'trace-store',
+      cost: { kind: 'deterministic' },
+      version: '1.0.0',
+      async analyze(_store, context) {
+        expect(context.priorFindings).toEqual([prior])
+        return [first]
+      },
+    })
+    agenticRegistry.register({
+      id: 'second-agentic',
+      description: 'second routed analyst',
+      inputKind: 'trace-store',
+      cost: { kind: 'deterministic' },
+      version: '1.0.0',
+      async analyze(_store, context) {
+        expect(context.priorFindings).toEqual([prior])
+        expect(context.upstreamFindings).toEqual([first])
+        return []
+      },
+    })
+
+    const { result } = await analyzeSpans(loopSpans(2), {
+      agenticRegistry,
+      agenticPriorFindings: [prior],
+    })
+
+    expect(result.findings).toContainEqual(first)
+    expect(result.per_analyst.map((item) => item.analyst_id)).toContain('second-agentic')
+  })
+
+  it.each([
+    [{ kind: 'observed', usd: 0.25 }, undefined, { kind: 'observed', usd: 0.25 }],
+    [{ kind: 'estimated', usd: 0.25 }, undefined, { kind: 'estimated', usd: 0.25 }],
+    [{ kind: 'uncaptured', usd: null }, 0.25, { kind: 'uncaptured', usd: null }],
+  ] as const)('preserves analyst cost provenance when combining passes', async (cost, knownCostUsd, expected) => {
+    const agenticRegistry = new AnalystRegistry()
+    agenticRegistry.register({
+      id: 'metered',
+      description: 'records one model call',
+      inputKind: 'trace-store',
+      cost: { kind: 'llm' },
+      version: '1.0.0',
+      async analyze(_store, context) {
+        context.recordUsage?.({
+          calls: 1,
+          tokens: null,
+          cost,
+          ...(knownCostUsd === undefined ? {} : { knownCostUsd }),
+        })
+        return []
+      },
+    })
+
+    const { result } = await analyzeSpans(loopSpans(2), { agenticRegistry })
+
+    expect(result.total_cost_usd).toBe(0.25)
+    expect(result.total_cost_provenance).toEqual(expected)
+  })
+
   it('rejects endpoint-only token trends when the session contains compaction resets and output increases', async () => {
     const inputs = [25_073, 100_000, 240_000, 30_000, 120_000, 210_878]
     const outputs = [934, 150, 1_200, 120, 900, 137]

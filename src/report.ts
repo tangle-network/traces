@@ -87,9 +87,13 @@ function decimal(value: number, digits = 1): string {
   })
 }
 
+function measured(value: number | null, render: (captured: number) => string): string {
+  return value === null ? 'not captured' : render(value)
+}
+
 function distributionRow(label: string, distribution: ScalarDistribution, unit = ''): string {
   if (distribution.n === 0) return `| ${label} | 0 | not captured | not captured | not captured | not captured | not captured |`
-  const value = (number: number) => `${decimal(number)}${unit}`
+  const value = (number: number | null) => measured(number, (captured) => `${decimal(captured)}${unit}`)
   return `| ${label} | ${count(distribution.n)} | ${value(distribution.min)} | ${value(distribution.mean)} | ${value(distribution.p50)} | ${value(distribution.p95)} | ${value(distribution.max)} |`
 }
 
@@ -102,26 +106,42 @@ function tokenRows(usage: TokenUsageInsight): string[] {
     ['Cache write', usage.totals.cacheWrite, usage.cacheWrite],
   ]
   return rows.map(([label, total, values]) =>
-    `| ${label} | ${count(total)} | ${count(values.n)} | ${decimal(values.mean)} | ${decimal(values.p50)} | ${decimal(values.p95)} | ${count(values.max)} |`,
+    `| ${label} | ${count(total)} | ${count(values.n)} | ${measured(values.mean, decimal)} | ${measured(values.p50, decimal)} | ${measured(values.p95, decimal)} | ${measured(values.max, count)} |`,
   )
+}
+
+function analysisCost(result: AnalystRunResult): string {
+  const cost = `$${result.total_cost_usd.toFixed(4)}`
+  if (result.total_cost_provenance?.kind === 'observed') return `Analysis cost: ${cost} observed.`
+  if (result.total_cost_provenance?.kind === 'estimated') return `Analysis cost: ${cost} estimated.`
+  return `Known analysis cost: ${cost}; additional cost was not captured.`
 }
 
 export function renderExecution(report: ExecutionReport): string {
   const execution = report.execution
   const lines = ['## execution facts', '']
   lines.push(
-    `- **Runs:** ${count(execution.durationMs.n)}  |  ` +
+    `- **Sessions:** ${count(execution.durationMs.n)}  |  ` +
       `**Model-call runs:** ${count(execution.modelCalls.runs)}  |  ` +
       `**Model-call events:** ${count(execution.modelCalls.events)}  |  ` +
-      `**Failed runs:** ${count(execution.failures.runs)}/${count(execution.failures.reportingRuns)} ` +
-      `(${decimal(execution.failures.fraction * 100, 2)}%)`,
+      `**Sessions with execution errors:** ${count(execution.executionErrors.runs)}/${count(execution.executionErrors.reportingRuns)} ` +
+      `(${measured(execution.executionErrors.fraction, (fraction) => `${decimal(fraction * 100, 2)}%`)})`,
+  )
+  lines.push(
+    `- **Terminal outcomes:** ${count(execution.terminalOutcomes.succeeded)} succeeded  |  ` +
+      `${count(execution.terminalOutcomes.failed)} failed  |  ` +
+      `${count(execution.terminalOutcomes.cancelled)} cancelled  |  ` +
+      `${count(execution.terminalOutcomes.incomplete)} incomplete  |  ` +
+      `${count(execution.terminalOutcomes.unknown)} unknown`,
   )
   lines.push('- **Task quality:** not measured; these traces do not include comparable task outcome labels.')
   lines.push('')
-  lines.push('| Time | Runs measured | Min | Mean | p50 | p95 | Max |')
+  lines.push('| Time | Sessions measured | Min | Mean | p50 | p95 | Max |')
   lines.push('|---|---:|---:|---:|---:|---:|---:|')
-  lines.push(distributionRow('Duration', execution.durationMs, 'ms'))
+  lines.push(distributionRow('Recorded session interval', execution.durationMs, 'ms'))
   lines.push(distributionRow('Queue', execution.queueMs, 'ms'))
+  lines.push('')
+  lines.push('Recorded session interval is first-to-last trace time and can include idle time; it is not active agent runtime.')
   lines.push('')
   lines.push('### Direct model usage')
   lines.push('')
@@ -200,7 +220,7 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
     : `${meta.sessionCount} session(s)`
   lines.push(
     `${sessionSummary}, ${meta.spanCount} spans → **${findingSummary}** ` +
-      `across ${result.per_analyst.length} analyst(s). Analysis cost: $${result.total_cost_usd.toFixed(4)}.`,
+      `across ${result.per_analyst.length} analyst(s). ${analysisCost(result)}`,
   )
   lines.push('')
   if (meta.unassignedTraceCount) {
@@ -510,9 +530,8 @@ export function renderReactions(rr: ReactionReport): string {
 }
 
 /**
- * Render skill + subagent adoption. Explicit trace-level invocations and
- * loop-dispatched runs are reported SEPARATELY — the trace count alone
- * undercounts loop-dispatched skills by orders of magnitude.
+ * Render skill + subagent adoption without treating a catalog, a document read,
+ * or unlinked repository history as an invocation.
  */
 export function renderAdoption(ar: AdoptionReport): string {
   const lines: string[] = ['## skill & subagent adoption (deterministic)', '']
@@ -551,13 +570,21 @@ export function renderAdoption(ar: AdoptionReport): string {
   }
   lines.push(
     `- **Materialized skill catalogs/instructions:** ${ar.sessionsWithMaterializedSkills}/${ar.executionGroupCount} observed group(s)  ·  ` +
-      `**SKILL.md tool references:** ${ar.sessionsWithSkillFileReference}/${ar.executionGroupCount} observed group(s)`,
+      `**Sessions with successful skill-document reads:** ${ar.sessionsWithSkillFileReference}/${ar.executionGroupCount}`,
   )
   lines.push(
     `- **Explicit skill invocations:** ${ar.totalSkillInvocations} (Skill tool spans)  ·  ` +
-      `**Loop-dispatched runs:** ${ar.totalLoopDispatchedRuns} ` +
-      `(from ${ar.skillRunFilesRead} \`.evolve/skill-runs.jsonl\` file(s))`,
+      `**Session-linked loop runs:** ${ar.totalLoopDispatchedRuns}`,
   )
+  if (ar.totalUnlinkedLoopDispatchedRuns > 0) {
+    lines.push(
+      `- **Unlinked repository history:** ${ar.totalUnlinkedLoopDispatchedRuns} run(s) from ` +
+        `${ar.skillRunFilesRead} \`.evolve/skill-runs.jsonl\` file(s); not attributed to these sessions.`,
+    )
+  }
+  if (ar.totalSkillDocumentReads > 0) {
+    lines.push(`- **Successful skill-document reads:** ${ar.totalSkillDocumentReads}; inspection is not outcome evidence.`)
+  }
   lines.push(
     `- **Subagent spawns observed:** ${ar.totalSubagentSpawns} across ${ar.sessionsWithSubagent} observed group(s); ` +
       'capture completeness depends on source telemetry.',
@@ -565,15 +592,22 @@ export function renderAdoption(ar: AdoptionReport): string {
   lines.push('')
 
   const skillRows = Object.entries(ar.skillInvocations).sort((a, b) => b[1] - a[1])
+  const documentRows = Object.entries(ar.skillDocumentReads).sort((a, b) => b[1] - a[1])
   const loopRows = Object.entries(ar.loopDispatchedRuns).sort((a, b) => b[1] - a[1])
-  if (skillRows.length > 0 || loopRows.length > 0) {
-    lines.push('| Skill | Explicit invocations | Loop-dispatched runs |')
-    lines.push('|---|---|---|')
-    const names = [...new Set([...skillRows.map((r) => r[0]), ...loopRows.map((r) => r[0])])].sort(
-      (a, b) => (ar.skillInvocations[b] ?? 0) + (ar.loopDispatchedRuns[b] ?? 0) - (ar.skillInvocations[a] ?? 0) - (ar.loopDispatchedRuns[a] ?? 0),
+  if (skillRows.length > 0 || documentRows.length > 0 || loopRows.length > 0) {
+    lines.push('| Skill | Explicit invocations | Documents read | Session-linked loop runs |')
+    lines.push('|---|---|---|---|')
+    const names = [...new Set([
+      ...skillRows.map((r) => r[0]),
+      ...documentRows.map((r) => r[0]),
+      ...loopRows.map((r) => r[0]),
+    ])].sort(
+      (a, b) =>
+        (ar.skillInvocations[b] ?? 0) + (ar.skillDocumentReads[b] ?? 0) + (ar.loopDispatchedRuns[b] ?? 0) -
+        (ar.skillInvocations[a] ?? 0) - (ar.skillDocumentReads[a] ?? 0) - (ar.loopDispatchedRuns[a] ?? 0),
     )
     for (const n of names) {
-      lines.push(`| \`${n}\` | ${ar.skillInvocations[n] ?? 0} | ${ar.loopDispatchedRuns[n] ?? 0} |`)
+      lines.push(`| \`${n}\` | ${ar.skillInvocations[n] ?? 0} | ${ar.skillDocumentReads[n] ?? 0} | ${ar.loopDispatchedRuns[n] ?? 0} |`)
     }
     lines.push('')
   }
