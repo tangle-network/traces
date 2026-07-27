@@ -12,6 +12,7 @@
  */
 
 import type { AxAIService } from '@ax-llm/ax'
+import type { RunCostProvenance } from '@tangle-network/agent-eval'
 import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   type AnalystFinding,
@@ -67,6 +68,19 @@ export interface AnalyzeResult {
  */
 const GENERATED_TRACE_FILE_CEILING = 512 * 1024 * 1024
 
+function mergeCostProvenance(
+  first: RunCostProvenance | undefined,
+  second: RunCostProvenance | undefined,
+  totalCostUsd: number,
+): RunCostProvenance {
+  if (!first || !second || first.kind === 'uncaptured' || second.kind === 'uncaptured') {
+    return { kind: 'uncaptured', usd: null }
+  }
+  return first.kind === 'estimated' || second.kind === 'estimated'
+    ? { kind: 'estimated', usd: totalCostUsd }
+    : { kind: 'observed', usd: totalCostUsd }
+}
+
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   const otlpPath = await writeOtlpFile(spans, opts.otlpOutPath)
@@ -108,7 +122,13 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     })
     result.findings.push(...agResult.findings)
     result.per_analyst.push(...agResult.per_analyst)
-    result.total_cost_usd += agResult.total_cost_usd
+    const totalCostUsd = result.total_cost_usd + agResult.total_cost_usd
+    result.total_cost_provenance = mergeCostProvenance(
+      result.total_cost_provenance,
+      agResult.total_cost_provenance,
+      totalCostUsd,
+    )
+    result.total_cost_usd = totalCostUsd
   }
 
   return { otlpPath, execution, result }

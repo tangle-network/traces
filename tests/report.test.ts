@@ -16,9 +16,20 @@ function emptyResult(): AnalystRunResult {
     ended_at: '2026-07-03T00:00:01.000Z',
     findings: [],
     per_analyst: [
-      { analyst_id: 'efficiency-behavioral', status: 'ok', findings_count: 0, latency_ms: 347, cost_usd: 0 },
+      {
+        analyst_id: 'efficiency-behavioral',
+        status: 'ok',
+        findings_count: 0,
+        latency_ms: 347,
+        usage: {
+          calls: 0,
+          tokens: { input: 0, output: 0 },
+          cost: { kind: 'observed', usd: 0 },
+        },
+      },
     ],
     total_cost_usd: 0,
+    total_cost_provenance: { kind: 'observed', usd: 0 },
   }
 }
 
@@ -64,6 +75,23 @@ describe('renderReport', () => {
     expect(report).toContain('1 session(s), 10 spans')
     expect(report).toContain('**0 findings**')
     expect(report).toContain('No supported behavioral findings in the captured fields.')
+  })
+
+  it('labels a known subtotal when analyst cost was not fully captured', () => {
+    const result = emptyResult()
+    result.total_cost_usd = 0.25
+    result.total_cost_provenance = { kind: 'uncaptured', usd: null }
+
+    const report = renderReport(result, {
+      harness: 'codex',
+      sessionCount: 1,
+      spanCount: 10,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      execution: EMPTY_EXECUTION,
+    })
+
+    expect(report).toContain('Known analysis cost: $0.2500; additional cost was not captured.')
+    expect(report).not.toContain('Analysis cost: $0.2500.')
   })
 
   it('shows the exact selected child session and its operator provenance', () => {

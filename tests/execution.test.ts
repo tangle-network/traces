@@ -77,11 +77,13 @@ describe('execution accounting', () => {
       cacheWrite: 0,
     })
     expect(report.execution.modelCalls).toEqual({ runs: 1, events: 1, reportingRuns: 1 })
-    expect(report.execution.failures).toEqual({
+    expect(report.execution.executionErrors).toMatchObject({
       runs: 1,
       fraction: 1,
-      reportedErrorEvents: 1,
+      events: 1,
       reportingRuns: 1,
+      errorSpanEvents: 1,
+      errorSpanReportingRuns: 1,
     })
     expect(report.costProvenance).toEqual({
       observed: { n: 1, totalUsd: 0.02 },
@@ -95,7 +97,8 @@ describe('execution accounting', () => {
     const markdown = renderExecution(measuredExecution())
 
     expect(markdown).toContain('**Sessions:** 1')
-    expect(markdown).toContain('**Sessions with tool errors:** 1/1 (100.00%)')
+    expect(markdown).toContain('**Sessions with execution errors:** 1/1 (100.00%)')
+    expect(markdown).toContain('**Terminal outcomes:** 1 succeeded  |  0 failed')
     expect(markdown).toContain('**Task quality:** not measured')
     expect(markdown).toContain('| Input | 100 | 1 |')
     expect(markdown).toContain('| Reasoning (output subset) | 5 | 1 |')
@@ -104,5 +107,23 @@ describe('execution accounting', () => {
     expect(markdown).toContain('### Orchestration-reported usage')
     expect(markdown).toContain('| Input | 1,000 | 1 |')
     expect(markdown).toContain('Aggregate cost: $0.300000')
+  })
+
+  it('keeps a failed terminal outcome separate from child execution errors', () => {
+    const markdown = renderExecution(summarizeSpanExecution([
+      span({
+        traceId: 'failed-run',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        endTime: '2026-01-01T00:00:01.000Z',
+        status: 'ERROR',
+        statusMessage: 'process failed',
+      }),
+    ]))
+
+    expect(markdown).toContain('**Sessions with execution errors:** 0/1 (0.00%)')
+    expect(markdown).toContain('**Terminal outcomes:** 0 succeeded  |  1 failed')
   })
 })

@@ -347,7 +347,9 @@ describe('toTraceSpanEvents', () => {
   it('maps to OTel wire shape, ISO→nanos, root gets metadata', () => {
     const events = toTraceSpanEvents([root(), toolSpan('ls')], { 'tangle.harness': 'claude-code', 'redaction.count': 0 })
     const r = events.find((e) => e.spanId === 'root')!
-    expect(r.startTimeUnixNano).toBe(Date.parse('2026-01-01T00:00:00.000Z') * 1_000_000)
+    expect(r.startTimeUnixNano).toBe(
+      (BigInt(Date.parse('2026-01-01T00:00:00.000Z')) * 1_000_000n).toString(),
+    )
     expect(r.attributes['tangle.harness']).toBe('claude-code')
     // non-root span does NOT carry the session metadata
     const t = events.find((e) => e.spanId === 's1')!

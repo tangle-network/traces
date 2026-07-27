@@ -231,6 +231,35 @@ describe('analyzeSpans (bring-your-own analysts)', () => {
     expect(result.per_analyst.map((item) => item.analyst_id)).toContain('second-agentic')
   })
 
+  it.each([
+    [{ kind: 'observed', usd: 0.25 }, undefined, { kind: 'observed', usd: 0.25 }],
+    [{ kind: 'estimated', usd: 0.25 }, undefined, { kind: 'estimated', usd: 0.25 }],
+    [{ kind: 'uncaptured', usd: null }, 0.25, { kind: 'uncaptured', usd: null }],
+  ] as const)('preserves analyst cost provenance when combining passes', async (cost, knownCostUsd, expected) => {
+    const agenticRegistry = new AnalystRegistry()
+    agenticRegistry.register({
+      id: 'metered',
+      description: 'records one model call',
+      inputKind: 'trace-store',
+      cost: { kind: 'llm' },
+      version: '1.0.0',
+      async analyze(_store, context) {
+        context.recordUsage?.({
+          calls: 1,
+          tokens: null,
+          cost,
+          ...(knownCostUsd === undefined ? {} : { knownCostUsd }),
+        })
+        return []
+      },
+    })
+
+    const { result } = await analyzeSpans(loopSpans(2), { agenticRegistry })
+
+    expect(result.total_cost_usd).toBe(0.25)
+    expect(result.total_cost_provenance).toEqual(expected)
+  })
+
   it('rejects endpoint-only token trends when the session contains compaction resets and output increases', async () => {
     const inputs = [25_073, 100_000, 240_000, 30_000, 120_000, 210_878]
     const outputs = [934, 150, 1_200, 120, 900, 137]
