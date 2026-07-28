@@ -81,6 +81,7 @@ The deterministic pass (free, no key) surfaces:
 |---|---|---|
 | `claude-code` (`claude`, `claudish`, `openclaw`, `nanoclaw`) | `~/.claude/projects/<cwd>/*.jsonl` (+ subagent sidechains) | verified |
 | `codex` (`codex-acp`) | `~/.codex/sessions/**/rollout-*.jsonl` | verified |
+| `codex-exec` (`codex-json`) | explicit `codex exec --json` JSONL file | fixture |
 | `opencode` | `~/.local/share/opencode/storage/` | verified |
 | `gemini` (`gemini-cli`) | `~/.gemini/tmp/<hash>/chats/session-*.json` | verified |
 | `pi` | `~/.pi/agent/sessions/<cwd>/*.jsonl` | verified |
@@ -105,6 +106,7 @@ traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
 traces index    --all --since 24h --out session-index.json
 traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
+traces evidence --harness codex-exec --session /tmp/codex.jsonl --cwd "$PWD" --out policy-evidence.jsonl
 traces export   policy-evidence.jsonl --out spans.openinference.jsonl
 traces watch    --all                              # live observer; loops + semantic findings
 traces stream   --all --mode findings              # low-volume semantic feed
@@ -249,10 +251,13 @@ traces evidence --all --since 24h --out policy-evidence.jsonl --otlp spans.otlp.
 
 `--last` follows recent file activity and is useful for live inspection.
 For a reproducible report, run `traces list` first and pass its session ID with `--session`.
+Ephemeral `codex exec --json` output has no discovery location, so select its file with `--harness codex-exec --session <path>`.
+The adapter rejects empty, incomplete, or other JSONL formats instead of emitting zero-valued session evidence.
 
 Each JSONL row is one session:
 
 - session provenance: harness, session id, cwd, path, mtime
+- explicit-session source binding: `provenance.sourceSha256` over the exact stable input bytes
 - repo labels: `tangle.subject.key`, `git.repository`, branch, commit
 - behavior metrics: span counts, LLM turns, tool calls, errored tool calls, tokens, models, tool histogram
 - mining signals: stuck loops and tool error rate

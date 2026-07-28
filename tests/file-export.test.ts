@@ -71,6 +71,7 @@ const policyRecord: PolicyEvidenceRecord = {
     source: 'traces',
     evidenceKind: 'session-summary',
     otlpPath: '/runs/2026-06-27/spans.jsonl',
+    sourceSha256: 'a'.repeat(64),
     notCampaignCell: true,
     note: 'compact evidence row',
   },
@@ -120,6 +121,7 @@ describe('trace evidence export', () => {
       'traces.source_format': 'policy-evidence',
       'traces.metrics.tool_call_count': 3,
       'traces.signals.stuck_loop_count': 1,
+      'traces.provenance.source_sha256': 'a'.repeat(64),
     }))
   })
 

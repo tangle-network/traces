@@ -255,6 +255,7 @@ function policyEvidenceToSpans(records: readonly PolicyEvidenceRecord[]): OtlpSp
       'traces.provenance.source': record.provenance.source,
       'traces.provenance.evidence_kind': record.provenance.evidenceKind,
       'traces.provenance.otlp_path': record.provenance.otlpPath,
+      'traces.provenance.source_sha256': record.provenance.sourceSha256,
       [ATTR.SUBJECT_KEY]: record.repo.subjectKey,
       [ATTR.GIT_REPOSITORY]: record.repo.repository,
       [ATTR.GIT_BRANCH_NAME]: record.repo.branch,

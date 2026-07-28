@@ -67,6 +67,8 @@ export interface PolicyEvidenceRecord {
     readonly source: 'traces'
     readonly evidenceKind: 'session-summary'
     readonly otlpPath?: string
+    /** SHA-256 of the stable explicit session file consumed by the CLI. */
+    readonly sourceSha256?: string
     readonly notCampaignCell: true
     readonly note: string
   }
@@ -77,6 +79,8 @@ export interface BuildPolicyEvidenceOptions {
   readonly minLoopOccurrences?: number
   readonly maxLoopExamples?: number
   readonly otlpPath?: string
+  /** SHA-256 of the exact stable source bytes used to produce this record. */
+  readonly sourceSha256?: string
 }
 
 export interface CollectPolicyEvidenceOptions extends ScanOptions, BuildPolicyEvidenceOptions {}
@@ -142,6 +146,9 @@ export async function buildPolicyEvidenceRecord(
   spans: readonly OtlpSpan[],
   opts: BuildPolicyEvidenceOptions = {},
 ): Promise<PolicyEvidenceRecord> {
+  if (opts.sourceSha256 && !/^[a-f0-9]{64}$/.test(opts.sourceSha256)) {
+    throw new Error('sourceSha256 must be a lowercase SHA-256 hex digest')
+  }
   const toolSpans = spans.filter((span) => spanKind(span) === 'TOOL')
   const erroredToolCallCount = toolSpans.filter((span) => span.status.code === 'ERROR').length
   const pipelines = await runPipelines(spans, { minLoopOccurrences: opts.minLoopOccurrences })
@@ -191,6 +198,7 @@ export async function buildPolicyEvidenceRecord(
       source: 'traces',
       evidenceKind: 'session-summary',
       ...(opts.otlpPath ? { otlpPath: opts.otlpPath } : {}),
+      ...(opts.sourceSha256 ? { sourceSha256: opts.sourceSha256 } : {}),
       notCampaignCell: true,
       note: 'This is normalized coding-agent session evidence for downstream policy mining; it is not an eval campaign cell.',
     },

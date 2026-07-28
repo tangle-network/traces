@@ -107,6 +107,12 @@ describe('policy evidence export', () => {
     expect(record.repo.cwd).toBe('/work/agent-lab')
   })
 
+  it('rejects malformed source digests', async () => {
+    await expect(buildPolicyEvidenceRecord(ref, policySpans(), {
+      sourceSha256: 'not-a-digest',
+    })).rejects.toThrow('sourceSha256 must be a lowercase SHA-256 hex digest')
+  })
+
   it('collects policy evidence through the public scan path', async () => {
     const adapter: HarnessTraceAdapter = {
       harness: 'synthetic',

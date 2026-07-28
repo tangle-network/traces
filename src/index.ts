@@ -28,6 +28,7 @@ export * from './session-source.js' // scanSessions() / parseSession() — locat
 export * from './repo.js' // resolveRepoAttrs() — per-session repo/git resource labels
 export { ClaudeAdapter } from './adapters/claude.js'
 export { CodexAdapter } from './adapters/codex.js'
+export { CodexExecAdapter, CodexExecStreamError } from './adapters/codex-exec.js'
 export { OpencodeAdapter } from './adapters/opencode.js'
 export { GeminiAdapter } from './adapters/gemini.js'
 export { QwenAdapter } from './adapters/qwen.js'
