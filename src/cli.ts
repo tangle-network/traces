@@ -22,7 +22,8 @@
  * feed as JSONL for visualizers, dashboards, and external agents.
  */
 
-import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { createReadStream, readFileSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { ACTOR_ATTR } from './adapters/conversation.js'
@@ -371,13 +372,33 @@ async function cmdConvert(args: Args): Promise<void> {
   console.log(`wrote ${spans.length} spans → ${path}`)
 }
 
-async function collectSessionRows(args: Args): Promise<Array<{ ref: SessionRef; spans: OtlpSpan[] }>> {
+interface SessionRow {
+  readonly ref: SessionRef
+  readonly spans: OtlpSpan[]
+  readonly sourceSha256?: string
+}
+
+async function sourceSha256(path: string): Promise<string> {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(path)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+async function collectSessionRows(args: Args, bindExplicitSource = false): Promise<SessionRow[]> {
   if (args.session) {
     const { adapter, ref } = await resolveSelectedSession(args)
-    return [{ ref, spans: await parseSession(adapter, ref) }]
+    if (!bindExplicitSource) return [{ ref, spans: await parseSession(adapter, ref) }]
+
+    const before = await sourceSha256(ref.path)
+    const spans = await parseSession(adapter, ref)
+    const after = await sourceSha256(ref.path)
+    if (before !== after) {
+      throw new Error(`session source changed while parsing; refusing unbound evidence: ${ref.path}`)
+    }
+    return [{ ref, spans, sourceSha256: after }]
   }
   const groups = await discover({ ...args, last: args.last || 20 })
-  const rows: Array<{ ref: SessionRef; spans: OtlpSpan[] }> = []
+  const rows: SessionRow[] = []
   for (const { adapter, refs } of groups) {
     for (const ref of refs) rows.push({ ref, spans: await parseSession(adapter, ref) })
   }
@@ -385,7 +406,7 @@ async function collectSessionRows(args: Args): Promise<Array<{ ref: SessionRef; 
 }
 
 async function cmdEvidence(args: Args): Promise<void> {
-  const rows = (await collectSessionRows(args)).filter((row) => row.spans.length > 0)
+  const rows = (await collectSessionRows(args, true)).filter((row) => row.spans.length > 0)
   if (rows.length === 0) throw new Error('no spans found for the given selection')
   const otlpPath = args.otlp ? await writeOtlpFile(rows.flatMap((row) => row.spans), args.otlp) : undefined
   const generatedAt = new Date().toISOString()
@@ -395,6 +416,7 @@ async function cmdEvidence(args: Args): Promise<void> {
       minLoopOccurrences: args.minLoop,
       maxLoopExamples: 25,
       otlpPath,
+      sourceSha256: row.sourceSha256,
     }),
   ))
   if (args.out) {

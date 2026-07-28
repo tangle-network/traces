@@ -14,6 +14,7 @@
 import { AmpAdapter } from './adapters/amp.js'
 import { ClaudeAdapter } from './adapters/claude.js'
 import { CodexAdapter } from './adapters/codex.js'
+import { CodexExecAdapter } from './adapters/codex-exec.js'
 import { CopilotAdapter } from './adapters/copilot.js'
 import { FactoryAdapter } from './adapters/factory.js'
 import { ForgeAdapter } from './adapters/forge.js'
@@ -26,6 +27,7 @@ import type { HarnessTraceAdapter } from './types.js'
 const ADAPTERS: HarnessTraceAdapter[] = [
   new ClaudeAdapter(),
   new CodexAdapter(),
+  new CodexExecAdapter(),
   new OpencodeAdapter(),
   new GeminiAdapter(),
   new QwenAdapter(),
