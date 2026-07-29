@@ -1089,18 +1089,36 @@ describe('codex current tool and subagent events', () => {
         { type: 'response_item', timestamp: '2026-07-11T09:00:10.000Z', payload: { type: 'function_call_output', call_id: 'captured-exit', output: 'fixture text\nProcess exited with code 1\nnot a runner header' } },
         { type: 'response_item', timestamp: '2026-07-11T09:00:11.000Z', payload: { type: 'function_call', call_id: 'timed-out', name: 'wait', arguments: '{}' } },
         { type: 'response_item', timestamp: '2026-07-11T09:00:12.000Z', payload: { type: 'function_call_output', call_id: 'timed-out', output: '{"timed_out":true}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:13.000Z', payload: { type: 'function_call', call_id: 'poll-timed-out', name: 'wait_agent', arguments: '{"timeout_ms":10000}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:23.000Z', payload: { type: 'function_call_output', call_id: 'poll-timed-out', output: '{"message":"Wait timed out.","timed_out":true}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:24.000Z', payload: { type: 'function_call', call_id: 'process-timed-out', name: 'exec_command', arguments: '{"cmd":"slow-command"}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:25.000Z', payload: { type: 'function_call_output', call_id: 'process-timed-out', output: '{"timed_out":true,"exit_code":124,"output":"process exceeded deadline"}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:26.000Z', payload: { type: 'function_call', call_id: 'poll-failed', name: 'wait_agent', arguments: '{"timeout_ms":10000}' } },
+        { type: 'response_item', timestamp: '2026-07-11T09:00:27.000Z', payload: { type: 'function_call_output', call_id: 'poll-failed', output: '{"timed_out":true,"succeeded":false,"error":"poll transport failed"}' } },
       ].map((event) => JSON.stringify(event)).join('\n'),
     )
 
     const tools = (await new CodexAdapter().parse(refFor(path, 'codex')))
       .filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
-    expect(tools).toHaveLength(6)
+    expect(tools).toHaveLength(9)
     expect(tools.find((item) => item.span_id === 'tool:read-source')?.status).toEqual({ code: 'OK' })
     expect(tools.find((item) => item.span_id === 'tool:failed-command')?.status.code).toBe('ERROR')
     expect(tools.find((item) => item.span_id === 'tool:domain-result')?.status).toEqual({ code: 'OK' })
     expect(tools.find((item) => item.span_id === 'tool:captured-log')?.status).toEqual({ code: 'OK' })
     expect(tools.find((item) => item.span_id === 'tool:captured-exit')?.status).toEqual({ code: 'OK' })
     expect(tools.find((item) => item.span_id === 'tool:timed-out')?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === 'tool:poll-timed-out')).toMatchObject({
+      status: { code: 'OK' },
+      attributes: {
+        'traces.expected_blocking': true,
+        'traces.poll.outcome': 'timeout',
+      },
+    })
+    expect(tools.find((item) => item.span_id === 'tool:process-timed-out')?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === 'tool:poll-failed')).toMatchObject({
+      status: { code: 'ERROR' },
+    })
+    expect(tools.find((item) => item.span_id === 'tool:poll-failed')?.attributes['traces.poll.outcome']).toBeUndefined()
   })
 
   it('captures custom tool calls, joins their outputs, and tracks subagent lifecycles', async () => {
@@ -1470,6 +1488,10 @@ describe('codex current tool and subagent events', () => {
     ])
     expect(collaboration.every((item) => item.attributes['traces.codex.agent_session_ids'] === JSON.stringify([childId]))).toBe(true)
     expect(collaboration[0]!.attributes['traces.child_session_ids']).toBe(JSON.stringify([childId]))
+    expect(collaboration[2]).toMatchObject({
+      status: { code: 'OK' },
+      attributes: { 'traces.poll.outcome': 'timeout' },
+    })
     expect((await analyzeAdoption(parentSpans)).totalSubagentSpawns).toBe(1)
 
     const childRoot = childSpans[0]!
@@ -1481,6 +1503,262 @@ describe('codex current tool and subagent events', () => {
       'traces.codex.agent_nickname': 'Einstein',
       'traces.codex.agent_role': 'worker',
     })
+  })
+
+  it('joins current direct collaboration calls, lifecycle events, and child messages once', async () => {
+    const path = join(dir, 'rollout-codex-direct-collaboration.jsonl')
+    const childId = '019fabd5-b536-7673-8e79-55c61b5879cc'
+    const childPath = '/root/docs_contract_audit'
+    const startedAt = Date.parse('2026-07-29T03:05:37.395Z')
+    writeFileSync(
+      path,
+      [
+        {
+          timestamp: '2026-07-29T03:04:01.413Z',
+          type: 'session_meta',
+          payload: { id: 'direct-parent', cwd: '/repo' },
+        },
+        {
+          timestamp: '2026-07-29T03:04:01.413Z',
+          type: 'event_msg',
+          payload: { type: 'task_started', turn_id: 'turn-current', started_at: 1785294241 },
+        },
+        {
+          timestamp: '2026-07-29T03:05:37.325Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            call_id: 'call-spawn',
+            name: 'spawn_agent',
+            arguments: '{"task_name":"docs_contract_audit","fork_turns":"all","message":"Audit"}',
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:05:37.350Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call_output',
+            call_id: 'call-spawn',
+            output: '{"agent_name":"/root/docs_contract_audit","agent_status":"running"}',
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:05:37.395Z',
+          type: 'event_msg',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'call-spawn',
+            kind: 'started',
+            occurred_at_ms: startedAt,
+            agent_thread_id: childId,
+            agent_path: childPath,
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:13:54.700Z',
+          type: 'response_item',
+          payload: {
+            type: 'agent_message',
+            author: childPath,
+            recipient: '/root',
+            content: [{ type: 'input_text', text: 'Message Type: MESSAGE\nTask name: /root\nSender: /root/docs_contract_audit\nPayload:\nInspecting.' }],
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:13:54.700Z',
+          type: 'response_item',
+          payload: {
+            type: 'agent_message',
+            author: childPath,
+            recipient: '/root',
+            content: [{ type: 'input_text', text: 'Message Type: MESSAGE\nTask name: /root\nSender: /root/docs_contract_audit\nPayload:\nInspecting.' }],
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:19:37.715Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            call_id: 'call-send',
+            name: 'send_message',
+            arguments: '{"target":"/root/docs_contract_audit","message":"Check the contract"}',
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:19:37.717Z',
+          type: 'event_msg',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'call-send',
+            kind: 'interacted',
+            agent_thread_id: childId,
+            agent_path: childPath,
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:20:00.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            call_id: 'call-interrupt',
+            name: 'interrupt_agent',
+            arguments: '{"target":"/root/docs_contract_audit"}',
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:20:00.010Z',
+          type: 'event_msg',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'call-interrupt',
+            kind: 'interrupted',
+            agent_thread_id: childId,
+            agent_path: childPath,
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:47:54.762Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            call_id: 'call-followup',
+            name: 'followup_task',
+            arguments: '{"target":"docs_contract_audit","message":"Finish"}',
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:47:54.766Z',
+          type: 'event_msg',
+          payload: {
+            type: 'sub_agent_activity',
+            event_id: 'call-followup',
+            kind: 'interacted',
+            agent_thread_id: childId,
+            agent_path: childPath,
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:50:29.388Z',
+          type: 'response_item',
+          payload: {
+            type: 'agent_message',
+            author: childPath,
+            recipient: '/root',
+            content: [{ type: 'input_text', text: 'Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/docs_contract_audit\nPayload:\nFinished.' }],
+          },
+        },
+        {
+          timestamp: '2026-07-29T03:52:09.076Z',
+          type: 'response_item',
+          payload: { type: 'function_call', call_id: 'call-wait', name: 'wait_agent', arguments: '{"timeout_ms":10000}' },
+        },
+        {
+          timestamp: '2026-07-29T03:52:19.081Z',
+          type: 'response_item',
+          payload: { type: 'function_call_output', call_id: 'call-wait', output: '{"message":"Wait timed out.","timed_out":true}' },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const root = spans[0]!
+    expect(root.status).toEqual({ code: 'UNSET' })
+
+    const collaboration = spans.filter((item) => item.attributes['traces.codex.agent_operation'])
+    expect(collaboration.map((item) => item.attributes['traces.codex.agent_operation'])).toEqual([
+      'spawn_agent',
+      'send_message',
+      'interrupt_agent',
+      'followup_task',
+      'wait_agent',
+    ])
+    for (const callId of ['call-spawn', 'call-send', 'call-interrupt', 'call-followup']) {
+      expect(collaboration.find((item) => item.span_id === `tool:${callId}`)?.attributes['traces.codex.agent_session_ids'])
+        .toBe(JSON.stringify([childId]))
+    }
+    expect(collaboration[0]?.attributes['traces.child_session_ids']).toBe(JSON.stringify([childId]))
+    expect(collaboration[4]).toMatchObject({
+      status: { code: 'OK' },
+      attributes: { 'traces.expected_blocking': true, 'traces.poll.outcome': 'timeout' },
+    })
+
+    const agent = spans.find((item) => item.span_id === `subagent:${childId}`)
+    expect(agent).toMatchObject({
+      parent_span_id: 'tool:call-spawn',
+      start_time: '2026-07-29T03:05:37.395Z',
+      end_time: '2026-07-29T03:50:29.388Z',
+      status: { code: 'OK' },
+      attributes: { 'traces.codex.subagent_interruption_count': 1 },
+    })
+    expect(JSON.parse(String(agent?.attributes['traces.codex.subagent_lifecycle']))).toEqual([
+      expect.objectContaining({ kind: 'started' }),
+      expect.objectContaining({ kind: 'interacted' }),
+      expect.objectContaining({ kind: 'interrupted' }),
+      expect.objectContaining({ kind: 'interacted' }),
+      expect.objectContaining({ kind: 'final_answer' }),
+    ])
+    const messages = spans.filter((item) => item.name.startsWith('message.agent.'))
+    expect(messages).toHaveLength(2)
+    expect(messages.map((item) => item.name)).toEqual(['message.agent.progress', 'message.agent.final'])
+    expect(messages.every((item) => item.parent_span_id === `subagent:${childId}`)).toBe(true)
+    expect(messages.every((item) => item.attributes['traces.codex.agent_session_ids'] === JSON.stringify([childId]))).toBe(true)
+  })
+
+  it('reopens an interrupted child on progress even when the interacted event is missing', async () => {
+    const path = join(dir, 'rollout-codex-resumed-child-progress.jsonl')
+    const childId = '019fabd5-b536-7673-8e79-55c61b5879cc'
+    const childPath = '/root/docs_contract_audit'
+    writeFileSync(path, [
+      { timestamp: '2026-07-29T03:00:00.000Z', type: 'session_meta', payload: { id: 'resumed-parent', cwd: '/repo' } },
+      {
+        timestamp: '2026-07-29T03:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'sub_agent_activity', kind: 'started', agent_thread_id: childId, agent_path: childPath },
+      },
+      {
+        timestamp: '2026-07-29T03:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'sub_agent_activity', kind: 'interrupted', agent_thread_id: childId, agent_path: childPath },
+      },
+      {
+        timestamp: '2026-07-29T03:00:04.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'agent_message',
+          author: childPath,
+          recipient: '/root',
+          content: [{ type: 'input_text', text: 'Message Type: MESSAGE\nTask name: /root\nSender: /root/docs_contract_audit\nPayload:\nStill working.' }],
+        },
+      },
+    ].map((event) => JSON.stringify(event)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    expect(spans.find((item) => item.span_id === `subagent:${childId}`)).toMatchObject({
+      end_time: '2026-07-29T03:00:04.000Z',
+      status: { code: 'UNSET' },
+      attributes: { 'traces.codex.subagent_interruption_count': 1 },
+    })
+    expect(spans.filter((item) => item.name === 'message.agent.progress')).toHaveLength(1)
+  })
+
+  it('marks a session complete only when task_complete matches the latest task_started', async () => {
+    const stalePath = join(dir, 'rollout-codex-stale-task-complete.jsonl')
+    const completePath = join(dir, 'rollout-codex-matching-task-complete.jsonl')
+    const prefix = [
+      { timestamp: '2026-07-29T01:00:00.000Z', type: 'session_meta', payload: { id: 'task-lifecycle', cwd: '/repo' } },
+      { timestamp: '2026-07-29T01:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-old' } },
+      { timestamp: '2026-07-29T01:00:02.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-latest' } },
+      { timestamp: '2026-07-29T01:00:03.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-old' } },
+    ]
+    writeFileSync(stalePath, prefix.map((event) => JSON.stringify(event)).join('\n'))
+    writeFileSync(
+      completePath,
+      [...prefix, { timestamp: '2026-07-29T01:00:04.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-latest' } }]
+        .map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    expect((await new CodexAdapter().parse(refFor(stalePath, 'codex')))[0]?.status).toEqual({ code: 'UNSET' })
+    expect((await new CodexAdapter().parse(refFor(completePath, 'codex')))[0]?.status).toEqual({ code: 'OK' })
   })
 
   it.each([

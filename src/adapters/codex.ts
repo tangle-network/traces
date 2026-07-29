@@ -49,6 +49,7 @@ interface CodexLine {
     call_id?: string
     output?: unknown
     event_id?: string
+    turn_id?: string
     occurred_at_ms?: number
     started_at?: number
     agent_thread_id?: string
@@ -58,6 +59,8 @@ interface CodexLine {
     thread_source?: string
     agent_nickname?: string
     agent_role?: string
+    author?: string
+    recipient?: string
     source?: {
       subagent?: {
         thread_spawn?: {
@@ -125,11 +128,11 @@ function numericStatus(value: unknown): number | undefined {
   return undefined
 }
 
-function explicitOutputError(value: unknown): boolean | undefined {
+function explicitOutputError(value: unknown, timeoutIsError = true): boolean | undefined {
   if (Array.isArray(value)) {
     let observedSuccess = false
     for (const item of value) {
-      const status = explicitOutputError(item)
+      const status = explicitOutputError(item, timeoutIsError)
       if (status === true) return true
       if (status === false) observedSuccess = true
     }
@@ -145,13 +148,13 @@ function explicitOutputError(value: unknown): boolean | undefined {
       }
     }
     for (const key of ['timed_out', 'timedOut']) {
-      if (row[key] === true) return true
+      if (row[key] === true && timeoutIsError) return true
     }
     if (typeof row.succeeded === 'boolean' && ('value' in row || 'error' in row)) {
       return !row.succeeded
     }
     if ((row.type === 'input_text' || row.type === 'text') && typeof row.text === 'string') {
-      return explicitOutputError(row.text)
+      return explicitOutputError(row.text, timeoutIsError)
     }
     return undefined
   }
@@ -161,7 +164,7 @@ function explicitOutputError(value: unknown): boolean | undefined {
   if (!text) return undefined
   if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
     try {
-      const parsedStatus = explicitOutputError(JSON.parse(text) as unknown)
+      const parsedStatus = explicitOutputError(JSON.parse(text) as unknown, timeoutIsError)
       if (parsedStatus !== undefined) return parsedStatus
     } catch {
       // Some tools return ordinary source text that begins with a brace.
@@ -183,11 +186,42 @@ function explicitOutputError(value: unknown): boolean | undefined {
   return undefined
 }
 
+function explicitTimeout(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(explicitTimeout)
+  if (value && typeof value === 'object') {
+    const row = value as Record<string, unknown>
+    if (row.timed_out === true || row.timedOut === true) return true
+    if ((row.type === 'input_text' || row.type === 'text') && typeof row.text === 'string') {
+      return explicitTimeout(row.text)
+    }
+    return false
+  }
+  if (typeof value !== 'string') return false
+  const text = value.trim()
+  if (!text || !((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']')))) {
+    return false
+  }
+  try {
+    return explicitTimeout(JSON.parse(text) as unknown)
+  } catch {
+    return false
+  }
+}
+
+function isWaitAgentOperation(name: string): boolean {
+  return name === 'wait_agent' || name.endsWith('__wait_agent')
+}
+
 /** Only protocol-level status fields count; arbitrary tool output may itself contain code or logs mentioning errors. */
-function outputIsError(output: unknown): { error: boolean; message: string } {
-  const error = explicitOutputError(output) === true
+function outputStatus(name: string, output: unknown): { error: boolean; message: string; pollOutcome?: 'timeout' } {
+  const waitAgent = isWaitAgentOperation(name)
+  const error = explicitOutputError(output, !waitAgent) === true
   const message = typeof output === 'string' ? output : JSON.stringify(output ?? '')
-  return { error, message: error ? message.slice(0, 500) : '' }
+  return {
+    error,
+    message: error ? message.slice(0, 500) : '',
+    ...(!error && waitAgent && explicitTimeout(output) ? { pollOutcome: 'timeout' as const } : {}),
+  }
 }
 
 /** A custom `exec` call is a small JavaScript program around one or more real tools. */
@@ -218,9 +252,19 @@ function spawnedSessionIds(output: unknown): string[] {
   return [...new Set(ids)]
 }
 
+const DIRECT_AGENT_OPERATIONS = new Set([
+  'spawn_agent',
+  'send_message',
+  'followup_task',
+  'wait_agent',
+  'interrupt_agent',
+  'list_agents',
+])
+
 function multiAgentOperation(name: string): string | null {
   const prefix = 'multi_agent_v1__'
-  return name.startsWith(prefix) ? name.slice(prefix.length) : null
+  if (name.startsWith(prefix)) return name.slice(prefix.length)
+  return DIRECT_AGENT_OPERATIONS.has(name) ? name : null
 }
 
 function setAgentSessionIds(toolSpan: OtlpSpan, ids: readonly string[]): void {
@@ -230,6 +274,37 @@ function setAgentSessionIds(toolSpan: OtlpSpan, ids: readonly string[]): void {
   toolSpan.attributes['traces.codex.agent_session_count'] = unique.length
   if (toolSpan.attributes['traces.codex.agent_operation'] === 'spawn_agent') {
     toolSpan.attributes['traces.child_session_ids'] = JSON.stringify(unique)
+  }
+}
+
+interface SubagentLifecycleEntry {
+  kind: string
+  at: string
+  eventId?: string
+}
+
+function recordSubagentLifecycle(
+  agentSpan: OtlpSpan,
+  kind: string,
+  at: string,
+  eventId?: string,
+): void {
+  const raw = agentSpan.attributes['traces.codex.subagent_lifecycle']
+  let entries: SubagentLifecycleEntry[] = []
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) entries = parsed as SubagentLifecycleEntry[]
+    } catch {
+      // A malformed prior attribute should not hide the current lifecycle event.
+    }
+  }
+  entries.push({ kind, at, ...(eventId ? { eventId } : {}) })
+  agentSpan.attributes['traces.codex.subagent_lifecycle'] = JSON.stringify(entries)
+  if (kind === 'interrupted') {
+    const count = agentSpan.attributes['traces.codex.subagent_interruption_count']
+    agentSpan.attributes['traces.codex.subagent_interruption_count'] =
+      (typeof count === 'number' ? count : 0) + 1
   }
 }
 
@@ -252,6 +327,7 @@ function classifyNestedTool(name: string, input: string | undefined): string {
 }
 
 function isExpectedBlockingTool(name: string, input: string | undefined): boolean {
+  if (isWaitAgentOperation(name)) return true
   if (!input) return false
   if (name === 'wait') return /\bcell_id\b["']?\s*:/.test(input)
   if (name === 'write_stdin') return /\bsession_id\b["']?\s*:/.test(input)
@@ -379,6 +455,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       service: SERVICE,
       agent: SERVICE,
       model,
+      status: 'UNSET',
       extra: {
         'traces.session.role': sessionRole,
         ...(parentSessionId ? { 'traces.parent_session_id': parentSessionId } : {}),
@@ -396,6 +473,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
 
     const toolByCallId = new Map<string, OtlpSpan>()
     const subagentByThreadId = new Map<string, OtlpSpan>()
+    const subagentThreadIdByPath = new Map<string, string>()
+    const seenAgentMessages = new Set<string>()
+    let activeTaskTurnId: string | null | undefined
     let step = 0
     let lastLlm = rootId
     let sawUserTurn = false
@@ -410,6 +490,16 @@ export class CodexAdapter implements HarnessTraceAdapter {
       }
       lastTimestamp = l.timestamp
       const ts = l.timestamp ?? new Date(0).toISOString()
+      if (l.type === 'event_msg' && l.payload?.type === 'task_started') {
+        activeTaskTurnId = l.payload.turn_id ?? null
+        root.status = { code: 'UNSET' }
+      } else if (l.type === 'event_msg' && l.payload?.type === 'task_complete') {
+        const completedTurnId = l.payload.turn_id ?? null
+        if (activeTaskTurnId !== undefined && activeTaskTurnId === completedTurnId) {
+          activeTaskTurnId = undefined
+          root.status = { code: 'OK' }
+        }
+      }
       if (!model && l.type === 'turn_context' && l.payload?.model) {
         model = l.payload.model
         for (const pending of awaitingModel) pending.attributes['llm.model_name'] = model
@@ -481,9 +571,11 @@ export class CodexAdapter implements HarnessTraceAdapter {
       ) {
         const t = toolByCallId.get(l.payload.call_id ?? '')
         if (t) {
-          const { error, message } = outputIsError(l.payload.output)
+          const name = String(t.attributes['tool.name'] ?? '')
+          const { error, message, pollOutcome } = outputStatus(name, l.payload.output)
           t.end_time = ts
           t.status = error ? { code: 'ERROR', message } : { code: 'OK' }
+          if (pollOutcome) t.attributes['traces.poll.outcome'] = pollOutcome
           recordToolOutput(t, l.payload.output)
           if (t.attributes['traces.codex.agent_operation'] === 'spawn_agent') {
             setAgentSessionIds(t, spawnedSessionIds(l.payload.output))
@@ -495,13 +587,15 @@ export class CodexAdapter implements HarnessTraceAdapter {
         const eventTime = typeof occurredAtMs === 'number' && Number.isFinite(occurredAtMs)
           ? new Date(occurredAtMs).toISOString()
           : ts
+        const eventCallSpan = toolByCallId.get(l.payload.event_id ?? '')
+        if (eventCallSpan && threadId) setAgentSessionIds(eventCallSpan, [threadId])
         if (l.payload.kind === 'started' && threadId && !subagentByThreadId.has(threadId)) {
           const agentPath = l.payload.agent_path ?? 'subagent'
           const subagentType = agentPath.split('/').filter(Boolean).at(-1) ?? 'subagent'
           const toolSpan = span({
             traceId,
             spanId: `subagent:${threadId}`,
-            parentSpanId: lastLlm,
+            parentSpanId: eventCallSpan?.span_id ?? lastLlm,
             name: 'tool.Agent',
             kind: 'TOOL',
             startTime: eventTime,
@@ -509,6 +603,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: 'Agent',
             step,
+            status: 'UNSET',
             extra: {
               ...toolIoAttributes({
                 input: {
@@ -523,10 +618,13 @@ export class CodexAdapter implements HarnessTraceAdapter {
           })
           spans.push(toolSpan)
           subagentByThreadId.set(threadId, toolSpan)
+          subagentThreadIdByPath.set(agentPath, threadId)
+          recordSubagentLifecycle(toolSpan, 'started', eventTime, l.payload.event_id)
           step += 1
         } else if (l.payload.kind === 'completed' && threadId) {
           const toolSpan = subagentByThreadId.get(threadId)
           if (toolSpan) {
+            recordSubagentLifecycle(toolSpan, 'completed', eventTime, l.payload.event_id)
             toolSpan.end_time = eventTime
             toolSpan.status = { code: 'OK' }
           }
@@ -536,11 +634,73 @@ export class CodexAdapter implements HarnessTraceAdapter {
         ) {
           const toolSpan = subagentByThreadId.get(threadId)
           if (toolSpan) {
+            recordSubagentLifecycle(toolSpan, l.payload.kind!, eventTime, l.payload.event_id)
             toolSpan.end_time = eventTime
             toolSpan.status = { code: 'ERROR', message: `subagent ${l.payload.kind}` }
           }
+        } else if (l.payload.kind === 'interacted' && threadId) {
+          const toolSpan = subagentByThreadId.get(threadId)
+          if (toolSpan) {
+            recordSubagentLifecycle(toolSpan, 'interacted', eventTime, l.payload.event_id)
+            const operation = eventCallSpan?.attributes['traces.codex.agent_operation']
+            if (operation === 'followup_task' || operation === 'send_input') {
+              toolSpan.end_time = eventTime
+              toolSpan.status = { code: 'UNSET' }
+            }
+          }
         }
         // `interacted` is a progress event, not a terminal state.
+      } else if (l.type === 'response_item' && l.payload?.type === 'agent_message') {
+        const messageIdentity = JSON.stringify([
+          l.timestamp ?? null,
+          l.payload.author ?? null,
+          l.payload.recipient ?? null,
+          l.payload.content ?? null,
+        ])
+        if (seenAgentMessages.has(messageIdentity)) continue
+        seenAgentMessages.add(messageIdentity)
+        const text = textOf(l.payload.content)
+        const author = l.payload.author
+        const recipient = l.payload.recipient
+        const messageType = /^Message Type:\s*FINAL_ANSWER\b/m.test(text)
+          ? 'final'
+          : /^Message Type:\s*MESSAGE\b/m.test(text)
+            ? 'progress'
+            : 'unknown'
+        const threadId = author ? subagentThreadIdByPath.get(author) : undefined
+        const agentSpan = threadId ? subagentByThreadId.get(threadId) : undefined
+        const messageSpan = span({
+          traceId,
+          spanId: `msg:${step}:agent`,
+          parentSpanId: agentSpan?.span_id ?? rootId,
+          name: `message.agent.${messageType}`,
+          kind: 'CHAIN',
+          startTime: ts,
+          service: SERVICE,
+          agent: SERVICE,
+          step,
+          content: text,
+          extra: {
+            'traces.codex.agent_message_type': messageType,
+            ...(author ? { 'traces.codex.agent_message_author': author } : {}),
+            ...(recipient ? { 'traces.codex.agent_message_recipient': recipient } : {}),
+            ...(threadId ? {
+              'traces.codex.agent_thread_id': threadId,
+              'traces.codex.agent_session_ids': JSON.stringify([threadId]),
+              'traces.codex.agent_session_count': 1,
+            } : {}),
+          },
+        })
+        spans.push(messageSpan)
+        step += 1
+        if (messageType === 'progress' && agentSpan) {
+          agentSpan.end_time = ts
+          agentSpan.status = { code: 'UNSET' }
+        } else if (messageType === 'final' && agentSpan) {
+          recordSubagentLifecycle(agentSpan, 'final_answer', ts)
+          agentSpan.end_time = ts
+          agentSpan.status = { code: 'OK' }
+        }
       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
         // The human's prompt text. Codex drops the user turn from token events,
         // so capture it here as its own CHAIN span (no text → no span).

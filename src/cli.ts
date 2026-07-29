@@ -75,6 +75,7 @@ interface Args {
   harnessExplicit: boolean
   all: boolean
   last: number
+  current: boolean
   session?: string
   cwd?: string
   since?: string
@@ -118,6 +119,7 @@ function parseArgs(argv: string[]): Args {
     harnessExplicit: false,
     all: false,
     last: 0,
+    current: false,
     llm: false,
     interval: 5,
     window: 30,
@@ -138,6 +140,7 @@ function parseArgs(argv: string[]): Args {
       case '--harness': a.harness = next() ?? a.harness; a.harnessExplicit = true; break
       case '--all': a.all = true; break
       case '--last': a.last = Number(next()); break
+      case '--current': a.current = true; break
       case '--session': a.session = next(); break
       case '--cwd': a.cwd = next(); break
       case '--supervisor-run-dir': a.supervisorRunDir = next(); break
@@ -176,6 +179,35 @@ function parseArgs(argv: string[]): Args {
     }
   }
   return a
+}
+
+const CURRENT_SESSION_COMMANDS = new Set([
+  'analyze',
+  'investigate',
+  'improve',
+  'convert',
+  'index',
+  'evidence',
+  'stream',
+])
+
+function applyCurrentSessionSelection(args: Args): Args {
+  if (!args.current) return args
+  if (!CURRENT_SESSION_COMMANDS.has(args.command)) {
+    throw new Error(`--current is not supported by ${args.command}`)
+  }
+  if (args.input) throw new Error('--current cannot be combined with an input file')
+  if (args.supervisorRunDir) throw new Error('--current cannot be combined with --supervisor-run-dir')
+  if (args.session) throw new Error('--current cannot be combined with --session')
+  if (args.last > 0) throw new Error('--current cannot be combined with --last')
+  if (args.all) throw new Error('--current cannot be combined with --all')
+  const adapter = resolveAdapter(args.harness)
+  if (adapter?.harness !== 'codex') {
+    throw new Error('--current uses CODEX_THREAD_ID and requires --harness codex')
+  }
+  const sessionId = process.env.CODEX_THREAD_ID?.trim()
+  if (!sessionId) throw new Error('--current requires CODEX_THREAD_ID from the active Codex session')
+  return { ...args, session: sessionId }
 }
 
 /** Y/N confirm on a TTY (prompt to stderr so stdout stays clean). Non-TTY → false. */
@@ -233,7 +265,7 @@ async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTra
         sessionId: args.session,
         path: args.session,
         // --session is an explicit file; honor --cwd so adoption can find the
-        // project's .evolve/skill-runs.jsonl (locate() infers cwd in the scan path).
+        // project's current or legacy skill-run log (locate() infers cwd in the scan path).
         cwd: args.cwd ?? null,
         mtimeMs: st.mtimeMs,
       },
@@ -936,6 +968,7 @@ Options:
   --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
   --all            Sweep every known harness
   --last <n>       Most-recent N sessions
+  --current        Analyze the active Codex session named by CODEX_THREAD_ID
   --session <id|path> Analyze one listed session ID or one explicit harness session file
   --cwd <dir>      Filter sessions by working directory
   --supervisor-run-dir <dir>
@@ -978,12 +1011,13 @@ async function main(): Promise<void> {
     console.log(`traces ${packageVersion()}`)
     return
   }
-  const args = parseArgs(rawArgs)
-  if (args.help) {
-    if (args.command === 'export' || (args.command === 'help' && args.input === 'export')) usageExport()
+  const parsedArgs = parseArgs(rawArgs)
+  if (parsedArgs.help) {
+    if (parsedArgs.command === 'export' || (parsedArgs.command === 'help' && parsedArgs.input === 'export')) usageExport()
     else usage()
     return
   }
+  const args = applyCurrentSessionSelection(parsedArgs)
   switch (args.command) {
     case 'help':
       if (args.input === 'export') usageExport()
