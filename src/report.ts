@@ -579,7 +579,7 @@ export function renderAdoption(ar: AdoptionReport): string {
   if (ar.totalUnlinkedLoopDispatchedRuns > 0) {
     lines.push(
       `- **Unlinked repository history:** ${ar.totalUnlinkedLoopDispatchedRuns} run(s) from ` +
-        `${ar.skillRunFilesRead} \`.evolve/skill-runs.jsonl\` file(s); not attributed to these sessions.`,
+        `${ar.skillRunFilesRead} current or legacy \`skill-runs.jsonl\` file(s); unassigned to these sessions.`,
     )
   }
   if (ar.totalSkillDocumentReads > 0) {

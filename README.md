@@ -98,7 +98,7 @@ Every adapter captures the full conversation: the **user's prompt** and the **as
 ```bash
 traces list     --harness claude-code --last 20    # discover sessions
 traces analyze  --harness codex --session <id>     # pin one ID printed by `list`
-traces analyze  --harness codex --last 1           # $0 findings with actions + checks
+traces analyze  --harness codex --current          # this session, even when a child wrote later
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
@@ -121,7 +121,8 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--harness <id>` | Harness or alias (default: `claude-code`) |
 | `--all` | Every known harness |
 | `--last <n>` | Most-recent N sessions |
-| `--session <path>` | One explicit session file |
+| `--current` | Active Codex session from `CODEX_THREAD_ID` |
+| `--session <id\|path>` | One listed session ID or explicit session file |
 | `--cwd <dir>` | Filter by working directory |
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
@@ -249,7 +250,8 @@ It is intentionally read-only: it points to repeated-call loops, high tool-error
 traces evidence --all --since 24h --out policy-evidence.jsonl --otlp spans.otlp.jsonl
 ```
 
-`--last` follows recent file activity and is useful for live inspection.
+`--last` follows recent file activity and may select a child session in multi-agent work.
+Use `--harness codex --current` for the invoking Codex session, or select an exact ID.
 For a reproducible report, run `traces list` first and pass its session ID with `--session`.
 Ephemeral `codex exec --json` output has no discovery location, so select its file with `--harness codex-exec --session <path>`.
 The adapter rejects empty, incomplete, or other JSONL formats instead of emitting zero-valued session evidence.

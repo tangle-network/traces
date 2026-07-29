@@ -250,13 +250,25 @@ describe('countSkillRunsJsonl', () => {
 describe('analyzeAdoption', () => {
   it('separates session-linked loop runs from unlinked repository history', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'tt-adopt-cwd-'))
+    const migratedExact = { skill: 'reflect', sessionId: 's1', ts: '2026-07-29T00:00:00Z' }
+    mkdirSync(join(cwd, '.agent'), { recursive: true })
     mkdirSync(join(cwd, '.evolve'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.agent', 'skill-runs.jsonl'),
+      [
+        JSON.stringify(migratedExact),
+        JSON.stringify({ id: 'skill-run-1', skill: 'polish', sessionId: 's1', verdict: 'KEEP' }),
+        JSON.stringify({ skill: 'critical-audit' }),
+      ].join('\n'),
+    )
     writeFileSync(
       join(cwd, '.evolve', 'skill-runs.jsonl'),
       [
         JSON.stringify({ skill: 'evolve', sessionId: 's1' }),
         JSON.stringify({ skill: 'evolve' }),
         JSON.stringify({ skills: ['evolve', 'converge'] }),
+        JSON.stringify(migratedExact),
+        JSON.stringify({ id: 'skill-run-1', skill: 'polish', sessionId: 's1', verdict: 'MIGRATED' }),
       ].join('\n'),
     )
     const spans: OtlpSpan[] = [
@@ -323,11 +335,14 @@ describe('analyzeAdoption', () => {
     expect(r.totalSubagentSpawns).toBe(3)
     expect(r.sessionsWithSubagent).toBe(2)
     expect(r.loopDispatchedRuns.evolve).toBe(1)
-    expect(r.totalLoopDispatchedRuns).toBe(1)
+    expect(r.loopDispatchedRuns.reflect).toBe(1)
+    expect(r.loopDispatchedRuns.polish).toBe(1)
+    expect(r.totalLoopDispatchedRuns).toBe(3)
     expect(r.unlinkedLoopDispatchedRuns.evolve).toBe(2)
     expect(r.unlinkedLoopDispatchedRuns.converge).toBe(1)
-    expect(r.totalUnlinkedLoopDispatchedRuns).toBe(3)
-    expect(r.skillRunFilesRead).toBe(1)
+    expect(r.unlinkedLoopDispatchedRuns['critical-audit']).toBe(1)
+    expect(r.totalUnlinkedLoopDispatchedRuns).toBe(4)
+    expect(r.skillRunFilesRead).toBe(2)
   })
 
   it('reports Codex skill invocation as unsupported while preserving catalog, file, and subagent evidence', async () => {

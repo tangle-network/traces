@@ -405,6 +405,59 @@ describe('traces CLI', () => {
     })
   })
 
+  it('selects the Codex session named by CODEX_THREAD_ID instead of the most recent child', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-current-'))
+    const codexHome = join(dir, 'codex')
+    const sessions = join(codexHome, 'sessions', '2026', '07', '29')
+    const parentId = '019fabd3-6738-7491-a8c0-957ca2bc9876'
+    const childId = '019fae74-a099-7b13-befd-003a6ba7f09a'
+    const parent = join(sessions, `rollout-2026-07-29T00-00-00-${parentId}.jsonl`)
+    const child = join(sessions, `rollout-2026-07-29T00-01-00-${childId}.jsonl`)
+    const index = join(dir, 'index.json')
+    await mkdir(sessions, { recursive: true })
+    await writeFile(parent, [
+      { timestamp: '2026-07-29T00:00:00.000Z', type: 'session_meta', payload: { id: parentId, cwd: dir } },
+      { timestamp: '2026-07-29T00:00:01.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Parent pursuit.' } },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+    await writeFile(child, [
+      {
+        timestamp: '2026-07-29T00:01:00.000Z',
+        type: 'session_meta',
+        payload: { id: childId, cwd: dir, parent_thread_id: parentId, thread_source: 'subagent' },
+      },
+      { timestamp: '2026-07-29T00:01:01.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Child task.' } },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'index',
+      '--harness',
+      'codex',
+      '--current',
+      '--out',
+      index,
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        CODEX_THREAD_ID: parentId,
+        NO_COLOR: '1',
+        FORCE_COLOR: '',
+      },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const output = JSON.parse(await readFile(index, 'utf8')) as {
+      sessions: Array<{ session: { sessionId: string; path: string } }>
+    }
+    expect(output.sessions).toHaveLength(1)
+    expect(output.sessions[0]).toMatchObject({ session: { sessionId: parentId, path: parent } })
+  })
+
   it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-stream-'))
     const input = join(dir, 'spans.openinference.jsonl')

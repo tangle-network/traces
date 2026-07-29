@@ -6,9 +6,9 @@
  *   2. per-skill invocation frequency
  *   3. subagent (Task/Agent) spawn frequency
  *
- * A repository's `.evolve/skill-runs.jsonl` is historical context, not session
- * evidence, unless a row carries the selected session ID. This keeps old runs
- * from being attributed to the current trace.
+ * A repository's `.agent/skill-runs.jsonl` (or legacy `.evolve` log) is
+ * historical context, not session evidence, unless a row carries the selected
+ * session ID. This keeps old runs from being attributed to the current trace.
  */
 
 import { readFile } from 'node:fs/promises'
@@ -58,7 +58,7 @@ export interface AdoptionReport {
   loopDispatchedRuns: Record<string, number>
   /** Total session-linked loop-dispatched skill runs. */
   totalLoopDispatchedRuns: number
-  /** `.evolve/skill-runs.jsonl` files that were read. */
+  /** Current or legacy `skill-runs.jsonl` files that were read. */
   skillRunFilesRead: number
   /** Same-repository loop history without a selected session ID. Never treat
    *  this as evidence that a selected session used a skill. */
@@ -151,7 +151,7 @@ function telemetryStatus(
 }
 
 /**
- * Count loop-dispatched skill runs from a `.evolve/skill-runs.jsonl` file's raw
+ * Count loop-dispatched skill runs from a `skill-runs.jsonl` file's raw
  * contents. Each line records one or more skills under `skills` (array) or
  * `skill` (string) — the schema varies across producers, so accept both.
  */
@@ -169,6 +169,22 @@ function sessionIdFromRun(record: Record<string, unknown>): string | undefined {
     if (typeof record[key] === 'string' && record[key]) return record[key]
   }
   return undefined
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+function skillRunIdentity(record: Record<string, unknown>): string {
+  for (const key of ['id', 'runId', 'run_id', 'skillRunId', 'skill_run_id']) {
+    if (typeof record[key] === 'string' && record[key]) return `id:${record[key]}`
+  }
+  return `row:${canonicalJson(record)}`
 }
 
 function addCounts(target: Record<string, number>, names: readonly string[]): void {
@@ -206,38 +222,45 @@ async function readLoopRuns(
   const linkedCounts: Record<string, number> = {}
   const unlinkedCounts: Record<string, number> = {}
   let filesRead = 0
-  const seen = new Set<string>()
+  const seenCwds = new Set<string>()
   for (const cwd of cwds) {
-    if (!cwd || seen.has(cwd)) continue
-    seen.add(cwd)
-    const path = join(cwd, '.evolve', 'skill-runs.jsonl')
-    let raw: string
-    try {
-      raw = await readFile(path, 'utf8')
-    } catch {
-      continue
-    }
-    filesRead += 1
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue
-      let value: unknown
+    if (!cwd || seenCwds.has(cwd)) continue
+    seenCwds.add(cwd)
+    const firstSourceByRun = new Map<string, string>()
+    for (const artifactDir of ['.agent', '.evolve']) {
+      const path = join(cwd, artifactDir, 'skill-runs.jsonl')
+      let raw: string
       try {
-        value = JSON.parse(line)
+        raw = await readFile(path, 'utf8')
       } catch {
         continue
       }
-      if (!value || typeof value !== 'object') continue
-      const record = value as Record<string, unknown>
-      const target = sessionIds.has(sessionIdFromRun(record) ?? '') ? linkedCounts : unlinkedCounts
-      addCounts(target, skillNamesFromRun(record))
+      filesRead += 1
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue
+        let value: unknown
+        try {
+          value = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (!value || typeof value !== 'object') continue
+        const record = value as Record<string, unknown>
+        const identity = skillRunIdentity(record)
+        const firstSource = firstSourceByRun.get(identity)
+        if (firstSource && firstSource !== path) continue
+        firstSourceByRun.set(identity, path)
+        const target = sessionIds.has(sessionIdFromRun(record) ?? '') ? linkedCounts : unlinkedCounts
+        addCounts(target, skillNamesFromRun(record))
+      }
     }
   }
   return { linkedCounts, unlinkedCounts, filesRead }
 }
 
 export interface AdoptionOptions {
-  /** Session cwds to probe for `.evolve/skill-runs.jsonl`. The CLI passes the
-   *  cwds of the analyzed sessions. */
+  /** Session cwds to probe for current and legacy skill-run logs. The CLI
+   *  passes the cwds of the analyzed sessions. */
   cwds?: readonly string[]
 }
 
