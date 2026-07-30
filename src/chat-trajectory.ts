@@ -60,7 +60,7 @@ export function chatTrajectoryToSpans(
   const traceId = options.traceId ?? trajectoryId(trajectory)
   const service = options.service ?? trajectory.trajectory_format ?? 'chat-trajectory'
   const stepMode = options.stepMode ?? 'assistant'
-  const times = trajectory.messages.map((message, index) => messageTime(message.timestamp, index))
+  const times = messageTimes(trajectory.messages)
   const actionCount = trajectory.messages.filter((message) => messageKind(message.role) === 'LLM').length
   const root = span({
     traceId,
@@ -164,8 +164,25 @@ function messageAgent(role: string): string | undefined {
     : role.trim()
 }
 
+function messageTimes(messages: readonly ChatTrajectoryMessage[]): string[] {
+  const supplied = messages.filter((message) => message.timestamp !== undefined).length
+  if (supplied === 0) return messages.map((_, index) => new Date(index).toISOString())
+  if (supplied !== messages.length) {
+    throw new TypeError('chat trajectory timestamps must be present on every message or none')
+  }
+
+  const times = messages.map((message, index) => messageTime(message.timestamp, index))
+  for (let index = 1; index < times.length; index += 1) {
+    if (Date.parse(times[index]!) < Date.parse(times[index - 1]!)) {
+      throw new RangeError(
+        `chat trajectory message ${index + 1} timestamp precedes message ${index}`,
+      )
+    }
+  }
+  return times
+}
+
 function messageTime(value: string | number | undefined, index: number): string {
-  if (value === undefined) return new Date(index).toISOString()
   const parsed = parseTime(value)
   if (!parsed) {
     throw new TypeError(`chat trajectory message ${index + 1} has an invalid timestamp`)

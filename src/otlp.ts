@@ -27,6 +27,7 @@ import {
   OPENINFERENCE_SPAN_KIND,
   TOOL_NAME,
 } from '@tangle-network/agent-eval/trace-attributes'
+import { validateOtlpSpans } from './span-validation.js'
 
 export type OtlpSpanKind = 'AGENT' | 'LLM' | 'TOOL' | 'CHAIN' | 'SPAN'
 
@@ -158,7 +159,8 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
  *  OpenInference tools directly — no per-tool conversion. */
 export function serializeSpans(spans: readonly OtlpSpan[]): string {
   if (spans.length === 0) return ''
-  return `${spans.map((s) => JSON.stringify(toOpenInferenceSpan(s))).join('\n')}\n`
+  const validated = validateOtlpSpans(spans, 'serialized spans')
+  return `${validated.map((s) => JSON.stringify(toOpenInferenceSpan(s))).join('\n')}\n`
 }
 
 /** Write spans to an OTLP-JSONL file (a temp file when no path is given). */

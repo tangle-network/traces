@@ -94,6 +94,24 @@ describe('chatTrajectoryToSpans', () => {
     ])).toThrow(/message 1 has an invalid timestamp/)
   })
 
+  it('rejects partial timestamps instead of mixing real and synthetic time', () => {
+    expect(() =>
+      chatTrajectoryToSpans([
+        { role: 'user', content: 'Start', timestamp: '2026-01-01T00:00:00Z' },
+        { role: 'assistant', content: 'Finish' },
+      ]),
+    ).toThrow(/timestamps must be present on every message or none/)
+  })
+
+  it('rejects timestamps that contradict transcript order', () => {
+    expect(() =>
+      chatTrajectoryToSpans([
+        { role: 'user', content: 'Start', timestamp: '2026-01-01T00:00:01Z' },
+        { role: 'assistant', content: 'Finish', timestamp: '2026-01-01T00:00:00Z' },
+      ]),
+    ).toThrow(/message 2 timestamp precedes message 1/)
+  })
+
   it('rejects duplicate trajectory identities in one export', () => {
     expect(() => exportTraceEvidenceRows([trajectory, trajectory])).toThrow(
       /duplicate span identity \(case-1, root\)/,
