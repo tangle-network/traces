@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { capText } from './adapters/conversation.js'
 import type { OtlpSpan, OtlpSpanKind } from './otlp.js'
 import { span } from './otlp.js'
+import { validateOtlpSpans } from './span-validation.js'
 
 type JsonObject = Record<string, unknown>
 
@@ -78,7 +79,7 @@ export function chatTrajectoryToSpans(
       'trajectory.source_path': options.sourcePath,
       'trajectory.api_calls': finiteNumber(trajectory.info?.model_stats, 'api_calls'),
       'trajectory.timestamps_synthetic': trajectory.messages.some(
-        (message) => parseTime(message.timestamp) === undefined,
+        (message) => message.timestamp === undefined,
       ),
     }),
   })
@@ -124,7 +125,7 @@ export function chatTrajectoryToSpans(
       }),
     )
   }
-  return spans
+  return validateOtlpSpans(spans, 'chat trajectory output')
 }
 
 function trajectoryId(trajectory: ChatTrajectory): string {
@@ -164,13 +165,19 @@ function messageAgent(role: string): string | undefined {
 }
 
 function messageTime(value: string | number | undefined, index: number): string {
-  return parseTime(value) ?? new Date(index).toISOString()
+  if (value === undefined) return new Date(index).toISOString()
+  const parsed = parseTime(value)
+  if (!parsed) {
+    throw new TypeError(`chat trajectory message ${index + 1} has an invalid timestamp`)
+  }
+  return parsed
 }
 
 function parseTime(value: string | number | undefined): string | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
     const millis = value < 10_000_000_000 ? value * 1000 : value
-    return new Date(millis).toISOString()
+    const date = new Date(millis)
+    return Number.isFinite(date.getTime()) ? date.toISOString() : undefined
   }
   if (typeof value !== 'string' || !value.trim()) return undefined
   const millis = Date.parse(value)

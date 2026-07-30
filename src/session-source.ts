@@ -11,7 +11,10 @@ import { stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
 import { cwdMatchesSelection, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
+import { validateOtlpSpans } from './span-validation.js'
 import type { HarnessTraceAdapter, ParseOptions, SessionRef } from './types.js'
+
+export { validateOtlpSpans }
 
 /**
  * Parse one session to spans and stamp per-session repo/git resource attrs
@@ -24,7 +27,10 @@ export async function parseSession(
   ref: SessionRef,
   options: ParseOptions = {},
 ): Promise<OtlpSpan[]> {
-  const spans = await adapter.parse(ref, options)
+  const spans = validateOtlpSpans(
+    await adapter.parse(ref, options),
+    `${adapter.harness} adapter output`,
+  )
   if (spans.length === 0) throw new EmptySessionError(ref.path)
   stampSessionIntegrity(ref, spans)
   stampSessionIdentity(spans, ref.sessionId)

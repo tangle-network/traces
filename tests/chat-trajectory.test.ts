@@ -87,4 +87,16 @@ describe('chatTrajectoryToSpans', () => {
     expect(arrayResult.format).toBe('chat-trajectory')
     expect(arrayResult.spans).toHaveLength(6)
   })
+
+  it('rejects an explicitly malformed message timestamp', () => {
+    expect(() => chatTrajectoryToSpans([
+      { role: 'user', content: 'Start', timestamp: 'not-a-date' },
+    ])).toThrow(/message 1 has an invalid timestamp/)
+  })
+
+  it('rejects duplicate trajectory identities in one export', () => {
+    expect(() => exportTraceEvidenceRows([trajectory, trajectory])).toThrow(
+      /duplicate span identity \(case-1, root\)/,
+    )
+  })
 })

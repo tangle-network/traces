@@ -31,6 +31,7 @@ import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
 import { serializeSpans, span } from './otlp.js'
 import { redactSpans } from './redact.js'
+import { validateOtlpSpans } from './span-validation.js'
 
 type JsonObject = Record<string, unknown>
 
@@ -164,6 +165,7 @@ function isOpenInferenceRow(row: unknown): row is JsonObject {
   return (
     typeof row.trace_id === 'string' &&
     typeof row.span_id === 'string' &&
+    (row.parent_span_id === null || typeof row.parent_span_id === 'string') &&
     typeof row.name === 'string' &&
     typeof row.start_time === 'string' &&
     typeof row.end_time === 'string' &&
@@ -607,7 +609,8 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
       isoTime(row.start_time) ??
       stringValue(row.start_time) ??
       isoTime(row.received_at) ??
-      new Date(0).toISOString()
+      stringValue(row.received_at) ??
+      ''
     const endTime =
       unixNanoTime(row.end_unix_nano) ??
       isoTime(row.end_time) ??
@@ -695,16 +698,26 @@ function openInferenceToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
     const status = objectValue(row.status)
     const message = stringValue(status?.message)
     return {
-      trace_id: stringValue(row.trace_id) ?? hashId(row, 32),
-      span_id: stringValue(row.span_id) ?? hashId({ row, field: 'span' }),
+      trace_id: row.trace_id as string,
+      span_id: row.span_id as string,
       parent_span_id: stringValue(row.parent_span_id) || null,
-      name,
-      start_time: stringValue(row.start_time) ?? new Date(0).toISOString(),
-      end_time: stringValue(row.end_time) ?? stringValue(row.start_time) ?? new Date(0).toISOString(),
-      status: { code: statusCode(status?.code), ...(message ? { message } : {}) },
+      name: row.name as string,
+      start_time: row.start_time as string,
+      end_time: row.end_time as string,
+      status: {
+        code: openInferenceStatusCode(status?.code),
+        ...(message ? { message } : {}),
+      },
       attributes: attrs,
     }
   })
+}
+
+function openInferenceStatusCode(value: unknown): OtlpStatusCode {
+  if (value === 'OK' || value === 'STATUS_CODE_OK') return 'OK'
+  if (value === 'ERROR' || value === 'STATUS_CODE_ERROR') return 'ERROR'
+  if (value === 'UNSET' || value === 'STATUS_CODE_UNSET') return 'UNSET'
+  throw new TypeError('OpenInference status.code must be OK, ERROR, UNSET, or its STATUS_CODE_* form')
 }
 
 function normalizeAttributes(attributes: JsonObject | undefined): JsonObject {
@@ -749,9 +762,10 @@ export function exportTraceEvidenceRows(
   const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)
+  const validated = validateOtlpSpans(redacted.spans, `${format} export`)
   return {
     format,
-    spans: redacted.spans,
+    spans: validated,
     redactionCount: redacted.report.redactionCount,
     redactionsByRule: redacted.report.byRule,
   }
@@ -799,7 +813,12 @@ export async function exportTraceEvidenceFile(
         format,
       })
     }
-    return { format, spans, redactionCount, redactionsByRule }
+    return {
+      format,
+      spans: validateOtlpSpans(spans, `${format} file export`),
+      redactionCount,
+      redactionsByRule,
+    }
   }
   const text = await readFile(inputPath, 'utf8')
   return exportTraceEvidenceText(text, { ...opts, sourcePath: inputPath })
