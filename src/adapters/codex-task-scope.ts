@@ -160,9 +160,11 @@ export async function findForkTaskBoundary(
     ? []
     : uniqueTaskBoundaries(
         candidates.filter(
-          (candidate) =>
-            candidate.startedAt !== undefined
-            && Math.abs(candidate.startedAt - startedAt) <= 2,
+          (candidate) => {
+            const candidateStartedAt =
+              candidate.startedAt ?? Math.floor(Date.parse(candidate.timestamp) / 1_000)
+            return Math.abs(candidateStartedAt - startedAt) <= 2
+          },
         ),
       )
   if (temporal.length === 1) return temporal[0]!

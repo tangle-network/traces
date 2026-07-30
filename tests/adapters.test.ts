@@ -1191,6 +1191,42 @@ describe('codex current tool and subagent events', () => {
       .toEqual(['current child prompt'])
   })
 
+  it('uses task timestamps when older child events omit started_at', async () => {
+    const path = join(dir, 'rollout-codex-fork-timestamp-only.jsonl')
+    writeFileSync(path, [
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T08:08:48.000Z',
+        payload: {
+          id: 'child-without-ordered-id',
+          parent_thread_id: 'parent-session',
+          thread_source: 'subagent',
+          timestamp: '2026-07-29T08:08:48.000Z',
+          cwd: '/repo',
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T08:08:49.000Z',
+        payload: { type: 'task_started', turn_id: 'current-turn' },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T08:08:50.000Z',
+        payload: { type: 'message', role: 'user', content: 'current child prompt' },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+
+    expect(spans[0]?.attributes).toMatchObject({
+      'traces.codex.task_scope': 'fork-current',
+      'traces.codex.turn_id': 'current-turn',
+    })
+    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content))
+      .toEqual(['current child prompt'])
+  })
+
   it('rejects a child session when no current task boundary can be identified', async () => {
     const path = join(dir, 'rollout-codex-fork-missing-boundary.jsonl')
     writeFileSync(path, [
