@@ -741,10 +741,14 @@ describe('traces CLI', () => {
       status: 'completed', startedAt: at(0), completedAt: at(200), result: { delivered: true, spentUsd: 0.02 },
     }))
     await writeFile(join(sup, 'workers', 'w-0.ndjson'), [
-      JSON.stringify({ kind: 'started', label: 'w-0', at: at(10), cwd: '/tmp/clone-w-0' }),
-      JSON.stringify({ kind: 'message', label: 'w-0', direction: 'down', message: 'narrow the fix', delivered: true, at: at(20) }),
+      JSON.stringify({ kind: 'started', workerId: 'sup-1:w0', label: 'w-0', at: at(10), cwd: '/tmp/clone-w-0' }),
+      JSON.stringify({ kind: 'message', requestId: 'steer-1', label: 'w-0', direction: 'down', message: 'narrow the fix', delivered: true, at: at(20) }),
       JSON.stringify({ kind: 'finished', label: 'w-0', passed: true, patchBytes: 42, evidence: 'verify PASSED\n', at: at(100) }),
     ].join('\n'))
+    await writeFile(
+      join(sup, 'workers', 'w-0.inbox.ndjson'),
+      `${JSON.stringify({ id: 'steer-1', message: 'narrow the fix' })}\n`,
+    )
 
     const run = (args: string[]) => execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
       cwd: process.cwd(),
