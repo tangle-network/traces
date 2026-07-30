@@ -6,15 +6,16 @@
  * (token trajectory) and `message.content[]` tool_use blocks; tool results
  * arrive as `tool_result` blocks in the following user message or as a
  * `tool_result` attachment. Subagent runs live in a sibling
- * nested `<session>/subagents/.../agent-*.jsonl` files with a `.meta.json` carrying the
- * spawning `toolUseId`, so we parent each subagent under its `Agent` call.
+ * nested `<session>/subagents/.../agent-*.jsonl` files. Ordinary subagent
+ * metadata carries the spawning `toolUseId`. Workflow subagents instead live
+ * under `workflows/<runId>` and bind to the exact run ID and transcript
+ * directory returned by the parent `Workflow` call.
  *
  * Shared by the claudish / openclaw / nanoclaw forks via aliases — they
  * write the same transcript shape.
  */
 
 import { createHash } from 'node:crypto'
-import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, relative } from 'node:path'
@@ -32,7 +33,22 @@ import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
-import { claudeActor } from './actor.js'
+import { claudeActor, claudePromptStartsTask } from './actor.js'
+import { collectClaudeSubagentSources } from './claude-subagent-sources.js'
+import {
+  bindWorkflowRuns,
+  bindWorkflowSubagent,
+  ClaudeTaskScopeError,
+  createWorkflowProjectionIndex,
+  indexWorkflowResults,
+  indexWorkflowTools,
+  resolveWorkflowRunReference,
+  selectWorkflowBinding,
+  structuredWorkflowRunReference,
+  type WorkflowProjectionIndex,
+  type WorkflowRunBinding,
+  type WorkflowRunReference,
+} from './claude-workflow.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { toolIoAttributes } from './tool-io.js'
 
@@ -47,6 +63,7 @@ interface ClaudeEvent {
   timestamp?: string
   cwd?: string
   isSidechain?: boolean
+  isMeta?: boolean
   userType?: string
   message?: {
     id?: string
@@ -67,6 +84,10 @@ interface ClaudeEvent {
     toolName?: string
     exitCode?: number
     stderr?: string
+  }
+  toolUseResult?: {
+    runId?: unknown
+    transcriptDir?: unknown
   }
 }
 
@@ -163,6 +184,7 @@ interface ToolResultProjection {
   isError: boolean
   attributes: Record<string, unknown>
   message: string
+  workflowRun?: WorkflowRunReference
 }
 
 type ClaudeEventProjection =
@@ -183,18 +205,31 @@ type ClaudeEventProjection =
       timestamp: string
       prompt: string | null
       isSidechain?: boolean
+      isMeta?: boolean
       userType?: string | null
       results: ToolResultProjection[]
     }
   | { kind: 'attachment'; timestamp: string; result: ToolResultProjection }
   | { kind: 'ignored' }
 
-function projectToolResult(toolUseId: string, isError: boolean, output: unknown): ToolResultProjection {
+function projectToolResult(
+  toolUseId: string,
+  isError: boolean,
+  output: unknown,
+  structuredWorkflowRun?: WorkflowRunReference,
+): ToolResultProjection {
+  const outputText = stringifyToolResult(output)
+  const workflowRun = resolveWorkflowRunReference(
+    toolUseId,
+    outputText,
+    structuredWorkflowRun,
+  )
   return {
     toolUseId,
     isError,
     attributes: toolIoAttributes({ output }),
-    message: stringifyToolResult(output).slice(0, 500),
+    message: outputText.slice(0, 500),
+    ...(workflowRun ? { workflowRun } : {}),
   }
 }
 
@@ -221,16 +256,36 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
   }
   if (event.type === 'user' && event.message) {
     const results: ToolResultProjection[] = []
-    for (const block of asBlocks(event.message.content)) {
+    const resultBlocks = asBlocks(event.message.content).filter(
+      (block) => block.type === 'tool_result' && Boolean(block.tool_use_id),
+    )
+    const structuredWorkflowRun = structuredWorkflowRunReference(event.toolUseResult)
+    if (structuredWorkflowRun && resultBlocks.length !== 1) {
+      throw new ClaudeTaskScopeError(
+        'Claude Workflow result metadata does not identify exactly one tool result',
+      )
+    }
+    for (const block of resultBlocks) {
       if (block.type !== 'tool_result' || !block.tool_use_id) continue
-      results.push(projectToolResult(block.tool_use_id, block.is_error === true, block.content))
+      results.push(projectToolResult(
+        block.tool_use_id,
+        block.is_error === true,
+        block.content,
+        structuredWorkflowRun,
+      ))
     }
     const prompt = textOf(event.message.content)
     return {
       kind: 'user',
       timestamp,
       prompt: prompt || null,
-      ...(prompt ? { isSidechain: event.isSidechain === true, userType: event.userType ?? null } : {}),
+      ...(prompt
+        ? {
+            isSidechain: event.isSidechain === true,
+            isMeta: event.isMeta === true,
+            userType: event.userType ?? null,
+          }
+        : {}),
       results,
     }
   }
@@ -248,8 +303,30 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
   return { kind: 'ignored' }
 }
 
+function indexWorkflowProjection(
+  projection: ClaudeEventProjection,
+  index: WorkflowProjectionIndex,
+): void {
+  if (projection.kind === 'assistant') {
+    indexWorkflowTools(index, projection.timestamp, projection.tools)
+    return
+  }
+  if (projection.kind !== 'user' && projection.kind !== 'attachment') return
+  const results = projection.kind === 'user' ? projection.results : [projection.result]
+  indexWorkflowResults(index, results)
+}
+
 function fingerprintClaudeEvent(event: ClaudeEventProjection): string {
   return createHash('sha256').update(JSON.stringify(event)).digest('hex')
+}
+
+function startsClaudeTask(projection: ClaudeEventProjection): boolean {
+  if (projection.kind !== 'user' || projection.prompt === null) return false
+  return claudePromptStartsTask({
+    text: projection.prompt,
+    isSidechain: projection.isSidechain,
+    userType: projection.userType,
+  })
 }
 
 /**
@@ -257,13 +334,12 @@ function fingerprintClaudeEvent(event: ClaudeEventProjection): string {
  * same span-producing fields is one logical event; a changed emitted field is
  * corruption that must remain visible to callers.
  */
-function consumeDistinctClaudeEvent(
+function distinctClaudeEvent(
   event: ClaudeEvent,
-  ctx: ClaudeStreamContext,
-  state: ClaudeStreamState,
   seen: SeenClaudeEvents,
   sourcePath: string,
-): boolean {
+  fallbackUid: string,
+): { projection: ClaudeEventProjection; uid: string } | undefined {
   const projection = projectClaudeEvent(event)
   if (event.uuid) {
     const fingerprint = fingerprintClaudeEvent(projection)
@@ -272,11 +348,23 @@ function consumeDistinctClaudeEvent(
       if (previous !== fingerprint) {
         throw new ClaudeEventConflictError(sourcePath, event.uuid)
       }
-      return false
+      return undefined
     }
     seen.set(event.uuid, fingerprint)
   }
-  consumeClaudeEvent(projection, event.uuid ?? `step${state.step}`, ctx, state)
+  return { projection, uid: event.uuid ?? fallbackUid }
+}
+
+function consumeDistinctClaudeEvent(
+  event: ClaudeEvent,
+  ctx: ClaudeStreamContext,
+  state: ClaudeStreamState,
+  seen: SeenClaudeEvents,
+  sourcePath: string,
+): boolean {
+  const accepted = distinctClaudeEvent(event, seen, sourcePath, `step${state.step}`)
+  if (!accepted) return false
+  consumeClaudeEvent(accepted.projection, accepted.uid, ctx, state)
   return true
 }
 
@@ -366,6 +454,7 @@ function consumeClaudeEvent(
       const actor = claudeActor({
         text: event.prompt,
         isSidechain: event.isSidechain,
+        isMeta: event.isMeta,
         userType: event.userType ?? null,
         isFirstUserTurn: !state.sawUserTurn,
       })
@@ -446,6 +535,52 @@ function setRootTimeBounds(root: OtlpSpan, spans: readonly OtlpSpan[]): void {
   if (lastTimestamp) root.end_time = lastTimestamp.source
 }
 
+function orderClaudeSpans(root: OtlpSpan, spans: readonly OtlpSpan[]): OtlpSpan[] {
+  const indexed = spans
+    .filter((item) => item !== root)
+    .map((item, index) => ({
+      item,
+      index,
+      startMs: Date.parse(item.start_time),
+      localStep: typeof item.attributes.step === 'number'
+        ? item.attributes.step
+        : Number.MAX_SAFE_INTEGER,
+    }))
+  indexed.sort((left, right) =>
+    (Number.isFinite(left.startMs) ? left.startMs : Number.MAX_SAFE_INTEGER)
+      - (Number.isFinite(right.startMs) ? right.startMs : Number.MAX_SAFE_INTEGER)
+    || left.localStep - right.localStep
+    || left.item.span_id.localeCompare(right.item.span_id)
+    || left.index - right.index)
+
+  const byId = new Map<string, OtlpSpan>()
+  for (const { item } of indexed) {
+    if (byId.has(item.span_id)) {
+      throw new ClaudeTaskScopeError(`Claude trace contains duplicate span ${item.span_id}`)
+    }
+    byId.set(item.span_id, item)
+  }
+
+  const emitted = new Set<string>()
+  const active = new Set<string>()
+  const ordered: OtlpSpan[] = []
+  const emit = (item: OtlpSpan): void => {
+    if (emitted.has(item.span_id)) return
+    if (active.has(item.span_id)) {
+      throw new ClaudeTaskScopeError(`Claude trace contains a parent cycle at ${item.span_id}`)
+    }
+    active.add(item.span_id)
+    const parent = item.parent_span_id ? byId.get(item.parent_span_id) : undefined
+    if (parent) emit(parent)
+    active.delete(item.span_id)
+    emitted.add(item.span_id)
+    ordered.push(item)
+  }
+  for (const { item } of indexed) emit(item)
+  for (const [step, item] of ordered.entries()) item.attributes.step = step
+  return [root, ...ordered]
+}
+
 /**
  * Project one event stream (a main session or a subagent sidechain) onto
  * spans. `idPrefix` keeps span ids unique when folding subagents into the
@@ -474,29 +609,90 @@ interface SubagentMeta {
   parentAgentId?: string
 }
 
-async function listSubagentFiles(root: string): Promise<string[]> {
-  const pending = [root]
-  const files: string[] = []
-  while (pending.length > 0) {
-    const dir = pending.pop()
-    if (!dir) continue
-    let entries: Dirent[]
-    try {
-      entries = await readdir(dir, { withFileTypes: true })
-    } catch (error) {
-      if (isMissingPathError(error)) continue
-      throw error
+interface ClaudeSubagentFile {
+  file: string
+  sourceKey: string
+  agentId: string
+  meta: SubagentMeta
+  parentToolUseId?: string
+  parsed?: ParsedStream
+}
+
+async function readClaudeWorkflowBindings(
+  ref: SessionRef,
+  options: Pick<ParseOptions, 'signal'>,
+): Promise<Map<string, WorkflowRunBinding[]>> {
+  const index = createWorkflowProjectionIndex()
+  const seen = new Map<string, string>()
+  let row = 0
+  for await (const event of readJsonl<ClaudeEvent>(
+    ref.path,
+    sessionJsonlOptions(ref, options),
+  )) {
+    options.signal?.throwIfAborted()
+    const accepted = distinctClaudeEvent(event, seen, ref.path, `source${row}`)
+    row += 1
+    if (accepted) indexWorkflowProjection(accepted.projection, index)
+  }
+  return bindWorkflowRuns(index)
+}
+
+async function parseClaudeSubagent(
+  ref: SessionRef,
+  traceId: string,
+  agent: ClaudeSubagentFile,
+  options: ParseOptions,
+): Promise<ParsedStream> {
+  if (agent.parsed) return agent.parsed
+  const ctx: ClaudeStreamContext = {
+    traceId,
+    agent: agent.meta.agentType ? `subagent:${agent.meta.agentType}` : 'subagent',
+    startStep: 0,
+    idPrefix: `${agent.sourceKey}:`,
+    rootParent: `root:${traceId}`,
+  }
+  const state = createClaudeStream(ctx.startStep)
+  const seen = new Map<string, string>()
+  for await (const event of readJsonl<ClaudeEvent>(
+    agent.file,
+    sessionJsonlOptions(ref, options),
+  )) {
+    options.signal?.throwIfAborted()
+    consumeDistinctClaudeEvent(event, ctx, state, seen, agent.file)
+  }
+  options.signal?.throwIfAborted()
+  agent.parsed = finishClaudeStream(state)
+  return agent.parsed
+}
+
+function firstSubagentTimestamp(agent: ClaudeSubagentFile, parsed: ParsedStream): string {
+  let earliest: { timestamp: string; milliseconds: number } | undefined
+  for (const item of parsed.spans) {
+    const milliseconds = Date.parse(item.start_time)
+    if (!Number.isFinite(milliseconds)) {
+      throw new ClaudeTaskScopeError(
+        `Cannot link Claude Workflow subagent ${agent.file}: child start time is invalid`,
+      )
     }
-    for (const entry of entries) {
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        pending.push(path)
-      } else if (entry.isFile() && /^agent-.*\.jsonl$/.test(entry.name)) {
-        files.push(path)
-      }
+    if (!earliest || milliseconds < earliest.milliseconds) {
+      earliest = { timestamp: item.start_time, milliseconds }
     }
   }
-  return files.sort()
+  if (!earliest) {
+    throw new ClaudeTaskScopeError(
+      `Cannot link Claude Workflow subagent ${agent.file}: child produced no spans`,
+    )
+  }
+  return earliest.timestamp
+}
+
+function stampSkippedSubagents(root: OtlpSpan, agentIds: readonly string[]): void {
+  if (agentIds.length === 0) return
+  const captured = [...agentIds].sort().slice(0, 100)
+  root.attributes['traces.claude.skipped_subagent_count'] = agentIds.length
+  root.attributes['traces.claude.skipped_subagent_ids'] = JSON.stringify(captured)
+  root.attributes['traces.claude.skipped_subagent_ids_omitted'] =
+    Math.max(0, agentIds.length - captured.length)
 }
 
 export class ClaudeAdapter implements HarnessTraceAdapter {
@@ -505,6 +701,27 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
 
   private root(): string {
     return join(homedir(), '.claude', 'projects')
+  }
+
+  async sourcePaths(
+    ref: SessionRef,
+    options: Pick<ParseOptions, 'signal'> = {},
+  ): Promise<readonly string[]> {
+    const bindings = await readClaudeWorkflowBindings(ref, options)
+    const sources = await collectClaudeSubagentSources(ref, bindings, options.signal)
+    const metadataFiles: string[] = []
+    for (const file of sources.files) {
+      options.signal?.throwIfAborted()
+      const path = file.replace(/\.jsonl$/, '.meta.json')
+      try {
+        const source = await stat(path)
+        if (source.isFile()) metadataFiles.push(path)
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error
+      }
+    }
+    options.signal?.throwIfAborted()
+    return [ref.path, ...sources.files, ...metadataFiles].sort()
   }
 
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
@@ -548,6 +765,11 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    options.signal?.throwIfAborted()
+    const taskScope = options.taskScope ?? 'all'
+    if (taskScope === 'turn' && !options.taskTurnId) {
+      throw new ClaudeTaskScopeError('Claude taskScope "turn" requires a stable taskTurnId')
+    }
     const sourceTraceId = ref.sessionId
     const sourceRootId = `root:${sourceTraceId}`
     const ctx: ClaudeStreamContext = {
@@ -557,16 +779,53 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       idPrefix: '',
       rootParent: sourceRootId,
     }
-    const state = createClaudeStream(ctx.startStep)
+    let state = createClaudeStream(ctx.startStep)
     let discoveredTraceId: string | undefined
     const seen = new Map<string, string>()
+    const workflowIndex = createWorkflowProjectionIndex()
+    let selectedTurnId: string | undefined
+    let selectedTurnFound = false
+    let active = taskScope === 'all'
 
     for await (const event of readJsonl<ClaudeEvent>(ref.path, sessionJsonlOptions(ref, options))) {
+      options.signal?.throwIfAborted()
       if (!discoveredTraceId && event.sessionId) discoveredTraceId = event.sessionId
-      if (!consumeDistinctClaudeEvent(event, ctx, state, seen, ref.path)) continue
+      const accepted = distinctClaudeEvent(event, seen, ref.path, `step${state.step}`)
+      if (!accepted) continue
+      indexWorkflowProjection(accepted.projection, workflowIndex)
+      const startsTask = startsClaudeTask(accepted.projection)
+      if (startsTask && taskScope === 'latest') {
+        if (!event.uuid) {
+          throw new ClaudeTaskScopeError(
+            `Cannot select Claude's latest task because a user task in ${ref.path} has no stable UUID`,
+          )
+        }
+        state = createClaudeStream(ctx.startStep)
+        selectedTurnId = event.uuid
+        selectedTurnFound = true
+        active = true
+      } else if (startsTask && taskScope === 'turn') {
+        active = event.uuid === options.taskTurnId
+        if (active) {
+          state = createClaudeStream(ctx.startStep)
+          selectedTurnId = event.uuid
+          selectedTurnFound = true
+        }
+      }
+      if (active) consumeClaudeEvent(accepted.projection, accepted.uid, ctx, state)
+    }
+    options.signal?.throwIfAborted()
+    if (taskScope === 'latest' && !selectedTurnFound) {
+      throw new ClaudeTaskScopeError(`Cannot select Claude's latest task because ${ref.path} has no user task`)
+    }
+    if (taskScope === 'turn' && !selectedTurnFound) {
+      throw new ClaudeTaskScopeError(
+        `Claude task turn ${JSON.stringify(options.taskTurnId)} was not found in ${ref.path}`,
+      )
     }
 
     const main = finishClaudeStream(state)
+    const workflowBindings = bindWorkflowRuns(workflowIndex)
     const traceId = discoveredTraceId ?? sourceTraceId
     const rootId = `root:${traceId}`
     for (const item of main.spans) {
@@ -586,9 +845,22 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     const spans: OtlpSpan[] = [root]
     appendAll(spans, main.spans)
 
-    await this.foldSubagents(ref, traceId, main, spans, options)
-    setRootTimeBounds(root, spans)
-    return spans
+    await this.foldSubagents(
+      ref,
+      traceId,
+      main,
+      workflowBindings,
+      spans,
+      {
+        ...options,
+        taskScope,
+        ...(selectedTurnId ? { taskTurnId: selectedTurnId } : {}),
+      },
+    )
+    options.signal?.throwIfAborted()
+    const ordered = orderClaudeSpans(root, spans)
+    setRootTimeBounds(root, ordered)
+    return ordered
   }
 
   /** Parse nested `subagents/.../agent-*.jsonl`, parenting each under its Agent call. */
@@ -596,18 +868,20 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     ref: SessionRef,
     traceId: string,
     main: ParsedStream,
+    workflowBindings: ReadonlyMap<string, readonly WorkflowRunBinding[]>,
     out: OtlpSpan[],
     options: ParseOptions,
   ): Promise<void> {
     const subDir = join(ref.path.replace(/\.jsonl$/, ''), 'subagents')
-    const files = await listSubagentFiles(subDir)
-    let step = main.nextStep
-    const parsedAgents: Array<{
-      agentId: string
-      meta: SubagentMeta
-      parsed: ParsedStream
-    }> = []
-    for (const file of files) {
+    const sources = await collectClaudeSubagentSources(
+      ref,
+      workflowBindings,
+      options.signal,
+    )
+    const scoped = options.taskScope !== undefined && options.taskScope !== 'all'
+    const agents: ClaudeSubagentFile[] = []
+    for (const file of sources.files) {
+      options.signal?.throwIfAborted()
       const sourceKey = relative(subDir, file)
         .replace(/\.jsonl$/, '')
         .split(/[\\/]/)
@@ -620,48 +894,116 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       } catch (error) {
         if (!isMissingJsonSource(error)) throw error
       }
-      const ctx: ClaudeStreamContext = {
-        traceId,
-        agent: meta.agentType ? `subagent:${meta.agentType}` : 'subagent',
-        startStep: step,
-        idPrefix: `${sourceKey}:`,
-        rootParent: `root:${traceId}`,
-      }
-      const state = createClaudeStream(ctx.startStep)
-      const seen = new Map<string, string>()
-      for await (const event of readJsonl<ClaudeEvent>(
+      options.signal?.throwIfAborted()
+      const workflowLocation = sources.workflowByFile.get(file)
+      const workflowRunId = workflowLocation?.runId
+      const agent: ClaudeSubagentFile = {
         file,
-        sessionJsonlOptions(ref, options),
-      )) {
-        consumeDistinctClaudeEvent(event, ctx, state, seen, file)
-      }
-      const parsed = finishClaudeStream(state)
-      parsedAgents.push({
+        sourceKey,
         agentId: basename(file, '.jsonl').replace(/^agent-/, ''),
         meta,
-        parsed,
-      })
-      step = parsed.nextStep
+        ...(meta.toolUseId ? { parentToolUseId: meta.toolUseId } : {}),
+      }
+      if (workflowRunId) {
+        const runBindings = bindWorkflowSubagent(
+          file,
+          workflowRunId,
+          workflowLocation.transcriptDir,
+          workflowBindings,
+        )
+        const parsed = await parseClaudeSubagent(ref, traceId, agent, options)
+        const binding = selectWorkflowBinding(
+          basename(file),
+          runBindings,
+          firstSubagentTimestamp(agent, parsed),
+          meta.toolUseId,
+        )
+        agent.parentToolUseId = binding.toolUseId
+      }
+      agents.push(agent)
     }
 
-    const byAgentId = new Map<string, ParsedStream>()
-    for (const agent of parsedAgents) {
-      if (byAgentId.has(agent.agentId)) {
+    const agentsById = new Map<string, ClaudeSubagentFile>()
+    const childrenByParent = new Map<string, ClaudeSubagentFile[]>()
+    for (const agent of agents) {
+      if (agentsById.has(agent.agentId)) {
         throw new Error(`Duplicate Claude subagent id: ${agent.agentId}`)
       }
-      byAgentId.set(agent.agentId, agent.parsed)
-    }
-    for (const agent of parsedAgents) {
-      const parentTools = agent.meta.parentAgentId
-        ? byAgentId.get(agent.meta.parentAgentId)?.toolSpanByUseId
-        : main.toolSpanByUseId
-      const parent =
-        (agent.meta.toolUseId && parentTools?.get(agent.meta.toolUseId)?.span_id) ||
-        `root:${traceId}`
-      for (const item of agent.parsed.spans) {
-        if (item.parent_span_id === `root:${traceId}`) item.parent_span_id = parent
+      agentsById.set(agent.agentId, agent)
+      if (agent.meta.parentAgentId) {
+        const siblings = childrenByParent.get(agent.meta.parentAgentId) ?? []
+        siblings.push(agent)
+        childrenByParent.set(agent.meta.parentAgentId, siblings)
       }
-      appendAll(out, agent.parsed.spans)
+    }
+
+    const selectedAgentIds = new Set<string>()
+    if (!scoped) {
+      for (const agent of agents) {
+        await parseClaudeSubagent(ref, traceId, agent, options)
+        selectedAgentIds.add(agent.agentId)
+      }
+    } else {
+      const pending: ClaudeSubagentFile[] = []
+      for (const agent of agents) {
+        if (
+          !agent.meta.parentAgentId
+          && agent.parentToolUseId
+          && main.toolSpanByUseId.has(agent.parentToolUseId)
+        ) pending.push(agent)
+      }
+      for (let cursor = 0; cursor < pending.length; cursor += 1) {
+        options.signal?.throwIfAborted()
+        const agent = pending[cursor]
+        if (!agent || selectedAgentIds.has(agent.agentId)) continue
+        const parsed = await parseClaudeSubagent(ref, traceId, agent, options)
+        selectedAgentIds.add(agent.agentId)
+        for (const child of childrenByParent.get(agent.agentId) ?? []) {
+          if (
+            child.parentToolUseId
+            && parsed.toolSpanByUseId.has(child.parentToolUseId)
+          ) pending.push(child)
+        }
+      }
+      const skipped = agents
+        .filter((agent) => !selectedAgentIds.has(agent.agentId))
+        .map((agent) => agent.agentId)
+      const root = out[0]
+      if (root) stampSkippedSubagents(root, skipped)
+    }
+
+    const selectedAgents = agents.filter((agent) => selectedAgentIds.has(agent.agentId))
+    const parsedByAgentId = new Map<string, ParsedStream>()
+    for (const agent of selectedAgents) {
+      if (agent.parsed) parsedByAgentId.set(agent.agentId, agent.parsed)
+    }
+    for (const agent of selectedAgents) {
+      const parsed = agent.parsed
+      if (!parsed) {
+        throw new ClaudeTaskScopeError(`Claude subagent ${agent.agentId} was not parsed`)
+      }
+      const parentTools = agent.meta.parentAgentId
+        ? parsedByAgentId.get(agent.meta.parentAgentId)?.toolSpanByUseId
+        : main.toolSpanByUseId
+      const parentSpan = agent.parentToolUseId
+        ? parentTools?.get(agent.parentToolUseId)
+        : undefined
+      const parent = parentSpan?.span_id ?? `root:${traceId}`
+      const parentAgentMissing = Boolean(
+        agent.meta.parentAgentId && !parsedByAgentId.has(agent.meta.parentAgentId),
+      )
+      for (const item of parsed.spans) {
+        if (item.parent_span_id === `root:${traceId}`) item.parent_span_id = parent
+        if (agent.parentToolUseId && !parentSpan) {
+          item.attributes['traces.claude.parent_tool_missing'] = true
+          item.attributes['traces.claude.parent_tool_use_id'] = agent.parentToolUseId
+        }
+        if (parentAgentMissing) {
+          item.attributes['traces.claude.parent_agent_missing'] = true
+          item.attributes['traces.claude.parent_agent_id'] = agent.meta.parentAgentId
+        }
+      }
+      appendAll(out, parsed.spans)
     }
   }
 }

@@ -24,6 +24,7 @@ import { stampSessionIntegrity } from '../src/integrity.js'
 import { JsonlParseError } from '../src/jsonl.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import { parseSession } from '../src/session-source.js'
+import { describeSessionRelationship } from '../src/session-relationship.js'
 import type { SessionRef } from '../src/types.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'tt-adapters-'))
@@ -656,6 +657,181 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
 })
 
 describe('claude adapter (conversation capture)', () => {
+  it('scopes all, latest, and exact turns by stable user event ID with their subagents', async () => {
+    const path = join(dir, 'claude-task-scopes.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'user',
+          uuid: 'turn-old',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'user', content: 'OLD TASK' },
+        },
+        {
+          type: 'assistant',
+          uuid: 'answer-old',
+          parentUuid: 'turn-old',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: {
+            id: 'message-old',
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'OLD ANSWER' },
+              { type: 'tool_use', id: 'agent-call-old', name: 'Agent', input: { task: 'old worker' } },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          uuid: 'turn-new',
+          parentUuid: 'answer-old',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:01:00Z',
+          message: { role: 'user', content: 'NEW TASK' },
+        },
+        {
+          type: 'assistant',
+          uuid: 'answer-new',
+          parentUuid: 'turn-new',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:01:01Z',
+          message: {
+            id: 'message-new',
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'NEW ANSWER' },
+              { type: 'tool_use', id: 'agent-call-new', name: 'Agent', input: { task: 'new worker' } },
+            ],
+          },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+    const subDir = join(dir, 'claude-task-scopes', 'subagents')
+    mkdirSync(subDir, { recursive: true })
+    for (const turn of ['old', 'new'] as const) {
+      writeFileSync(
+        join(subDir, `agent-${turn}.jsonl`),
+        [
+          {
+            type: 'user',
+            uuid: `worker-task-${turn}`,
+            timestamp: `2026-01-01T00:0${turn === 'old' ? '0' : '1'}:02Z`,
+            isSidechain: true,
+            message: { role: 'user', content: `${turn.toUpperCase()} WORKER TASK` },
+          },
+          {
+            type: 'assistant',
+            uuid: `worker-answer-${turn}`,
+            timestamp: `2026-01-01T00:0${turn === 'old' ? '0' : '1'}:03Z`,
+            message: {
+              id: `worker-message-${turn}`,
+              role: 'assistant',
+              content: [{ type: 'text', text: `${turn.toUpperCase()} WORKER ANSWER` }],
+            },
+          },
+        ].map((event) => JSON.stringify(event)).join('\n'),
+      )
+      writeFileSync(
+        join(subDir, `agent-${turn}.meta.json`),
+        JSON.stringify({ agentType: 'worker', toolUseId: `agent-call-${turn}` }),
+      )
+    }
+
+    const adapter = new ClaudeAdapter()
+    const all = await adapter.parse(refFor(path, 'claude-code'), { taskScope: 'all' })
+    const latest = await adapter.parse(refFor(path, 'claude-code'), { taskScope: 'latest' })
+    const exact = await adapter.parse(refFor(path, 'claude-code'), {
+      taskScope: 'turn',
+      taskTurnId: 'turn-old',
+    })
+    const contents = (spans: OtlpSpan[]) =>
+      spans.flatMap((item) => typeof item.attributes.content === 'string' ? [item.attributes.content] : [])
+
+    expect(contents(all)).toEqual([
+      'OLD TASK',
+      'OLD ANSWER',
+      'OLD WORKER TASK',
+      'OLD WORKER ANSWER',
+      'NEW TASK',
+      'NEW ANSWER',
+      'NEW WORKER TASK',
+      'NEW WORKER ANSWER',
+    ])
+    expect(contents(latest)).toEqual([
+      'NEW TASK',
+      'NEW ANSWER',
+      'NEW WORKER TASK',
+      'NEW WORKER ANSWER',
+    ])
+    expect(contents(exact)).toEqual([
+      'OLD TASK',
+      'OLD ANSWER',
+      'OLD WORKER TASK',
+      'OLD WORKER ANSWER',
+    ])
+    await expect(adapter.parse(refFor(path, 'claude-code'), {
+      taskScope: 'turn',
+      taskTurnId: 'missing-turn',
+    })).rejects.toThrow('Claude task turn "missing-turn" was not found')
+  })
+
+  it('does not replace the latest human task with a synthetic Claude user event', async () => {
+    const path = join(dir, 'claude-synthetic-latest.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'user',
+          uuid: 'human-turn',
+          sessionId: 'synthetic-latest',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'user', content: 'SHIP THE CHANGE' },
+        },
+        {
+          type: 'assistant',
+          uuid: 'human-answer',
+          sessionId: 'synthetic-latest',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: { id: 'answer', role: 'assistant', content: 'WORKING' },
+        },
+        {
+          type: 'user',
+          uuid: 'task-notification',
+          sessionId: 'synthetic-latest',
+          timestamp: '2026-01-01T00:00:02Z',
+          userType: 'external',
+          promptSource: 'system',
+          message: {
+            role: 'user',
+            content: '<task-notification>worker complete</task-notification>',
+          },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'), {
+      taskScope: 'latest',
+    })
+    const prompts = spans
+      .filter((item) => item.name === 'user.prompt')
+      .map((item) => ({
+        content: item.attributes.content,
+        actor: item.attributes['tangle.actor'],
+      }))
+
+    expect(prompts).toEqual([
+      { content: 'SHIP THE CHANGE', actor: 'human' },
+      {
+        content: '<task-notification>worker complete</task-notification>',
+        actor: 'injected',
+      },
+    ])
+    expect(spans.some((item) => item.attributes.content === 'WORKING')).toBe(true)
+  })
+
   it('keeps a canonical session ID that first appears on an accepted duplicate', async () => {
     const path = join(dir, 'claude-duplicate-session-id.jsonl')
     writeFileSync(
@@ -746,47 +922,21 @@ describe('claude adapter (conversation capture)', () => {
     })
   })
 
-  it('captures workflow agents nested below the direct subagent directory', async () => {
-    const path = join(dir, 'claude-nested-workflows.jsonl')
-    writeFileSync(
-      path,
-      JSON.stringify({
-        type: 'user',
-        uuid: 'u1',
-        sessionId: 'nested-trace',
-        timestamp: '2026-01-01T00:00:00Z',
-        message: { role: 'user', content: 'run workflow' },
-      }),
-    )
-    const workflowDir = join(dir, 'claude-nested-workflows', 'subagents', 'workflows', 'wf-1')
-    mkdirSync(workflowDir, { recursive: true })
-    writeFileSync(
-      join(workflowDir, 'agent-a.jsonl'),
-      [
-        { type: 'user', uuid: 'wu1', timestamp: '2026-01-01T00:00:01Z', isSidechain: true, message: { role: 'user', content: 'inspect' } },
-        {
-          type: 'assistant',
-          uuid: 'wa1',
-          timestamp: '2026-01-01T00:00:02Z',
-          message: { id: 'workflow-message', role: 'assistant', model: 'haiku', usage: { input_tokens: 4, output_tokens: 2 }, content: [{ type: 'text', text: 'workflow result' }] },
-        },
-      ]
-        .map((event) => JSON.stringify(event))
-        .join('\n'),
-    )
-    writeFileSync(
-      join(workflowDir, 'agent-a.meta.json'),
-      JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }),
-    )
+  it('declares every nested Claude worker and present metadata file as parse input', async () => {
+    const path = join(dir, 'claude-source-paths.jsonl')
+    const subDir = join(dir, 'claude-source-paths', 'subagents', 'workflows', 'wf-1')
+    const worker = join(subDir, 'agent-worker.jsonl')
+    const metadata = join(subDir, 'agent-worker.meta.json')
+    mkdirSync(subDir, { recursive: true })
+    writeFileSync(path, '{}\n')
+    writeFileSync(worker, '{}\n')
+    writeFileSync(metadata, '{}\n')
 
-    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    const workflowSpans = spans.filter(
-      (item) => item.attributes['agent.name'] === 'subagent:workflow-subagent',
-    )
-    expect(workflowSpans).toHaveLength(2)
-    expect(workflowSpans.some((item) => item.attributes.content === 'workflow result')).toBe(true)
-    expect(workflowSpans.every((item) => item.span_id.startsWith('workflows:wf-1:agent-a:'))).toBe(true)
-    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:02Z')
+    await expect(new ClaudeAdapter().sourcePaths(refFor(path, 'claude-code'))).resolves.toEqual([
+      path,
+      worker,
+      metadata,
+    ].sort())
   })
 
   it('parents nested subagents under the tool call from their declared parent agent', async () => {
@@ -1023,6 +1173,36 @@ describe('pi tool results', () => {
 })
 
 describe('codex current tool and subagent events', () => {
+  it('does not count a repeated cumulative token snapshot as another model call', async () => {
+    const path = join(dir, 'rollout-codex-repeated-token-snapshot.jsonl')
+    const usage = {
+      input_tokens: 49_139,
+      cached_input_tokens: 40_704,
+      output_tokens: 984,
+      reasoning_output_tokens: 624,
+      total_tokens: 50_123,
+    }
+    const total = {
+      input_tokens: 177_348,
+      cached_input_tokens: 136_960,
+      output_tokens: 3_790,
+      reasoning_output_tokens: 2_352,
+      total_tokens: 181_138,
+    }
+    writeFileSync(path, [
+      { type: 'session_meta', timestamp: '2026-07-28T22:29:00.000Z', payload: { id: 'codex-token-snapshot', cwd: '/x' } },
+      { type: 'event_msg', timestamp: '2026-07-28T22:29:41.813Z', payload: { type: 'token_count', info: { last_token_usage: usage, total_token_usage: total } } },
+      { type: 'event_msg', timestamp: '2026-07-28T22:29:56.221Z', payload: { type: 'token_count', info: { last_token_usage: usage, total_token_usage: total } } },
+      { type: 'event_msg', timestamp: '2026-07-28T22:29:56.225Z', payload: { type: 'turn_aborted' } },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const llms = spans.filter((item) => item.name === 'llm.turn')
+
+    expect(llms).toHaveLength(1)
+    expect(llms[0]?.attributes['llm.token_count.prompt']).toBe(49_139)
+  })
+
   it('excludes inherited fork replay before the current task start', async () => {
     const path = join(dir, 'rollout-codex-fork-replay.jsonl')
     const sessionTimestamp = '2026-07-13T05:33:02.042Z'
@@ -1030,7 +1210,25 @@ describe('codex current tool and subagent events', () => {
     writeFileSync(
       path,
       [
-        { type: 'session_meta', timestamp: sessionTimestamp, payload: { id: 'fork-current', cwd: '/x', timestamp: '2026-07-13T05:33:01.500Z' } },
+        {
+          type: 'session_meta',
+          timestamp: sessionTimestamp,
+          payload: {
+            id: 'fork-current',
+            cwd: '/x',
+            timestamp: '2026-07-13T05:33:01.500Z',
+            parent_thread_id: 'parent-session',
+            thread_source: 'subagent',
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: 'parent-session',
+                  depth: 1,
+                },
+              },
+            },
+          },
+        },
         { type: 'event_msg', timestamp: sessionTimestamp, payload: { type: 'task_started', started_at: currentStartedAt - 60 } },
         { type: 'turn_context', timestamp: sessionTimestamp, payload: { model: 'inherited-model' } },
         { type: 'event_msg', timestamp: sessionTimestamp, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10_000, output_tokens: 500 } } } },
@@ -1041,6 +1239,8 @@ describe('codex current tool and subagent events', () => {
         { type: 'event_msg', timestamp: '2026-07-13T05:33:03.000Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 4 } } } },
         { type: 'response_item', timestamp: '2026-07-13T05:33:04.000Z', payload: { type: 'function_call', call_id: 'current', name: 'exec_command', arguments: '{"cmd":"new"}' } },
         { type: 'response_item', timestamp: '2026-07-13T05:33:05.000Z', payload: { type: 'function_call_output', call_id: 'current', output: 'Script completed' } },
+        { type: 'event_msg', timestamp: '2026-07-13T05:34:00.000Z', payload: { type: 'task_started', turn_id: 'follow-up', started_at: currentStartedAt + 58 } },
+        { type: 'response_item', timestamp: '2026-07-13T05:34:01.000Z', payload: { type: 'message', role: 'user', content: 'follow-up task' } },
       ].map((row) => JSON.stringify(row)).join('\n'),
     )
 
@@ -1053,6 +1253,369 @@ describe('codex current tool and subagent events', () => {
     expect(llms[0]?.attributes['llm.token_count.prompt']).toBe(20)
     expect(tools).toHaveLength(1)
     expect(tools[0]?.attributes['input.value']).toContain('new')
+    expect(spans.some((item) => item.attributes.content === 'follow-up task')).toBe(true)
+  })
+
+  it('uses child and task identity when their recorded starts differ by three seconds', async () => {
+    const path = join(dir, 'rollout-codex-fork-three-second-skew.jsonl')
+    const childId = '019faceb-47f1-7403-8a20-8f4cc74c9eb0'
+    const currentTurnId = '019faceb-5224-7271-8635-55cb22aa9adc'
+    writeFileSync(path, [
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T08:08:49.088Z',
+        payload: {
+          id: childId,
+          session_id: '019f20d1-2ff1-7f42-9af2-7fb6ec0928d4',
+          parent_thread_id: '019f20d1-2ff1-7f42-9af2-7fb6ec0928d4',
+          thread_source: 'subagent',
+          timestamp: '2026-07-29T08:08:48.374Z',
+          cwd: '/repo',
+        },
+      },
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T08:08:49.088Z',
+        payload: {
+          id: '019f20d1-2ff1-7f42-9af2-7fb6ec0928d4',
+          thread_source: 'user',
+          timestamp: '2026-07-02T03:13:28.070Z',
+          cwd: '/repo',
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T08:08:49.088Z',
+        payload: {
+          type: 'task_started',
+          turn_id: '4c37e0a8-7566-46e5-89b8-65d64fbfc5d4',
+          started_at: 1_785_312_038,
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T08:08:49.088Z',
+        payload: { type: 'message', role: 'user', content: 'inherited parent prompt' },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T08:08:51.014Z',
+        payload: {
+          type: 'task_started',
+          turn_id: currentTurnId,
+          started_at: 1_785_312_531,
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T08:08:51.054Z',
+        payload: { type: 'message', role: 'user', content: 'current child prompt' },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+
+    expect(spans[0]?.attributes).toMatchObject({
+      'traces.codex.task_scope': 'fork-current',
+      'traces.codex.turn_id': currentTurnId,
+    })
+    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content))
+      .toEqual(['current child prompt'])
+  })
+
+  it('uses task timestamps when older child events omit started_at', async () => {
+    const path = join(dir, 'rollout-codex-fork-timestamp-only.jsonl')
+    writeFileSync(path, [
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T08:08:48.000Z',
+        payload: {
+          id: 'child-without-ordered-id',
+          parent_thread_id: 'parent-session',
+          thread_source: 'subagent',
+          timestamp: '2026-07-29T08:08:48.000Z',
+          cwd: '/repo',
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T08:08:49.000Z',
+        payload: { type: 'task_started', turn_id: 'current-turn' },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T08:08:50.000Z',
+        payload: { type: 'message', role: 'user', content: 'current child prompt' },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+
+    expect(spans[0]?.attributes).toMatchObject({
+      'traces.codex.task_scope': 'fork-current',
+      'traces.codex.turn_id': 'current-turn',
+    })
+    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content))
+      .toEqual(['current child prompt'])
+  })
+
+  it('rejects a child session when no current task boundary can be identified', async () => {
+    const path = join(dir, 'rollout-codex-fork-missing-boundary.jsonl')
+    writeFileSync(path, [
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T08:08:49.088Z',
+        payload: {
+          id: '019faceb-47f1-7403-8a20-8f4cc74c9eb0',
+          parent_thread_id: '019f20d1-2ff1-7f42-9af2-7fb6ec0928d4',
+          thread_source: 'subagent',
+          timestamp: '2026-07-29T08:08:48.374Z',
+          cwd: '/repo',
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T08:08:49.088Z',
+        payload: { type: 'message', role: 'user', content: 'inherited parent prompt' },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    await expect(new CodexAdapter().parse(refFor(path, 'codex'))).rejects.toMatchObject({
+      name: 'CodexTaskScopeError',
+      code: 'CODEX_CHILD_TASK_NOT_FOUND',
+    })
+  })
+
+  it('rejects a child session when multiple current task boundaries are plausible', async () => {
+    const path = join(dir, 'rollout-codex-fork-ambiguous-boundary.jsonl')
+    writeFileSync(path, [
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T08:08:48.000Z',
+        payload: {
+          id: 'child-without-ordered-id',
+          parent_thread_id: 'parent-session',
+          thread_source: 'subagent',
+          timestamp: '2026-07-29T08:08:48.000Z',
+          cwd: '/repo',
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T08:08:49.000Z',
+        payload: { type: 'task_started', turn_id: 'possible-turn-one', started_at: 1_785_312_529 },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T08:08:50.000Z',
+        payload: { type: 'task_started', turn_id: 'possible-turn-two', started_at: 1_785_312_530 },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    await expect(new CodexAdapter().parse(refFor(path, 'codex'))).rejects.toMatchObject({
+      name: 'CodexTaskScopeError',
+      code: 'CODEX_CHILD_TASK_AMBIGUOUS',
+    })
+  })
+
+  it('keeps every task in an ordinary resumed session by default', async () => {
+    const path = join(dir, 'rollout-codex-all-tasks.jsonl')
+    writeFileSync(path, [
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T20:00:00.000Z',
+        payload: {
+          id: 'ordinary-resumed-session',
+          cwd: '/x',
+          timestamp: '2026-07-29T20:00:00.000Z',
+        },
+      },
+      { type: 'event_msg', timestamp: '2026-07-29T20:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-one' } },
+      { type: 'response_item', timestamp: '2026-07-29T20:00:02.000Z', payload: { type: 'message', role: 'user', content: 'first turn' } },
+      { type: 'event_msg', timestamp: '2026-07-29T20:00:03.000Z', payload: { type: 'task_complete', turn_id: 'turn-one' } },
+      { type: 'event_msg', timestamp: '2026-07-29T21:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-two' } },
+      { type: 'response_item', timestamp: '2026-07-29T21:00:02.000Z', payload: { type: 'message', role: 'user', content: 'second turn' } },
+      { type: 'event_msg', timestamp: '2026-07-29T21:00:03.000Z', payload: { type: 'task_complete', turn_id: 'turn-two' } },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+
+    expect(spans[0]?.attributes['traces.codex.task_scope']).toBe('all')
+    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content))
+      .toEqual(['first turn', 'second turn'])
+  })
+
+  it('scopes a resumed Codex session to its latest turn and current child references', async () => {
+    const path = join(dir, 'rollout-codex-latest-turn.jsonl')
+    const oldChild = '019fafea-bd83-79a1-9086-94ae557f6009'
+    const currentChild = '019fafc3-1e3b-7442-b88f-83327ff36284'
+    writeFileSync(path, [
+      { type: 'session_meta', timestamp: '2026-07-28T20:00:00.000Z', payload: { id: 'resumed-session', cwd: '/x' } },
+      { type: 'event_msg', timestamp: '2026-07-28T20:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-old' } },
+      { type: 'turn_context', timestamp: '2026-07-28T20:00:01.100Z', payload: { model: 'old-model' } },
+      { type: 'event_msg', timestamp: '2026-07-28T20:00:02.000Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 1_000, output_tokens: 100 } } } },
+      { type: 'response_item', timestamp: '2026-07-28T20:00:03.000Z', payload: { type: 'function_call', call_id: 'spawn-old', name: 'spawn_agent', arguments: '{"message":"old"}' } },
+      { type: 'response_item', timestamp: '2026-07-28T20:00:04.000Z', payload: { type: 'function_call_output', call_id: 'spawn-old', output: JSON.stringify({ agent_id: oldChild }) } },
+      { type: 'event_msg', timestamp: '2026-07-29T20:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-current' } },
+      { type: 'turn_context', timestamp: '2026-07-29T20:00:01.100Z', payload: { model: 'current-model' } },
+      { type: 'event_msg', timestamp: '2026-07-29T20:00:02.000Z', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, output_tokens: 4 } } } },
+      { type: 'response_item', timestamp: '2026-07-29T20:00:03.000Z', payload: { type: 'function_call', call_id: 'spawn-current', name: 'spawn_agent', arguments: '{"message":"current"}' } },
+      { type: 'response_item', timestamp: '2026-07-29T20:00:04.000Z', payload: { type: 'function_call_output', call_id: 'spawn-current', output: JSON.stringify({ agent_id: currentChild }) } },
+      { type: 'event_msg', timestamp: '2026-07-29T20:00:05.000Z', payload: { type: 'task_complete', turn_id: 'turn-current' } },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const parsed = await new CodexAdapter().parse(refFor(path, 'codex'), { taskScope: 'latest' })
+    const root = parsed[0]!
+    const relationship = describeSessionRelationship(refFor(path, 'codex'), parsed)
+
+    expect(root).toMatchObject({
+      start_time: '2026-07-29T20:00:01.000Z',
+      end_time: '2026-07-29T20:00:05.000Z',
+      status: { code: 'OK' },
+      attributes: {
+        'llm.model_name': 'current-model',
+        'traces.codex.task_scope': 'latest',
+        'traces.codex.turn_id': 'turn-current',
+      },
+    })
+    expect(parsed.filter((item) => item.name === 'llm.turn')).toHaveLength(1)
+    expect(parsed.find((item) => item.name === 'llm.turn')?.attributes['llm.token_count.prompt']).toBe(20)
+    expect(parsed.filter((item) => item.attributes['traces.codex.agent_operation'] === 'spawn_agent')).toHaveLength(1)
+    expect(relationship.childSessionIds).toEqual([currentChild])
+    expect(parsed.every((item) => item.attributes['traces.codex.turn_id'] === 'turn-current')).toBe(true)
+  })
+
+  it('resolves a child to the last parent task that structurally targeted its stable ID', async () => {
+    const path = join(dir, 'rollout-codex-parent-task-resolution.jsonl')
+    const childId = '019fb002-9e52-7373-a6fe-a9098f5650a5'
+    writeFileSync(path, [
+      { type: 'session_meta', timestamp: '2026-07-29T20:00:00.000Z', payload: { id: 'parent', cwd: '/x' } },
+      { type: 'event_msg', timestamp: '2026-07-29T20:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-spawn' } },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T20:00:02.000Z',
+        payload: {
+          type: 'function_call',
+          name: 'spawn_agent',
+          call_id: 'spawn',
+          arguments: '{"message":"work"}',
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-spawn' },
+        },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T20:00:03.000Z',
+        payload: {
+          type: 'function_call_output',
+          call_id: 'spawn',
+          output: JSON.stringify({ agent_id: childId }),
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-spawn' },
+        },
+      },
+      { type: 'event_msg', timestamp: '2026-07-29T21:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-followup' } },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T21:00:02.000Z',
+        payload: {
+          type: 'function_call',
+          name: 'send_input',
+          call_id: 'send',
+          arguments: JSON.stringify({ target: childId, message: 'continue' }),
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-followup' },
+        },
+      },
+      { type: 'event_msg', timestamp: '2026-07-29T22:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-unrelated' } },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+    const adapter = new CodexAdapter()
+    const ref = refFor(path, 'codex')
+
+    await expect(adapter.resolveParentTask(ref, childId)).resolves.toEqual({
+      kind: 'resolved',
+      turnId: 'turn-followup',
+    })
+    const exact = await adapter.parse(ref, { taskScope: 'turn', taskTurnId: 'turn-followup' })
+    const relationship = describeSessionRelationship(ref, exact)
+    expect(relationship).toMatchObject({
+      taskScope: 'turn',
+      turnId: 'turn-followup',
+      childSessionIds: [childId],
+      resumedChildSessionIds: [childId],
+    })
+    expect(exact.some((item) => item.attributes['traces.codex.turn_id'] === 'turn-unrelated')).toBe(false)
+    await expect(adapter.parse(ref, { taskScope: 'turn', taskTurnId: 'missing-turn' }))
+      .rejects.toMatchObject({ code: 'CODEX_TURN_NOT_FOUND' })
+  })
+
+  it('does not infer child sessions from UUIDs in agent message prose', async () => {
+    const path = join(dir, 'rollout-codex-structured-agent-target.jsonl')
+    const targetId = '019fb002-9e52-7373-a6fe-a9098f5650a5'
+    const mentionedId = '019fb002-bc5a-7d61-ac37-211b4b9eefac'
+    writeFileSync(path, [
+      { type: 'session_meta', timestamp: '2026-07-29T20:00:00.000Z', payload: { id: 'parent', cwd: '/x' } },
+      { type: 'event_msg', timestamp: '2026-07-29T20:00:01.000Z', payload: { type: 'task_started', turn_id: 'turn-one' } },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T20:00:02.000Z',
+        payload: {
+          type: 'function_call',
+          name: 'send_input',
+          call_id: 'send',
+          arguments: JSON.stringify({
+            target: targetId,
+            message: `Compare this with unrelated session ${mentionedId}.`,
+          }),
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-one' },
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+    const adapter = new CodexAdapter()
+    const ref = refFor(path, 'codex')
+    const spans = await adapter.parse(ref)
+
+    expect(describeSessionRelationship(ref, spans).childSessionIds).toEqual([targetId])
+    await expect(adapter.resolveParentTask(ref, targetId)).resolves.toEqual({
+      kind: 'resolved',
+      turnId: 'turn-one',
+    })
+    await expect(adapter.resolveParentTask(ref, mentionedId)).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'child-reference-not-found',
+    })
+  })
+
+  it('refuses parent-task resolution when a child reference has no turn metadata', async () => {
+    const path = join(dir, 'rollout-codex-parent-task-metadata-missing.jsonl')
+    const childId = '019fb002-9e52-7373-a6fe-a9098f5650a5'
+    writeFileSync(path, [
+      { type: 'session_meta', timestamp: '2026-07-29T20:00:00.000Z', payload: { id: 'parent', cwd: '/x' } },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T20:00:02.000Z',
+        payload: {
+          type: 'function_call',
+          name: 'send_input',
+          call_id: 'send',
+          arguments: JSON.stringify({ target: childId, message: 'continue' }),
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    await expect(new CodexAdapter().resolveParentTask(refFor(path, 'codex'), childId)).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'parent-turn-metadata-missing',
+    })
+  })
+
+  it('rejects latest-turn selection when the session has no task boundary', async () => {
+    const path = join(dir, 'rollout-codex-no-task-boundary.jsonl')
+    writeFileSync(path, JSON.stringify({
+      type: 'session_meta',
+      timestamp: '2026-07-28T20:00:00.000Z',
+      payload: { id: 'no-task-boundary', cwd: '/x' },
+    }))
+
+    await expect(new CodexAdapter().parse(refFor(path, 'codex'), { taskScope: 'latest' }))
+      .rejects.toMatchObject({ code: 'CODEX_LATEST_TURN_NOT_FOUND' })
   })
 
   it('uses protocol status instead of error words inside successful output', async () => {
@@ -1378,6 +1941,7 @@ describe('codex current tool and subagent events', () => {
   it('links multi-agent calls to native child-session metadata', async () => {
     const parentId = '019f24d6-b5ec-7173-acc1-f957de216ee5'
     const childId = '019f5aea-d6b4-7451-a3eb-60289875a357'
+    const unrelatedId = '019f5aea-eeee-7451-a3eb-60289875a357'
     const parentPath = join(dir, 'rollout-codex-multi-agent-parent.jsonl')
     const childPath = join(dir, 'rollout-codex-multi-agent-child.jsonl')
     writeFileSync(
@@ -1417,7 +1981,7 @@ describe('codex current tool and subagent events', () => {
             type: 'custom_tool_call',
             call_id: 'send-call',
             name: 'exec',
-            input: `await tools.multi_agent_v1__send_input({target:"${childId}",message:"Finish"})`,
+            input: `await tools.multi_agent_v1__send_input({target:"${childId}",message:"Compare ${unrelatedId}, then finish"})`,
           },
         },
         {
@@ -1469,6 +2033,15 @@ describe('codex current tool and subagent events', () => {
         },
         {
           timestamp: '2026-07-13T09:59:28.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_started',
+            turn_id: 'child-turn',
+            started_at: 1_783_936_768,
+          },
+        },
+        {
+          timestamp: '2026-07-13T09:59:28.100Z',
           type: 'response_item',
           payload: { type: 'message', role: 'user', content: 'Own direct-streaming conversion for the remaining JSONL adapters.' },
         },
@@ -1488,6 +2061,7 @@ describe('codex current tool and subagent events', () => {
     ])
     expect(collaboration.every((item) => item.attributes['traces.codex.agent_session_ids'] === JSON.stringify([childId]))).toBe(true)
     expect(collaboration[0]!.attributes['traces.child_session_ids']).toBe(JSON.stringify([childId]))
+    expect(collaboration[1]!.attributes['traces.codex.agent_request_id']).toBe('submission-1')
     expect(collaboration[2]).toMatchObject({
       status: { code: 'OK' },
       attributes: { 'traces.poll.outcome': 'timeout' },
@@ -1503,6 +2077,8 @@ describe('codex current tool and subagent events', () => {
       'traces.codex.agent_nickname': 'Einstein',
       'traces.codex.agent_role': 'worker',
     })
+    const childPrompt = childSpans.find((item) => item.name === 'user.prompt')
+    expect(childPrompt?.attributes['tangle.actor']).toBe('agent')
   })
 
   it('joins current direct collaboration calls, lifecycle events, and child messages once', async () => {
@@ -1739,6 +2315,172 @@ describe('codex current tool and subagent events', () => {
       attributes: { 'traces.codex.subagent_interruption_count': 1 },
     })
     expect(spans.filter((item) => item.name === 'message.agent.progress')).toHaveLength(1)
+  })
+
+  it('marks and clamps subagent clock skew instead of emitting a negative duration', async () => {
+    const path = join(dir, 'rollout-codex-subagent-clock-skew.jsonl')
+    const childId = '019fabd5-b536-7673-8e79-55c61b5879cc'
+    writeFileSync(path, [
+      { timestamp: '2026-07-29T03:00:00.000Z', type: 'session_meta', payload: { id: 'clock-skew-parent', cwd: '/repo' } },
+      {
+        timestamp: '2026-07-29T03:00:02.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'sub_agent_activity',
+          kind: 'started',
+          occurred_at_ms: Date.parse('2026-07-29T03:00:02.000Z'),
+          agent_thread_id: childId,
+          agent_path: '/root/worker',
+        },
+      },
+      {
+        timestamp: '2026-07-29T03:00:03.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'sub_agent_activity',
+          kind: 'completed',
+          occurred_at_ms: Date.parse('2026-07-29T03:00:01.000Z'),
+          agent_thread_id: childId,
+          agent_path: '/root/worker',
+        },
+      },
+    ].map((event) => JSON.stringify(event)).join('\n'))
+
+    const agent = (await new CodexAdapter().parse(refFor(path, 'codex')))
+      .find((item) => item.span_id === `subagent:${childId}`)
+
+    expect(agent).toMatchObject({
+      start_time: '2026-07-29T03:00:02.000Z',
+      end_time: '2026-07-29T03:00:02.000Z',
+      status: { code: 'OK' },
+      attributes: {
+        'traces.clock_skew_detected': true,
+        'traces.source_end_time': '2026-07-29T03:00:01.000Z',
+      },
+    })
+  })
+
+  it('retains a terminal subagent event when the start event is missing', async () => {
+    const path = join(dir, 'rollout-codex-subagent-missing-start.jsonl')
+    const childId = '019fabd5-b536-7673-8e79-55c61b5879cc'
+    const completed = {
+      timestamp: '2026-07-29T03:00:03.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'sub_agent_activity',
+        kind: 'completed',
+        agent_thread_id: childId,
+        agent_path: '/root/worker',
+      },
+    }
+    writeFileSync(path, [
+      { timestamp: '2026-07-29T03:00:00.000Z', type: 'session_meta', payload: { id: 'partial-parent', cwd: '/repo' } },
+      completed,
+      completed,
+    ].map((event) => JSON.stringify(event)).join('\n'))
+
+    const parsed = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const agent = parsed.find((item) => item.span_id === `subagent:${childId}`)
+
+    expect(agent).toMatchObject({
+      start_time: '2026-07-29T03:00:03.000Z',
+      end_time: '2026-07-29T03:00:03.000Z',
+      status: { code: 'OK' },
+      attributes: {
+        'traces.codex.subagent_start_missing': true,
+        'traces.codex.subagent_thread_id': childId,
+      },
+    })
+    expect(JSON.parse(String(agent?.attributes['traces.codex.subagent_lifecycle']))).toEqual([
+      { kind: 'completed', at: '2026-07-29T03:00:03.000Z' },
+    ])
+  })
+
+  it('falls back to the record timestamp when subagent epoch metadata is out of range', async () => {
+    const path = join(dir, 'rollout-codex-subagent-invalid-epoch.jsonl')
+    const childId = '019fabd5-b536-7673-8e79-55c61b5879cc'
+    writeFileSync(path, [
+      { timestamp: '2026-07-29T03:00:00.000Z', type: 'session_meta', payload: { id: 'invalid-epoch-parent', cwd: '/repo' } },
+      {
+        timestamp: '2026-07-29T03:00:02.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'sub_agent_activity',
+          kind: 'completed',
+          occurred_at_ms: Number.MAX_VALUE,
+          agent_thread_id: childId,
+          agent_path: '/root/worker',
+        },
+      },
+    ].map((event) => JSON.stringify(event)).join('\n'))
+
+    await expect(new CodexAdapter().parse(refFor(path, 'codex'))).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          span_id: `subagent:${childId}`,
+          start_time: '2026-07-29T03:00:02.000Z',
+          end_time: '2026-07-29T03:00:02.000Z',
+        }),
+      ]),
+    )
+  })
+
+  it('rejects an unselectable latest task without throwing on an out-of-range task epoch', async () => {
+    const path = join(dir, 'rollout-codex-task-invalid-epoch.jsonl')
+    writeFileSync(path, [
+      { timestamp: '2026-07-29T03:00:00.000Z', type: 'session_meta', payload: { id: 'invalid-task-epoch', cwd: '/repo' } },
+      { type: 'event_msg', payload: { type: 'task_started', started_at: Number.MAX_VALUE } },
+    ].map((event) => JSON.stringify(event)).join('\n'))
+
+    await expect(
+      new CodexAdapter().parse(refFor(path, 'codex'), { taskScope: 'latest' }),
+    ).rejects.toMatchObject({
+      name: 'CodexTaskScopeError',
+      code: 'CODEX_LATEST_TURN_NOT_FOUND',
+    })
+  })
+
+  it('keeps the latest valid session end when source records arrive out of order', async () => {
+    const path = join(dir, 'rollout-codex-out-of-order.jsonl')
+    writeFileSync(path, [
+      { timestamp: '2026-07-29T03:00:00.000Z', type: 'session_meta', payload: { id: 'out-of-order', cwd: '/repo' } },
+      { timestamp: '2026-07-29T03:00:05.000Z', type: 'event_msg', payload: { type: 'agent_message', message: 'later' } },
+      { timestamp: '2026-07-29T03:00:03.000Z', type: 'event_msg', payload: { type: 'agent_message', message: 'earlier' } },
+    ].map((event) => JSON.stringify(event)).join('\n'))
+
+    const [root] = await new CodexAdapter().parse(refFor(path, 'codex'))
+    expect(root?.end_time).toBe('2026-07-29T03:00:05.000Z')
+  })
+
+  it('reopens a completed child when a later structural start resumes it', async () => {
+    const path = join(dir, 'rollout-codex-subagent-restarted.jsonl')
+    const childId = '019fabd5-b536-7673-8e79-55c61b5879cc'
+    const event = (kind: string, timestamp: string) => ({
+      timestamp,
+      type: 'event_msg',
+      payload: {
+        type: 'sub_agent_activity',
+        kind,
+        occurred_at_ms: Date.parse(timestamp),
+        agent_thread_id: childId,
+        agent_path: '/root/worker',
+      },
+    })
+    writeFileSync(path, [
+      { timestamp: '2026-07-29T03:00:00.000Z', type: 'session_meta', payload: { id: 'restarted-parent', cwd: '/repo' } },
+      event('started', '2026-07-29T03:00:01.000Z'),
+      event('completed', '2026-07-29T03:00:02.000Z'),
+      event('started', '2026-07-29T03:00:03.000Z'),
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const agent = (await new CodexAdapter().parse(refFor(path, 'codex')))
+      .find((item) => item.span_id === `subagent:${childId}`)
+
+    expect(agent).toMatchObject({
+      start_time: '2026-07-29T03:00:01.000Z',
+      end_time: '2026-07-29T03:00:03.000Z',
+      status: { code: 'UNSET' },
+    })
   })
 
   it('marks a session complete only when task_complete matches the latest task_started', async () => {

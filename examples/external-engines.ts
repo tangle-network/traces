@@ -1,5 +1,5 @@
 /**
- * Run trace analyzers and PII scrubbers that traces does NOT bundle — you install
+ * Run trace analyzers and PII scrubbers that traces does NOT bundle. You install
  * the tool, traces drives it. Same pattern for any future engine/model.
  *
  *   pnpm tsx examples/external-engines.ts
@@ -9,6 +9,7 @@ import {
   collectSessions,
   commandRedactor,
   haloAnalyzer,
+  hodoscopeAnalyzer,
   writeOtlpFile,
 } from '@tangle-network/traces'
 
@@ -18,14 +19,29 @@ if (!batch) {
   process.exit(0)
 }
 
-// 1) External ANALYZER — emit the OTLP artifact, then run HALO over it as a peer
+// 1) External ANALYZER: emit the OTLP artifact, then run HALO over it as a peer
 //    to the built-in analysts. (Install HALO: github.com/context-labs/halo)
 const otlp = await writeOtlpFile(batch.spans, '/tmp/session.otlp.jsonl')
-const halo = haloAnalyzer({ defaultPrompt: 'diagnose stuck loops and wasted tokens' })
+const halo = haloAnalyzer({
+  defaultPrompt: 'diagnose stuck loops and wasted tokens',
+  maxDepth: 0,
+  maxTurns: 3,
+  maxParallel: 1,
+  reasoningEffort: 'low',
+})
 const analysis = await halo.analyze(otlp)
 console.log(analysis.ok ? analysis.output : `halo unavailable: ${analysis.error}`)
 
-// 2) External REDACTOR — scrub prose with your own PII model before upload. The
+// 2) DISCOVERY ENGINE: sample distinct behavior for human review.
+//    Hodoscope requires Python 3.11, uv, and model credentials.
+const discovery = await hodoscopeAnalyzer().analyze(otlp)
+console.log(
+  discovery.ok
+    ? `${discovery.candidates?.length ?? 0} behavior candidates need review`
+    : `hodoscope unavailable: ${discovery.error}`,
+)
+
+// 3) External REDACTOR: scrub prose with your own PII model before upload. The
 //    command reads a JSON array of strings on stdin and writes the scrubbed array
 //    on stdout (a 3-line wrapper adapts openai/privacy-filter's `opf`).
 const redactor = commandRedactor({ command: 'my-pii-scrubber' })

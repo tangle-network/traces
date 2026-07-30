@@ -25,9 +25,12 @@ export {
 } from './integrity.js'
 export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp
+export * from './session-relationship.js' // stable parent/child metadata decoding
+export * from './session-workflow.js' // collectSessionWorkflow() — bounded parent/child expansion
+export * from './session-selection.js' // collectSessionSelection() — parse/expand/bind selected groups
 export * from './repo.js' // resolveRepoAttrs() — per-session repo/git resource labels
 export { ClaudeAdapter } from './adapters/claude.js'
-export { CodexAdapter } from './adapters/codex.js'
+export { CodexAdapter, CodexTaskScopeError } from './adapters/codex.js'
 export { CodexExecAdapter, CodexExecStreamError } from './adapters/codex-exec.js'
 export { OpencodeAdapter } from './adapters/opencode.js'
 export { GeminiAdapter } from './adapters/gemini.js'
@@ -64,10 +67,12 @@ export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog
 export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
+export * from './chat-trajectory.js' // generic chat trajectory to stable step spans
 export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
 
 // ── External engines (NOT bundled — shell out to tools you install) ────────
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor
+export * from './hodoscope.js' // hodoscopeAnalyzer / writeHodoscopeInput
 
 // ── Live observation (event-driven; feed any system) ──────────────────────
 export * from './live.js' // streamSessions(), traceStreamEventsFromSpans(), semantic live findings
@@ -89,4 +94,9 @@ export type { Analyst, AnalystContext, AnalystFinding } from '@tangle-network/ag
 export { createHostedClient, hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 export type { HostedClient } from '@tangle-network/agent-eval/hosted'
 export { DEFAULT_REDACTION_RULES, redactString, redactValue } from '@tangle-network/agent-eval/traces'
-export type { RedactionReport, RedactionRule } from '@tangle-network/agent-eval/traces'
+export type {
+  ErrorCluster,
+  RedactionReport,
+  RedactionRule,
+  TraceAnalysisStore,
+} from '@tangle-network/agent-eval/traces'

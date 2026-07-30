@@ -41,13 +41,52 @@ describe('otlp span builder', () => {
 
   it('serializes one span per line with a trailing newline', () => {
     const out = serializeSpans([
-      span({ traceId: 't', spanId: 'a', name: 'x', kind: 'AGENT', startTime: 'now' }),
-      span({ traceId: 't', spanId: 'b', name: 'y', kind: 'LLM', startTime: 'now' }),
+      span({
+        traceId: 't',
+        spanId: 'a',
+        name: 'x',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00Z',
+      }),
+      span({
+        traceId: 't',
+        spanId: 'b',
+        name: 'y',
+        kind: 'LLM',
+        startTime: '2026-01-01T00:00:01Z',
+      }),
     ])
     const lines = out.split('\n').filter(Boolean)
     expect(lines).toHaveLength(2)
     expect(JSON.parse(lines[0]!).span_id).toBe('a')
     expect(out.endsWith('\n')).toBe(true)
+  })
+
+  it('rejects duplicate span identities at the serialization boundary', () => {
+    const duplicate = span({
+      traceId: 't',
+      spanId: 'same',
+      name: 'x',
+      kind: 'AGENT',
+      startTime: '2026-01-01T00:00:00Z',
+    })
+
+    expect(() => serializeSpans([duplicate, duplicate])).toThrow(
+      'duplicate span identity (t, same)',
+    )
+  })
+
+  it('rejects reversed timestamps at the serialization boundary', () => {
+    const reversed = span({
+      traceId: 't',
+      spanId: 'bad-time',
+      name: 'x',
+      kind: 'AGENT',
+      startTime: '2026-01-01T00:00:01Z',
+      endTime: '2026-01-01T00:00:00Z',
+    })
+
+    expect(() => serializeSpans([reversed])).toThrow(/end_time must not precede start_time/)
   })
 })
 

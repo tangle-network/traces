@@ -194,6 +194,36 @@ describe('readJsonl', () => {
     await expect(read()).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('stops an active stream at the caller signal', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'traces-jsonl-abort-'))
+    const path = join(directory, 'events.jsonl')
+    await writeFile(
+      path,
+      Array.from({ length: 20_000 }, (_, index) => JSON.stringify({ index })).join('\n'),
+      'utf8',
+    )
+    const controller = new AbortController()
+    const reason = new Error('stop reading')
+    const rows = readJsonl<{ index: number }>(path, { signal: controller.signal })
+
+    await expect(rows.next()).resolves.toMatchObject({
+      done: false,
+      value: { index: 0 },
+    })
+    controller.abort(reason)
+    await expect(rows.next()).rejects.toBe(reason)
+  })
+
+  it('does not open a source when already cancelled', async () => {
+    const controller = new AbortController()
+    const reason = new Error('cancelled before read')
+    controller.abort(reason)
+    const path = join(tmpdir(), `traces-jsonl-unused-${process.pid}-${Date.now()}.jsonl`)
+    const rows = readJsonl(path, { signal: controller.signal })
+
+    await expect(rows.next()).rejects.toBe(reason)
+  })
+
   it('requires a receipt callback in recovery mode', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'traces-jsonl-'))
     const path = join(directory, 'events.jsonl')

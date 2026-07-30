@@ -74,6 +74,8 @@ describe('policy evidence export', () => {
 
     expect(record.kind).toBe('traces.policy_evidence.session')
     expect(record.session.sessionId).toBe('sess-policy')
+    expect(record.session.role).toBe('unknown')
+    expect(record.session.childSessionIds).toEqual([])
     expect(record.repo.subjectKey).toBe('github.com/tangle-network/agent-lab')
     expect(record.repo.branch).toBe('research/x')
     expect(record.repo.resolutionSource).toBe('span-path')

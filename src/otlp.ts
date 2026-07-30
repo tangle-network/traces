@@ -20,9 +20,14 @@
 
 import {
   applyLlmSpanOtlpAttributes,
+  LLM_COST_USD,
+  LLM_INPUT_TOKENS,
+  LLM_MODEL_NAME,
+  LLM_OUTPUT_TOKENS,
   OPENINFERENCE_SPAN_KIND,
   TOOL_NAME,
 } from '@tangle-network/agent-eval/trace-attributes'
+import { validateOtlpSpans } from './span-validation.js'
 
 export type OtlpSpanKind = 'AGENT' | 'LLM' | 'TOOL' | 'CHAIN' | 'SPAN'
 
@@ -116,6 +121,13 @@ export function span(input: SpanInput): OtlpSpan {
  *  One artifact feeds our pipeline, HALO, and any OpenInference tool. */
 export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
   const a = s.attributes
+  const attributes = { ...a }
+  attributes['inference.observation_kind'] ??= a[OPENINFERENCE_SPAN_KIND]
+  if (a['agent.name'] != null) attributes['inference.agent_name'] ??= a['agent.name']
+  if (a[LLM_MODEL_NAME] != null) attributes['inference.llm.model_name'] ??= a[LLM_MODEL_NAME]
+  if (a[LLM_INPUT_TOKENS] != null) attributes['inference.llm.input_tokens'] ??= a[LLM_INPUT_TOKENS]
+  if (a[LLM_OUTPUT_TOKENS] != null) attributes['inference.llm.output_tokens'] ??= a[LLM_OUTPUT_TOKENS]
+  if (a[LLM_COST_USD] != null) attributes['inference.llm.cost.total'] ??= a[LLM_COST_USD]
   const resourceAttrs: Record<string, unknown> = {}
   if (a['service.name'] != null) resourceAttrs['service.name'] = a['service.name']
   if (a['agent.name'] != null) resourceAttrs['agent.name'] = a['agent.name']
@@ -132,10 +144,13 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
     kind: (typeof a[OPENINFERENCE_SPAN_KIND] === 'string' ? a[OPENINFERENCE_SPAN_KIND] : 'CHAIN'),
     start_time: s.start_time,
     end_time: s.end_time,
-    status: { code: s.status.code, message: s.status.message ?? '' },
+    status: {
+      code: `STATUS_CODE_${s.status.code}`,
+      message: s.status.message ?? '',
+    },
     resource: { attributes: resourceAttrs },
     scope: { name: 'tangle-traces', version: '' },
-    attributes: a,
+    attributes,
   }
 }
 
@@ -144,7 +159,8 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
  *  OpenInference tools directly — no per-tool conversion. */
 export function serializeSpans(spans: readonly OtlpSpan[]): string {
   if (spans.length === 0) return ''
-  return `${spans.map((s) => JSON.stringify(toOpenInferenceSpan(s))).join('\n')}\n`
+  const validated = validateOtlpSpans(spans, 'serialized spans')
+  return `${validated.map((s) => JSON.stringify(toOpenInferenceSpan(s))).join('\n')}\n`
 }
 
 /** Write spans to an OTLP-JSONL file (a temp file when no path is given). */

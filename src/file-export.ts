@@ -21,15 +21,26 @@ import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { capText } from './adapters/conversation.js'
 import { toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
 import { appendAll } from './arrays.js'
+import {
+  chatTrajectoryToSpans,
+  isChatTrajectory,
+  isChatTrajectoryMessage,
+} from './chat-trajectory.js'
 import type { PolicyEvidenceRecord } from './evidence.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
 import { serializeSpans, span } from './otlp.js'
 import { redactSpans } from './redact.js'
+import { validateOtlpSpans } from './span-validation.js'
 
 type JsonObject = Record<string, unknown>
 
-export type TraceEvidenceInputFormat = 'policy-evidence' | 'sandbox-events' | 'openinference' | 'intelligence-spans'
+export type TraceEvidenceInputFormat =
+  | 'policy-evidence'
+  | 'sandbox-events'
+  | 'openinference'
+  | 'intelligence-spans'
+  | 'chat-trajectory'
 export type TraceEvidenceFormatOption = TraceEvidenceInputFormat | 'auto'
 
 export interface TraceEvidenceExportOptions {
@@ -154,6 +165,7 @@ function isOpenInferenceRow(row: unknown): row is JsonObject {
   return (
     typeof row.trace_id === 'string' &&
     typeof row.span_id === 'string' &&
+    (row.parent_span_id === null || typeof row.parent_span_id === 'string') &&
     typeof row.name === 'string' &&
     typeof row.start_time === 'string' &&
     typeof row.end_time === 'string' &&
@@ -190,8 +202,9 @@ function detectFormat(rows: readonly unknown[], requested: TraceEvidenceFormatOp
   if (rows.every(isPolicyEvidenceRow)) return 'policy-evidence'
   if (rows.every(isOpenInferenceRow)) return 'openinference'
   if (rows.every(isIntelligenceSpanRow)) return 'intelligence-spans'
+  if (rows.every(isChatTrajectory) || rows.every(isChatTrajectoryMessage)) return 'chat-trajectory'
   if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
-  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, openinference, or intelligence-spans')
+  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, openinference, intelligence-spans, or chat-trajectory')
 }
 
 function requirePolicyEvidenceRows(rows: readonly unknown[]): readonly PolicyEvidenceRecord[] {
@@ -217,6 +230,19 @@ function requireIntelligenceSpanRows(rows: readonly unknown[]): readonly JsonObj
 function requireObjectRows(rows: readonly unknown[]): readonly JsonObject[] {
   if (!rows.every(isObject)) throw new Error('sandbox-events input must contain only JSON object events')
   return rows
+}
+
+function chatTrajectoryRowsToSpans(
+  rows: readonly unknown[],
+  sourcePath?: string,
+): OtlpSpan[] {
+  if (rows.every(isChatTrajectoryMessage)) {
+    return chatTrajectoryToSpans(rows, { sourcePath })
+  }
+  if (!rows.every(isChatTrajectory)) {
+    throw new Error('chat-trajectory input must be one message array or trajectory objects')
+  }
+  return rows.flatMap((trajectory) => chatTrajectoryToSpans(trajectory, { sourcePath }))
 }
 
 function evidenceTimeBounds(record: PolicyEvidenceRecord): { start: string; end: string } {
@@ -462,7 +488,9 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
 }
 
 function statusCode(value: unknown): OtlpStatusCode {
-  return value === 'OK' || value === 'ERROR' || value === 'UNSET' ? value : 'UNSET'
+  if (value === 'OK' || value === 'STATUS_CODE_OK') return 'OK'
+  if (value === 'ERROR' || value === 'STATUS_CODE_ERROR') return 'ERROR'
+  return 'UNSET'
 }
 
 function numberValue(value: unknown): number | undefined {
@@ -581,7 +609,8 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
       isoTime(row.start_time) ??
       stringValue(row.start_time) ??
       isoTime(row.received_at) ??
-      new Date(0).toISOString()
+      stringValue(row.received_at) ??
+      ''
     const endTime =
       unixNanoTime(row.end_unix_nano) ??
       isoTime(row.end_time) ??
@@ -669,16 +698,26 @@ function openInferenceToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
     const status = objectValue(row.status)
     const message = stringValue(status?.message)
     return {
-      trace_id: stringValue(row.trace_id) ?? hashId(row, 32),
-      span_id: stringValue(row.span_id) ?? hashId({ row, field: 'span' }),
+      trace_id: row.trace_id as string,
+      span_id: row.span_id as string,
       parent_span_id: stringValue(row.parent_span_id) || null,
-      name,
-      start_time: stringValue(row.start_time) ?? new Date(0).toISOString(),
-      end_time: stringValue(row.end_time) ?? stringValue(row.start_time) ?? new Date(0).toISOString(),
-      status: { code: statusCode(status?.code), ...(message ? { message } : {}) },
+      name: row.name as string,
+      start_time: row.start_time as string,
+      end_time: row.end_time as string,
+      status: {
+        code: openInferenceStatusCode(status?.code),
+        ...(message ? { message } : {}),
+      },
       attributes: attrs,
     }
   })
+}
+
+function openInferenceStatusCode(value: unknown): OtlpStatusCode {
+  if (value === 'OK' || value === 'STATUS_CODE_OK') return 'OK'
+  if (value === 'ERROR' || value === 'STATUS_CODE_ERROR') return 'ERROR'
+  if (value === 'UNSET' || value === 'STATUS_CODE_UNSET') return 'UNSET'
+  throw new TypeError('OpenInference status.code must be OK, ERROR, UNSET, or its STATUS_CODE_* form')
 }
 
 function normalizeAttributes(attributes: JsonObject | undefined): JsonObject {
@@ -717,13 +756,16 @@ export function exportTraceEvidenceRows(
         ? openInferenceToSpans(requireOpenInferenceRows(rows))
         : format === 'intelligence-spans'
           ? intelligenceSpansToSpans(requireIntelligenceSpanRows(rows))
-          : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
+          : format === 'chat-trajectory'
+            ? chatTrajectoryRowsToSpans(rows, opts.sourcePath)
+            : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
   const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)
+  const validated = validateOtlpSpans(redacted.spans, `${format} export`)
   return {
     format,
-    spans: redacted.spans,
+    spans: validated,
     redactionCount: redacted.report.redactionCount,
     redactionsByRule: redacted.report.byRule,
   }
@@ -771,7 +813,12 @@ export async function exportTraceEvidenceFile(
         format,
       })
     }
-    return { format, spans, redactionCount, redactionsByRule }
+    return {
+      format,
+      spans: validateOtlpSpans(spans, `${format} file export`),
+      redactionCount,
+      redactionsByRule,
+    }
   }
   const text = await readFile(inputPath, 'utf8')
   return exportTraceEvidenceText(text, { ...opts, sourcePath: inputPath })

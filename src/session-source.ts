@@ -11,7 +11,32 @@ import { stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
 import { cwdMatchesSelection, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
+import { validateOtlpSpans } from './span-validation.js'
 import type { HarnessTraceAdapter, ParseOptions, SessionRef } from './types.js'
+
+export { validateOtlpSpans }
+
+async function awaitWithAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation
+  signal.throwIfAborted()
+  return new Promise<T>((resolve, reject) => {
+    const stop = (): void => {
+      signal.removeEventListener('abort', stop)
+      reject(signal.reason)
+    }
+    signal.addEventListener('abort', stop, { once: true })
+    operation.then(
+      (value) => {
+        signal.removeEventListener('abort', stop)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', stop)
+        reject(error)
+      },
+    )
+  })
+}
 
 /**
  * Parse one session to spans and stamp per-session repo/git resource attrs
@@ -24,7 +49,12 @@ export async function parseSession(
   ref: SessionRef,
   options: ParseOptions = {},
 ): Promise<OtlpSpan[]> {
-  const spans = await adapter.parse(ref, options)
+  options.signal?.throwIfAborted()
+  const spans = validateOtlpSpans(
+    await awaitWithAbort(adapter.parse(ref, options), options.signal),
+    `${adapter.harness} adapter output`,
+  )
+  options.signal?.throwIfAborted()
   if (spans.length === 0) throw new EmptySessionError(ref.path)
   stampSessionIntegrity(ref, spans)
   stampSessionIdentity(spans, ref.sessionId)
@@ -74,8 +104,6 @@ export interface ScanOptions extends AdapterSelection, ParseOptions {
   sinceMs?: number
   /** Cap to the most-recent N sessions per harness. */
   last?: number
-  /** Cancel the scan; iteration stops between sessions. */
-  signal?: AbortSignal
   /** Handle a locate/parse failure and continue. Without this callback, failures propagate. */
   onError?: (error: unknown, ref?: SessionRef) => void
 }
@@ -105,7 +133,12 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
       if (opts.signal?.aborted) return
       let spans: OtlpSpan[]
       try {
-        spans = await parseSession(adapter, ref, { corruptionMode: opts.corruptionMode })
+        spans = await parseSession(adapter, ref, {
+          corruptionMode: opts.corruptionMode,
+          taskScope: opts.taskScope,
+          taskTurnId: opts.taskTurnId,
+          signal: opts.signal,
+        })
       } catch (err) {
         if (!opts.onError) throw err
         opts.onError(err, ref)

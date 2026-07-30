@@ -48,6 +48,7 @@ export interface AnalyzeOptions {
   /** Where to write the OTLP-JSONL artifact. Defaults to a temp file. */
   otlpOutPath?: string
   runId?: string
+  signal?: AbortSignal
   log?: (msg: string, fields?: Record<string, unknown>) => void
 }
 
@@ -83,7 +84,9 @@ function mergeCostProvenance(
 
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
+  opts.signal?.throwIfAborted()
   const otlpPath = await writeOtlpFile(spans, opts.otlpOutPath)
+  opts.signal?.throwIfAborted()
   const runId = opts.runId ?? `traces-${Date.now()}`
   const execution = summarizeSpanExecution(spans, {
     experimentId: runId,
@@ -98,8 +101,10 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     perCallByteCeiling: GENERATED_TRACE_FILE_CEILING,
   })
   await detStore.ensureIndexed()
+  opts.signal?.throwIfAborted()
   const detRegistry = opts.registry ?? buildDefaultAnalystRegistry({ registry: { log: opts.log } })
-  const result = await detRegistry.run(runId, { traceStore: detStore })
+  const result = await detRegistry.run(runId, { traceStore: detStore }, { signal: opts.signal })
+  opts.signal?.throwIfAborted()
 
   // Agentic pass — default ceiling so each tool call stays context-bounded;
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
@@ -116,6 +121,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     const agResult = await agRegistry.run(runId, { traceStore: agStore }, {
       budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
       chainFindings: true,
+      signal: opts.signal,
       ...(opts.agenticPriorFindings?.length
         ? { priorFindings: { '*': opts.agenticPriorFindings } }
         : {}),
@@ -131,5 +137,6 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     result.total_cost_usd = totalCostUsd
   }
 
+  opts.signal?.throwIfAborted()
   return { otlpPath, execution, result }
 }

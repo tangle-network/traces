@@ -180,6 +180,30 @@ describe('analyzeSpans (bring-your-own analysts)', () => {
     expect(result.findings.some((f) => f.claim === 'hello from my analyst')).toBe(true)
   })
 
+  it('forwards one cancellation signal through custom analyst runs', async () => {
+    const controller = new AbortController()
+    const reason = new Error('stop custom analysis')
+    const registry = new AnalystRegistry()
+    let observedSignal: AbortSignal | undefined
+    registry.register({
+      id: 'cancellable-analyst',
+      description: 'observes cancellation',
+      inputKind: 'trace-store',
+      cost: { kind: 'deterministic' },
+      version: '1.0.0',
+      async analyze(_store, context) {
+        observedSignal = context.signal
+        controller.abort(reason)
+        return []
+      },
+    })
+
+    await expect(
+      analyzeSpans(loopSpans(2), { registry, signal: controller.signal }),
+    ).rejects.toBe(reason)
+    expect(observedSignal).toBe(controller.signal)
+  })
+
   it('feeds compact deterministic findings to agentic analysts and chains their findings in order', async () => {
     const agenticRegistry = new AnalystRegistry()
     const prior = makeFinding({

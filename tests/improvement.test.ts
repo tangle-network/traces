@@ -74,17 +74,19 @@ function jsonAnalyzer(): ExternalAnalyzer {
     async analyze() {
       return {
         analyzer: 'json-engine',
+        kind: 'findings',
         ok: true,
-        output: JSON.stringify({
-          findings: [{
-            area: 'verification',
-            severity: 'high',
-            claim: 'external engine found that verification was skipped',
-            action: 'Run a real verification command before reporting completion.',
-            evidence_refs: [{ kind: 'artifact', uri: 'json-engine://finding/1', excerpt: 'missing verification' }],
-            confidence: 0.8,
-          }],
-        }),
+        output: 'Structured findings emitted.',
+        findings: [makeFinding({
+          analyst_id: 'external:json-engine',
+          area: 'verification',
+          severity: 'high',
+          claim: 'external engine found that verification was skipped',
+          recommended_action: 'Run a real verification command before reporting completion.',
+          validation_plan: 'Rerun the task and require a successful verification span.',
+          evidence_refs: [{ kind: 'artifact', uri: 'json-engine://finding/1', excerpt: 'missing verification' }],
+          confidence: 0.8,
+        })],
       }
     },
   }
@@ -106,13 +108,14 @@ describe('runTraceInvestigation', () => {
       finding.area === 'instrumentation' &&
       finding.recommended_action?.includes('complete canonical tool arguments'))).toBe(true)
     expect(result.findings.every((finding) => finding.finding_id && Array.isArray(finding.evidence_refs))).toBe(true)
-    expect(result.findings.some((finding) => finding.claim.includes('repeated tool-call loop'))).toBe(true)
+    const loopFinding = result.findings.find((finding) => finding.claim.includes('repeated tool-call loop'))
+    expect(loopFinding?.evidence_refs).toContainEqual(
+      expect.objectContaining({ kind: 'metric', uri: 'pipelines.stuck_loop_count' }),
+    )
+    expect(result.findings.some((finding) => finding.area === 'reliability')).toBe(false)
     expect(result.findings.some((finding) => finding.claim === 'No skill usage was observed in the selected sessions')).toBe(false)
     expect(result.findings.some((finding) => finding.recommended_action)).toBe(true)
     expect(result.findings.some((finding) => finding.validation_plan?.match(/Rerun|rerun|Run/))).toBe(true)
-    expect(result.findings.find((finding) => finding.area === 'reliability')?.evidence_refs).toContainEqual(
-      expect.objectContaining({ kind: 'span', uri: 'trace:trace-improve' }),
-    )
     expect(result.report).toContain('**Check:**')
     expect(result.report).toContain('external engine found')
     expect(result.report).toContain('Stuck loops')
@@ -150,6 +153,124 @@ describe('runTraceInvestigation', () => {
     expect(result.report).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
     expect(result.report).toContain('Materialized skill catalogs/instructions:** 1/1')
     expect(result.report).not.toContain('Skill penetration')
+  })
+
+  it('forwards cancellation to external analyzers and rejects the investigation', async () => {
+    const controller = new AbortController()
+    const reason = new Error('stop trace investigation')
+    let observedSignal: AbortSignal | undefined
+    const analyzer: ExternalAnalyzer = {
+      name: 'cancellable',
+      async analyze(_path, options) {
+        observedSignal = options?.signal
+        controller.abort(reason)
+        return {
+          analyzer: 'cancellable',
+          kind: 'report',
+          ok: false,
+          output: '',
+          error: 'cancelled',
+        }
+      },
+    }
+
+    await expect(runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      externalAnalyzers: [analyzer],
+      signal: controller.signal,
+    })).rejects.toBe(reason)
+    expect(observedSignal).toBe(controller.signal)
+  })
+
+  it('rejects external findings that cite spans outside the supplied traces', async () => {
+    const analyzer: ExternalAnalyzer = {
+      name: 'invented-evidence',
+      async analyze() {
+        return {
+          analyzer: 'invented-evidence',
+          kind: 'findings',
+          ok: true,
+          output: 'A span was cited.',
+          findings: [makeFinding({
+            analyst_id: 'external:invented-evidence',
+            area: 'verification',
+            severity: 'high',
+            claim: 'an external analyzer invented span evidence',
+            evidence_refs: [{
+              kind: 'span',
+              uri: 'trace://does-not-exist/span/never',
+            }],
+            confidence: 0.9,
+          })],
+        }
+      },
+    }
+
+    const result = await runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      externalAnalyzers: [analyzer],
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    expect(result.external).toEqual([
+      expect.objectContaining({
+        analyzer: 'invented-evidence',
+        kind: 'report',
+        ok: false,
+        output: '',
+        error: expect.stringContaining(
+          "unknown span evidence URI 'trace://does-not-exist/span/never'",
+        ),
+      }),
+    ])
+    expect(result.findings.some(
+      (finding) => finding.analyst_id === 'external:invented-evidence',
+    )).toBe(false)
+  })
+
+  it('accepts external findings that cite an exact supplied span', async () => {
+    const analyzer: ExternalAnalyzer = {
+      name: 'bound-evidence',
+      async analyze() {
+        return {
+          analyzer: 'bound-evidence',
+          kind: 'findings',
+          ok: true,
+          output: 'An existing span was cited.',
+          findings: [makeFinding({
+            analyst_id: 'external:bound-evidence',
+            area: 'verification',
+            severity: 'high',
+            claim: 'an external analyzer cited exact span evidence',
+            evidence_refs: [{
+              kind: 'span',
+              uri: 'trace://trace-improve/span/tool-0',
+            }],
+            confidence: 0.9,
+          })],
+        }
+      },
+    }
+
+    const result = await runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      externalAnalyzers: [analyzer],
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    expect(result.external).toEqual([
+      expect.objectContaining({
+        analyzer: 'bound-evidence',
+        kind: 'findings',
+        ok: true,
+      }),
+    ])
+    expect(result.findings.some(
+      (finding) => finding.analyst_id === 'external:bound-evidence',
+    )).toBe(true)
   })
 })
 
@@ -217,12 +338,13 @@ describe('runTraceImprovement', () => {
 })
 
 describe('loadTracesConfig', () => {
-  it('loads BYO analyzer config from an ESM config file and ignores a missing default', async () => {
-    expect(await loadTracesConfig('/tmp/no-such-traces-config.mjs')).toBeUndefined()
+  it('loads BYO analyzer config from an ESM config file and rejects a missing explicit path', async () => {
+    await expect(loadTracesConfig('/tmp/no-such-traces-config.mjs')).rejects.toThrow(/config not found/)
+    expect(await loadTracesConfig()).toBeUndefined()
 
     const dir = await mkdtemp(join(tmpdir(), 'traces-config-test-'))
     const configPath = join(dir, 'traces.config.mjs')
-    await writeFile(configPath, `export default { externalAnalyzers: [{ name: 'cfg-engine', async analyze() { return { analyzer: 'cfg-engine', ok: true, output: '' } } }] }\n`, 'utf8')
+    await writeFile(configPath, `export default { externalAnalyzers: [{ name: 'cfg-engine', async analyze() { return { analyzer: 'cfg-engine', kind: 'report', ok: true, output: '' } } }] }\n`, 'utf8')
 
     const config = await loadTracesConfig(configPath)
     expect(config?.externalAnalyzers).toHaveLength(1)

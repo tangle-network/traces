@@ -1,10 +1,14 @@
-/** Parse an ISO-8601 timestamp or an epoch-millis string to epoch ms.
- *  Returns 0 for empty/unparseable input (callers treat 0 as "unknown"). */
+/** Parse an ISO-8601 timestamp or an epoch-millis string to epoch ms. */
 export function parseIsoToEpochMs(ts: string): number {
-  if (!ts) return 0
-  if (/^\d+$/.test(ts)) return Number(ts)
-  const n = Date.parse(ts)
-  return Number.isNaN(n) ? 0 : n
+  if (typeof ts !== 'string' || ts.trim().length === 0) {
+    throw new TypeError('timestamp must be a non-empty string')
+  }
+  const value = ts.trim()
+  const n = /^\d+$/.test(value) ? Number(value) : Date.parse(value)
+  if (!Number.isFinite(n) || !Number.isFinite(new Date(n).getTime())) {
+    throw new TypeError(`invalid timestamp: ${ts}`)
+  }
+  return n
 }
 
 /** Parse a `--since` window: `30m` / `2h` / `7d` (relative to now) or an ISO

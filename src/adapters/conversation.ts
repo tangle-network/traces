@@ -27,12 +27,13 @@ export function capText(raw: string): string {
  * but only some are a real human typing — the rest are the harness or another
  * agent feeding the model:
  *   - `human`          a person typed it
+ *   - `agent`          a parent agent sent it to a child session
  *   - `subagent-spawn` a parent agent spawned a subagent with this prompt
  *   - `injected`       a synthetic harness prompt (benchmark task, memory, …)
  *   - `tool-result`    a tool result surfaced as a user turn (rare)
  * Analysts that measure human reactions must filter to `human` only.
  */
-export type Actor = 'human' | 'subagent-spawn' | 'injected' | 'tool-result'
+export type Actor = 'human' | 'agent' | 'subagent-spawn' | 'injected' | 'tool-result'
 
 /** Span attribute key for {@link Actor}. New (additive) — not part of the
  *  `tangle.sessionId`/`tangle.ingest_source` wire contract. */

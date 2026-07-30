@@ -4,9 +4,41 @@
  *   traces improve --last 5 --config examples/improvement-config.mjs --dir .traces/improvement
  *   traces stream --mode agent --config examples/improvement-config.mjs
  */
-import { makeFinding } from '@tangle-network/traces'
+import { buildDefaultAnalystRegistry, makeFinding } from '@tangle-network/traces'
+
+const registry = buildDefaultAnalystRegistry()
+
+registry.register({
+  id: 'example-error-summary',
+  description: 'Reports the most frequent error signature in the selected traces.',
+  inputKind: 'trace-store',
+  cost: { kind: 'deterministic' },
+  version: '1.0.0',
+  async analyze(store) {
+    const overview = await store.getOverview({ has_errors: true })
+    const cluster = overview.error_clusters[0]
+    if (!cluster) return []
+    return [makeFinding({
+      analyst_id: 'example-error-summary',
+      area: 'tool-use',
+      subject: cluster.signature,
+      claim: `${cluster.span_count} failed span(s) share the error: ${cluster.status_message_sample}`,
+      severity: cluster.span_count >= 3 ? 'high' : 'medium',
+      evidence_refs: [{
+        kind: 'span',
+        uri: `trace://${encodeURIComponent(cluster.exemplar_trace_ids[0])}/span/${encodeURIComponent(cluster.exemplar_span_ids[0])}`,
+        excerpt: cluster.status_message_sample,
+      }],
+      recommended_action: `Fix or change the retry policy for ${cluster.tool_name ?? cluster.span_name ?? 'the failing operation'}.`,
+      validation_plan: 'Rerun the same task and confirm this error signature is absent.',
+      confidence: 1,
+      id_basis: cluster.signature,
+    })]
+  },
+})
 
 export default {
+  registry,
   liveAnalysts: [{
     id: 'example-live-claim-check',
     analyze(context) {
@@ -26,25 +58,6 @@ export default {
         session: context.session,
         observedAt: context.generatedAt,
       }]
-    },
-  }],
-  analysts: [{
-    id: 'example-profile-analyst',
-    description: 'flags sessions that need a clearer recommendation writer',
-    inputKind: 'trace-store',
-    cost: { kind: 'deterministic' },
-    version: '1.0.0',
-    async analyze() {
-      return [makeFinding({
-        analyst_id: 'example-profile-analyst',
-        area: 'communication',
-        claim: 'recommendations should be rewritten as concrete action plus validation',
-        severity: 'medium',
-        evidence_refs: [{ kind: 'metric', uri: 'example.profile_rule' }],
-        recommended_action: 'Route findings through a recommendation-writing profile before presenting them.',
-        validation_plan: 'Rerun traces improve and confirm every recommendation has an action and a check.',
-        confidence: 0.8,
-      })]
     },
   }],
 }

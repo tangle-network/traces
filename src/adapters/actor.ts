@@ -92,11 +92,48 @@ export function looksLikeAgentPrompt(s: string): boolean {
   return AGENT_PROMPT.test(t)
 }
 
+const NON_TASK_PROMPT_MARKERS = [
+  '<task-notification>',
+  '<subagent_notification>',
+  '<command-stdout>',
+  '<local-command-stdout>',
+  '<user-memory-input>',
+  'This session is being continued from a previous conversation',
+  '[Your previous response had no visible output.',
+] as const
+
+const NON_TASK_COMMAND =
+  /<command-name>\/(?:clear|copy|effort|exit|login|mcp|model|plugin)<\/command-name>/
+
+/**
+ * Decide whether a top-level Claude user event starts a selectable task.
+ * Actor identity is intentionally separate: SDK and benchmark tasks are
+ * injected prompts, but they still begin a real run.
+ */
+export function claudePromptStartsTask(args: {
+  text: string
+  isSidechain?: boolean
+  userType?: string | null
+}): boolean {
+  const text = args.text.trim()
+  if (!text || args.isSidechain === true) return false
+  if (args.userType != null && args.userType !== 'external') return false
+  if (NON_TASK_PROMPT_MARKERS.some((marker) => text.includes(marker))) return false
+  if (text.startsWith('[Request interrupted by user')) return false
+  if (NON_TASK_COMMAND.test(text)) return false
+  if (text.startsWith('Base directory for this skill:')) return false
+  if (text.startsWith('# AGENTS.md instructions') && !text.includes('</INSTRUCTIONS>')) {
+    return false
+  }
+  return true
+}
+
 /**
  * Derive the actor for a Claude Code user turn from the structural signals the
  * adapter already parses, falling back to the text heuristics above.
  *
  *   isSidechain === true             → subagent-spawn
+ *   isMeta === true                  → injected
  *   userType present and !== external → injected
  *   synthetic markers in the text     → injected
  *   first-turn agent-spawn prompt     → subagent-spawn
@@ -105,10 +142,12 @@ export function looksLikeAgentPrompt(s: string): boolean {
 export function claudeActor(args: {
   text: string
   isSidechain?: boolean
+  isMeta?: boolean
   userType?: string | null
   isFirstUserTurn?: boolean
 }): Actor {
   if (args.isSidechain === true) return 'subagent-spawn'
+  if (args.isMeta === true) return 'injected'
   if (args.userType != null && args.userType !== 'external') return 'injected'
   // Harness-injected wrappers (task notifications, continuation summaries, slash
   // commands) arrive AS `external` user turns, so check the text before trusting

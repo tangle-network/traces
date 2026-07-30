@@ -378,7 +378,7 @@ describe('trace evidence export', () => {
     outputRows.forEach(expectOpenInferenceRow)
     expect(outputRows[0]!.kind).toBe('AGENT')
     expect(outputRows[0]!.start_time).toBe('2026-06-25T22:44:24.458Z')
-    expect((outputRows[0]!.status as Record<string, unknown>).code).toBe('UNSET')
+    expect((outputRows[0]!.status as Record<string, unknown>).code).toBe('STATUS_CODE_UNSET')
     expect(outputRows[0]!.resource).toEqual(expect.objectContaining({
       attributes: expect.objectContaining({
         'service.name': 'claude-code',
@@ -484,5 +484,70 @@ describe('trace evidence export', () => {
     expect(partialReads.spans.every((item) => item.attributes['input.value'] === undefined)).toBe(true)
     expect(partialReads.spans.every((item) => item.attributes['tool.args_captured'] === false)).toBe(true)
     expect((await runPipelines(partialReads.spans)).stuckLoops.findings).toHaveLength(0)
+  })
+})
+
+function completeOpenInferenceRow(overrides: Record<string, unknown> = {}) {
+  return {
+    trace_id: 'trace-hostile',
+    span_id: 'span-hostile',
+    parent_span_id: '',
+    name: 'hostile.span',
+    kind: 'CHAIN',
+    start_time: '2026-01-01T00:00:00.000Z',
+    end_time: '2026-01-01T00:00:01.000Z',
+    status: { code: 'OK', message: '' },
+    resource: { attributes: {} },
+    scope: { name: 'test' },
+    attributes: { 'openinference.span.kind': 'CHAIN' },
+    ...overrides,
+  }
+}
+
+describe('strict exported span validation', () => {
+  it('rejects duplicate trace and span identities', () => {
+    const row = completeOpenInferenceRow()
+
+    expect(() => exportTraceEvidenceRows([row, { ...row }], {
+      format: 'openinference',
+    })).toThrow('duplicate span identity (trace-hostile, span-hostile)')
+  })
+
+  it('rejects malformed and non-finite timestamps', () => {
+    expect(() => exportTraceEvidenceRows([
+      completeOpenInferenceRow({ start_time: 'not-a-date' }),
+    ], { format: 'openinference' })).toThrow(/start_time must be a finite/)
+    expect(() => exportTraceEvidenceRows([
+      completeOpenInferenceRow({ start_time: '999999999999999999999999' }),
+    ], { format: 'openinference' })).toThrow(/start_time must be a finite/)
+  })
+
+  it('rejects intervals whose end precedes their start', () => {
+    expect(() => exportTraceEvidenceRows([
+      completeOpenInferenceRow({
+        start_time: '2026-01-01T00:00:02.000Z',
+        end_time: '2026-01-01T00:00:01.000Z',
+      }),
+    ], { format: 'openinference' })).toThrow(/end_time must not precede start_time/)
+  })
+
+  it('rejects missing required fields instead of inventing them', () => {
+    const row = completeOpenInferenceRow()
+    delete (row as { name?: string }).name
+
+    expect(() => exportTraceEvidenceRows([row], {
+      format: 'openinference',
+    })).toThrow(/complete OpenInference span rows/)
+  })
+
+  it('rejects duplicate identities split across JSONL rows', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-duplicate-export-'))
+    const input = join(dir, 'duplicate.jsonl')
+    const row = completeOpenInferenceRow()
+    await writeFile(input, `${JSON.stringify(row)}\n${JSON.stringify(row)}\n`, 'utf8')
+
+    await expect(exportTraceEvidenceFile(input, {
+      format: 'openinference',
+    })).rejects.toThrow('duplicate span identity (trace-hostile, span-hostile)')
   })
 })

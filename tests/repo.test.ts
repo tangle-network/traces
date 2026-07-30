@@ -27,6 +27,7 @@ afterAll(async () => {
 
 async function initGitRepo(dir: string, remote: string): Promise<void> {
   await run('git', ['-C', dir, 'init', '-q', '-b', 'main'])
+  await run('git', ['-C', dir, 'config', 'core.hooksPath', '/dev/null'])
   await run('git', ['-C', dir, 'remote', 'add', 'origin', remote])
   await run('git', ['-C', dir, 'config', 'user.email', 't@t.t'])
   await run('git', ['-C', dir, 'config', 'user.name', 'T'])

@@ -22,104 +22,57 @@ import { isMissingPathError } from '../json.js'
 import { readJsonl, takeJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
-import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
+import type {
+  HarnessTraceAdapter,
+  LocateOptions,
+  ParentTaskResolution,
+  ParseOptions,
+  SessionRef,
+} from '../types.js'
 import { codexActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
+import {
+  type CodexLine,
+  type CodexTokenUsage,
+  contentToString,
+  latestTimestamp,
+  multiAgentOperation,
+  spawnedSessionIds,
+  targetedSessionIds,
+  timestampFromEpochMs,
+  validTimestamp,
+} from './codex-format.js'
+import {
+  type CodexTaskBoundary,
+  CodexTaskScopeError,
+  codexTaskBoundary,
+  currentTaskStartedAt,
+  findForkTaskBoundary,
+  findLatestTaskBoundary,
+  isCodexTaskBoundary,
+  resolveCodexParentTask,
+} from './codex-task-scope.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
+
+export { CodexTaskScopeError } from './codex-task-scope.js'
 
 const SERVICE = 'codex'
 const SESSION_HEAD_LINES = 40
 
-interface CodexLine {
-  timestamp?: string
-  type?: string
-  payload?: {
-    type?: string
-    id?: string
-    session_id?: string
-    cwd?: string
-    timestamp?: string
-    cli_version?: string
-    model?: string
-    role?: string
-    name?: string
-    content?: unknown
-    arguments?: unknown
-    input?: unknown
-    call_id?: string
-    output?: unknown
-    event_id?: string
-    turn_id?: string
-    occurred_at_ms?: number
-    started_at?: number
-    agent_thread_id?: string
-    agent_path?: string
-    kind?: string
-    parent_thread_id?: string
-    thread_source?: string
-    agent_nickname?: string
-    agent_role?: string
-    author?: string
-    recipient?: string
-    source?: {
-      subagent?: {
-        thread_spawn?: {
-          parent_thread_id?: string
-          depth?: number
-          agent_path?: string | null
-          agent_nickname?: string
-          agent_role?: string
-        }
-      }
-    }
-    info?: {
-      last_token_usage?: {
-        input_tokens?: number
-        cached_input_tokens?: number
-        output_tokens?: number
-        reasoning_output_tokens?: number
-      }
-      model_context_window?: number
-    }
-  }
-}
-
-function contentToString(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => (c && typeof c === 'object' && 'text' in c ? String((c as { text?: unknown }).text ?? '') : ''))
-      .join('')
-  }
-  return ''
+function tokenUsageSignature(usage: CodexTokenUsage): string {
+  return JSON.stringify([
+    usage.input_tokens ?? null,
+    usage.cached_input_tokens ?? null,
+    usage.cache_write_input_tokens ?? null,
+    usage.output_tokens ?? null,
+    usage.reasoning_output_tokens ?? null,
+    usage.total_tokens ?? null,
+  ])
 }
 
 /** A message's text (verbatim string body or joined text blocks), trimmed and capped. */
 function textOf(content: unknown): string {
   return capText(contentToString(content))
-}
-
-function currentTaskStartedAt(meta: CodexLine | undefined): number | undefined {
-  const timestamp = Date.parse(meta?.payload?.timestamp ?? meta?.timestamp ?? '')
-  return Number.isFinite(timestamp) ? Math.floor(timestamp / 1_000) : undefined
-}
-
-function isCurrentTaskStart(line: CodexLine, startedAt: number): boolean {
-  return line.type === 'event_msg'
-    && line.payload?.type === 'task_started'
-    && typeof line.payload.started_at === 'number'
-    && Math.abs(line.payload.started_at - startedAt) <= 2
-}
-
-/** A forked Codex session can prepend inherited rows with rewritten timestamps.
- * The task-start epoch survives. Codex records the child metadata just before
- * the task starts, so accept its nearest whole-second value. Probe first to
- * avoid dropping ordinary sessions without that event. */
-async function hasCurrentTaskStart(path: string, options: ReturnType<typeof sessionJsonlOptions>, startedAt: number): Promise<boolean> {
-  for await (const line of readJsonl<CodexLine>(path, options)) {
-    if (isCurrentTaskStart(line, startedAt)) return true
-  }
-  return false
 }
 
 function numericStatus(value: unknown): number | undefined {
@@ -238,33 +191,33 @@ function toolInputToString(input: unknown): string | undefined {
   return JSON.stringify(input)
 }
 
-const CODEX_SESSION_ID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
-
-function sessionIds(value: unknown): string[] {
-  return [...new Set(contentToString(value).match(CODEX_SESSION_ID) ?? [])]
-}
-
-function spawnedSessionIds(output: unknown): string[] {
-  const text = contentToString(output)
-  const ids = [...text.matchAll(/["']?agent_id["']?\s*:\s*["']([0-9a-f-]{36})["']/gi)]
-    .map((match) => match[1]!)
-    .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))
-  return [...new Set(ids)]
-}
-
-const DIRECT_AGENT_OPERATIONS = new Set([
-  'spawn_agent',
-  'send_message',
-  'followup_task',
-  'wait_agent',
-  'interrupt_agent',
-  'list_agents',
-])
-
-function multiAgentOperation(name: string): string | null {
-  const prefix = 'multi_agent_v1__'
-  if (name.startsWith(prefix)) return name.slice(prefix.length)
-  return DIRECT_AGENT_OPERATIONS.has(name) ? name : null
+function agentRequestId(output: unknown, depth = 3): string | undefined {
+  if (depth < 0 || output == null) return undefined
+  if (typeof output === 'string') {
+    try {
+      return agentRequestId(JSON.parse(output) as unknown, depth - 1)
+    } catch {
+      return undefined
+    }
+  }
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      const found = agentRequestId(item, depth - 1)
+      if (found) return found
+    }
+    return undefined
+  }
+  if (typeof output !== 'object') return undefined
+  const record = output as Record<string, unknown>
+  for (const key of ['submission_id', 'submissionId', 'request_id', 'requestId']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  for (const value of Object.values(record)) {
+    const found = agentRequestId(value, depth - 1)
+    if (found) return found
+  }
+  return undefined
 }
 
 function setAgentSessionIds(toolSpan: OtlpSpan, ids: readonly string[]): void {
@@ -299,13 +252,43 @@ function recordSubagentLifecycle(
       // A malformed prior attribute should not hide the current lifecycle event.
     }
   }
-  entries.push({ kind, at, ...(eventId ? { eventId } : {}) })
+  const entry = { kind, at, ...(eventId ? { eventId } : {}) }
+  if (entries.some((current) =>
+    current.kind === entry.kind
+    && current.at === entry.at
+    && current.eventId === entry.eventId
+  )) return
+  entries.push(entry)
   agentSpan.attributes['traces.codex.subagent_lifecycle'] = JSON.stringify(entries)
   if (kind === 'interrupted') {
     const count = agentSpan.attributes['traces.codex.subagent_interruption_count']
     agentSpan.attributes['traces.codex.subagent_interruption_count'] =
       (typeof count === 'number' ? count : 0) + 1
   }
+}
+
+function closeSpanAt(target: OtlpSpan, sourceEndTime: string): void {
+  const start = Date.parse(target.start_time)
+  const end = Date.parse(sourceEndTime)
+  if (Number.isFinite(start) && Number.isFinite(end) && end < start) {
+    target.end_time = target.start_time
+    target.attributes['traces.clock_skew_detected'] = true
+    target.attributes['traces.source_end_time'] = sourceEndTime
+    return
+  }
+  const currentEnd = Date.parse(target.end_time)
+  if (
+    Number.isFinite(start)
+    && Number.isFinite(end)
+    && Number.isFinite(currentEnd)
+    && currentEnd > start
+    && end < currentEnd
+  ) {
+    target.attributes['traces.clock_skew_detected'] = true
+    target.attributes['traces.source_end_time'] = sourceEndTime
+    return
+  }
+  target.end_time = sourceEndTime
 }
 
 const verificationCommand =
@@ -387,40 +370,60 @@ export class CodexAdapter implements HarnessTraceAdapter {
       : join(homedir(), '.codex', 'sessions')
   }
 
+  private async refFromPath(path: string, opts: LocateOptions): Promise<SessionRef | undefined> {
+    let st: Awaited<ReturnType<typeof stat>>
+    try {
+      st = await stat(path)
+    } catch (error) {
+      if (isMissingPathError(error)) return undefined
+      throw error
+    }
+    if (opts.sinceMs && st.mtimeMs < opts.sinceMs) return undefined
+    // Continuation sessions can lead with turn_context or metadata without cwd.
+    let cwd: string | null = null
+    let id = basename(path).replace(/^rollout-[\dT-]+-/, '').replace(/\.jsonl$/, '')
+    const ref: SessionRef = { harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs }
+    const head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES, sessionJsonlOptions(ref))
+    for (const parsed of head) {
+      if (parsed.type === 'session_meta' && parsed.payload?.id) id = parsed.payload.id
+      if (!cwd && parsed.payload?.cwd) cwd = parsed.payload.cwd
+      if (cwd) break
+    }
+    ref.sessionId = id
+    ref.cwd = cwd
+    if (ref.integrity) {
+      ref.integrity.corruptions = ref.integrity.corruptions.map((receipt) => ({ ...receipt, sessionId: id }))
+    }
+    if (opts.cwd && cwd && !cwd.startsWith(opts.cwd)) return undefined
+    if (opts.cwd && !cwd && !ref.integrity) return undefined
+    return ref
+  }
+
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
     const refs: SessionRef[] = []
     for await (const path of walkRollouts(this.root())) {
-      let st: Awaited<ReturnType<typeof stat>>
-      try {
-        st = await stat(path)
-      } catch (error) {
-        if (isMissingPathError(error)) continue
-        throw error
-      }
-      if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
-      // cwd usually rides the first line's session_meta, but a *continuation*
-      // session leads with a turn_context (or a meta without cwd). Both line
-      // types carry `payload.cwd`, so scan a bounded head for the first one —
-      // otherwise these sessions come back cwd:null and lose their repo labels.
-      let cwd: string | null = null
-      let id = basename(path).replace(/^rollout-[\dT-]+-/, '').replace(/\.jsonl$/, '')
-      const ref: SessionRef = { harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs }
-      const head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES, sessionJsonlOptions(ref))
-      for (const parsed of head) {
-        if (parsed.type === 'session_meta' && parsed.payload?.id) id = parsed.payload.id
-        if (!cwd && parsed.payload?.cwd) cwd = parsed.payload.cwd
-        if (cwd) break
-      }
-      ref.sessionId = id
-      ref.cwd = cwd
-      if (ref.integrity) {
-        ref.integrity.corruptions = ref.integrity.corruptions.map((receipt) => ({ ...receipt, sessionId: id }))
-      }
-      if (opts.cwd && cwd && !cwd.startsWith(opts.cwd)) continue
-      if (opts.cwd && !cwd && !ref.integrity) continue
-      refs.push(ref)
+      const ref = await this.refFromPath(path, opts)
+      if (ref) refs.push(ref)
     }
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  }
+
+  async locateBySessionId(sessionId: string, opts: LocateOptions = {}): Promise<SessionRef[]> {
+    const refs: SessionRef[] = []
+    for await (const path of walkRollouts(this.root())) {
+      if (!basename(path).includes(sessionId)) continue
+      const ref = await this.refFromPath(path, opts)
+      if (ref?.sessionId === sessionId) refs.push(ref)
+    }
+    return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  }
+
+  async resolveParentTask(
+    ref: SessionRef,
+    childSessionId: string,
+    options: Pick<ParseOptions, 'corruptionMode'> = {},
+  ): Promise<ParentTaskResolution> {
+    return resolveCodexParentTask(ref, childSessionId, options)
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
@@ -429,8 +432,37 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let first = head[0]
     let meta = head.find((line) => line.type === 'session_meta')
     const taskStartedAt = currentTaskStartedAt(meta)
-    const hasTaskBoundary = taskStartedAt !== undefined && await hasCurrentTaskStart(ref.path, jsonl, taskStartedAt)
-    let model = hasTaskBoundary ? null : head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
+    const spawnMeta = meta?.payload?.source?.subagent?.thread_spawn
+    const parentSessionId = meta?.payload?.parent_thread_id ?? spawnMeta?.parent_thread_id
+    const isChildSession = Boolean(parentSessionId || meta?.payload?.thread_source === 'subagent')
+    const forkBoundary = isChildSession
+      ? await findForkTaskBoundary(
+          ref.path,
+          jsonl,
+          meta?.payload?.id ?? ref.sessionId,
+          taskStartedAt,
+        )
+      : undefined
+    const latestBoundary = options.taskScope === 'latest'
+      ? await findLatestTaskBoundary(ref.path, jsonl)
+      : undefined
+    if (options.taskScope === 'latest' && !latestBoundary) {
+      throw new CodexTaskScopeError(
+        'CODEX_LATEST_TURN_NOT_FOUND',
+        `cannot select the latest Codex turn because no task_started event exists in ${ref.path}`,
+      )
+    }
+    if (options.taskScope === 'turn' && !options.taskTurnId) {
+      throw new CodexTaskScopeError(
+        'CODEX_TURN_ID_REQUIRED',
+        'taskTurnId is required when taskScope is "turn"',
+      )
+    }
+    const exactBoundary: CodexTaskBoundary | undefined = options.taskScope === 'turn'
+      ? { turnId: options.taskTurnId!, timestamp: new Date(0).toISOString() }
+      : undefined
+    const selectedBoundary = latestBoundary ?? exactBoundary ?? forkBoundary
+    let model = selectedBoundary ? null : head.find((line) => line.type === 'turn_context')?.payload?.model ?? null
     if (!first || !meta) {
       for await (const line of readJsonl<CodexLine>(ref.path, jsonl)) {
         first ??= line
@@ -440,8 +472,6 @@ export class CodexAdapter implements HarnessTraceAdapter {
       }
     }
     const traceId = meta?.payload?.id ?? ref.sessionId
-    const spawnMeta = meta?.payload?.source?.subagent?.thread_spawn
-    const parentSessionId = meta?.payload?.parent_thread_id ?? spawnMeta?.parent_thread_id
     const sessionRole = parentSessionId || meta?.payload?.thread_source === 'subagent' ? 'child' : 'operator'
 
     const rootId = `root:${traceId}`
@@ -451,13 +481,21 @@ export class CodexAdapter implements HarnessTraceAdapter {
       parentSpanId: null,
       name: 'session',
       kind: 'AGENT',
-      startTime: meta?.timestamp ?? first?.timestamp ?? new Date(0).toISOString(),
+      startTime: selectedBoundary?.timestamp ?? meta?.timestamp ?? first?.timestamp ?? new Date(0).toISOString(),
       service: SERVICE,
       agent: SERVICE,
       model,
       status: 'UNSET',
       extra: {
         'traces.session.role': sessionRole,
+        'traces.codex.task_scope': options.taskScope === 'latest'
+          ? 'latest'
+          : options.taskScope === 'turn'
+            ? 'turn'
+          : forkBoundary
+            ? 'fork-current'
+            : 'all',
+        ...(selectedBoundary?.turnId ? { 'traces.codex.turn_id': selectedBoundary.turnId } : {}),
         ...(parentSessionId ? { 'traces.parent_session_id': parentSessionId } : {}),
         ...(spawnMeta?.depth != null ? { 'traces.codex.agent_depth': spawnMeta.depth } : {}),
         ...(meta?.payload?.agent_nickname ?? spawnMeta?.agent_nickname
@@ -479,17 +517,90 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let step = 0
     let lastLlm = rootId
     let sawUserTurn = false
+    let lastCumulativeTokenUsage: string | undefined
     let lastTimestamp: string | undefined
     const awaitingModel = model ? [] : [root]
+    const ensureSubagentSpan = (
+      threadId: string,
+      agentPath: string,
+      eventTime: string,
+      eventCallSpan: OtlpSpan | undefined,
+      observedStart: boolean,
+    ): OtlpSpan => {
+      const existing = subagentByThreadId.get(threadId)
+      if (existing) {
+        subagentThreadIdByPath.set(agentPath, threadId)
+        if (observedStart) {
+          const eventStartedAt = Date.parse(eventTime)
+          const previousStartedAt = Date.parse(existing.start_time)
+          const previousEndedAt = Date.parse(existing.end_time)
+          if (eventStartedAt < previousStartedAt) existing.start_time = eventTime
+          if (
+            existing.status.code !== 'UNSET'
+            && Number.isFinite(eventStartedAt)
+            && Number.isFinite(previousEndedAt)
+            && eventStartedAt > previousEndedAt
+          ) {
+            existing.end_time = eventTime
+            existing.status = { code: 'UNSET' }
+          }
+          delete existing.attributes['traces.codex.subagent_start_missing']
+          if (eventCallSpan) existing.parent_span_id = eventCallSpan.span_id
+        }
+        return existing
+      }
+      const subagentType = agentPath.split('/').filter(Boolean).at(-1) ?? 'subagent'
+      const toolSpan = span({
+        traceId,
+        spanId: `subagent:${threadId}`,
+        parentSpanId: eventCallSpan?.span_id ?? lastLlm,
+        name: 'tool.Agent',
+        kind: 'TOOL',
+        startTime: eventTime,
+        service: SERVICE,
+        agent: SERVICE,
+        tool: 'Agent',
+        step,
+        status: 'UNSET',
+        extra: {
+          ...toolIoAttributes({
+            input: {
+              subagent_type: subagentType,
+              agent_path: agentPath,
+              agent_thread_id: threadId,
+            },
+          }),
+          'traces.codex.subagent_path': agentPath,
+          'traces.codex.subagent_thread_id': threadId,
+          ...(!observedStart ? { 'traces.codex.subagent_start_missing': true } : {}),
+        },
+      })
+      spans.push(toolSpan)
+      subagentByThreadId.set(threadId, toolSpan)
+      subagentThreadIdByPath.set(agentPath, threadId)
+      step += 1
+      return toolSpan
+    }
 
-    let reachedCurrentTask = !hasTaskBoundary
+    let reachedCurrentTask = !selectedBoundary
     for await (const l of readJsonl<CodexLine>(ref.path, jsonl)) {
       if (!reachedCurrentTask) {
-        if (isCurrentTaskStart(l, taskStartedAt!)) reachedCurrentTask = true
-        else continue
+        if (!isCodexTaskBoundary(l, selectedBoundary!)) continue
+        reachedCurrentTask = true
+        if (options.taskScope === 'turn') {
+          root.start_time = codexTaskBoundary(l)?.timestamp ?? root.start_time
+          root.end_time = root.start_time
+        }
+      } else if (
+        (options.taskScope === 'latest' || options.taskScope === 'turn') &&
+        selectedBoundary
+        && codexTaskBoundary(l)
+        && !isCodexTaskBoundary(l, selectedBoundary)
+      ) {
+        break
       }
-      lastTimestamp = l.timestamp
-      const ts = l.timestamp ?? new Date(0).toISOString()
+      lastTimestamp = latestTimestamp(lastTimestamp, l.timestamp)
+      const ts = validTimestamp(l.timestamp) ?? lastTimestamp ?? root.start_time
       if (l.type === 'event_msg' && l.payload?.type === 'task_started') {
         activeTaskTurnId = l.payload.turn_id ?? null
         root.status = { code: 'UNSET' }
@@ -507,6 +618,10 @@ export class CodexAdapter implements HarnessTraceAdapter {
       } else if (l.type === 'event_msg' && l.payload?.type === 'token_count') {
         const u = l.payload.info?.last_token_usage
         if (u && (u.input_tokens || u.output_tokens)) {
+          const cumulative = l.payload.info?.total_token_usage
+          const cumulativeSignature = cumulative ? tokenUsageSignature(cumulative) : undefined
+          if (cumulativeSignature && cumulativeSignature === lastCumulativeTokenUsage) continue
+          lastCumulativeTokenUsage = cumulativeSignature
           const id = `llm:${step}`
           const llm = span({
             traceId,
@@ -561,7 +676,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
             ...(agentOperation ? { 'traces.codex.agent_operation': agentOperation } : {}),
           },
         })
-        if (agentOperation && agentOperation !== 'spawn_agent') setAgentSessionIds(toolSpan, sessionIds(input))
+        if (agentOperation && agentOperation !== 'spawn_agent') {
+          setAgentSessionIds(toolSpan, targetedSessionIds(agentOperation, input))
+        }
         spans.push(toolSpan)
         toolByCallId.set(callId, toolSpan)
         step += 1
@@ -573,80 +690,49 @@ export class CodexAdapter implements HarnessTraceAdapter {
         if (t) {
           const name = String(t.attributes['tool.name'] ?? '')
           const { error, message, pollOutcome } = outputStatus(name, l.payload.output)
-          t.end_time = ts
+          closeSpanAt(t, ts)
           t.status = error ? { code: 'ERROR', message } : { code: 'OK' }
           if (pollOutcome) t.attributes['traces.poll.outcome'] = pollOutcome
           recordToolOutput(t, l.payload.output)
-          if (t.attributes['traces.codex.agent_operation'] === 'spawn_agent') {
+          const operation = t.attributes['traces.codex.agent_operation']
+          if (operation === 'spawn_agent') {
             setAgentSessionIds(t, spawnedSessionIds(l.payload.output))
+          }
+          if (typeof operation === 'string') {
+            const requestId = agentRequestId(l.payload.output)
+            if (requestId) t.attributes['traces.codex.agent_request_id'] = requestId
           }
         }
       } else if (l.type === 'event_msg' && l.payload?.type === 'sub_agent_activity') {
         const threadId = l.payload.agent_thread_id
         const occurredAtMs = l.payload.occurred_at_ms
-        const eventTime = typeof occurredAtMs === 'number' && Number.isFinite(occurredAtMs)
-          ? new Date(occurredAtMs).toISOString()
-          : ts
+        const eventTime = timestampFromEpochMs(occurredAtMs) ?? ts
         const eventCallSpan = toolByCallId.get(l.payload.event_id ?? '')
         if (eventCallSpan && threadId) setAgentSessionIds(eventCallSpan, [threadId])
-        if (l.payload.kind === 'started' && threadId && !subagentByThreadId.has(threadId)) {
-          const agentPath = l.payload.agent_path ?? 'subagent'
-          const subagentType = agentPath.split('/').filter(Boolean).at(-1) ?? 'subagent'
-          const toolSpan = span({
-            traceId,
-            spanId: `subagent:${threadId}`,
-            parentSpanId: eventCallSpan?.span_id ?? lastLlm,
-            name: 'tool.Agent',
-            kind: 'TOOL',
-            startTime: eventTime,
-            service: SERVICE,
-            agent: SERVICE,
-            tool: 'Agent',
-            step,
-            status: 'UNSET',
-            extra: {
-              ...toolIoAttributes({
-                input: {
-                  subagent_type: subagentType,
-                  agent_path: agentPath,
-                  agent_thread_id: threadId,
-                },
-              }),
-              'traces.codex.subagent_path': agentPath,
-              'traces.codex.subagent_thread_id': threadId,
-            },
-          })
-          spans.push(toolSpan)
-          subagentByThreadId.set(threadId, toolSpan)
-          subagentThreadIdByPath.set(agentPath, threadId)
+        const agentPath = l.payload.agent_path ?? 'subagent'
+        if (l.payload.kind === 'started' && threadId) {
+          const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, true)
           recordSubagentLifecycle(toolSpan, 'started', eventTime, l.payload.event_id)
-          step += 1
         } else if (l.payload.kind === 'completed' && threadId) {
-          const toolSpan = subagentByThreadId.get(threadId)
-          if (toolSpan) {
-            recordSubagentLifecycle(toolSpan, 'completed', eventTime, l.payload.event_id)
-            toolSpan.end_time = eventTime
-            toolSpan.status = { code: 'OK' }
-          }
+          const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, false)
+          recordSubagentLifecycle(toolSpan, 'completed', eventTime, l.payload.event_id)
+          closeSpanAt(toolSpan, eventTime)
+          toolSpan.status = { code: 'OK' }
         } else if (
           ['interrupted', 'failed', 'timed_out'].includes(l.payload.kind ?? '') &&
           threadId
         ) {
-          const toolSpan = subagentByThreadId.get(threadId)
-          if (toolSpan) {
-            recordSubagentLifecycle(toolSpan, l.payload.kind!, eventTime, l.payload.event_id)
-            toolSpan.end_time = eventTime
-            toolSpan.status = { code: 'ERROR', message: `subagent ${l.payload.kind}` }
-          }
+          const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, false)
+          recordSubagentLifecycle(toolSpan, l.payload.kind!, eventTime, l.payload.event_id)
+          closeSpanAt(toolSpan, eventTime)
+          toolSpan.status = { code: 'ERROR', message: `subagent ${l.payload.kind}` }
         } else if (l.payload.kind === 'interacted' && threadId) {
-          const toolSpan = subagentByThreadId.get(threadId)
-          if (toolSpan) {
-            recordSubagentLifecycle(toolSpan, 'interacted', eventTime, l.payload.event_id)
-            const operation = eventCallSpan?.attributes['traces.codex.agent_operation']
-            if (operation === 'followup_task' || operation === 'send_input') {
-              toolSpan.end_time = eventTime
-              toolSpan.status = { code: 'UNSET' }
-            }
+          const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, false)
+          recordSubagentLifecycle(toolSpan, 'interacted', eventTime, l.payload.event_id)
+          const operation = eventCallSpan?.attributes['traces.codex.agent_operation']
+          if (operation === 'followup_task' || operation === 'send_input') {
+            closeSpanAt(toolSpan, eventTime)
+            toolSpan.status = { code: 'UNSET' }
           }
         }
         // `interacted` is a progress event, not a terminal state.
@@ -694,11 +780,11 @@ export class CodexAdapter implements HarnessTraceAdapter {
         spans.push(messageSpan)
         step += 1
         if (messageType === 'progress' && agentSpan) {
-          agentSpan.end_time = ts
+          closeSpanAt(agentSpan, ts)
           agentSpan.status = { code: 'UNSET' }
         } else if (messageType === 'final' && agentSpan) {
           recordSubagentLifecycle(agentSpan, 'final_answer', ts)
-          agentSpan.end_time = ts
+          closeSpanAt(agentSpan, ts)
           agentSpan.status = { code: 'OK' }
         }
       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
@@ -706,9 +792,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
         // so capture it here as its own CHAIN span (no text → no span).
         const prompt = textOf(l.payload.content)
         if (prompt) {
-          // Codex has no sidechain/userType signal, so actor is text-only:
-          // synthetic markers or a first-turn agent brief → injected.
-          const actor = codexActor({ text: prompt, isFirstUserTurn: !sawUserTurn })
+          const actor = sessionRole === 'child'
+            ? 'agent'
+            : codexActor({ text: prompt, isFirstUserTurn: !sawUserTurn })
           sawUserTurn = true
           spans.push(
             userPromptSpan({
@@ -746,7 +832,16 @@ export class CodexAdapter implements HarnessTraceAdapter {
         }
       }
     }
-    root.end_time = lastTimestamp ?? root.start_time
+    if (!reachedCurrentTask && options.taskScope === 'turn') {
+      throw new CodexTaskScopeError(
+        'CODEX_TURN_NOT_FOUND',
+        `Codex turn ${JSON.stringify(options.taskTurnId)} does not exist in ${ref.path}`,
+      )
+    }
+    if (selectedBoundary?.turnId) {
+      for (const item of spans) item.attributes['traces.codex.turn_id'] ??= selectedBoundary.turnId
+    }
+    closeSpanAt(root, lastTimestamp ?? root.start_time)
     return spans
   }
 }

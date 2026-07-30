@@ -120,6 +120,48 @@ describe('renderReport', () => {
     expect(report).toContain('Counts below describe only the selected files, not their parent operator sessions.')
   })
 
+  it('shows incomplete workflow relationships and worker identity fields', () => {
+    const report = renderReport(emptyResult(), {
+      harness: 'codex',
+      sessionCount: 2,
+      spanCount: 20,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      execution: EMPTY_EXECUTION,
+      workflow: {
+        seedSessionIds: ['root'],
+        complete: false,
+        issues: [{
+          kind: 'missing-session',
+          sessionId: 'missing-child',
+          referencedBySessionId: 'root',
+          relation: 'child',
+        }],
+      },
+      sources: [{
+        sessionId: 'root',
+        role: 'operator',
+        childSessionIds: ['worker'],
+        path: '/sessions/root.jsonl',
+        subject: 'Coordinate the work.',
+      }, {
+        sessionId: 'worker',
+        role: 'child',
+        parentSessionId: 'root',
+        childSessionIds: [],
+        depth: 1,
+        agentNickname: 'Tesla',
+        agentRole: 'researcher',
+        path: '/sessions/worker.jsonl',
+        subject: 'Research one track.',
+      }],
+    })
+
+    expect(report).toContain('Session workflow: 1 seed session, 2 resolved sessions, 1 relationship issue.')
+    expect(report).toContain('Missing session `missing-child`, referenced as child by `root`')
+    expect(report).toContain('| child | 1 | Tesla / researcher | - | `worker` | `root` | 0 |')
+    expect(report).not.toContain('Counts below describe only the selected files')
+  })
+
   it('shows degraded source provenance without exposing malformed content', () => {
     const rawSecret = 'secret-malformed-record'
     const sha256 = createHash('sha256').update(rawSecret).digest('hex')

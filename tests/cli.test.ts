@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
-import { serializeSpans, span } from '../src/index.js'
+import { serializeSpans, span, type SessionWorkflowSummary } from '../src/index.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -205,7 +205,7 @@ describe('traces CLI', () => {
         extra: { 'session.id': 'session-config' },
       }),
     ]), 'utf8')
-    await writeFile(config, `export default { externalAnalyzers: [{ name: 'configured', async analyze() { return { analyzer: 'configured', ok: true, output: JSON.stringify({ findings: [{ area: 'external', severity: 'high', claim: 'explicit config executed' }] }) } } }] }\n`, 'utf8')
+    await writeFile(config, `export default { externalAnalyzers: [{ name: 'configured', async analyze() { return { analyzer: 'configured', kind: 'report', ok: true, output: 'explicit config executed' } } }] }\n`, 'utf8')
 
     const run = (report: string, extra: string[] = []) => execFileAsync(process.execPath, [
       '--import',
@@ -320,6 +320,15 @@ describe('traces CLI', () => {
       },
       {
         timestamp: '2026-07-13T09:59:28.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'task_started',
+          turn_id: 'child-task',
+          started_at: Date.parse('2026-07-13T09:59:27.900Z') / 1_000,
+        },
+      },
+      {
+        timestamp: '2026-07-13T09:59:28.100Z',
         type: 'response_item',
         payload: {
           type: 'message',
@@ -456,6 +465,204 @@ describe('traces CLI', () => {
     }
     expect(output.sessions).toHaveLength(1)
     expect(output.sessions[0]).toMatchObject({ session: { sessionId: parentId, path: parent } })
+  })
+
+  it('limits an explicit Claude Code session to its latest task turn', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-claude-latest-'))
+    const session = join(dir, 'claude-session.jsonl')
+    const index = join(dir, 'index.json')
+    await writeFile(session, [
+      {
+        type: 'user',
+        uuid: 'turn-old',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:00:00.000Z',
+        message: { role: 'user', content: 'OLD TASK' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'answer-old',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:00:01.000Z',
+        message: { id: 'message-old', role: 'assistant', content: 'OLD ANSWER' },
+      },
+      {
+        type: 'user',
+        uuid: 'turn-new',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:01:00.000Z',
+        message: { role: 'user', content: 'NEW TASK' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'answer-new',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:01:01.000Z',
+        message: { id: 'message-new', role: 'assistant', content: 'NEW ANSWER' },
+      },
+      {
+        type: 'user',
+        uuid: 'task-notification',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:01:02.000Z',
+        userType: 'external',
+        message: {
+          role: 'user',
+          content: '<task-notification>worker complete</task-notification>',
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'index',
+      '--harness',
+      'claude-code',
+      '--session',
+      session,
+      '--latest-turn',
+      '--out',
+      index,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const output = JSON.parse(await readFile(index, 'utf8')) as {
+      selection: { latestTurn?: boolean }
+      totals: { sessions: number; spans: number }
+    }
+    expect(output.selection.latestTurn).toBe(true)
+    expect(output.totals).toMatchObject({ sessions: 1, spans: 4 })
+  })
+
+  it('expands the active Codex session through recursively spawned child files', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-workflow-'))
+    const codexHome = join(dir, 'codex')
+    const sessions = join(codexHome, 'sessions', '2026', '07', '29')
+    const rootId = '019fabd3-6738-7491-a8c0-957ca2bc9876'
+    const childId = '019fae74-a099-7b13-befd-003a6ba7f09a'
+    const nestedId = '019fafc3-1e3b-7442-b88f-83327ff36284'
+    const historicalMissingId = '019fafc3-70fd-7383-944f-042f6e4f6a45'
+    const root = join(sessions, `rollout-2026-07-29T00-00-00-${rootId}.jsonl`)
+    const child = join(sessions, `rollout-2026-07-29T00-01-00-${childId}.jsonl`)
+    const nested = join(sessions, `rollout-2026-07-29T00-02-00-${nestedId}.jsonl`)
+    const index = join(dir, 'workflow-index.json')
+    await mkdir(sessions, { recursive: true })
+    const spawn = (id: string, callId: string, second = 1) => [
+      {
+        timestamp: `2026-07-29T00:00:0${second}.000Z`,
+        type: 'response_item',
+        payload: { type: 'function_call', call_id: callId, name: 'spawn_agent', arguments: '{"message":"work"}' },
+      },
+      {
+        timestamp: `2026-07-29T00:00:0${second + 1}.000Z`,
+        type: 'response_item',
+        payload: { type: 'function_call_output', call_id: callId, output: JSON.stringify({ agent_id: id }) },
+      },
+    ]
+    await writeFile(root, [
+      { timestamp: '2026-07-29T00:00:00.000Z', type: 'session_meta', payload: { id: rootId, cwd: dir } },
+      { timestamp: '2026-07-29T00:00:00.100Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'old-turn' } },
+      ...spawn(historicalMissingId, 'spawn-historical'),
+      { timestamp: '2026-07-29T00:00:03.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'current-turn' } },
+      ...spawn(childId, 'spawn-child', 4),
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+    await writeFile(child, [
+      {
+        timestamp: '2026-07-28T23:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          cwd: dir,
+          parent_thread_id: rootId,
+          thread_source: 'subagent',
+          agent_nickname: 'worker',
+          source: { subagent: { thread_spawn: { parent_thread_id: rootId, depth: 1 } } },
+        },
+      },
+      { timestamp: '2026-07-28T23:00:00.100Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'child-turn' } },
+      ...spawn(nestedId, 'spawn-nested'),
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+    await writeFile(nested, [
+      {
+        timestamp: '2026-07-28T22:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: nestedId,
+          cwd: dir,
+          parent_thread_id: childId,
+          thread_source: 'subagent',
+          agent_nickname: 'worker',
+          source: { subagent: { thread_spawn: { parent_thread_id: childId, depth: 2 } } },
+        },
+      },
+      { timestamp: '2026-07-28T22:00:00.100Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'nested-turn' } },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'index',
+      '--harness',
+      'codex',
+      '--current',
+      '--latest-turn',
+      '--workflow',
+      '--max-workflow-sessions',
+      '10',
+      '--out',
+      index,
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        CODEX_THREAD_ID: rootId,
+        NO_COLOR: '1',
+        FORCE_COLOR: '',
+      },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const output = JSON.parse(await readFile(index, 'utf8')) as {
+      selection: { workflow: SessionWorkflowSummary }
+      sessions: Array<{
+        session: {
+          sessionId: string
+          role: string
+          parentSessionId?: string
+          childSessionIds: string[]
+          depth?: number
+          agentNickname?: string
+        }
+      }>
+    }
+    expect(output.selection.workflow).toEqual({
+      seedSessionIds: [rootId],
+      complete: true,
+      issues: [],
+    })
+    expect(output.sessions.map((row) => row.session.sessionId)).toEqual([rootId, childId, nestedId])
+    expect(output.sessions.map((row) => row.session.role)).toEqual(['operator', 'child', 'child'])
+    expect(output.sessions[1]!.session).toMatchObject({
+      parentSessionId: rootId,
+      childSessionIds: [nestedId],
+      depth: 1,
+      agentNickname: 'worker',
+    })
+    expect(output.sessions[2]!.session).toMatchObject({
+      parentSessionId: childId,
+      childSessionIds: [],
+      depth: 2,
+      agentNickname: 'worker',
+    })
   })
 
   it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {
@@ -607,10 +814,14 @@ describe('traces CLI', () => {
       status: 'completed', startedAt: at(0), completedAt: at(200), result: { delivered: true, spentUsd: 0.02 },
     }))
     await writeFile(join(sup, 'workers', 'w-0.ndjson'), [
-      JSON.stringify({ kind: 'started', label: 'w-0', at: at(10), cwd: '/tmp/clone-w-0' }),
-      JSON.stringify({ kind: 'message', label: 'w-0', direction: 'down', message: 'narrow the fix', delivered: true, at: at(20) }),
+      JSON.stringify({ kind: 'started', workerId: 'sup-1:w0', label: 'w-0', at: at(10), cwd: '/tmp/clone-w-0' }),
+      JSON.stringify({ kind: 'message', requestId: 'steer-1', label: 'w-0', direction: 'down', message: 'narrow the fix', delivered: true, at: at(20) }),
       JSON.stringify({ kind: 'finished', label: 'w-0', passed: true, patchBytes: 42, evidence: 'verify PASSED\n', at: at(100) }),
     ].join('\n'))
+    await writeFile(
+      join(sup, 'workers', 'w-0.inbox.ndjson'),
+      `${JSON.stringify({ id: 'steer-1', message: 'narrow the fix' })}\n`,
+    )
 
     const run = (args: string[]) => execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
       cwd: process.cwd(),

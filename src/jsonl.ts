@@ -20,8 +20,12 @@ export interface JsonlCorruptionReceipt {
 }
 
 export type JsonlReadOptions =
-  | { mode?: 'strict' }
-  | { mode: 'recover'; onCorruption: (receipt: JsonlCorruptionReceipt) => void }
+  | { mode?: 'strict'; signal?: AbortSignal }
+  | {
+      mode: 'recover'
+      onCorruption: (receipt: JsonlCorruptionReceipt) => void
+      signal?: AbortSignal
+    }
 
 export class JsonlParseError extends SyntaxError {
   readonly sourcePath: string
@@ -107,16 +111,19 @@ export async function* readJsonl<T>(
   ) {
     throw new TypeError('JSONL recover mode requires an onCorruption callback')
   }
-  const input = createReadStream(path)
+  options.signal?.throwIfAborted()
+  const input = createReadStream(path, { signal: options.signal })
   let lineNumber = 0
   let byteOffset = 0
   let fragments: Buffer[] = []
   try {
     for await (const chunk of input) {
+      options.signal?.throwIfAborted()
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
       let start = 0
       let newline = bytes.indexOf(0x0a)
       while (newline !== -1) {
+        options.signal?.throwIfAborted()
         fragments.push(bytes.subarray(start, newline))
         const rawLine = fragments.length === 1 ? fragments[0]! : Buffer.concat(fragments)
         fragments = []
@@ -130,6 +137,7 @@ export async function* readJsonl<T>(
       if (start < bytes.length) fragments.push(bytes.subarray(start))
     }
     if (fragments.length > 0) {
+      options.signal?.throwIfAborted()
       const rawLine = fragments.length === 1 ? fragments[0]! : Buffer.concat(fragments)
       lineNumber += 1
       const parsed = parseLine<T>(rawLine, path, lineNumber, byteOffset, options)

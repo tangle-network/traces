@@ -54,10 +54,13 @@ export function recordSessionCorruption(ref: SessionRef, receipt: JsonlCorruptio
 }
 
 export function sessionJsonlOptions(ref: SessionRef, options: ParseOptions = {}): JsonlReadOptions {
-  if (options.corruptionMode === 'strict') return { mode: 'strict' }
+  if (options.corruptionMode === 'strict') {
+    return { mode: 'strict', signal: options.signal }
+  }
   return {
     mode: 'recover',
     onCorruption: (receipt) => recordSessionCorruption(ref, receipt),
+    signal: options.signal,
   }
 }
 

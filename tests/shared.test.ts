@@ -154,10 +154,15 @@ describe('scanSessions', () => {
 })
 
 describe('parseIsoToEpochMs', () => {
-  it('parses ISO + epoch-ms strings, 0 on empty/bad', () => {
+  it('parses ISO and epoch-millis strings, including a real epoch-zero value', () => {
     expect(parseIsoToEpochMs('2026-01-01T00:00:00.000Z')).toBe(Date.parse('2026-01-01T00:00:00.000Z'))
     expect(parseIsoToEpochMs('1700000000000')).toBe(1_700_000_000_000)
-    expect(parseIsoToEpochMs('')).toBe(0)
-    expect(parseIsoToEpochMs('not-a-date')).toBe(0)
+    expect(parseIsoToEpochMs('0')).toBe(0)
+  })
+
+  it('rejects empty, malformed, and non-finite timestamps', () => {
+    expect(() => parseIsoToEpochMs('')).toThrow(/non-empty/)
+    expect(() => parseIsoToEpochMs('not-a-date')).toThrow(/invalid timestamp/)
+    expect(() => parseIsoToEpochMs('999999999999999999999999')).toThrow(/invalid timestamp/)
   })
 })

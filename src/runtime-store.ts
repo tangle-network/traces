@@ -15,6 +15,7 @@
 import { InMemoryTraceStore, type Span } from '@tangle-network/agent-eval'
 import { toolArgumentsFromAttributes } from './adapters/tool-io.js'
 import type { OtlpSpan, OtlpSpanKind } from './otlp.js'
+import { validateOtlpSpans } from './span-validation.js'
 import { parseIsoToEpochMs as ms } from './time.js'
 
 const KIND: Record<OtlpSpanKind, Span['kind']> = {
@@ -31,20 +32,22 @@ export interface RuntimeTrace {
 }
 
 export async function toRuntimeStore(spans: readonly OtlpSpan[]): Promise<RuntimeTrace> {
+  const validated = validateOtlpSpans(spans, 'runtime store input')
   const store = new InMemoryTraceStore()
   const runs = new Map<string, { startedAt: number; endedAt: number; failed: boolean }>()
 
-  for (const item of spans) {
+  for (const item of validated) {
     const startedAt = ms(item.start_time)
     const endedAt = ms(item.end_time)
+    const terminalFailure = item.parent_span_id === null && item.status.code === 'ERROR'
     const current = runs.get(item.trace_id)
     runs.set(item.trace_id, current
       ? {
           startedAt: Math.min(current.startedAt, startedAt),
           endedAt: Math.max(current.endedAt, endedAt),
-          failed: current.failed || item.status.code === 'ERROR',
+          failed: current.failed || terminalFailure,
         }
-      : { startedAt, endedAt, failed: item.status.code === 'ERROR' })
+      : { startedAt, endedAt, failed: terminalFailure })
   }
 
   for (const [runId, run] of runs) {
@@ -57,20 +60,31 @@ export async function toRuntimeStore(spans: readonly OtlpSpan[]): Promise<Runtim
     })
   }
 
-  for (const s of spans) {
+  for (const s of validated) {
     const kind = KIND[s.attributes['openinference.span.kind'] as OtlpSpanKind] ?? 'custom'
     const startedAt = ms(s.start_time)
     const endedAt = ms(s.end_time)
+    const attributes = {
+      ...s.attributes,
+      'traces.source.trace_id': s.trace_id,
+      'traces.source.span_id': s.span_id,
+      ...(s.parent_span_id === null
+        ? {}
+        : { 'traces.source.parent_span_id': s.parent_span_id }),
+    }
     const base = {
-      spanId: s.span_id,
-      parentSpanId: s.parent_span_id ?? undefined,
+      spanId: runtimeSpanId(s.trace_id, s.span_id),
+      parentSpanId:
+        s.parent_span_id === null
+          ? undefined
+          : runtimeSpanId(s.trace_id, s.parent_span_id),
       runId: s.trace_id,
       name: s.name,
       startedAt,
       endedAt,
       status: s.status.code === 'ERROR' ? ('error' as const) : ('ok' as const),
       error: s.status.message,
-      attributes: s.attributes,
+      attributes,
     }
 
     const tool = kind === 'tool' ? toolArgumentsFromAttributes(s.attributes) : undefined
@@ -90,4 +104,8 @@ export async function toRuntimeStore(spans: readonly OtlpSpan[]): Promise<Runtim
   }
 
   return { store, runIds: [...runs.keys()] }
+}
+
+function runtimeSpanId(traceId: string, spanId: string): string {
+  return `${encodeURIComponent(traceId)}:${encodeURIComponent(spanId)}`
 }
