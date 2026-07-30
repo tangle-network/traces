@@ -13,6 +13,7 @@
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces inspect session-index.json [--out inspection-report.md]
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
+ *   traces import-codetracebench <rows.jsonl> --trajectory-dir <dir> --out <dir> --revision <40-or-64-character-hex>
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces stream  [input.jsonl] [--replay] [--all] [--format auto]
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
@@ -30,6 +31,7 @@ import { basename, resolve } from 'node:path'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
+import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
@@ -117,6 +119,9 @@ interface Args {
   metadata?: string
   attrs: string[]
   supervisorRunDir?: string
+  trajectoryDir?: string
+  revision?: string
+  concurrency: number
 }
 
 const DEFAULT_ANALYST_MODEL = 'gpt-5-mini'
@@ -151,6 +156,7 @@ function parseArgs(argv: string[]): Args {
     noSpans: false,
     noFindings: false,
     attrs: [],
+    concurrency: 4,
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -166,6 +172,9 @@ function parseArgs(argv: string[]): Args {
       case '--session': a.session = next(); break
       case '--cwd': a.cwd = next(); break
       case '--supervisor-run-dir': a.supervisorRunDir = next(); break
+      case '--trajectory-dir': a.trajectoryDir = next(); break
+      case '--revision': a.revision = next(); break
+      case '--concurrency': a.concurrency = Number(next()); break
       case '--since': a.since = next(); break
       case '--out': a.out = next(); break
       case '--dir': a.dir = next(); break
@@ -572,6 +581,55 @@ async function cmdExport(args: Args): Promise<void> {
   }
   const result = await exportTraceEvidenceFile(args.input, { format, attributes })
   process.stdout.write(serializeSpans(result.spans))
+}
+
+async function cmdImportCodeTraceBench(args: Args): Promise<void> {
+  if (!args.input) {
+    throw new Error(
+      'import-codetracebench needs the native CodeTraceBench rows JSON or JSONL file',
+    )
+  }
+  if (!args.trajectoryDir) {
+    throw new Error(
+      'import-codetracebench needs --trajectory-dir with <traj_id>/steps.json directories',
+    )
+  }
+  if (!args.out) {
+    throw new Error('import-codetracebench needs a new --out directory')
+  }
+  if (!args.revision) {
+    throw new Error(
+      'import-codetracebench needs --revision with a full 40- or 64-character hexadecimal commit or digest',
+    )
+  }
+  const controller = new AbortController()
+  const interrupt = () => controller.abort(
+    new Error('import-codetracebench interrupted'),
+  )
+  process.once('SIGINT', interrupt)
+  process.once('SIGTERM', interrupt)
+  try {
+    const result = await importCodeTraceBench({
+      rowsPath: args.input,
+      trajectoryDir: args.trajectoryDir,
+      outDir: args.out,
+      revision: args.revision,
+      concurrency: args.concurrency,
+      signal: controller.signal,
+    })
+    const traceCount = result.receipt.counts.traces
+    const stepCount = result.receipt.counts.steps
+    const spanCount = result.receipt.counts.spans
+    console.log(
+      `imported ${traceCount} CodeTraceBench ${traceCount === 1 ? 'trajectory' : 'trajectories'} ` +
+        `(${stepCount} ${stepCount === 1 ? 'step' : 'steps'}, ` +
+        `${spanCount} ${spanCount === 1 ? 'span' : 'spans'}) ` +
+        `→ ${result.directory}; receipt: ${result.receiptPath}`,
+    )
+  } finally {
+    process.removeListener('SIGINT', interrupt)
+    process.removeListener('SIGTERM', interrupt)
+  }
 }
 
 function traceEvidenceFormat(raw: string | undefined): TraceEvidenceFormatOption {
@@ -1017,6 +1075,23 @@ Safety:
   --metadata must be a JSON object; --attr key=value is repeatable and overrides matching metadata keys.`)
 }
 
+function usageImportCodeTraceBench(): void {
+  console.log(`traces import-codetracebench: write one label-free OTLP file per trajectory
+
+Usage:
+  traces import-codetracebench <rows.jsonl|rows.json> \\
+    --trajectory-dir <normalized-dir> --out <new-trace-dir> \\
+    --revision <40-or-64-character-hex> [--concurrency 4]
+
+Input layout:
+  <normalized-dir>/<traj_id>/steps.json
+  <normalized-dir>/<traj_id>/task.md    optional
+
+The command validates every native step, rejects annotation leakage, writes
+<traj_id>.otlp.jsonl files, and records input and output SHA-256 hashes in
+codetracebench-import.json. The output directory must not already exist.`)
+}
+
 function usage(): void {
   console.log(`traces: analyze, observe & upload coding-agent sessions
 
@@ -1030,6 +1105,8 @@ Commands:
   index     Emit a reusable session index JSON for later investigation
   inspect   Read a session index and print ranked improvement findings
   export    Convert evidence/events files to OpenInference JSONL for HALO
+  import-codetracebench
+            Convert CodeTracer-normalized CodeTraceBench trajectories in bulk
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
@@ -1075,7 +1152,7 @@ Options:
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version
-  --help, -h       Show help (use \`traces export --help\` for export examples)
+  --help, -h       Show help (use \`traces export --help\` or \`traces import-codetracebench --help\`)
 
 Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)
 }
@@ -1088,14 +1165,19 @@ async function main(): Promise<void> {
   }
   const parsedArgs = parseArgs(rawArgs)
   if (parsedArgs.help) {
-    if (parsedArgs.command === 'export' || (parsedArgs.command === 'help' && parsedArgs.input === 'export')) usageExport()
+    if (
+      parsedArgs.command === 'import-codetracebench' ||
+      (parsedArgs.command === 'help' && parsedArgs.input === 'import-codetracebench')
+    ) usageImportCodeTraceBench()
+    else if (parsedArgs.command === 'export' || (parsedArgs.command === 'help' && parsedArgs.input === 'export')) usageExport()
     else usage()
     return
   }
   const args = validateWorkflowSelection(applyCurrentSessionSelection(parsedArgs))
   switch (args.command) {
     case 'help':
-      if (args.input === 'export') usageExport()
+      if (args.input === 'import-codetracebench') usageImportCodeTraceBench()
+      else if (args.input === 'export') usageExport()
       else usage()
       break
     case 'list': await cmdList(args); break
@@ -1106,6 +1188,7 @@ async function main(): Promise<void> {
     case 'index': await cmdIndex(args); break
     case 'inspect': await cmdInspect(args); break
     case 'export': await cmdExport(args); break
+    case 'import-codetracebench': await cmdImportCodeTraceBench(args); break
     case 'evidence': await cmdEvidence(args); break
     case 'stream': await cmdStream(args); break
     case 'watch': await cmdWatch(args); break

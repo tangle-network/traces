@@ -122,6 +122,7 @@ traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces evidence --harness codex-exec --session /tmp/codex.jsonl --cwd "$PWD" --out policy-evidence.jsonl
 traces export   policy-evidence.jsonl --out spans.openinference.jsonl
+traces import-codetracebench verified.jsonl --trajectory-dir normalized --out traces --revision <40-or-64-character-hex>
 traces watch    --all                              # live observer; loops + semantic findings
 traces stream   --all --mode findings              # low-volume semantic feed
 traces stream   --all --mode agent                 # findings + deterministic report events
