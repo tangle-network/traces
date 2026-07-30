@@ -175,10 +175,11 @@ It must also avoid inventing issues on clean trajectories.
 | Dataset | Labels used |
 | --- | --- |
 | AgentRx | Failure category, failed step, and root-cause step |
-| CodeTraceBench | Incorrect and unhelpful action steps, including clean trajectories |
+| CodeTraceBench | Incorrect and unhelpful action steps; solved label-empty rows are clean controls |
 
 Use `runAnalystBenchmark` to report recall, precision, F1, root-step accuracy, citation coverage, citation validity, clean-case false positives, repeat agreement, latency, calls, tokens, and known cost.
 Use `compareAnalystRunners` for paired baseline and candidate comparisons.
+Failed label-empty CodeTraceBench rows are unlabeled, not clean controls.
 
 ```ts
 import {
