@@ -1,3 +1,7 @@
+import { mkdtempSync } from 'node:fs'
+import { access, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { commandAnalyzer, commandRedactor, haloAnalyzer, runCommand } from '../src/external.js'
 import { span } from '../src/otlp.js'
@@ -5,6 +9,61 @@ import { applyRedactor } from '../src/redact.js'
 
 // Redactor stub: read a JSON array on stdin, return each element replaced.
 const REDACT_STUB = `let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const a=JSON.parse(s);process.stdout.write(JSON.stringify(a.map(()=>'[ML]')))})`
+
+interface DescendantFixture {
+  directory: string
+  startedPath: string
+  sentinelPath: string
+  sentinelDelayMs: number
+  parentScript: string
+}
+
+function descendantFixture(onReady: string, sentinelDelayMs: number): DescendantFixture {
+  const directory = mkdtempSync(join(tmpdir(), 'traces-process-tree-'))
+  const startedPath = join(directory, 'descendant-started')
+  const sentinelPath = join(directory, 'descendant-escaped')
+  const descendantScript = [
+    `require('node:fs').writeFileSync(${JSON.stringify(startedPath)}, String(Date.now()))`,
+    `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinelPath)}, 'escaped'), ${sentinelDelayMs})`,
+  ].join(';')
+  const parentScript = [
+    `const { existsSync, mkdirSync } = require('node:fs')`,
+    `const { spawn } = require('node:child_process')`,
+    `mkdirSync(${JSON.stringify(directory)}, { recursive: true })`,
+    `spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], { stdio: 'ignore' })`,
+    `const deadline = Date.now() + 5000`,
+    `const ready = setInterval(() => {`,
+    `  if (existsSync(${JSON.stringify(startedPath)})) { clearInterval(ready); ${onReady} } else if (Date.now() >= deadline) { process.exit(2) }`,
+    `}, 5)`,
+    `setInterval(() => {}, 1000)`,
+  ].join(';')
+  return { directory, startedPath, sentinelPath, sentinelDelayMs, parentScript }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function waitForPath(path: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!(await pathExists(path))) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+async function expectDescendantTerminated(fixture: DescendantFixture): Promise<void> {
+  await waitForPath(fixture.startedPath)
+  const startedAt = Number(await readFile(fixture.startedPath, 'utf8'))
+  const remaining = Math.max(0, startedAt + fixture.sentinelDelayMs + 100 - Date.now())
+  await new Promise((resolve) => setTimeout(resolve, remaining))
+  expect(await pathExists(fixture.sentinelPath)).toBe(false)
+}
 
 describe('runCommand', () => {
   it('captures stdout/stderr and exit code', async () => {
@@ -15,6 +74,50 @@ describe('runCommand', () => {
   })
   it('enforces a timeout', async () => {
     await expect(runCommand('node', ['-e', 'setTimeout(()=>{}, 5000)'], { timeoutMs: 100 })).rejects.toThrow(/timed out/)
+  })
+
+  it('terminates descendants before rejecting a timeout', async () => {
+    const fixture = descendantFixture(`process.stdout.write('ready')`, 1_500)
+    try {
+      await expect(
+        runCommand(process.execPath, ['-e', fixture.parentScript], { timeoutMs: 800 }),
+      ).rejects.toThrow(/timed out/)
+      await expectDescendantTerminated(fixture)
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true })
+    }
+  })
+
+  it('terminates descendants before rejecting output overflow', async () => {
+    const fixture = descendantFixture(`process.stdout.write('x'.repeat(4096))`, 500)
+    try {
+      await expect(
+        runCommand(process.execPath, ['-e', fixture.parentScript], {
+          timeoutMs: 5_000,
+          maxBuffer: 64,
+        }),
+      ).rejects.toThrow(/output exceeded/)
+      await expectDescendantTerminated(fixture)
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true })
+    }
+  })
+
+  it('terminates descendants before rejecting cancellation', async () => {
+    const fixture = descendantFixture(`process.stdout.write('ready')`, 500)
+    const controller = new AbortController()
+    try {
+      const result = runCommand(process.execPath, ['-e', fixture.parentScript], {
+        signal: controller.signal,
+        timeoutMs: 5_000,
+      })
+      await waitForPath(fixture.startedPath)
+      controller.abort(new Error('cancelled by test'))
+      await expect(result).rejects.toMatchObject({ name: 'AbortError' })
+      await expectDescendantTerminated(fixture)
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true })
+    }
   })
 })
 

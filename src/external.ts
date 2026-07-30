@@ -19,6 +19,67 @@ export interface RunResult {
   code: number | null
 }
 
+type SpawnedProcess = ReturnType<typeof spawn>
+
+function forceKill(child: SpawnedProcess): void {
+  try {
+    child.kill('SIGKILL')
+  } catch {
+    // The process already exited.
+  }
+}
+
+function terminateWindowsProcessTree(child: SpawnedProcess): Promise<void> {
+  if (child.pid === undefined) {
+    forceKill(child)
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    let finished = false
+    const finish = (): void => {
+      if (finished) return
+      finished = true
+      forceKill(child)
+      resolve()
+    }
+    let killer: SpawnedProcess
+    try {
+      killer = spawn(
+        'taskkill.exe',
+        ['/PID', String(child.pid), '/T', '/F'],
+        { stdio: 'ignore', windowsHide: true },
+      )
+    } catch {
+      finish()
+      return
+    }
+    killer.once('error', finish)
+    killer.once('close', finish)
+  })
+}
+
+function terminateProcessTree(child: SpawnedProcess): Promise<void> {
+  if (process.platform === 'win32') return terminateWindowsProcessTree(child)
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+      return Promise.resolve()
+    } catch {
+      // Fall back when the platform cannot address the detached process group.
+    }
+  }
+  forceKill(child)
+  return Promise.resolve()
+}
+
+function abortError(signal: AbortSignal): Error {
+  const error = new Error('The operation was aborted')
+  error.name = 'AbortError'
+  const withCause = error as Error & { cause?: unknown }
+  withCause.cause = signal.reason
+  return error
+}
+
 /** Spawn `command args`, optionally write `input` to stdin, and collect output.
  *  Rejects on spawn error, timeout, or output exceeding `maxBuffer`. */
 export function runCommand(
@@ -28,29 +89,67 @@ export function runCommand(
 ): Promise<RunResult> {
   const timeoutMs = opts.timeoutMs ?? 120_000
   const maxBuffer = opts.maxBuffer ?? 32 * 1024 * 1024
+  if (opts.signal?.aborted) return Promise.reject(abortError(opts.signal))
+
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(command, [...args], { signal: opts.signal })
+      child = spawn(command, [...args], { detached: process.platform !== 'win32' })
     } catch (err) {
       reject(err instanceof Error ? err : new Error(String(err)))
       return
     }
     let out = ''
     let err = ''
-    let killed = false
-    const timer = setTimeout(() => {
-      killed = true
-      child.kill('SIGKILL')
-      reject(new Error(`${command}: timed out after ${timeoutMs}ms`))
+    let closed = false
+    let closeCode: number | null = null
+    let spawnError: Error | undefined
+    let terminationError: Error | undefined
+    let terminationComplete = true
+    let settled = false
+    let timer: ReturnType<typeof setTimeout>
+    const onAbort = (): void => requestTermination(abortError(opts.signal!))
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      opts.signal?.removeEventListener('abort', onAbort)
+    }
+    const settle = (): void => {
+      if (settled || !closed || (terminationError && !terminationComplete)) return
+      settled = true
+      cleanup()
+      if (terminationError) {
+        reject(terminationError)
+      } else if (spawnError) {
+        reject(spawnError)
+      } else {
+        resolve({ stdout: out, stderr: err, code: closeCode })
+      }
+    }
+    function requestTermination(error: Error): void {
+      if (settled || terminationError) return
+      terminationError = error
+      clearTimeout(timer)
+      child.stdin?.destroy()
+      if (closed) {
+        settle()
+        return
+      }
+      terminationComplete = false
+      void terminateProcessTree(child).finally(() => {
+        terminationComplete = true
+        settle()
+      })
+    }
+
+    timer = setTimeout(() => {
+      requestTermination(new Error(`${command}: timed out after ${timeoutMs}ms`))
     }, timeoutMs)
     const cap = (add: string, buf: string): string => {
+      if (terminationError) return buf
       const next = buf + add
       if (next.length > maxBuffer) {
-        killed = true
-        child.kill('SIGKILL')
-        clearTimeout(timer)
-        reject(new Error(`${command}: output exceeded ${maxBuffer} bytes`))
+        requestTermination(new Error(`${command}: output exceeded ${maxBuffer} bytes`))
+        return buf
       }
       return next
     }
@@ -61,16 +160,18 @@ export function runCommand(
       err = cap(String(d), err)
     })
     child.on('error', (e) => {
-      clearTimeout(timer)
-      if (!killed) reject(e)
+      spawnError = e
     })
     child.on('close', (code) => {
-      clearTimeout(timer)
-      if (!killed) resolve({ stdout: out, stderr: err, code })
+      closed = true
+      closeCode = code
+      settle()
     })
+    opts.signal?.addEventListener('abort', onAbort, { once: true })
+    if (opts.signal?.aborted) onAbort()
     if (opts.input !== undefined) {
       child.stdin?.on('error', () => {}) // ignore EPIPE if the tool closes stdin early
-      child.stdin?.end(opts.input)
+      if (!terminationError) child.stdin?.end(opts.input)
     }
   })
 }
