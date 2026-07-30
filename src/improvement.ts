@@ -34,6 +34,7 @@ import {
   type ReportSource,
   summarizeDeterministicSignals,
 } from './report.js'
+import type { SessionWorkflowSummary } from './session-workflow.js'
 
 export interface TracesConfig {
   readonly registry?: AnalystRegistry
@@ -46,6 +47,7 @@ export interface TraceInvestigationOptions {
   readonly spans: readonly OtlpSpan[]
   readonly harness: string
   readonly sources?: readonly ReportSource[]
+  readonly workflow?: SessionWorkflowSummary
   readonly cwds?: readonly string[]
   readonly minLoopOccurrences?: number
   readonly ai?: AxAIService
@@ -58,6 +60,7 @@ export interface TraceInvestigationOptions {
   readonly analyzerPrompt?: string
   readonly otlpOutPath?: string
   readonly generatedAt?: string
+  readonly signal?: AbortSignal
   readonly log?: (msg: string, fields?: Record<string, unknown>) => void
 }
 
@@ -89,9 +92,11 @@ export interface TraceInvestigationResult {
   /** Traces without exactly one stable session identity. */
   readonly unassignedTraceCount: number
   readonly sources?: readonly ReportSource[]
+  readonly workflow?: SessionWorkflowSummary
   readonly spanCount: number
   readonly otlpPath: string
   readonly execution: ExecutionReport
+  readonly analystResult: AnalystRunResult
   readonly findings: readonly AnalystFinding[]
   readonly pipelines: PipelineReport
   readonly reactions: ReactionReport
@@ -126,6 +131,7 @@ export interface TraceStoreInvestigationOptions {
   readonly budgetUsd?: number
   readonly runId?: string
   readonly generatedAt?: string
+  readonly signal?: AbortSignal
   readonly log?: (msg: string, fields?: Record<string, unknown>) => void
 }
 
@@ -343,77 +349,10 @@ function deterministicFindings(pipelines: PipelineReport, reactions: ReactionRep
   return findings
 }
 
-function validSeverity(value: unknown): value is AnalystFinding['severity'] {
-  return value === 'critical' || value === 'high' || value === 'medium' || value === 'low' || value === 'info'
-}
-
-function validEvidenceRef(value: unknown): value is AnalystFinding['evidence_refs'][number] {
-  if (!value || typeof value !== 'object') return false
-  const row = value as Record<string, unknown>
-  return (
-    (row.kind === 'span' || row.kind === 'event' || row.kind === 'artifact' || row.kind === 'finding' || row.kind === 'metric') &&
-    typeof row.uri === 'string' &&
-    (row.excerpt === undefined || typeof row.excerpt === 'string')
-  )
-}
-
-function externalRows(output: string): unknown[] {
-  const trimmed = output.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return []
-  try {
-    const parsed: unknown = JSON.parse(trimmed)
-    if (Array.isArray(parsed)) return parsed
-    if (parsed && typeof parsed === 'object') {
-      const row = parsed as Record<string, unknown>
-      if (Array.isArray(row.findings)) return row.findings
-      if (Array.isArray(row.issues)) return row.issues
-      if (Array.isArray(row.recommendations)) return row.recommendations
-    }
-  } catch {
-    return []
-  }
-  return []
-}
-
-function coerceExternalFinding(analyzer: string, row: unknown, index: number): AnalystFinding | null {
-  if (!row || typeof row !== 'object') return null
-  const item = row as Record<string, unknown>
-  const claim = item.claim ?? item.title ?? item.issue ?? item.recommendation
-  if (typeof claim !== 'string' || claim.trim().length === 0) return null
-  const evidenceRefs = Array.isArray(item.evidence_refs)
-    ? item.evidence_refs.filter(validEvidenceRef)
-    : Array.isArray(item.evidenceRefs)
-      ? item.evidenceRefs.filter(validEvidenceRef)
-      : []
-  return makeFinding({
-    analyst_id: `external:${analyzer}`,
-    area: typeof item.area === 'string' && item.area ? item.area : 'external',
-    claim,
-    severity: validSeverity(item.severity) ? item.severity : 'medium',
-    rationale: typeof item.rationale === 'string' ? item.rationale : undefined,
-    evidence_refs: evidenceRefs,
-    recommended_action: typeof item.recommended_action === 'string'
-      ? item.recommended_action
-      : typeof item.action === 'string'
-        ? item.action
-        : undefined,
-    validation_plan: typeof item.validation_plan === 'string' ? item.validation_plan : undefined,
-    confidence: typeof item.confidence === 'number' && Number.isFinite(item.confidence) ? item.confidence : 0.65,
-    subject: typeof item.subject === 'string' ? item.subject : undefined,
-    metadata: { source: 'traces.external', analyzer, rowIndex: index },
-  })
-}
-
 function normalizeExternalFindings(results: readonly ExternalAnalysisResult[]): AnalystFinding[] {
-  const out: AnalystFinding[] = []
-  for (const result of results) {
-    if (result.findings) out.push(...result.findings)
-    externalRows(result.output).forEach((row, index) => {
-      const finding = coerceExternalFinding(result.analyzer, row, index)
-      if (finding) out.push(finding)
-    })
-  }
-  return out
+  return results.flatMap((result) =>
+    result.ok && result.kind === 'findings' ? [...(result.findings ?? [])] : [],
+  )
 }
 
 function buildEvidenceRows(findings: readonly AnalystFinding[]): TraceEvidenceRow[] {
@@ -471,9 +410,13 @@ function renderExternal(results: readonly ExternalAnalysisResult[]): string {
   if (results.length === 0) return ''
   const lines = ['## external analyzers', '']
   for (const result of results) {
-    lines.push(`### ${result.analyzer}`)
+    lines.push(`### ${result.analyzer} (${result.kind})`)
     lines.push('')
-    lines.push(result.ok ? result.output || '(no output)' : `failed: ${result.error}`)
+    if (!result.ok) lines.push(`failed: ${result.error}`)
+    else if (result.kind === 'discovery') {
+      lines.push(`${result.candidates?.length ?? 0} review candidate(s).`)
+      if (result.output) lines.push('', result.output)
+    } else lines.push(result.output || '(no output)')
     lines.push('')
   }
   return lines.join('\n')
@@ -499,6 +442,7 @@ function renderInvestigationReport(result: TraceInvestigationResult, analystResu
       execution: result.execution,
       deterministic: summarizeDeterministicSignals(result.pipelines, result.reactions),
       sources: result.sources,
+      workflow: result.workflow,
     })}\n${renderAgenticRoute(result.agenticRoute)}` +
     `${renderPipelines(result.pipelines)}\n${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
   const external = renderExternal(result.external)
@@ -521,8 +465,12 @@ async function existingConfigPath(path?: string): Promise<string | undefined> {
     try {
       await access(resolved)
       return resolved
-    } catch {
-      if (path) return undefined
+    } catch (error) {
+      if (path) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'ENOENT') throw new Error(`traces config not found: ${resolved}`)
+        throw error
+      }
     }
   }
   return undefined
@@ -557,12 +505,14 @@ export function mergeTracesConfig(opts: TraceInvestigationOptions, config?: Trac
 
 export async function runTraceInvestigation(opts: TraceInvestigationOptions): Promise<TraceInvestigationResult> {
   if (opts.spans.length === 0) throw new Error('runTraceInvestigation: no spans to analyze')
+  opts.signal?.throwIfAborted()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
   const [pipelines, reactions, adoption] = await Promise.all([
     runPipelines(opts.spans, { minLoopOccurrences: opts.minLoopOccurrences }),
     Promise.resolve(analyzeReactions(opts.spans)),
     analyzeAdoption(opts.spans, { cwds: opts.cwds }),
   ])
+  opts.signal?.throwIfAborted()
   const deterministic = deterministicFindings(pipelines, reactions, adoption)
   // A supplied registry owns its own composition. Only describe a route when
   // this package builds the maintained agent-eval suite itself.
@@ -579,11 +529,16 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     agenticPriorFindings: deterministic,
     otlpOutPath: opts.otlpOutPath,
     runId: `traces-investigation-${Date.parse(generatedAt) || Date.now()}`,
+    signal: opts.signal,
     log: opts.log,
   })
   const external = opts.externalAnalyzers?.length
-    ? await runExternalAnalyzers(analysis.otlpPath, opts.externalAnalyzers, { prompt: opts.analyzerPrompt })
+    ? await runExternalAnalyzers(analysis.otlpPath, opts.externalAnalyzers, {
+        prompt: opts.analyzerPrompt,
+        signal: opts.signal,
+      })
     : []
+  opts.signal?.throwIfAborted()
   const findings = [
     ...analysis.result.findings,
     ...deterministic,
@@ -597,9 +552,11 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     sessionCount: adoption.identifiedSessionCount,
     unassignedTraceCount: adoption.unassignedTraceCount,
     sources: opts.sources,
+    workflow: opts.workflow,
     spanCount: opts.spans.length,
     otlpPath: analysis.otlpPath,
     execution: analysis.execution,
+    analystResult: analysis.result,
     findings,
     pipelines,
     reactions,
@@ -612,6 +569,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
 }
 
 export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOptions): Promise<TraceStoreInvestigationResult> {
+  opts.signal?.throwIfAborted()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
   const registry = opts.registry ?? buildDefaultAnalystRegistry({
     ai: opts.ai,
@@ -622,7 +580,9 @@ export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOp
   const analystResult = await registry.run(runId, { traceStore: opts.traceStore }, {
     budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
     chainFindings: true,
+    signal: opts.signal,
   })
+  opts.signal?.throwIfAborted()
   const packet = buildTraceFindingPacket({
     findings: analystResult.findings,
     generatedAt,
