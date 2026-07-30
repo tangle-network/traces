@@ -1,7 +1,8 @@
 import { mkdtempSync } from 'node:fs'
-import { access, readFile, rm } from 'node:fs/promises'
+import { access, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
 import { describe, expect, it } from 'vitest'
 import {
   commandAnalyzer,
@@ -10,7 +11,7 @@ import {
   runCommand,
   runExternalAnalyzers,
 } from '../src/external.js'
-import { span } from '../src/otlp.js'
+import { serializeSpans, span } from '../src/otlp.js'
 import { applyRedactor } from '../src/redact.js'
 
 // Redactor stub: read a JSON array on stdin, return each element replaced.
@@ -85,6 +86,38 @@ describe('runCommand', () => {
     expect(r.stderr.trim()).toBe('warn')
     expect(r.code).toBe(0)
   })
+
+  it('closes stdin when no input is provided', async () => {
+    const r = await runCommand(process.execPath, [
+      '-e',
+      "process.stdin.on('end',()=>process.stdout.write('closed'));process.stdin.resume()",
+    ])
+
+    expect(r).toMatchObject({ stdout: 'closed', code: 0 })
+  })
+
+  it('limits combined stdout and stderr by encoded byte length', async () => {
+    await expect(
+      runCommand(
+        process.execPath,
+        [
+          '-e',
+          "process.stdout.write('é'.repeat(20));process.stderr.write('é'.repeat(20))",
+        ],
+        { maxBuffer: 64 },
+      ),
+    ).rejects.toThrow(/output exceeded 64 bytes/)
+  })
+
+  it('rejects invalid resource limits before spawning', () => {
+    expect(() => runCommand('not-run', [], { timeoutMs: 0 })).toThrow(
+      /timeoutMs must be a positive safe integer/,
+    )
+    expect(() => runCommand('not-run', [], { maxBuffer: Number.POSITIVE_INFINITY })).toThrow(
+      /maxBuffer must be a positive safe integer/,
+    )
+  })
+
   it('enforces a timeout', async () => {
     await expect(runCommand('node', ['-e', 'setTimeout(()=>{}, 5000)'], { timeoutMs: 100 })).rejects.toThrow(/timed out/)
   })
@@ -97,6 +130,23 @@ describe('runCommand', () => {
       ).rejects.toThrow(/timed out/)
       await expectDescendantTerminated(fixture)
     } finally {
+      await rm(fixture.directory, { recursive: true, force: true })
+    }
+  })
+
+  it('uses /proc to terminate detached descendants when ps is unavailable on Linux', async () => {
+    if (process.platform !== 'linux') return
+    const fixture = descendantFixture(`process.stdout.write('ready')`, 1_500)
+    const originalPath = process.env.PATH
+    process.env.PATH = '/path-without-ps'
+    try {
+      await expect(
+        runCommand(process.execPath, ['-e', fixture.parentScript], { timeoutMs: 800 }),
+      ).rejects.toThrow(/timed out/)
+      await expectDescendantTerminated(fixture)
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH
+      else process.env.PATH = originalPath
       await rm(fixture.directory, { recursive: true, force: true })
     }
   })
@@ -190,6 +240,64 @@ describe('commandAnalyzer', () => {
       output: 'observed',
       error: expect.stringContaining('findings must be an array'),
     })
+  })
+
+  it('binds direct structured findings to spans in the source artifact', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'traces-command-analyzer-'))
+    const otlpPath = join(directory, 'spans.otlp.jsonl')
+    await writeFile(
+      otlpPath,
+      serializeSpans([
+        span({
+          traceId: 'trace-1',
+          spanId: 'span-1',
+          name: 'tool.exec',
+          kind: 'TOOL',
+          startTime: '2026-01-01T00:00:00Z',
+        }),
+      ]),
+      'utf8',
+    )
+    let evidenceUri = 'trace://trace-1/span/span-1'
+    const finding = (): AnalystFinding => ({
+      schema_version: '1.0.0',
+      finding_id: 'finding-1',
+      analyst_id: 'external-test',
+      produced_at: '2026-01-01T00:00:01Z',
+      severity: 'high',
+      area: 'tool-use',
+      claim: 'The tool failed.',
+      evidence_refs: [{ kind: 'span', uri: evidenceUri }],
+      recommended_action: 'Fix the command.',
+      validation_plan: 'Rerun the same command.',
+      confidence: 1,
+    })
+    const analyzer = commandAnalyzer({
+      name: 'structured',
+      command: process.execPath,
+      args: () => ['-e', 'process.stdout.write("observed")'],
+      parse: () => ({ kind: 'findings', findings: [finding()] }),
+    })
+
+    try {
+      await expect(analyzer.analyze(otlpPath)).resolves.toMatchObject({
+        analyzer: 'structured',
+        kind: 'findings',
+        ok: true,
+        findings: [finding()],
+      })
+
+      evidenceUri = 'trace://trace-1/span/not-present'
+      await expect(analyzer.analyze(otlpPath)).resolves.toMatchObject({
+        analyzer: 'structured',
+        kind: 'report',
+        ok: false,
+        output: 'observed',
+        error: expect.stringContaining('unknown span evidence URI'),
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 })
 

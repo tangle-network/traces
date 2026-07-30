@@ -11,12 +11,14 @@
  */
 
 import { spawn } from 'node:child_process'
+import { readdir, readFile } from 'node:fs/promises'
 import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
 import {
   decodeExternalAnalysisPayload,
   decodeExternalAnalysisResult,
   spanEvidenceUri,
 } from './external-analysis-validation.js'
+import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
 
 export interface RunResult {
@@ -70,15 +72,17 @@ interface PosixProcess {
   depth: number
 }
 
-function signalProcess(pid: number, signal: NodeJS.Signals): void {
+function signalProcess(pid: number, signal: NodeJS.Signals): boolean {
   try {
     process.kill(pid, signal)
+    return true
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+    throw error
   }
 }
 
-function readPosixProcessTable(): Promise<Array<{ pid: number; parentPid: number }>> {
+function readProcessTableWithPs(): Promise<Array<{ pid: number; parentPid: number }>> {
   return new Promise((resolve, reject) => {
     let child: SpawnedProcess
     try {
@@ -148,6 +152,64 @@ function readPosixProcessTable(): Promise<Array<{ pid: number; parentPid: number
   })
 }
 
+async function readLinuxProcProcessTable(): Promise<
+  Array<{ pid: number; parentPid: number }>
+> {
+  const entries = await readdir('/proc', { withFileTypes: true })
+  const rows = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map(async (entry) => {
+        try {
+          const stat = await readFile(`/proc/${entry.name}/stat`, 'utf8')
+          const commandEnd = stat.lastIndexOf(')')
+          if (commandEnd < 0) return undefined
+          const fields = stat.slice(commandEnd + 1).trim().split(/\s+/)
+          const pid = Number(entry.name)
+          const parentPid = Number(fields[1])
+          if (
+            !Number.isSafeInteger(pid) ||
+            pid < 1 ||
+            !Number.isSafeInteger(parentPid) ||
+            parentPid < 0
+          ) {
+            return undefined
+          }
+          return { pid, parentPid }
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code
+          if (code === 'ENOENT' || code === 'EACCES' || code === 'ESRCH') return undefined
+          throw error
+        }
+      }),
+  )
+  const table = rows.filter(
+    (row): row is { pid: number; parentPid: number } => row !== undefined,
+  )
+  if (table.length === 0) throw new Error('/proc returned no process records')
+  return table
+}
+
+async function readPosixProcessTable(): Promise<
+  Array<{ pid: number; parentPid: number }>
+> {
+  try {
+    return await readProcessTableWithPs()
+  } catch (psError) {
+    if (process.platform !== 'linux') throw psError
+    try {
+      return await readLinuxProcProcessTable()
+    } catch (procError) {
+      throw new Error(
+        `could not enumerate analyzer descendants: ps: ${
+          psError instanceof Error ? psError.message : String(psError)
+        }; /proc: ${procError instanceof Error ? procError.message : String(procError)}`,
+        { cause: procError },
+      )
+    }
+  }
+}
+
 function descendantsOf(
   rootPid: number,
   table: readonly { pid: number; parentPid: number }[],
@@ -187,8 +249,9 @@ async function terminatePosixProcessTree(child: SpawnedProcess): Promise<void> {
     for (let pass = 0; pass < 4; pass += 1) {
       const current = descendantsOf(rootPid, await readPosixProcessTable())
       for (const processEntry of current) {
-        descendants.set(processEntry.pid, processEntry)
-        signalProcess(processEntry.pid, 'SIGSTOP')
+        if (signalProcess(processEntry.pid, 'SIGSTOP')) {
+          descendants.set(processEntry.pid, processEntry)
+        }
       }
       const signature = [...descendants.keys()].sort((left, right) => left - right).join(',')
       if (signature === previous) break
@@ -240,6 +303,12 @@ export function runCommand(
 ): Promise<RunResult> {
   const timeoutMs = opts.timeoutMs ?? 120_000
   const maxBuffer = opts.maxBuffer ?? 32 * 1024 * 1024
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new RangeError('timeoutMs must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(maxBuffer) || maxBuffer < 1) {
+    throw new RangeError('maxBuffer must be a positive safe integer')
+  }
   if (opts.signal?.aborted) return Promise.reject(abortError(opts.signal))
 
   return new Promise((resolve, reject) => {
@@ -252,6 +321,7 @@ export function runCommand(
     }
     let out = ''
     let err = ''
+    let outputBytes = 0
     let closed = false
     let closeCode: number | null = null
     let spawnError: Error | undefined
@@ -307,20 +377,20 @@ export function runCommand(
     timer = setTimeout(() => {
       requestTermination(new Error(`${command}: timed out after ${timeoutMs}ms`))
     }, timeoutMs)
-    const cap = (add: string, buf: string): string => {
+    const cap = (add: Buffer | string, buf: string): string => {
       if (terminationError) return buf
-      const next = buf + add
-      if (next.length > maxBuffer) {
+      outputBytes += Buffer.isBuffer(add) ? add.byteLength : Buffer.byteLength(add)
+      if (outputBytes > maxBuffer) {
         requestTermination(new Error(`${command}: output exceeded ${maxBuffer} bytes`))
         return buf
       }
-      return next
+      return buf + String(add)
     }
     child.stdout?.on('data', (d) => {
-      out = cap(String(d), out)
+      out = cap(d, out)
     })
     child.stderr?.on('data', (d) => {
-      err = cap(String(d), err)
+      err = cap(d, err)
     })
     child.on('error', (e) => {
       spawnError = e
@@ -332,10 +402,8 @@ export function runCommand(
     })
     opts.signal?.addEventListener('abort', onAbort, { once: true })
     if (opts.signal?.aborted) onAbort()
-    if (opts.input !== undefined) {
-      child.stdin?.on('error', () => {}) // ignore EPIPE if the tool closes stdin early
-      if (!terminationError) child.stdin?.end(opts.input)
-    }
+    child.stdin?.on('error', () => {}) // ignore EPIPE if the tool closes stdin early
+    if (!terminationError) child.stdin?.end(opts.input)
   })
 }
 
@@ -376,11 +444,42 @@ export type ExternalAnalysisPayload =
   | { kind: 'findings'; findings: readonly AnalystFinding[] }
   | { kind: 'discovery'; candidates: readonly ExternalDiscoveryCandidate[] }
 
+export interface ExternalAnalyzerOptions {
+  prompt?: string
+  signal?: AbortSignal
+  /** Supplied by runExternalAnalyzers to avoid rereading the OTLP artifact. */
+  knownSpanUris?: ReadonlySet<string>
+}
+
 /** An analysis engine that runs over the emitted OTLP-JSONL artifact — a peer to
  *  the built-in analysts, so you get many analyzers beyond our own. */
 export interface ExternalAnalyzer {
   name: string
-  analyze(otlpPath: string, opts?: { prompt?: string; signal?: AbortSignal }): Promise<ExternalAnalysisResult>
+  analyze(otlpPath: string, opts?: ExternalAnalyzerOptions): Promise<ExternalAnalysisResult>
+}
+
+async function spanUrisFromArtifact(
+  otlpPath: string,
+  signal?: AbortSignal,
+): Promise<Set<string>> {
+  const uris = new Set<string>()
+  let index = 0
+  for await (const value of readJsonl<unknown>(otlpPath, { signal })) {
+    const label = `${otlpPath}:${index + 1}`
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new TypeError(`${label} must contain an object`)
+    }
+    const row = value as Record<string, unknown>
+    if (typeof row.trace_id !== 'string' || row.trace_id.trim().length === 0) {
+      throw new TypeError(`${label}.trace_id must be a non-empty string`)
+    }
+    if (typeof row.span_id !== 'string' || row.span_id.trim().length === 0) {
+      throw new TypeError(`${label}.span_id must be a non-empty string`)
+    }
+    uris.add(spanEvidenceUri(row.trace_id, row.span_id))
+    index += 1
+  }
+  return uris
 }
 
 /** Wrap any CLI that reads the OTLP file and prints analysis to stdout. `args`
@@ -426,25 +525,37 @@ export function commandAnalyzer(spec: {
             error: error instanceof Error ? error.message : String(error),
           }
         }
-        if (payload.kind === 'findings') {
+        if (payload.kind === 'report') {
+          return { analyzer: spec.name, kind: payload.kind, ok: true, output }
+        }
+        const result = payload.kind === 'findings'
+          ? {
+              analyzer: spec.name,
+              kind: payload.kind,
+              ok: true,
+              output,
+              findings: payload.findings,
+            }
+          : {
+              analyzer: spec.name,
+              kind: payload.kind,
+              ok: true,
+              output,
+              candidates: payload.candidates,
+            }
+        try {
+          const knownSpanUris =
+            opts.knownSpanUris ?? (await spanUrisFromArtifact(otlpPath, opts.signal))
+          return decodeExternalAnalysisResult(result, spec.name, knownSpanUris)
+        } catch (error) {
           return {
             analyzer: spec.name,
-            kind: payload.kind,
-            ok: true,
+            kind: 'report',
+            ok: false,
             output,
-            findings: payload.findings,
+            error: error instanceof Error ? error.message : String(error),
           }
         }
-        if (payload.kind === 'discovery') {
-          return {
-            analyzer: spec.name,
-            kind: payload.kind,
-            ok: true,
-            output,
-            candidates: payload.candidates,
-          }
-        }
-        return { analyzer: spec.name, kind: payload.kind, ok: true, output }
       } catch (e) {
         return {
           analyzer: spec.name,
@@ -529,6 +640,7 @@ export function runExternalAnalyzers(
       const raw = await analyzer.analyze(otlpPath, {
         prompt: opts.prompt,
         signal: opts.signal,
+        knownSpanUris,
       })
       return decodeExternalAnalysisResult(raw, analyzer.name, knownSpanUris)
     } catch (error) {
