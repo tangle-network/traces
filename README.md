@@ -49,7 +49,10 @@ traces watch --all
 traces stream --all --mode findings
 ```
 
-That's the command in the demo above. The **deterministic pass** checks stuck loops, token growth, output decay, missing self-verification, tool failures, and human corrections. Each supported issue is returned as a finding with evidence, an action, confidence, and a validation plan. It needs no API key and costs nothing.
+The first command is shown in the demo above.
+The **deterministic pass** checks stuck loops, token growth, output decay, missing self-verification, tool failures, and human corrections.
+Each supported issue is returned as a finding with evidence, an action, confidence, and a validation plan.
+It needs no API key and costs nothing.
 
 Add `--llm` for the **agentic analysts**. `traces` first uses free local signals to choose the smallest useful set: a failure review always runs, while knowledge and edit reviews run only when failures, repeated calls, or corrective feedback support them. They call OpenAI and respect `--budget <usd>`.
 
@@ -140,7 +143,7 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory |
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
-| `--format <kind>` | `export` / file `stream`: `auto`, `policy-evidence`, `sandbox-events`, or `openinference` |
+| `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
 | `--config <path>` | `analyze` / `investigate` / `improve` / `stream`: load BYO analysts, live analysts, and external analyzers |
 | `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (default 5) / active-session window minutes (default 30) |

@@ -128,6 +128,34 @@ traces improve --last 5 --config traces.config.mjs --dir .traces/improvement
 
 The full runnable example is [`examples/custom-analyst.ts`](../examples/custom-analyst.ts).
 
+Run its fixed input to inspect the complete JSON:
+
+```bash
+pnpm tsx examples/custom-analyst.ts --fixture
+```
+
+The current fixture returns one finding:
+
+```json
+{
+  "analyst_id": "failed-tool-clusters",
+  "area": "tool-use",
+  "claim": "3 failed span(s) share the error: Command failed with exit code 127 on attempt 1",
+  "severity": "high",
+  "evidence_refs": [
+    {
+      "kind": "span",
+      "uri": "trace://fixture-three-failures/span/failed-1"
+    }
+  ],
+  "recommended_action": "Fix or change the retry policy for exec.",
+  "validation_plan": "Rerun the same task and confirm this error signature is absent.",
+  "confidence": 1
+}
+```
+
+`pnpm tsx examples/custom-analyst.ts --good-fixture` returns `[]`.
+
 ## Test an analyst
 
 A useful analyst must beat a trivial no-findings baseline on labeled trajectories.
@@ -178,7 +206,7 @@ Do not train or rewrite policy from an analyst's own prose alone.
 Attach independent feedback or a measured task outcome to the trace first.
 Then promote the reviewed failure into an eval case, make one targeted change, and compare before and after on fresh cases.
 
-This keeps the loop auditable:
+The required review path is:
 
 ```text
 production trace -> finding -> reviewed feedback -> eval case -> candidate change -> comparison
