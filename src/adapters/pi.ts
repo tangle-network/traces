@@ -4,7 +4,8 @@
  * Line types: `session` (id + cwd), `model_change`, `thinking_level_change`,
  * and `message`. A `message` line wraps `message.{role, model, provider,
  * content[], usage.{input,output}, stopReason, errorMessage}`. Tool calls
- * ride inside `message.content[]` as tool blocks.
+ * ride inside assistant `message.content[]` blocks; their completions are
+ * separate `role: "toolResult"` messages keyed by `message.toolCallId`.
  */
 
 import { readdir, stat } from 'node:fs/promises'
@@ -52,7 +53,20 @@ interface PiLine {
     stopReason?: string
     errorMessage?: string
     usage?: { input?: number; output?: number }
+    toolCallId?: string
+    toolName?: string
+    isError?: boolean
   }
+}
+
+interface PiToolResult {
+  callId: string
+  toolName: string
+  timestamp: string
+  isError: boolean
+  output: unknown
+  errorMessage: string
+  step: number
 }
 
 function isToolBlock(b: PiContentBlock): boolean {
@@ -71,6 +85,21 @@ function textOf(content: PiContentBlock[] | undefined): string {
       .map((b) => b.text)
       .join(''),
   )
+}
+
+function toolResultOutput(content: PiContentBlock[] | undefined): unknown {
+  if (content?.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string') {
+    return content[0].text
+  }
+  return content
+}
+
+function completeToolSpan(toolSpan: OtlpSpan, result: PiToolResult): void {
+  toolSpan.end_time = result.timestamp
+  toolSpan.status = result.isError
+    ? { code: 'ERROR', message: result.errorMessage }
+    : { code: 'OK' }
+  recordToolOutput(toolSpan, result.output)
 }
 
 export class PiAdapter implements HarnessTraceAdapter {
@@ -125,6 +154,7 @@ export class PiAdapter implements HarnessTraceAdapter {
     const sourceRootId = `root:${sourceTraceId}`
     const spans: OtlpSpan[] = []
     const toolByCallId = new Map<string, OtlpSpan>()
+    const pendingResults = new Map<string, PiToolResult>()
     let firstTimestamp: string | undefined
     let lastTimestamp: string | undefined
     let sessionLine: Pick<PiLine, 'id' | 'timestamp'> | undefined
@@ -146,7 +176,26 @@ export class PiAdapter implements HarnessTraceAdapter {
       const mid = l.id ?? `m${step}`
       const msg = l.message
       const llmId = `llm:${mid}`
-      if (msg.role === 'user') {
+      if (msg.role === 'toolResult') {
+        const callId = msg.toolCallId ?? `${mid}:result`
+        const errorMessage = textOf(msg.content).slice(0, 500) || 'tool result reported error'
+        const result: PiToolResult = {
+          callId,
+          toolName: msg.toolName ?? 'tool',
+          timestamp: ts,
+          isError: msg.isError === true,
+          output: toolResultOutput(msg.content),
+          errorMessage,
+          step,
+        }
+        const toolSpan = toolByCallId.get(callId)
+        if (toolSpan) completeToolSpan(toolSpan, result)
+        else {
+          pendingResults.set(callId, result)
+          step += 1
+        }
+        continue
+      } else if (msg.role === 'user') {
         // The human's prompt text. (A tool-result-only user turn yields no
         // text → no user.prompt span.)
         const prompt = textOf(msg.content)
@@ -203,11 +252,17 @@ export class PiAdapter implements HarnessTraceAdapter {
             service: SERVICE,
             agent: SERVICE,
             tool: name,
+            status: 'UNSET',
             step,
             extra: toolIoAttributes({ input: b.input ?? b.args ?? b.arguments }),
           })
           spans.push(toolSpan)
           toolByCallId.set(callId, toolSpan)
+          const pending = pendingResults.get(callId)
+          if (pending) {
+            completeToolSpan(toolSpan, pending)
+            pendingResults.delete(callId)
+          }
           step += 1
         } else if (isToolResultBlock(b)) {
           const callId = b.toolCallId ?? b.callId ?? b.id ?? ''
@@ -220,6 +275,30 @@ export class PiAdapter implements HarnessTraceAdapter {
           }
         }
       }
+    }
+
+    for (const result of pendingResults.values()) {
+      spans.push(
+        span({
+          traceId: sourceTraceId,
+          spanId: `tool:${result.callId}`,
+          parentSpanId: sourceRootId,
+          name: `tool.${result.toolName}`,
+          kind: 'TOOL',
+          startTime: result.timestamp,
+          endTime: result.timestamp,
+          status: result.isError ? 'ERROR' : 'OK',
+          statusMessage: result.isError ? result.errorMessage : undefined,
+          service: SERVICE,
+          agent: SERVICE,
+          tool: result.toolName,
+          step: result.step,
+          extra: {
+            ...toolIoAttributes({ output: result.output }),
+            'traces.pi.tool_result_without_call': true,
+          },
+        }),
+      )
     }
 
     const traceId = sessionLine?.id ?? sourceTraceId

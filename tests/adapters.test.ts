@@ -1139,7 +1139,7 @@ describe('conversation capture — JSONL adapters', () => {
       writeFileSync(path, c.lines.map((l) => JSON.stringify(l)).join('\n'))
       const spans = await c.make().parse(refFor(path, c.name))
       if (c.name === 'pi') {
-        expect(traceShapeDigest(spans)).toBe('3c39c063421a2a4952f72cb1f6b0b7ba6a434cb5ee18475daac2a5208366f632')
+        expect(traceShapeDigest(spans)).toBe('bf3cbbead044c361a625eaacb2894535c0cc7a68c72f1ad5c9ed9f2a44e17fad')
       }
       expect(userPrompt(spans)?.attributes['content']).toBe('hello world')
       expect(hasContent(spans, 'on it')).toBe(true)
@@ -1182,23 +1182,164 @@ describe('pi tool results', () => {
     expect(result?.attributes['input.value']).toBe('{"command":"python3 solution.py"}')
   })
 
-  it('joins a successful result to its tool call without dropping the output', async () => {
-    const path = join(dir, 'pi-tool-result.jsonl')
+  it('joins parallel message-level results by call id and preserves failures and timing', async () => {
+    const path = join(dir, 'pi-parallel-tool-results.jsonl')
     writeFileSync(
       path,
       [
-        { type: 'session', id: 'pi-result', timestamp: '2026-06-20T10:00:00Z' },
-        { type: 'message', id: 'm1', timestamp: '2026-06-20T10:00:01Z', message: { role: 'assistant', content: [{ type: 'tool_call', id: 'tc1', toolName: 'read', input: { path: 'a' } }] } },
-        { type: 'message', id: 'm2', timestamp: '2026-06-20T10:00:02Z', message: { role: 'toolResult', content: [{ type: 'tool_result', toolCallId: 'tc1', output: 'pi result' }] } },
+        { type: 'session', id: 'pi-parallel', timestamp: '2026-06-20T10:00:00Z' },
+        {
+          type: 'message',
+          id: 'm1',
+          timestamp: '2026-06-20T10:00:01Z',
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'call-a', name: 'read', arguments: { path: 'a' } },
+              { type: 'toolCall', id: 'call-b', name: 'bash', arguments: { command: 'false' } },
+              { type: 'toolCall', id: 'call-unfinished', name: 'write', arguments: { path: 'b' } },
+            ],
+          },
+        },
+        {
+          type: 'message',
+          id: 'm2',
+          parentId: 'm1',
+          timestamp: '2026-06-20T10:00:03Z',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call-b',
+            toolName: 'bash',
+            content: [{ type: 'text', text: 'permission denied' }],
+            isError: true,
+          },
+        },
+        {
+          type: 'message',
+          id: 'm3',
+          parentId: 'm2',
+          timestamp: '2026-06-20T10:00:04Z',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call-a',
+            toolName: 'read',
+            content: [{ type: 'text', text: 'alpha result' }],
+            isError: false,
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join('\n'),
+    )
+
+    const spans = await new PiAdapter().parse(refFor(path, 'pi'))
+    const tools = new Map(
+      spans
+        .filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+        .map((item) => [item.span_id, item]),
+    )
+
+    expect(spans.filter((item) => item.attributes['openinference.span.kind'] === 'LLM').map((item) => item.name))
+      .toEqual(['message.assistant'])
+    expect(tools.get('tool:call-a')).toMatchObject({
+      parent_span_id: 'llm:m1',
+      start_time: '2026-06-20T10:00:01Z',
+      end_time: '2026-06-20T10:00:04Z',
+      status: { code: 'OK' },
+    })
+    expect(tools.get('tool:call-a')?.attributes['output.value']).toBe('alpha result')
+    expect(tools.get('tool:call-b')).toMatchObject({
+      parent_span_id: 'llm:m1',
+      start_time: '2026-06-20T10:00:01Z',
+      end_time: '2026-06-20T10:00:03Z',
+      status: { code: 'ERROR', message: 'permission denied' },
+    })
+    expect(tools.get('tool:call-b')?.attributes['output.value']).toBe('permission denied')
+    expect(tools.get('tool:call-unfinished')).toMatchObject({
+      start_time: '2026-06-20T10:00:01Z',
+      end_time: '2026-06-20T10:00:01Z',
+      status: { code: 'UNSET' },
+    })
+  })
+
+  it('joins a result persisted before its call record without manufacturing an orphan', async () => {
+    const path = join(dir, 'pi-out-of-order-tool-result.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'session', id: 'pi-out-of-order', timestamp: '2026-06-20T10:00:00Z' },
+        {
+          type: 'message',
+          id: 'm1',
+          timestamp: '2026-06-20T10:00:03Z',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call-late',
+            toolName: 'read',
+            content: [{ type: 'text', text: 'late result' }],
+            isError: false,
+          },
+        },
+        {
+          type: 'message',
+          id: 'm2',
+          timestamp: '2026-06-20T10:00:01Z',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'call-late', name: 'read', arguments: { path: 'a' } }],
+          },
+        },
       ]
         .map((line) => JSON.stringify(line))
         .join('\n'),
     )
 
     const result = tool(await new PiAdapter().parse(refFor(path, 'pi')))
-    expect(result?.status.code).toBe('OK')
-    expect(result?.attributes['input.value']).toBe('{"path":"a"}')
-    expect(result?.attributes['output.value']).toBe('pi result')
+    expect(result).toMatchObject({
+      span_id: 'tool:call-late',
+      parent_span_id: 'llm:m2',
+      start_time: '2026-06-20T10:00:01Z',
+      end_time: '2026-06-20T10:00:03Z',
+      status: { code: 'OK' },
+    })
+    expect(result?.attributes['output.value']).toBe('late result')
+    expect(result?.attributes['traces.pi.tool_result_without_call']).toBeUndefined()
+  })
+
+  it('retains an orphan result as an explicitly marked root-owned tool span', async () => {
+    const path = join(dir, 'pi-orphan-tool-result.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'session', id: 'pi-orphan', timestamp: '2026-06-20T10:00:00Z' },
+        {
+          type: 'message',
+          id: 'm1',
+          timestamp: '2026-06-20T10:00:05Z',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call-orphan',
+            toolName: 'bash',
+            content: [{ type: 'text', text: 'orphan failure' }],
+            isError: true,
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join('\n'),
+    )
+
+    const result = tool(await new PiAdapter().parse(refFor(path, 'pi')))
+    expect(result).toMatchObject({
+      span_id: 'tool:call-orphan',
+      parent_span_id: 'root:pi-orphan',
+      start_time: '2026-06-20T10:00:05Z',
+      end_time: '2026-06-20T10:00:05Z',
+      status: { code: 'ERROR', message: 'orphan failure' },
+    })
+    expect(result?.attributes['tool.name']).toBe('bash')
+    expect(result?.attributes['output.value']).toBe('orphan failure')
+    expect(result?.attributes['traces.pi.tool_result_without_call']).toBe(true)
   })
 })
 
