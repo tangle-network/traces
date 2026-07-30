@@ -31,6 +31,7 @@ interface PiContentBlock {
   toolCallId?: string
   input?: unknown
   args?: unknown
+  arguments?: unknown
   isError?: boolean
   is_error?: boolean
   content?: unknown
@@ -203,7 +204,7 @@ export class PiAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: name,
             step,
-            extra: toolIoAttributes({ input: b.input ?? b.args }),
+            extra: toolIoAttributes({ input: b.input ?? b.args ?? b.arguments }),
           })
           spans.push(toolSpan)
           toolByCallId.set(callId, toolSpan)

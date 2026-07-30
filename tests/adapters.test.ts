@@ -1152,6 +1152,36 @@ describe('conversation capture — JSONL adapters', () => {
 })
 
 describe('pi tool results', () => {
+  it('captures arguments from Pi toolCall blocks', async () => {
+    const path = join(dir, 'pi-tool-arguments.jsonl')
+    writeFileSync(
+      path,
+      [
+        { type: 'session', id: 'pi-arguments', timestamp: '2026-07-30T04:00:00Z' },
+        {
+          type: 'message',
+          id: 'm1',
+          timestamp: '2026-07-30T04:00:01Z',
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'toolCall',
+              id: 'tc1',
+              name: 'bash',
+              arguments: { command: 'python3 solution.py' },
+            }],
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join('\n'),
+    )
+
+    const result = tool(await new PiAdapter().parse(refFor(path, 'pi')))
+    expect(result?.attributes['tool.name']).toBe('bash')
+    expect(result?.attributes['input.value']).toBe('{"command":"python3 solution.py"}')
+  })
+
   it('joins a successful result to its tool call without dropping the output', async () => {
     const path = join(dir, 'pi-tool-result.jsonl')
     writeFileSync(
