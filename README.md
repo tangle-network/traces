@@ -23,6 +23,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [Policy-mining evidence](#policy-mining-evidence)
 - [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
 - [Trace analysts](#trace-analysts)
+- [Agent skills](#agent-skills)
 - [Library (SDK)](#library-sdk)
 - [Examples](#examples)
 - [Develop](#develop)
@@ -372,6 +373,29 @@ In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnal
 See [`examples/external-engines.ts`](./examples/external-engines.ts).
 
 > For the built-in agentic analysts (`--llm`), set `OPENAI_API_KEY`, or point at any OpenAI-compatible gateway with `OPENAI_BASE_URL` (e.g. an internal router) to use a non-OpenAI key.
+
+## Agent skills
+
+The npm package ships two AgentProfile-ready skills:
+
+| Skill | Use |
+|---|---|
+| [`inspect-agent-traces`](./skills/inspect-agent-traces/SKILL.md) | select workflows and export deterministic findings |
+| [`build-trace-analyst`](./skills/build-trace-analyst/SKILL.md) | write and calibrate a custom analyst |
+
+Load both from GitHub:
+
+```ts
+import { defineGitHubResource } from '@tangle-network/agent-interface'
+
+const names = ['inspect-agent-traces', 'build-trace-analyst']
+const skills = names.map((name) => defineGitHubResource(`skills/${name}/SKILL.md`, {
+  repository: 'tangle-network/traces',
+  ref: 'main',
+  name,
+}))
+const profile = { name: 'trace-reviewer', resources: { skills } }
+```
 
 ## Release automation
 

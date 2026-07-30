@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect Agent Traces"
+  short_description: "Inspect real workflows with Traces"
+  default_prompt: "Use $inspect-agent-traces to inspect the latest agent workflow and report cited findings."

@@ -27,10 +27,21 @@ const packJson = execFileSync('npm', ['pack', '--dry-run', '--json'], { encoding
 const [pack] = JSON.parse(packJson)
 const files = new Set(pack.files.map((file) => file.path))
 
-for (const expected of ['dist/cli.js', 'dist/index.js', 'dist/index.d.ts', 'README.md', 'install.sh', 'package.json']) {
+for (const expected of [
+  'dist/cli.js',
+  'dist/index.js',
+  'dist/index.d.ts',
+  'README.md',
+  'install.sh',
+  'package.json',
+  'skills/inspect-agent-traces/SKILL.md',
+  'skills/inspect-agent-traces/agents/openai.yaml',
+  'skills/build-trace-analyst/SKILL.md',
+  'skills/build-trace-analyst/agents/openai.yaml',
+]) {
   if (!files.has(expected)) {
     throw new Error(`npm package is missing ${expected}`)
   }
 }
 
-console.log(`package binary ok: ${pkg.name}@${pkg.version} ships ${binPath}`)
+console.log(`package ok: ${pkg.name}@${pkg.version} ships ${binPath} and 2 agent skills`)
