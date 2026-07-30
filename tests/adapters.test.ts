@@ -657,6 +657,127 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
 })
 
 describe('claude adapter (conversation capture)', () => {
+  it('scopes all, latest, and exact turns by stable user event ID with their subagents', async () => {
+    const path = join(dir, 'claude-task-scopes.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'user',
+          uuid: 'turn-old',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'user', content: 'OLD TASK' },
+        },
+        {
+          type: 'assistant',
+          uuid: 'answer-old',
+          parentUuid: 'turn-old',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: {
+            id: 'message-old',
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'OLD ANSWER' },
+              { type: 'tool_use', id: 'agent-call-old', name: 'Agent', input: { task: 'old worker' } },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          uuid: 'turn-new',
+          parentUuid: 'answer-old',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:01:00Z',
+          message: { role: 'user', content: 'NEW TASK' },
+        },
+        {
+          type: 'assistant',
+          uuid: 'answer-new',
+          parentUuid: 'turn-new',
+          sessionId: 'scoped-session',
+          timestamp: '2026-01-01T00:01:01Z',
+          message: {
+            id: 'message-new',
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'NEW ANSWER' },
+              { type: 'tool_use', id: 'agent-call-new', name: 'Agent', input: { task: 'new worker' } },
+            ],
+          },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+    const subDir = join(dir, 'claude-task-scopes', 'subagents')
+    mkdirSync(subDir, { recursive: true })
+    for (const turn of ['old', 'new'] as const) {
+      writeFileSync(
+        join(subDir, `agent-${turn}.jsonl`),
+        [
+          {
+            type: 'user',
+            uuid: `worker-task-${turn}`,
+            timestamp: `2026-01-01T00:0${turn === 'old' ? '0' : '1'}:02Z`,
+            isSidechain: true,
+            message: { role: 'user', content: `${turn.toUpperCase()} WORKER TASK` },
+          },
+          {
+            type: 'assistant',
+            uuid: `worker-answer-${turn}`,
+            timestamp: `2026-01-01T00:0${turn === 'old' ? '0' : '1'}:03Z`,
+            message: {
+              id: `worker-message-${turn}`,
+              role: 'assistant',
+              content: [{ type: 'text', text: `${turn.toUpperCase()} WORKER ANSWER` }],
+            },
+          },
+        ].map((event) => JSON.stringify(event)).join('\n'),
+      )
+      writeFileSync(
+        join(subDir, `agent-${turn}.meta.json`),
+        JSON.stringify({ agentType: 'worker', toolUseId: `agent-call-${turn}` }),
+      )
+    }
+
+    const adapter = new ClaudeAdapter()
+    const all = await adapter.parse(refFor(path, 'claude-code'), { taskScope: 'all' })
+    const latest = await adapter.parse(refFor(path, 'claude-code'), { taskScope: 'latest' })
+    const exact = await adapter.parse(refFor(path, 'claude-code'), {
+      taskScope: 'turn',
+      taskTurnId: 'turn-old',
+    })
+    const contents = (spans: OtlpSpan[]) =>
+      spans.flatMap((item) => typeof item.attributes.content === 'string' ? [item.attributes.content] : [])
+
+    expect(contents(all)).toEqual([
+      'OLD TASK',
+      'OLD ANSWER',
+      'NEW TASK',
+      'NEW ANSWER',
+      'NEW WORKER TASK',
+      'NEW WORKER ANSWER',
+      'OLD WORKER TASK',
+      'OLD WORKER ANSWER',
+    ])
+    expect(contents(latest)).toEqual([
+      'NEW TASK',
+      'NEW ANSWER',
+      'NEW WORKER TASK',
+      'NEW WORKER ANSWER',
+    ])
+    expect(contents(exact)).toEqual([
+      'OLD TASK',
+      'OLD ANSWER',
+      'OLD WORKER TASK',
+      'OLD WORKER ANSWER',
+    ])
+    await expect(adapter.parse(refFor(path, 'claude-code'), {
+      taskScope: 'turn',
+      taskTurnId: 'missing-turn',
+    })).rejects.toThrow('Claude task turn "missing-turn" was not found')
+  })
+
   it('keeps a canonical session ID that first appears on an accepted duplicate', async () => {
     const path = join(dir, 'claude-duplicate-session-id.jsonl')
     writeFileSync(

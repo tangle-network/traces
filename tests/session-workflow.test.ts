@@ -14,6 +14,7 @@ interface Node {
   readonly path?: string
   readonly parent?: string
   readonly children?: readonly string[]
+  readonly spawned?: readonly string[]
   readonly resumed?: readonly string[]
   readonly nickname?: string
   readonly depth?: number
@@ -58,6 +59,21 @@ function spans(node: Node): OtlpSpan[] {
       extra: {
         'traces.codex.agent_operation': 'send_input',
         'traces.codex.agent_session_ids': JSON.stringify(node.resumed),
+      },
+    }))
+  }
+  if (node.spawned) {
+    result.push(span({
+      traceId: node.id,
+      spanId: `spawn:${node.id}`,
+      parentSpanId: `root:${node.id}`,
+      name: 'tool.spawn_agent',
+      kind: 'TOOL',
+      startTime: new Date(node.mtimeMs ?? 0).toISOString(),
+      service: 'synthetic',
+      extra: {
+        'traces.codex.agent_operation': 'spawn_agent',
+        'traces.codex.agent_session_ids': JSON.stringify(node.spawned),
       },
     }))
   }
@@ -228,6 +244,52 @@ describe('session workflows', () => {
     expect(source.locate).not.toHaveBeenCalled()
   })
 
+  it('forwards cancellation into an active parser and returns before its delay', async () => {
+    const controller = new AbortController()
+    const root = { id: 'root' }
+    let parserStopped = false
+    const source = adapter([root])
+    source.parse = async (session, options) => {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 500)
+        const stop = (): void => {
+          clearTimeout(timer)
+          parserStopped = true
+          reject(options?.signal?.reason)
+        }
+        options?.signal?.addEventListener('abort', stop, { once: true })
+      })
+      return spans(root)
+    }
+    const startedAt = performance.now()
+    setTimeout(() => controller.abort(new Error('stop')), 20)
+
+    await expect(collectSessionWorkflow(source, [ref(root)], { signal: controller.signal }))
+      .rejects.toThrow('stop')
+
+    expect(performance.now() - startedAt).toBeLessThan(150)
+    expect(parserStopped).toBe(true)
+  })
+
+  it('returns promptly when a custom parser ignores cancellation', async () => {
+    const controller = new AbortController()
+    const root = { id: 'root' }
+    let receivedSignal: AbortSignal | undefined
+    const source = adapter([root])
+    source.parse = async (_session, options) => {
+      receivedSignal = options?.signal
+      return new Promise<OtlpSpan[]>(() => {})
+    }
+    const startedAt = performance.now()
+    setTimeout(() => controller.abort(new Error('stop')), 20)
+
+    await expect(collectSessionWorkflow(source, [ref(root)], { signal: controller.signal }))
+      .rejects.toThrow('stop')
+
+    expect(performance.now() - startedAt).toBeLessThan(150)
+    expect(receivedSignal).toBe(controller.signal)
+  })
+
   it('resolves a latest child to the exact parent task by stable child ID', async () => {
     const nodes: Node[] = [
       { id: 'root', children: ['child'] },
@@ -308,6 +370,74 @@ describe('session workflows', () => {
       { id: 'root', scope: 'latest' },
       { id: 'existing-child', scope: 'latest' },
       { id: 'new-child', scope: 'all' },
+    ])
+  })
+
+  it('keeps the full history of a child spawned and then steered in the selected task', async () => {
+    const nodes: Node[] = [
+      { id: 'root', children: ['child'], spawned: ['child'], resumed: ['child'] },
+      { id: 'child', parent: 'root' },
+    ]
+    const scopes: Array<{ id: string; scope: string | undefined }> = []
+    const source = adapter(nodes)
+    const parse = source.parse.bind(source)
+    source.parse = async (session, options) => {
+      scopes.push({ id: session.sessionId, scope: options?.taskScope })
+      const result = await parse(session, options)
+      if (session.sessionId !== 'child') return result
+      for (const [index, content] of ['INITIAL', 'FOLLOWUP'].entries()) {
+        result.push(span({
+          traceId: 'child',
+          spanId: `prompt:${index}`,
+          parentSpanId: 'root:child',
+          name: 'user.prompt',
+          kind: 'CHAIN',
+          startTime: new Date(index).toISOString(),
+          service: 'synthetic',
+          extra: { content },
+        }))
+      }
+      return result
+    }
+
+    const workflow = await collectSessionWorkflow(source, [ref(nodes[0]!)], { taskScope: 'latest' })
+
+    expect(workflow.complete).toBe(true)
+    expect(scopes).toEqual([
+      { id: 'root', scope: 'latest' },
+      { id: 'child', scope: 'all' },
+    ])
+    expect(workflow.sessions[0]?.relationship).toMatchObject({
+      spawnedChildSessionIds: ['child'],
+      resumedChildSessionIds: [],
+    })
+    expect(
+      workflow.sessions
+        .find((session) => session.relationship.sessionId === 'child')
+        ?.spans.filter((item) => item.name === 'user.prompt')
+        .map((item) => item.attributes.content),
+    ).toEqual(['INITIAL', 'FOLLOWUP'])
+  })
+
+  it('keeps an explicit all-history child seed when its parent infers latest', async () => {
+    const nodes: Node[] = [
+      { id: 'root', children: ['child'], resumed: ['child'] },
+      { id: 'child', parent: 'root' },
+    ]
+    const scopes: Array<{ id: string; scope: string | undefined }> = []
+    const source = adapter(nodes)
+    const parse = source.parse.bind(source)
+    source.parse = async (session, options) => {
+      scopes.push({ id: session.sessionId, scope: options?.taskScope })
+      return parse(session, options)
+    }
+
+    const workflow = await collectSessionWorkflow(source, nodes.map(ref), { taskScope: 'all' })
+
+    expect(workflow.complete).toBe(true)
+    expect(scopes).toEqual([
+      { id: 'root', scope: 'all' },
+      { id: 'child', scope: 'all' },
     ])
   })
 })

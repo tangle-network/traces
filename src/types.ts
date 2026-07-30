@@ -22,6 +22,8 @@ export interface ParseOptions {
   taskScope?: 'all' | 'latest' | 'turn'
   /** Stable turn identifier required when taskScope is `turn`. */
   taskTurnId?: string
+  /** Stop active session reads and parsing. */
+  signal?: AbortSignal
 }
 
 export type ParentTaskResolution =
@@ -85,6 +87,6 @@ export interface HarnessTraceAdapter {
   resolveParentTask?(
     ref: SessionRef,
     childSessionId: string,
-    options?: Pick<ParseOptions, 'corruptionMode'>,
+    options?: Pick<ParseOptions, 'corruptionMode' | 'signal'>,
   ): Promise<ParentTaskResolution>
 }

@@ -9,6 +9,8 @@ export interface SessionRelationship {
   readonly role: SessionRole
   readonly parentSessionId?: string
   readonly childSessionIds: readonly string[]
+  /** Child sessions created in this task. Their full history belongs to the task. */
+  readonly spawnedChildSessionIds: readonly string[]
   /** Existing child sessions resumed or steered in this task. */
   readonly resumedChildSessionIds: readonly string[]
   readonly depth?: number
@@ -85,6 +87,7 @@ export function describeSessionRelationship(
 ): SessionRelationship {
   const root = sessionRoot(ref, spans)
   const childSessionIds = new Set<string>()
+  const spawnedChildSessionIds = new Set<string>()
   const resumedChildSessionIds = new Set<string>()
   for (const span of spans) {
     const direct = parseSessionIds(span.attributes['traces.child_session_ids'], 'traces.child_session_ids')
@@ -94,14 +97,15 @@ export function describeSessionRelationship(
       span.attributes['traces.codex.agent_session_ids'],
       'traces.codex.agent_session_ids',
     )
-    if (
-      ['spawn_agent', 'send_input', 'send_message', 'followup_task'].includes(String(operation))
-      && direct.length === 0
-    ) {
+    const operationName = String(operation)
+    if (['spawn_agent', 'send_input', 'send_message', 'followup_task'].includes(operationName)) {
       for (const id of agentSessionIds) childSessionIds.add(id)
     }
-    if (['send_input', 'send_message', 'followup_task'].includes(String(operation))) {
-      for (const id of agentSessionIds) resumedChildSessionIds.add(id)
+    if (operationName === 'spawn_agent') {
+      for (const id of [...direct, ...agentSessionIds]) spawnedChildSessionIds.add(id)
+    }
+    if (['send_input', 'send_message', 'followup_task'].includes(operationName)) {
+      for (const id of [...direct, ...agentSessionIds]) resumedChildSessionIds.add(id)
     }
     const lifecycleChild = stringAttribute(span, 'traces.codex.subagent_thread_id')
     if (lifecycleChild) childSessionIds.add(lifecycleChild)
@@ -126,7 +130,10 @@ export function describeSessionRelationship(
     role: role === 'operator' || role === 'child' ? role : 'unknown',
     ...(parentSessionId ? { parentSessionId } : {}),
     childSessionIds: [...childSessionIds].sort(),
-    resumedChildSessionIds: [...resumedChildSessionIds].sort(),
+    spawnedChildSessionIds: [...spawnedChildSessionIds].sort(),
+    resumedChildSessionIds: [...resumedChildSessionIds]
+      .filter((sessionId) => !spawnedChildSessionIds.has(sessionId))
+      .sort(),
     ...(depth !== undefined ? { depth } : {}),
     ...(agentNickname ? { agentNickname } : {}),
     ...(agentRole ? { agentRole } : {}),

@@ -61,7 +61,6 @@ export interface SessionWorkflow extends SessionWorkflowSummary {
 export interface CollectSessionWorkflowOptions extends ParseOptions {
   /** Maximum number of source files parsed for one workflow selection. */
   readonly maxSessions?: number
-  readonly signal?: AbortSignal
 }
 
 interface SessionReference {
@@ -73,8 +72,9 @@ interface SessionReference {
 
 interface QueuedSession {
   readonly ref: SessionRef
-  readonly taskScope: 'all' | 'latest' | 'turn'
-  readonly taskTurnId?: string
+  taskScope: 'all' | 'latest' | 'turn'
+  taskTurnId?: string
+  explicitExactTurn: boolean
 }
 
 function refPathKey(ref: SessionRef): string {
@@ -94,7 +94,11 @@ function referencesFor(relationship: SessionRelationship): SessionReference[] {
       sessionId,
       referencedBySessionId: relationship.sessionId,
       relation: 'child' as const,
-      taskScope: relationship.resumedChildSessionIds.includes(sessionId) ? 'latest' as const : 'all' as const,
+      taskScope: relationship.spawnedChildSessionIds.includes(sessionId)
+        ? 'all' as const
+        : relationship.resumedChildSessionIds.includes(sessionId)
+          ? 'latest' as const
+          : 'all' as const,
     })),
   ]
 }
@@ -254,24 +258,43 @@ export async function collectSessionWorkflow(
     ref: SessionRef,
     taskScope: QueuedSession['taskScope'],
     taskTurnId?: string,
+    explicit = false,
   ): void => {
     const key = refPathKey(ref)
     const existing = queuedByPath.get(key)
     if (existing) {
-      if (existing.taskScope !== taskScope || existing.taskTurnId !== taskTurnId) {
+      const conflictingExplicitTurns =
+        existing.taskScope === 'turn'
+        && taskScope === 'turn'
+        && existing.taskTurnId !== taskTurnId
+        && existing.explicitExactTurn
+        && explicit
+      if (conflictingExplicitTurns) {
         throw new SessionWorkflowError(
           'SESSION_WORKFLOW_TASK_CONFLICT',
-          `session ${ref.sessionId} was selected with conflicting task scopes`,
+          `session ${ref.sessionId} was explicitly selected at two different exact turns`,
         )
       }
+      if (existing.taskScope === taskScope && existing.taskTurnId === taskTurnId) {
+        if (taskScope === 'turn' && explicit) existing.explicitExactTurn = true
+        return
+      }
+      existing.taskScope = 'all'
+      delete existing.taskTurnId
+      existing.explicitExactTurn = false
       return
     }
-    const queued = { ref, taskScope, ...(taskTurnId ? { taskTurnId } : {}) }
+    const queued = {
+      ref,
+      taskScope,
+      ...(taskTurnId ? { taskTurnId } : {}),
+      explicitExactTurn: explicit && taskScope === 'turn',
+    }
     queuedByPath.set(key, queued)
     queue.push(queued)
   }
   const seedTaskScope = options.taskScope ?? 'all'
-  for (const seed of seeds) enqueue(seed, seedTaskScope, options.taskTurnId)
+  for (const seed of seeds) enqueue(seed, seedTaskScope, options.taskTurnId, true)
 
   const sessions: SessionWorkflowSession[] = []
   const parsedById = new Map<string, SessionWorkflowSession>()
@@ -295,6 +318,7 @@ export async function collectSessionWorkflow(
       corruptionMode: options.corruptionMode,
       taskScope,
       taskTurnId,
+      signal: options.signal,
     })
     options.signal?.throwIfAborted()
     const relationship = describeSessionRelationship(ref, spans)
@@ -342,6 +366,7 @@ export async function collectSessionWorkflow(
       const resolution = adapter.resolveParentTask
         ? await adapter.resolveParentTask(candidates[0]!, relationship.sessionId, {
             corruptionMode: options.corruptionMode,
+            signal: options.signal,
           })
         : { kind: 'unavailable' as const, reason: 'unsupported' as const }
       options.signal?.throwIfAborted()
