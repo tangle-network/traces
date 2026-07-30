@@ -21,6 +21,7 @@ import {
 } from './agentic-routing.js'
 import { analyzeSpans } from './analyze.js'
 import type { ExternalAnalysisResult, ExternalAnalyzer } from './external.js'
+import { spanEvidenceUri } from './external-analysis-validation.js'
 import { runExternalAnalyzers } from './external.js'
 import type { TraceLiveAnalyst } from './live.js'
 import type { OtlpSpan } from './otlp.js'
@@ -251,7 +252,83 @@ function traceCoverageFinding(
   })
 }
 
-function deterministicFindings(pipelines: PipelineReport, reactions: ReactionReport, adoption: AdoptionReport): AnalystFinding[] {
+function sortedToolErrorSpans(spans: readonly OtlpSpan[]): OtlpSpan[] {
+  return spans
+    .filter((item) =>
+      item.attributes['openinference.span.kind'] === 'TOOL' &&
+      item.status.code === 'ERROR')
+    .sort((left, right) =>
+      left.start_time.localeCompare(right.start_time) ||
+      left.trace_id.localeCompare(right.trace_id) ||
+      left.span_id.localeCompare(right.span_id))
+}
+
+function toolErrorEvidence(item: OtlpSpan): AnalystFinding['evidence_refs'][number] {
+  return evidence(
+    'span',
+    spanEvidenceUri(item.trace_id, item.span_id),
+    `${String(item.attributes['tool.name'] ?? item.name)}: ${item.status.message ?? 'tool span ended with ERROR'}`.slice(0, 240),
+  )
+}
+
+function toolErrorFinding(
+  pipelines: PipelineReport,
+  spans: readonly OtlpSpan[],
+): AnalystFinding | undefined {
+  const terminalFailureTraceIds = new Set(
+    spans
+      .filter((item) => item.parent_span_id === null && item.status.code === 'ERROR')
+      .map((item) => item.trace_id),
+  )
+  const nonTerminalRuns = pipelines.toolUse.filter(
+    (run) => !terminalFailureTraceIds.has(run.runId),
+  )
+  const totalCalls = nonTerminalRuns.reduce((total, run) => total + run.totalCalls, 0)
+  const errorCount = nonTerminalRuns.reduce(
+    (total, run) => total + Object.values(run.byTool)
+      .reduce((runTotal, tool) => runTotal + tool.errors, 0),
+    0,
+  )
+  if (errorCount === 0) return undefined
+
+  const errorSpans = sortedToolErrorSpans(spans)
+    .filter((item) => !terminalFailureTraceIds.has(item.trace_id))
+  if (errorSpans.length === 0) return undefined
+
+  const affectedRuns = new Set(errorSpans.map((item) => item.trace_id)).size
+  const errorRate = errorCount / Math.max(1, totalCalls)
+  const citedSpans = errorSpans.slice(0, 3)
+
+  return makeFinding({
+    analyst_id: 'traces-deterministic',
+    area: 'tool-use',
+    subject: 'non-terminal-tool-errors',
+    claim: `${errorCount}/${totalCalls} tool call(s) ended in errors across ${affectedRuns} run(s) without a terminal failure`,
+    severity: errorRate >= 0.25 ? 'high' : 'medium',
+    rationale: 'Recovered tool errors still consume time and tokens, and repeated failures can hide brittle retry or recovery behavior.',
+    evidence_refs: citedSpans.map(toolErrorEvidence),
+    recommended_action: 'Inspect the most frequent failing tool and its cited inputs, then change the retry or recovery policy so a failure produces new state before another call.',
+    validation_plan: 'Rerun comparable sessions and require non-terminal tool errors to decrease without increasing terminal failures.',
+    confidence: 1,
+    metadata: {
+      source: 'agent-eval.computeToolUseMetrics',
+      errorCount,
+      totalCalls,
+      errorRate,
+      affectedRuns,
+      citedErrorSpans: citedSpans.length,
+      omittedErrorSpans: Math.max(0, errorSpans.length - citedSpans.length),
+    },
+    id_basis: 'non-terminal-tool-errors',
+  })
+}
+
+function deterministicFindings(
+  pipelines: PipelineReport,
+  reactions: ReactionReport,
+  adoption: AdoptionReport,
+  spans: readonly OtlpSpan[],
+): AnalystFinding[] {
   const findings: AnalystFinding[] = []
   const coverage = traceCoverageFinding(pipelines, adoption)
   if (coverage) findings.push(coverage)
@@ -275,10 +352,20 @@ function deterministicFindings(pipelines: PipelineReport, reactions: ReactionRep
     }))
   }
 
+  const toolErrors = toolErrorFinding(pipelines, spans)
+  if (toolErrors) findings.push(toolErrors)
+
   const failedRuns = pipelines.failureClusters.totalFailures
   if (failedRuns > 0) {
     const top = pipelines.failureClusters.clusters[0]
     const failureRate = failedRuns / Math.max(1, pipelines.failureClusters.totalRuns)
+    const exampleSpans = top?.exampleRunId
+      ? spans.filter((item) => item.trace_id === top.exampleRunId)
+      : []
+    const exampleRoot = exampleSpans.find((item) =>
+      item.parent_span_id === null && item.status.code === 'ERROR')
+    const exampleToolErrors = sortedToolErrorSpans(exampleSpans)
+    const citedToolErrors = exampleToolErrors.slice(0, 3)
     findings.push(makeFinding({
       analyst_id: 'traces-deterministic',
       area: 'reliability',
@@ -286,6 +373,14 @@ function deterministicFindings(pipelines: PipelineReport, reactions: ReactionRep
       severity: failureRate >= 0.1 ? 'high' : 'medium',
       rationale: 'Execution errors consume time and tokens, and sparse error telemetry can hide whether the agent recovered or repeated the same failure.',
       evidence_refs: [
+        ...(exampleRoot
+          ? [evidence(
+              'span',
+              spanEvidenceUri(exampleRoot.trace_id, exampleRoot.span_id),
+              `${exampleRoot.name}: ${exampleRoot.status.message ?? 'root span ended with ERROR'}`.slice(0, 240),
+            )]
+          : []),
+        ...citedToolErrors.map(toolErrorEvidence),
         evidence(
           'metric',
           `pipelines.failure_cluster.${top?.failureClass ?? 'unknown'}`,
@@ -293,9 +388,6 @@ function deterministicFindings(pipelines: PipelineReport, reactions: ReactionRep
             ? `${top.runCount} run(s); example: ${top.exampleError ?? 'error details not captured'}`
             : `${failedRuns} failed run(s)`,
         ),
-        ...(top?.exampleRunId
-          ? [evidence('span', `trace:${top.exampleRunId}`, top.exampleError)]
-          : []),
       ],
       recommended_action: top?.failureClass === 'unknown'
         ? 'Instrument the failing operation name and arguments, then start with the highest-frequency example error and verify the agent changes state before retrying.'
@@ -308,6 +400,8 @@ function deterministicFindings(pipelines: PipelineReport, reactions: ReactionRep
         totalRuns: pipelines.failureClusters.totalRuns,
         topFailureClass: top?.failureClass,
         exampleRunId: top?.exampleRunId,
+        citedToolErrorSpans: citedToolErrors.length,
+        omittedToolErrorSpans: Math.max(0, exampleToolErrors.length - citedToolErrors.length),
       },
     }))
   }
@@ -513,7 +607,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     analyzeAdoption(opts.spans, { cwds: opts.cwds }),
   ])
   opts.signal?.throwIfAborted()
-  const deterministic = deterministicFindings(pipelines, reactions, adoption)
+  const deterministic = deterministicFindings(pipelines, reactions, adoption, opts.spans)
   // A supplied registry owns its own composition. Only describe a route when
   // this package builds the maintained agent-eval suite itself.
   const agenticRoute = opts.ai && !opts.agenticRegistry

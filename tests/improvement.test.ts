@@ -68,6 +68,45 @@ function fixtureSpans(): OtlpSpan[] {
   return spans
 }
 
+interface ToolCallFixture {
+  id: string
+  tool: string
+  message?: string
+}
+
+function toolRunSpans(
+  traceId: string,
+  calls: readonly ToolCallFixture[],
+  terminalError?: string,
+): OtlpSpan[] {
+  return [
+    span({
+      traceId,
+      spanId: 'root',
+      name: 'session',
+      kind: 'AGENT',
+      startTime: '2026-01-01T00:00:00.000Z',
+      status: terminalError ? 'ERROR' : 'OK',
+      statusMessage: terminalError,
+      service: 'synthetic',
+    }),
+    ...calls.map((call, index) =>
+      span({
+        traceId,
+        spanId: call.id,
+        parentSpanId: 'root',
+        name: `tool.${call.tool}`,
+        kind: 'TOOL',
+        startTime: `2026-01-01T00:00:0${index + 1}.000Z`,
+        status: call.message ? 'ERROR' : 'OK',
+        statusMessage: call.message,
+        service: 'synthetic',
+        tool: call.tool,
+        extra: { 'input.value': JSON.stringify({ attempt: index + 1 }) },
+      })),
+  ]
+}
+
 function jsonAnalyzer(): ExternalAnalyzer {
   return {
     name: 'json-engine',
@@ -119,6 +158,121 @@ describe('runTraceInvestigation', () => {
     expect(result.report).toContain('**Check:**')
     expect(result.report).toContain('external engine found')
     expect(result.report).toContain('Stuck loops')
+  })
+
+  it('reports varied non-terminal tool errors once with exact source spans', async () => {
+    const errorSpans = [
+      { id: 'failed-install', tool: 'exec', message: 'package install exited 1' },
+      { id: 'failed-read', tool: 'read', message: 'file disappeared before read' },
+      { id: 'failed-fetch', tool: 'fetch', message: 'upstream returned 503' },
+    ]
+    const spans = toolRunSpans('recovered-errors', errorSpans)
+
+    const first = await runTraceInvestigation({
+      spans,
+      harness: 'synthetic',
+      generatedAt: '2026-01-01T00:00:05.000Z',
+    })
+    const second = await runTraceInvestigation({
+      spans,
+      harness: 'synthetic',
+      generatedAt: '2026-01-02T00:00:05.000Z',
+    })
+    const findings = first.findings.filter(
+      (finding) => finding.subject === 'non-terminal-tool-errors',
+    )
+
+    expect(first.pipelines.failureClusters.totalFailures).toBe(0)
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({
+      area: 'tool-use',
+      severity: 'high',
+      claim: '3/3 tool call(s) ended in errors across 1 run(s) without a terminal failure',
+      metadata: {
+        errorCount: 3,
+        totalCalls: 3,
+        affectedRuns: 1,
+        citedErrorSpans: 3,
+        omittedErrorSpans: 0,
+      },
+    })
+    expect(findings[0]!.evidence_refs).toEqual(errorSpans.map((item) => ({
+      kind: 'span',
+      uri: `trace://recovered-errors/span/${item.id}`,
+      excerpt: `${item.tool}: ${item.message}`,
+    })))
+    expect(second.findings.find(
+      (finding) => finding.subject === 'non-terminal-tool-errors',
+    )?.finding_id).toBe(findings[0]!.finding_id)
+  })
+
+  it('does not emit a tool-error finding for clean tool calls', async () => {
+    const result = await runTraceInvestigation({
+      spans: toolRunSpans('clean-tools', [{ id: 'successful-tool', tool: 'exec' }]),
+      harness: 'synthetic',
+      generatedAt: '2026-01-01T00:00:02.000Z',
+    })
+
+    expect(result.findings.filter(
+      (finding) => finding.subject === 'non-terminal-tool-errors',
+    )).toHaveLength(0)
+  })
+
+  it('keeps exact terminal error evidence without a separate recovered-error finding', async () => {
+    const spans = toolRunSpans(
+      'terminal/failure',
+      [
+        { id: 'failed tool 1', tool: 'exec', message: 'command exited 1' },
+        { id: 'failed tool 2', tool: 'read', message: 'input disappeared' },
+        { id: 'failed tool 3', tool: 'fetch', message: 'upstream returned 503' },
+        { id: 'failed tool 4', tool: 'write', message: 'disk became read-only' },
+      ],
+      'task failed',
+    )
+    const result = await runTraceInvestigation({
+      spans,
+      harness: 'synthetic',
+      generatedAt: '2026-01-01T00:00:06.000Z',
+    })
+
+    expect(result.pipelines.failureClusters.totalFailures).toBe(1)
+    const terminalFindings = result.findings.filter(
+      (finding) => finding.claim.includes('run(s) had execution errors'),
+    )
+    expect(terminalFindings).toHaveLength(1)
+    expect(terminalFindings[0]!.evidence_refs.filter(
+      (reference) => reference.kind === 'span',
+    )).toEqual([
+      {
+        kind: 'span',
+        uri: 'trace://terminal%2Ffailure/span/root',
+        excerpt: 'session: task failed',
+      },
+      {
+        kind: 'span',
+        uri: 'trace://terminal%2Ffailure/span/failed%20tool%201',
+        excerpt: 'exec: command exited 1',
+      },
+      {
+        kind: 'span',
+        uri: 'trace://terminal%2Ffailure/span/failed%20tool%202',
+        excerpt: 'read: input disappeared',
+      },
+      {
+        kind: 'span',
+        uri: 'trace://terminal%2Ffailure/span/failed%20tool%203',
+        excerpt: 'fetch: upstream returned 503',
+      },
+    ])
+    expect(terminalFindings[0]).toMatchObject({
+      metadata: {
+        citedToolErrorSpans: 3,
+        omittedToolErrorSpans: 1,
+      },
+    })
+    expect(result.findings.filter(
+      (finding) => finding.subject === 'non-terminal-tool-errors',
+    )).toHaveLength(0)
   })
 
   it('does not recommend skill adoption when Codex has no dedicated Skill event', async () => {
