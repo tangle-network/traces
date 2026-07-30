@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Trace Analyst"
+  short_description: "Create and test a custom trace analyst"
+  default_prompt: "Use $build-trace-analyst to create, run, and evaluate an analyst for this trace question."
