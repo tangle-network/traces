@@ -49,7 +49,7 @@ Use AgentRx or CodeTraceBench labels when they match the finding.
 Compare the candidate with a no-findings baseline and relevant maintained or external analysts on identical cases and limits.
 
 Use at least 20 independent cases before comparative statistics.
-Retain every case row and report recall, precision, F1, first-bad-step accuracy, citation coverage and validity, clean-case false positives, repeat agreement, failures, latency, calls, all token fields, and known or missing cost.
+Retain every case row and report exact-step recall, precision, F1, root-step accuracy when labeled, citation coverage and validity, clean-case false positives, repeat agreement, failures, latency, calls, all token fields, and known or missing cost.
 
 Do not claim quality from fixtures alone.
 Require a fresh task comparison before using findings to change an agent or knowledge base.
