@@ -32,10 +32,11 @@ export const CODING_REDACTION_RULES: RedactionRule[] = [
     id: 'private-key',
     pattern: /-----BEGIN(?:[A-Z ]+)?PRIVATE KEY-----[\s\S]*?-----END(?:[A-Z ]+)?PRIVATE KEY-----/g,
   },
+  // Match the whole identifier because underscores prevent a word boundary before a secret suffix.
   {
     id: 'assigned-secret',
     pattern:
-      /\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)\b\s*[:=]\s*["']?[A-Za-z0-9._\-]{12,}["']?/gi,
+      /(?<![A-Za-z0-9_-])(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)(?![A-Za-z0-9_-])\s*[:=]\s*(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&)\]}"'\r\n]+)/gi,
   },
   // Credentials embedded in URLs — common when a prompt pastes a curl/clone line.
   { id: 'url-userinfo', pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi },

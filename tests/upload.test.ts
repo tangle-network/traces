@@ -70,6 +70,53 @@ describe('redactSpans', () => {
     expect(report.redactionCount).toBe(0)
   })
 
+  it('scrubs values assigned to identifiers ending in secret suffixes', () => {
+    const suffixes = [
+      'API_KEY',
+      'APIKEY',
+      'SECRET',
+      'TOKEN',
+      'PASSWORD',
+      'PASSWD',
+      'ACCESS_TOKEN',
+      'CLIENT_SECRET',
+    ]
+    const prefixes = ['', 'VENDOR_', 'MULTI_VENDOR_', '_', 'VENDOR']
+    const cases = suffixes.flatMap((suffix) => prefixes.map((prefix) => `${prefix}${suffix}`))
+    const fakeValues = cases.map((_, index) =>
+      index === 18 ? 'fake' : `synthetic-${index}+value/==`,
+    )
+    const source = cases
+      .map((identifier, index) => {
+        const fakeValue = fakeValues[index]!
+        if (index % 3 === 0) return `${identifier}=${fakeValue}`
+        if (index % 3 === 1) return `export ${identifier} = "${fakeValue}"`
+        return `${identifier}: '${fakeValue}'`
+      })
+      .join('\n')
+
+    const { spans, report } = redactSpans([toolSpan(source)])
+    const content = String(spans[0]!.attributes.content)
+    for (const fakeValue of fakeValues) expect(content).not.toContain(fakeValue)
+    expect(report.byRule['assigned-secret']).toBe(cases.length)
+  })
+
+  it('preserves assignments whose identifiers do not end in secret suffixes', () => {
+    const source = [
+      'RETRY_TOKEN_COUNT=123456789012',
+      'API_KEY_NAME=primary',
+      'PASSWORD_POLICY=strict',
+      'CLIENT_SECRET_FILE=/tmp/synthetic',
+      'SECRETARY_MODE=enabled',
+      'TOKENIZER_MODEL=local',
+      'MONKEY=synthetic-value',
+    ].join('\n')
+
+    const { spans, report } = redactSpans([toolSpan(source)])
+    expect(spans[0]!.attributes.content).toBe(source)
+    expect(report.redactionCount).toBe(0)
+  })
+
   it('scrubs credentials embedded in URLs (userinfo + secret query params)', () => {
     const { spans } = redactSpans([
       toolSpan('git clone https://bob:p4ssw0rd-secret@github.com/x/y.git; curl "https://api.x.com/v1?api_key=ABCDEF123456&page=2"'),
