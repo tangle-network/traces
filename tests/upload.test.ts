@@ -83,22 +83,38 @@ describe('redactSpans', () => {
     ]
     const prefixes = ['', 'VENDOR_', 'MULTI_VENDOR_', '_', 'VENDOR']
     const cases = suffixes.flatMap((suffix) => prefixes.map((prefix) => `${prefix}${suffix}`))
-    const fakeValues = cases.map((_, index) =>
-      index === 18 ? 'fake' : `synthetic-${index}+value/==`,
-    )
+    const protectedFragments: string[] = []
     const source = cases
       .map((identifier, index) => {
-        const fakeValue = fakeValues[index]!
-        if (index % 3 === 0) return `${identifier}=${fakeValue}`
-        if (index % 3 === 1) return `export ${identifier} = "${fakeValue}"`
-        return `${identifier}: '${fakeValue}'`
+        const first = index === 18 ? 'fake' : `synthetic-${index}-alpha`
+        const second = `synthetic-${index}-bravo`
+        protectedFragments.push(first)
+        if (index % 8 === 0) return `${identifier}=${first}`
+        protectedFragments.push(second)
+        if (index % 8 === 1) return `export ${identifier}="${first} ${second}"`
+        if (index % 8 === 2) return `${identifier}='${first} ${second}'`
+        if (index % 8 === 3) return `${identifier}=$'${first} ${second}'`
+        if (index % 8 === 4) return `${identifier}=${first}"${second}"`
+        if (index % 8 === 5) return `${identifier}=${first}\\ ${second}`
+        if (index % 8 === 6) return `${identifier}=$(printf '${first} ${second}')`
+        return `${identifier}=$"${first} ${second}"`
       })
       .join('\n')
 
     const { spans, report } = redactSpans([toolSpan(source)])
     const content = String(spans[0]!.attributes.content)
-    for (const fakeValue of fakeValues) expect(content).not.toContain(fakeValue)
+    for (const fragment of protectedFragments) expect(content).not.toContain(fragment)
     expect(report.byRule['assigned-secret']).toBe(cases.length)
+  })
+
+  it('preserves the command after a shell environment assignment', () => {
+    const { spans, report } = redactSpans([
+      toolSpan('SERVICE_TOKEN=synthetic-assigned-value printf-safe-command'),
+    ])
+    const content = String(spans[0]!.attributes.content)
+    expect(content).not.toContain('synthetic-assigned-value')
+    expect(content).toContain('printf-safe-command')
+    expect(report.byRule['assigned-secret']).toBe(1)
   })
 
   it('preserves assignments whose identifiers do not end in secret suffixes', () => {
@@ -110,6 +126,8 @@ describe('redactSpans', () => {
       'SECRETARY_MODE=enabled',
       'TOKENIZER_MODEL=local',
       'MONKEY=synthetic-value',
+      'function parse(token: string) {}',
+      'Narrative token: synthetic-value',
     ].join('\n')
 
     const { spans, report } = redactSpans([toolSpan(source)])

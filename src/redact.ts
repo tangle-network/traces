@@ -36,7 +36,7 @@ export const CODING_REDACTION_RULES: RedactionRule[] = [
   {
     id: 'assigned-secret',
     pattern:
-      /(?<![A-Za-z0-9_-])(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)(?![A-Za-z0-9_-])\s*[:=]\s*(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&)\]}"'\r\n]+)/gi,
+      /(?<![A-Za-z0-9_-])(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)(?![A-Za-z0-9_-])\+?=(?:\$\((?:\\.|[^\\\r\n])*\)|\$\{(?:\\.|[^}\\\r\n])*\}|`(?:\\.|[^`\\\r\n])*`|\$?'(?:\\.|[^'\\\r\n])*'|\$?"(?:\\.|[^"\\\r\n])*"|\\[^\r\n]|[^\s;&|<>()"'`\\\r\n])+/gi,
   },
   // Credentials embedded in URLs — common when a prompt pastes a curl/clone line.
   { id: 'url-userinfo', pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi },
