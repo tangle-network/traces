@@ -13,6 +13,7 @@
 // ── Core span model + adapters (read / convert / extend) ──────────────────
 export * from './types.js' // HarnessTraceAdapter, SessionRef, LocateOptions
 export * from './otlp.js' // OtlpSpan, span(), serializeSpans(), writeOtlpFile()
+export * from './codetracebench.js'
 export * from './attributes.js' // ATTR keys, INGEST_SOURCE_CLI, DEFAULT_HARNESS
 export * from './time.js' // parseIsoToEpochMs(), parseSince()
 export { JsonSourceError, readJsonFile } from './json.js'
