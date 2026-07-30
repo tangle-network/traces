@@ -182,6 +182,96 @@ describe('runTraceInvestigation', () => {
     })).rejects.toBe(reason)
     expect(observedSignal).toBe(controller.signal)
   })
+
+  it('rejects external findings that cite spans outside the supplied traces', async () => {
+    const analyzer: ExternalAnalyzer = {
+      name: 'invented-evidence',
+      async analyze() {
+        return {
+          analyzer: 'invented-evidence',
+          kind: 'findings',
+          ok: true,
+          output: 'A span was cited.',
+          findings: [makeFinding({
+            analyst_id: 'external:invented-evidence',
+            area: 'verification',
+            severity: 'high',
+            claim: 'an external analyzer invented span evidence',
+            evidence_refs: [{
+              kind: 'span',
+              uri: 'trace://does-not-exist/span/never',
+            }],
+            confidence: 0.9,
+          })],
+        }
+      },
+    }
+
+    const result = await runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      externalAnalyzers: [analyzer],
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    expect(result.external).toEqual([
+      expect.objectContaining({
+        analyzer: 'invented-evidence',
+        kind: 'report',
+        ok: false,
+        output: '',
+        error: expect.stringContaining(
+          "unknown span evidence URI 'trace://does-not-exist/span/never'",
+        ),
+      }),
+    ])
+    expect(result.findings.some(
+      (finding) => finding.analyst_id === 'external:invented-evidence',
+    )).toBe(false)
+  })
+
+  it('accepts external findings that cite an exact supplied span', async () => {
+    const analyzer: ExternalAnalyzer = {
+      name: 'bound-evidence',
+      async analyze() {
+        return {
+          analyzer: 'bound-evidence',
+          kind: 'findings',
+          ok: true,
+          output: 'An existing span was cited.',
+          findings: [makeFinding({
+            analyst_id: 'external:bound-evidence',
+            area: 'verification',
+            severity: 'high',
+            claim: 'an external analyzer cited exact span evidence',
+            evidence_refs: [{
+              kind: 'span',
+              uri: 'trace://trace-improve/span/tool-0',
+            }],
+            confidence: 0.9,
+          })],
+        }
+      },
+    }
+
+    const result = await runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      externalAnalyzers: [analyzer],
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    expect(result.external).toEqual([
+      expect.objectContaining({
+        analyzer: 'bound-evidence',
+        kind: 'findings',
+        ok: true,
+      }),
+    ])
+    expect(result.findings.some(
+      (finding) => finding.analyst_id === 'external:bound-evidence',
+    )).toBe(true)
+  })
 })
 
 describe('buildTraceFindingPacket', () => {

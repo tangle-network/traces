@@ -28,15 +28,22 @@ function descendantFixture(onReady: string, sentinelDelayMs: number): Descendant
   const directory = mkdtempSync(join(tmpdir(), 'traces-process-tree-'))
   const startedPath = join(directory, 'descendant-started')
   const sentinelPath = join(directory, 'descendant-escaped')
-  const descendantScript = [
+  const leafScript = [
     `require('node:fs').writeFileSync(${JSON.stringify(startedPath)}, String(Date.now()))`,
     `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinelPath)}, 'escaped'), ${sentinelDelayMs})`,
+  ].join(';')
+  const descendantScript = [
+    `const { spawn } = require('node:child_process')`,
+    `const leaf = spawn(process.execPath, ['-e', ${JSON.stringify(leafScript)}], { stdio: 'ignore', detached: process.platform !== 'win32' })`,
+    `leaf.unref()`,
+    `setInterval(() => {}, 1000)`,
   ].join(';')
   const parentScript = [
     `const { existsSync, mkdirSync } = require('node:fs')`,
     `const { spawn } = require('node:child_process')`,
     `mkdirSync(${JSON.stringify(directory)}, { recursive: true })`,
-    `spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], { stdio: 'ignore' })`,
+    `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], { stdio: 'ignore', detached: process.platform !== 'win32' })`,
+    `descendant.unref()`,
     `const deadline = Date.now() + 5000`,
     `const ready = setInterval(() => {`,
     `  if (existsSync(${JSON.stringify(startedPath)})) { clearInterval(ready); ${onReady} } else if (Date.now() >= deadline) { process.exit(2) }`,
@@ -82,7 +89,7 @@ describe('runCommand', () => {
     await expect(runCommand('node', ['-e', 'setTimeout(()=>{}, 5000)'], { timeoutMs: 100 })).rejects.toThrow(/timed out/)
   })
 
-  it('terminates descendants before rejecting a timeout', async () => {
+  it('terminates the detached descendant tree before rejecting a timeout', async () => {
     const fixture = descendantFixture(`process.stdout.write('ready')`, 1_500)
     try {
       await expect(
@@ -94,7 +101,7 @@ describe('runCommand', () => {
     }
   })
 
-  it('terminates descendants before rejecting output overflow', async () => {
+  it('terminates the detached descendant tree before rejecting output overflow', async () => {
     const fixture = descendantFixture(`process.stdout.write('x'.repeat(4096))`, 500)
     try {
       await expect(
@@ -109,7 +116,7 @@ describe('runCommand', () => {
     }
   })
 
-  it('terminates descendants before rejecting cancellation', async () => {
+  it('terminates the detached descendant tree before rejecting cancellation', async () => {
     const fixture = descendantFixture(`process.stdout.write('ready')`, 500)
     const controller = new AbortController()
     try {
@@ -144,6 +151,45 @@ describe('commandAnalyzer', () => {
     const a = commandAnalyzer({ name: 'missing', command: 'definitely-not-a-real-binary-xyz', args: (p) => [p] })
     const res = await a.analyze('/tmp/x')
     expect(res.ok).toBe(false)
+  })
+
+  it('rejects parser attempts to spoof library-controlled result fields', async () => {
+    const analyzer = commandAnalyzer({
+      name: 'trusted',
+      command: process.execPath,
+      args: () => ['-e', 'process.stdout.write("observed")'],
+      parse: () => ({
+        kind: 'report',
+        analyzer: 'spoofed',
+        ok: false,
+        output: 'forged',
+      }) as never,
+    })
+
+    await expect(analyzer.analyze('/tmp/spans.otlp.jsonl')).resolves.toMatchObject({
+      analyzer: 'trusted',
+      kind: 'report',
+      ok: false,
+      output: 'observed',
+      error: expect.stringContaining("unexpected field 'analyzer'"),
+    })
+  })
+
+  it('rejects malformed parser findings without throwing', async () => {
+    const analyzer = commandAnalyzer({
+      name: 'trusted',
+      command: process.execPath,
+      args: () => ['-e', 'process.stdout.write("observed")'],
+      parse: () => ({ kind: 'findings', findings: { poison: true } }) as never,
+    })
+
+    await expect(analyzer.analyze('/tmp/spans.otlp.jsonl')).resolves.toMatchObject({
+      analyzer: 'trusted',
+      kind: 'report',
+      ok: false,
+      output: 'observed',
+      error: expect.stringContaining('findings must be an array'),
+    })
   })
 })
 
@@ -184,6 +230,56 @@ describe('runExternalAnalyzers', () => {
         output: 'kept',
       },
     ])
+  })
+
+  it('rejects malformed custom analyzer results and preserves the registered name', async () => {
+    const [result] = await runExternalAnalyzers('/tmp/spans.otlp.jsonl', [
+      {
+        name: 'trusted',
+        async analyze() {
+          return {
+            analyzer: 'spoofed',
+            kind: 'findings',
+            ok: true,
+            output: 'forged',
+            findings: { poison: true },
+          } as never
+        },
+      },
+    ])
+
+    expect(result).toMatchObject({
+      analyzer: 'trusted',
+      kind: 'report',
+      ok: false,
+      output: '',
+      error: expect.stringContaining("reported analyzer 'spoofed'"),
+    })
+  })
+
+  it('rejects malformed finding collections from custom analyzers', async () => {
+    const [result] = await runExternalAnalyzers('/tmp/spans.otlp.jsonl', [
+      {
+        name: 'trusted',
+        async analyze() {
+          return {
+            analyzer: 'trusted',
+            kind: 'findings',
+            ok: true,
+            output: 'observed',
+            findings: { poison: true },
+          } as never
+        },
+      },
+    ])
+
+    expect(result).toMatchObject({
+      analyzer: 'trusted',
+      kind: 'report',
+      ok: false,
+      output: '',
+      error: expect.stringContaining('findings must be an array'),
+    })
   })
 })
 

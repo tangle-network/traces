@@ -88,6 +88,15 @@ function fixture(options: { duplicateLlmContent?: boolean } = {}) {
   ]
 }
 
+function reidentifyFixture(traceId: string) {
+  return fixture().map((item) => ({
+    ...item,
+    trace_id: traceId,
+    span_id: `${traceId}-${item.span_id}`,
+    parent_span_id: item.parent_span_id ? `${traceId}-${item.parent_span_id}` : null,
+  }))
+}
+
 describe('writeHodoscopeInput', () => {
   it('preserves production Codex assistant actions and their source spans', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'hodoscope-input-test-'))
@@ -141,6 +150,26 @@ describe('writeHodoscopeInput', () => {
       'tool',
       'assistant-final',
     ])
+  })
+
+  it('rejects reuse of a non-empty explicit directory without mixing samples', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'hodoscope-reuse-test-'))
+    const otlp = join(directory, 'spans.jsonl')
+    const input = join(directory, 'input')
+    await writeFile(
+      otlp,
+      serializeSpans([...reidentifyFixture('trace-one'), ...reidentifyFixture('trace-two')]),
+      'utf8',
+    )
+    await writeHodoscopeInput(otlp, { directory: input })
+    const originalFiles = await readdir(join(input, 'samples'))
+    expect(originalFiles).toHaveLength(2)
+
+    await writeFile(otlp, serializeSpans(reidentifyFixture('trace-three')), 'utf8')
+    await expect(writeHodoscopeInput(otlp, { directory: input })).rejects.toThrow(
+      /explicit directory must be empty/,
+    )
+    expect(await readdir(join(input, 'samples'))).toEqual(originalFiles)
   })
 })
 

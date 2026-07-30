@@ -12,6 +12,12 @@
 
 import { spawn } from 'node:child_process'
 import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
+import {
+  decodeExternalAnalysisPayload,
+  decodeExternalAnalysisResult,
+  spanEvidenceUri,
+} from './external-analysis-validation.js'
+import type { OtlpSpan } from './otlp.js'
 
 export interface RunResult {
   stdout: string
@@ -58,18 +64,163 @@ function terminateWindowsProcessTree(child: SpawnedProcess): Promise<void> {
   })
 }
 
-function terminateProcessTree(child: SpawnedProcess): Promise<void> {
-  if (process.platform === 'win32') return terminateWindowsProcessTree(child)
-  if (child.pid !== undefined) {
+interface PosixProcess {
+  pid: number
+  parentPid: number
+  depth: number
+}
+
+function signalProcess(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+  }
+}
+
+function readPosixProcessTable(): Promise<Array<{ pid: number; parentPid: number }>> {
+  return new Promise((resolve, reject) => {
+    let child: SpawnedProcess
     try {
-      process.kill(-child.pid, 'SIGKILL')
-      return Promise.resolve()
-    } catch {
-      // Fall back when the platform cannot address the detached process group.
+      child = spawn('ps', ['-A', '-o', 'pid=', '-o', 'ppid='], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)))
+      return
+    }
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const finish = (
+      action: () => void,
+    ): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      action()
+    }
+    const timer = setTimeout(() => {
+      forceKill(child)
+      finish(() => reject(new Error('ps: timed out while enumerating analyzer descendants')))
+    }, 2_000)
+    child.stdout?.on('data', (data) => {
+      stdout += String(data)
+      if (stdout.length > 4 * 1024 * 1024) {
+        forceKill(child)
+        finish(() => reject(new Error('ps: process table exceeded 4 MiB')))
+      }
+    })
+    child.stderr?.on('data', (data) => {
+      stderr += String(data)
+      if (stderr.length > 1024 * 1024) {
+        forceKill(child)
+        finish(() => reject(new Error('ps: stderr exceeded 1 MiB')))
+      }
+    })
+    child.once('error', (error) => {
+      finish(() => reject(error))
+    })
+    child.once('close', (code) => {
+      finish(() => {
+        if (code !== 0) {
+          reject(new Error(stderr.trim() || `ps: exited ${code}`))
+          return
+        }
+        const rows = stdout
+          .split('\n')
+          .map((line) => line.trim().split(/\s+/))
+          .filter((parts) => parts.length >= 2)
+          .map(([pid, parentPid]) => ({
+            pid: Number(pid),
+            parentPid: Number(parentPid),
+          }))
+          .filter(({ pid, parentPid }) =>
+            Number.isSafeInteger(pid) && pid > 0 &&
+            Number.isSafeInteger(parentPid) && parentPid >= 0)
+        if (rows.length === 0) {
+          reject(new Error('ps: returned no process records'))
+          return
+        }
+        resolve(rows)
+      })
+    })
+  })
+}
+
+function descendantsOf(
+  rootPid: number,
+  table: readonly { pid: number; parentPid: number }[],
+): PosixProcess[] {
+  const children = new Map<number, number[]>()
+  for (const row of table) {
+    const siblings = children.get(row.parentPid) ?? []
+    siblings.push(row.pid)
+    children.set(row.parentPid, siblings)
+  }
+  const descendants: PosixProcess[] = []
+  const seen = new Set<number>([rootPid])
+  const visit = (parentPid: number, depth: number): void => {
+    for (const pid of children.get(parentPid) ?? []) {
+      if (seen.has(pid)) continue
+      seen.add(pid)
+      descendants.push({ pid, parentPid, depth })
+      visit(pid, depth + 1)
     }
   }
-  forceKill(child)
-  return Promise.resolve()
+  visit(rootPid, 1)
+  return descendants
+}
+
+async function terminatePosixProcessTree(child: SpawnedProcess): Promise<void> {
+  if (child.pid === undefined) {
+    forceKill(child)
+    return
+  }
+  const rootPid = child.pid
+  const descendants = new Map<number, PosixProcess>()
+  let failure: unknown
+  try {
+    signalProcess(-rootPid, 'SIGSTOP')
+    signalProcess(rootPid, 'SIGSTOP')
+    let previous = ''
+    for (let pass = 0; pass < 4; pass += 1) {
+      const current = descendantsOf(rootPid, await readPosixProcessTable())
+      for (const processEntry of current) {
+        descendants.set(processEntry.pid, processEntry)
+        signalProcess(processEntry.pid, 'SIGSTOP')
+      }
+      const signature = [...descendants.keys()].sort((left, right) => left - right).join(',')
+      if (signature === previous) break
+      previous = signature
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    for (const processEntry of [...descendants.values()].sort(
+      (left, right) => right.depth - left.depth,
+    )) {
+      try {
+        signalProcess(processEntry.pid, 'SIGKILL')
+      } catch (error) {
+        failure ??= error
+      }
+    }
+    try {
+      signalProcess(-rootPid, 'SIGKILL')
+    } catch (error) {
+      failure ??= error
+    }
+    forceKill(child)
+  }
+  if (failure) {
+    throw failure instanceof Error ? failure : new Error(String(failure))
+  }
+}
+
+function terminateProcessTree(child: SpawnedProcess): Promise<void> {
+  if (process.platform === 'win32') return terminateWindowsProcessTree(child)
+  return terminatePosixProcessTree(child)
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -135,10 +286,22 @@ export function runCommand(
         return
       }
       terminationComplete = false
-      void terminateProcessTree(child).finally(() => {
-        terminationComplete = true
-        settle()
-      })
+      void terminateProcessTree(child).then(
+        () => {
+          terminationComplete = true
+          settle()
+        },
+        (cause) => {
+          terminationError = new Error(
+            `${terminationError?.message ?? error.message}; process-tree termination failed: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+            { cause },
+          )
+          terminationComplete = true
+          settle()
+        },
+      )
     }
 
     timer = setTimeout(() => {
@@ -248,8 +411,40 @@ export function commandAnalyzer(spec: {
             error: res.stderr.trim() || `exit ${res.code}`,
           }
         }
-        const payload = spec.parse?.(res.stdout) ?? { kind: 'report' as const }
-        return { analyzer: spec.name, ok: true, output: res.stdout.trim(), ...payload }
+        const output = res.stdout.trim()
+        let payload: ExternalAnalysisPayload
+        try {
+          payload = spec.parse
+            ? decodeExternalAnalysisPayload(spec.parse(res.stdout))
+            : { kind: 'report' }
+        } catch (error) {
+          return {
+            analyzer: spec.name,
+            kind: 'report',
+            ok: false,
+            output,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        }
+        if (payload.kind === 'findings') {
+          return {
+            analyzer: spec.name,
+            kind: payload.kind,
+            ok: true,
+            output,
+            findings: payload.findings,
+          }
+        }
+        if (payload.kind === 'discovery') {
+          return {
+            analyzer: spec.name,
+            kind: payload.kind,
+            ok: true,
+            output,
+            candidates: payload.candidates,
+          }
+        }
+        return { analyzer: spec.name, kind: payload.kind, ok: true, output }
       } catch (e) {
         return {
           analyzer: spec.name,
@@ -320,11 +515,22 @@ export function haloAnalyzer(opts: HaloAnalyzerOptions = {}): ExternalAnalyzer {
 export function runExternalAnalyzers(
   otlpPath: string,
   analyzers: readonly ExternalAnalyzer[],
-  opts: { prompt?: string; signal?: AbortSignal } = {},
+  opts: {
+    prompt?: string
+    signal?: AbortSignal
+    spans?: readonly OtlpSpan[]
+  } = {},
 ): Promise<ExternalAnalysisResult[]> {
+  const knownSpanUris = opts.spans
+    ? new Set(opts.spans.map((span) => spanEvidenceUri(span.trace_id, span.span_id)))
+    : undefined
   return Promise.all(analyzers.map(async (analyzer) => {
     try {
-      return await analyzer.analyze(otlpPath, opts)
+      const raw = await analyzer.analyze(otlpPath, {
+        prompt: opts.prompt,
+        signal: opts.signal,
+      })
+      return decodeExternalAnalysisResult(raw, analyzer.name, knownSpanUris)
     } catch (error) {
       return {
         analyzer: analyzer.name,

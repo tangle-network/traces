@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { endianness, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type {
@@ -113,11 +113,17 @@ export async function writeHodoscopeInput(
   otlpPath: string,
   options: { directory?: string; groupByAttribute?: string } = {},
 ): Promise<HodoscopeInput> {
-  const directory = options.directory
-    ? resolve(options.directory)
-    : await mkdtemp(join(tmpdir(), 'traces-hodoscope-input-'))
+  const explicitDirectory = options.directory ? resolve(options.directory) : undefined
+  const directory = explicitDirectory
+    ?? await mkdtemp(join(tmpdir(), 'traces-hodoscope-input-'))
+  if (explicitDirectory) {
+    await mkdir(directory, { recursive: true })
+    if ((await readdir(directory)).length > 0) {
+      throw new Error(`Hodoscope explicit directory must be empty: ${directory}`)
+    }
+  }
   const samples = join(directory, 'samples')
-  await mkdir(samples, { recursive: true })
+  await mkdir(samples)
   const rows: OpenInferenceRow[] = []
   for await (const value of readJsonl<unknown>(otlpPath)) rows.push(parseOpenInferenceRow(value))
   if (rows.length === 0) throw new Error('Hodoscope input contains no spans')

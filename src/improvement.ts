@@ -536,6 +536,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     ? await runExternalAnalyzers(analysis.otlpPath, opts.externalAnalyzers, {
         prompt: opts.analyzerPrompt,
         signal: opts.signal,
+        spans: opts.spans,
       })
     : []
   opts.signal?.throwIfAborted()
