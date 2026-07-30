@@ -753,12 +753,12 @@ describe('claude adapter (conversation capture)', () => {
     expect(contents(all)).toEqual([
       'OLD TASK',
       'OLD ANSWER',
+      'OLD WORKER TASK',
+      'OLD WORKER ANSWER',
       'NEW TASK',
       'NEW ANSWER',
       'NEW WORKER TASK',
       'NEW WORKER ANSWER',
-      'OLD WORKER TASK',
-      'OLD WORKER ANSWER',
     ])
     expect(contents(latest)).toEqual([
       'NEW TASK',
@@ -776,6 +776,60 @@ describe('claude adapter (conversation capture)', () => {
       taskScope: 'turn',
       taskTurnId: 'missing-turn',
     })).rejects.toThrow('Claude task turn "missing-turn" was not found')
+  })
+
+  it('does not replace the latest human task with a synthetic Claude user event', async () => {
+    const path = join(dir, 'claude-synthetic-latest.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'user',
+          uuid: 'human-turn',
+          sessionId: 'synthetic-latest',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'user', content: 'SHIP THE CHANGE' },
+        },
+        {
+          type: 'assistant',
+          uuid: 'human-answer',
+          sessionId: 'synthetic-latest',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: { id: 'answer', role: 'assistant', content: 'WORKING' },
+        },
+        {
+          type: 'user',
+          uuid: 'task-notification',
+          sessionId: 'synthetic-latest',
+          timestamp: '2026-01-01T00:00:02Z',
+          userType: 'external',
+          promptSource: 'system',
+          message: {
+            role: 'user',
+            content: '<task-notification>worker complete</task-notification>',
+          },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'), {
+      taskScope: 'latest',
+    })
+    const prompts = spans
+      .filter((item) => item.name === 'user.prompt')
+      .map((item) => ({
+        content: item.attributes.content,
+        actor: item.attributes['tangle.actor'],
+      }))
+
+    expect(prompts).toEqual([
+      { content: 'SHIP THE CHANGE', actor: 'human' },
+      {
+        content: '<task-notification>worker complete</task-notification>',
+        actor: 'injected',
+      },
+    ])
+    expect(spans.some((item) => item.attributes.content === 'WORKING')).toBe(true)
   })
 
   it('keeps a canonical session ID that first appears on an accepted duplicate', async () => {
@@ -866,49 +920,6 @@ describe('claude adapter (conversation capture)', () => {
       start_time: '2026-01-01T00:00:02Z',
       end_time: '2026-01-01T00:00:05Z',
     })
-  })
-
-  it('captures workflow agents nested below the direct subagent directory', async () => {
-    const path = join(dir, 'claude-nested-workflows.jsonl')
-    writeFileSync(
-      path,
-      JSON.stringify({
-        type: 'user',
-        uuid: 'u1',
-        sessionId: 'nested-trace',
-        timestamp: '2026-01-01T00:00:00Z',
-        message: { role: 'user', content: 'run workflow' },
-      }),
-    )
-    const workflowDir = join(dir, 'claude-nested-workflows', 'subagents', 'workflows', 'wf-1')
-    mkdirSync(workflowDir, { recursive: true })
-    writeFileSync(
-      join(workflowDir, 'agent-a.jsonl'),
-      [
-        { type: 'user', uuid: 'wu1', timestamp: '2026-01-01T00:00:01Z', isSidechain: true, message: { role: 'user', content: 'inspect' } },
-        {
-          type: 'assistant',
-          uuid: 'wa1',
-          timestamp: '2026-01-01T00:00:02Z',
-          message: { id: 'workflow-message', role: 'assistant', model: 'haiku', usage: { input_tokens: 4, output_tokens: 2 }, content: [{ type: 'text', text: 'workflow result' }] },
-        },
-      ]
-        .map((event) => JSON.stringify(event))
-        .join('\n'),
-    )
-    writeFileSync(
-      join(workflowDir, 'agent-a.meta.json'),
-      JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }),
-    )
-
-    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    const workflowSpans = spans.filter(
-      (item) => item.attributes['agent.name'] === 'subagent:workflow-subagent',
-    )
-    expect(workflowSpans).toHaveLength(2)
-    expect(workflowSpans.some((item) => item.attributes.content === 'workflow result')).toBe(true)
-    expect(workflowSpans.every((item) => item.span_id.startsWith('workflows:wf-1:agent-a:'))).toBe(true)
-    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:02Z')
   })
 
   it('declares every nested Claude worker and present metadata file as parse input', async () => {

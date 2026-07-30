@@ -53,9 +53,19 @@ interface SessionSourceSnapshot {
   readonly files: readonly SessionSourceFile[]
 }
 
-async function fileSha256(path: string): Promise<string> {
+async function fileSha256(path: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted()
   const hash = createHash('sha256')
-  for await (const chunk of createReadStream(path)) hash.update(chunk)
+  try {
+    for await (const chunk of createReadStream(path, { signal })) {
+      signal?.throwIfAborted()
+      hash.update(chunk)
+    }
+  } catch (error) {
+    if (signal?.aborted) signal.throwIfAborted()
+    throw error
+  }
+  signal?.throwIfAborted()
   return hash.digest('hex')
 }
 
@@ -65,7 +75,9 @@ async function sourceSnapshot(
   signal?: AbortSignal,
 ): Promise<SessionSourceSnapshot> {
   signal?.throwIfAborted()
-  const paths = [...(adapter.sourcePaths ? await adapter.sourcePaths(ref) : [ref.path])].sort()
+  const paths = [
+    ...(adapter.sourcePaths ? await adapter.sourcePaths(ref, { signal }) : [ref.path]),
+  ].sort()
   signal?.throwIfAborted()
   if (paths.length === 0) throw new Error(`adapter returned no source files for ${ref.path}`)
   if (new Set(paths).size !== paths.length) {
@@ -74,7 +86,7 @@ async function sourceSnapshot(
   const files: SessionSourceFile[] = []
   for (const path of paths) {
     signal?.throwIfAborted()
-    files.push({ path, sha256: await fileSha256(path) })
+    files.push({ path, sha256: await fileSha256(path, signal) })
   }
   const sha256 = files.length === 1
     ? files[0]!.sha256
@@ -104,7 +116,7 @@ async function boundSessionRow(
   signal?: AbortSignal,
 ): Promise<SessionSelectionRow> {
   const before = await sourceSnapshot(adapter, ref, signal)
-  const spans = await parseSession(adapter, ref, { taskScope, taskTurnId })
+  const spans = await parseSession(adapter, ref, { taskScope, taskTurnId, signal })
   signal?.throwIfAborted()
   const after = await sourceSnapshot(adapter, ref, signal)
   if (JSON.stringify(before) !== JSON.stringify(after)) {
@@ -156,6 +168,7 @@ export async function collectSessionSelection(
               spans: await parseSession(adapter, ref, {
                 taskScope,
                 taskTurnId: options.taskTurnId,
+                signal: options.signal,
               }),
               taskScope,
               ...(options.taskTurnId ? { taskTurnId: options.taskTurnId } : {}),

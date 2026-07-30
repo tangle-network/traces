@@ -159,4 +159,57 @@ describe('session selection', () => {
       { bindSources: true },
     )).rejects.toThrow(`session source changed while parsing; refusing unbound evidence: ${root.path}`)
   })
+
+  it('forwards cancellation through selected-session reparsing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-selection-signal-'))
+    const root = ref('root', join(dir, 'root.jsonl'))
+    await writeFile(root.path, '{"session":"root"}\n', 'utf8')
+    const controller = new AbortController()
+    let receivedSignal: AbortSignal | undefined
+    const adapter: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return [root]
+      },
+      async parse(_selected, options) {
+        receivedSignal = options?.signal
+        return sessionSpans('root')
+      },
+    }
+
+    await collectSessionSelection(
+      [{ adapter, refs: [root] }],
+      { bindSources: true, signal: controller.signal },
+    )
+
+    expect(receivedSignal).toBe(controller.signal)
+  })
+
+  it('stops an active source hash when selection is cancelled', async () => {
+    const controller = new AbortController()
+    const root = ref('root', '/dev/zero')
+    let receivedSignal: AbortSignal | undefined
+    const adapter: HarnessTraceAdapter = {
+      harness: 'synthetic',
+      async locate() {
+        return [root]
+      },
+      async sourcePaths(_selected, options) {
+        receivedSignal = options?.signal
+        return ['/dev/zero']
+      },
+      async parse() {
+        return sessionSpans('root')
+      },
+    }
+    const stopped = new Error('stop source hash')
+    const selection = collectSessionSelection(
+      [{ adapter, refs: [root] }],
+      { bindSources: true, signal: controller.signal },
+    )
+    setTimeout(() => controller.abort(stopped), 10)
+
+    await expect(selection).rejects.toBe(stopped)
+    expect(receivedSignal).toBe(controller.signal)
+  })
 })

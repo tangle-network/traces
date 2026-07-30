@@ -467,6 +467,79 @@ describe('traces CLI', () => {
     expect(output.sessions[0]).toMatchObject({ session: { sessionId: parentId, path: parent } })
   })
 
+  it('limits an explicit Claude Code session to its latest task turn', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-claude-latest-'))
+    const session = join(dir, 'claude-session.jsonl')
+    const index = join(dir, 'index.json')
+    await writeFile(session, [
+      {
+        type: 'user',
+        uuid: 'turn-old',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:00:00.000Z',
+        message: { role: 'user', content: 'OLD TASK' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'answer-old',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:00:01.000Z',
+        message: { id: 'message-old', role: 'assistant', content: 'OLD ANSWER' },
+      },
+      {
+        type: 'user',
+        uuid: 'turn-new',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:01:00.000Z',
+        message: { role: 'user', content: 'NEW TASK' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'answer-new',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:01:01.000Z',
+        message: { id: 'message-new', role: 'assistant', content: 'NEW ANSWER' },
+      },
+      {
+        type: 'user',
+        uuid: 'task-notification',
+        sessionId: 'claude-session',
+        timestamp: '2026-07-29T00:01:02.000Z',
+        userType: 'external',
+        message: {
+          role: 'user',
+          content: '<task-notification>worker complete</task-notification>',
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'index',
+      '--harness',
+      'claude-code',
+      '--session',
+      session,
+      '--latest-turn',
+      '--out',
+      index,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const output = JSON.parse(await readFile(index, 'utf8')) as {
+      selection: { latestTurn?: boolean }
+      totals: { sessions: number; spans: number }
+    }
+    expect(output.selection.latestTurn).toBe(true)
+    expect(output.totals).toMatchObject({ sessions: 1, spans: 4 })
+  })
+
   it('expands the active Codex session through recursively spawned child files', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-workflow-'))
     const codexHome = join(dir, 'codex')

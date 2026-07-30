@@ -5,6 +5,7 @@
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces analyze --harness codex --current --latest-turn --workflow
+ *   traces analyze --harness claude-code --session <path> --latest-turn --workflow
  *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
  *   traces investigate [input.jsonl] [--format auto] [--out report.md]
  *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
@@ -250,8 +251,10 @@ function validateWorkflowSelection(args: Args): Args {
     throw new Error('--workflow and --latest-turn cannot be combined with --supervisor-run-dir')
   }
   const selected = resolveAdapter(args.harness)
-  if (args.latestTurn && (args.all || selected?.harness !== 'codex')) {
-    throw new Error('--latest-turn requires --harness codex')
+  const supportsTaskTurns =
+    selected?.harness === 'codex' || selected?.harness === 'claude-code'
+  if (args.latestTurn && (args.all || !supportsTaskTurns)) {
+    throw new Error('--latest-turn requires --harness codex or claude-code')
   }
   return args
 }
@@ -1037,7 +1040,7 @@ Options:
   --all            Sweep every known harness
   --last <n>       Most-recent N sessions
   --current        Analyze the active Codex session named by CODEX_THREAD_ID
-  --latest-turn    Limit a resumed Codex session to its latest task turn
+  --latest-turn    Limit a resumed Codex or Claude Code session to its latest task turn
   --session <id|path> Analyze one listed session ID or one explicit harness session file
   --workflow       Expand selected sessions through stable parent/child session IDs
   --max-workflow-sessions <n>

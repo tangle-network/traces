@@ -111,6 +111,7 @@ traces list     --harness claude-code --last 20    # discover sessions
 traces analyze  --harness codex --session <id>     # pin one ID printed by `list`
 traces analyze  --harness codex --current          # this session, even when a child wrote later
 traces analyze --harness codex --current --latest-turn --workflow  # current turn plus workers
+traces analyze --harness claude-code --session <path> --latest-turn # latest task plus its subagents
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
@@ -134,7 +135,7 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--all` | Every known harness |
 | `--last <n>` | Most-recent N sessions |
 | `--current` | Active Codex session from `CODEX_THREAD_ID` |
-| `--latest-turn` | Limit a resumed Codex session to its latest task turn |
+| `--latest-turn` | Limit a resumed Codex or Claude Code session to its latest task turn |
 | `--session <id\|path>` | One listed session ID or explicit session file |
 | `--workflow` | Expand selected files through stable parent and child session IDs |
 | `--max-workflow-sessions <n>` | Stop workflow expansion before parsing more than `n` files; default `100` |
@@ -275,6 +276,12 @@ This requires the parent log to record the child ID on a spawn, send, follow-up,
 If either field is absent, the workflow is reported incomplete instead of widening to the parent's full history.
 Missing files, duplicate IDs, contradictory parents, and cycles are reported explicitly.
 Claude Code subagent files are already folded into their parent trace, so `--workflow` normally resolves one Claude session file.
+With `--latest-turn`, ordinary Claude subagents are selected by their parent tool call ID.
+Claude Workflow subagents are selected by the run ID and transcript directory returned by the parent `Workflow` call.
+Each Workflow child attaches to the latest matching call that started before the child.
+Task selection then keeps only children attached to calls in that task.
+Returned directories from another resumed Claude session are included in parsing and source hashes.
+Missing or conflicting Workflow identities stop the parse instead of widening the selected history.
 Cross-harness parent/child trees are not inferred.
 For a reproducible report, run `traces list` first and pass its session ID with `--session`.
 Ephemeral `codex exec --json` output has no discovery location, so select its file with `--harness codex-exec --session <path>`.

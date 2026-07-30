@@ -79,7 +79,10 @@ export interface HarnessTraceAdapter {
   /** Parse one discovered session into normalized OTLP spans. */
   parse(ref: SessionRef, options?: ParseOptions): Promise<OtlpSpan[]>
   /** Every file whose bytes can affect parse output. Defaults to ref.path. */
-  sourcePaths?(ref: SessionRef): Promise<readonly string[]>
+  sourcePaths?(
+    ref: SessionRef,
+    options?: Pick<ParseOptions, 'signal'>,
+  ): Promise<readonly string[]>
   /**
    * Resolve the exact parent task that referenced a child by stable session ID.
    * Adapters must not infer this from names or timestamps.

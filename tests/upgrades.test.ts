@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ACTOR_ATTR } from '../src/adapters/conversation.js'
-import { classifyReaction, claudeActor, codexActor } from '../src/adapters/actor.js'
+import {
+  classifyReaction,
+  claudeActor,
+  claudePromptStartsTask,
+  codexActor,
+} from '../src/adapters/actor.js'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
 import { CodexAdapter } from '../src/adapters/codex.js'
 import { analyzeAdoption, countSkillRunsJsonl } from '../src/adoption.js'
@@ -24,6 +29,7 @@ const userPrompts = (s: OtlpSpan[]) => s.filter((x) => x.name === 'user.prompt')
 describe('actor derivation', () => {
   it('claudeActor: sidechain → subagent-spawn, external → human, injected userType → injected', () => {
     expect(claudeActor({ text: 'do x', isSidechain: true })).toBe('subagent-spawn')
+    expect(claudeActor({ text: 'do x', isMeta: true })).toBe('injected')
     expect(claudeActor({ text: 'do x', userType: 'external' })).toBe('human')
     expect(claudeActor({ text: 'do x', userType: 'memory' })).toBe('injected')
     expect(claudeActor({ text: 'do x' })).toBe('human')
@@ -36,6 +42,31 @@ describe('actor derivation', () => {
     )
     // The same imperative on a LATER turn is treated as a human follow-up.
     expect(claudeActor({ text: 'your task: keep going', isFirstUserTurn: false })).toBe('human')
+  })
+
+  it('separates automated task boundaries from injected actor identity', () => {
+    const headlessTask = '## Current Skill\nExtract the transaction. Return ONLY JSON.'
+    expect(claudeActor({
+      text: headlessTask,
+      userType: 'external',
+      isFirstUserTurn: true,
+    })).toBe('injected')
+    expect(claudePromptStartsTask({
+      text: headlessTask,
+      userType: 'external',
+    })).toBe(true)
+    expect(claudePromptStartsTask({
+      text: '<task-notification>worker complete</task-notification>',
+      userType: 'external',
+    })).toBe(false)
+    expect(claudePromptStartsTask({
+      text: '<local-command-stdout>model changed</local-command-stdout>',
+      userType: 'external',
+    })).toBe(false)
+    expect(claudePromptStartsTask({
+      text: '<command-name>/model</command-name>',
+      userType: 'external',
+    })).toBe(false)
   })
 
   it('codexActor: text-only — synthetic → injected, first-turn brief → injected, else human', () => {

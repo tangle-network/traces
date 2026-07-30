@@ -15,6 +15,9 @@ Keeping them separate prevents an exploratory model output from being reported a
 # Free local checks over the active Codex coordinator and connected workers.
 traces analyze --harness codex --current --latest-turn --workflow
 
+# Limit a resumed Claude Code session to its latest task and subagents.
+traces analyze --harness claude-code --session <path> --latest-turn
+
 # Write reusable findings, evidence, report, and OpenInference spans.
 traces improve --harness codex --last 5 --dir .traces/improvement
 
@@ -24,13 +27,18 @@ traces analyze --harness codex --last 5 --llm --budget 0.50
 
 Without `--workflow`, each selected Codex file is analyzed independently.
 With it, `traces` follows stable parent and child session IDs, up to 100 files by default.
-`--latest-turn` keeps a long-lived resumed Codex thread scoped to its most recent task and the workers spawned from that task.
-When the selected session is a child, `traces` finds the last parent task that structurally spawned or targeted that stable child ID and reads only that task.
-The parent log must carry both the child ID and a stable turn ID on the relevant spawn, send, follow-up, or lifecycle event.
+`--latest-turn` keeps a long-lived resumed Codex or Claude Code session scoped to its most recent task and the workers spawned from that task.
+For Codex, when the selected session is a child, `traces` finds the last parent task that structurally spawned or targeted that stable child ID and reads only that task.
+The Codex parent log must carry both the child ID and a stable turn ID on the relevant spawn, send, follow-up, or lifecycle event.
 Without those fields, the result is explicitly incomplete; names, nicknames, and timestamps are never used as substitutes.
 It reports missing files, duplicate IDs, contradictory parents, and cycles instead of guessing.
 Use `--max-workflow-sessions <n>` to set a different bound.
 Claude Code already folds nested subagent files into its parent trace.
+Ordinary Claude subagents use their parent tool call ID.
+Claude Workflow subagents use the run ID and transcript directory returned by the parent `Workflow` call.
+If the same Workflow run is resumed, each child attaches to the latest matching call that started before it.
+The selected task includes only children attached to its calls.
+Returned directories from another resumed Claude session are parsed and included in source hashes.
 
 `traces improve` writes:
 
@@ -134,7 +142,8 @@ Run its fixed input to inspect the complete JSON:
 pnpm tsx examples/custom-analyst.ts --fixture
 ```
 
-The current fixture returns one finding:
+The current fixture returns one finding.
+Its stable fields are:
 
 ```json
 {
