@@ -11,6 +11,7 @@ import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { runPipelines } from './pipelines.js'
 import { type ScanOptions, scanSessions } from './session-source.js'
+import { describeSessionRelationship, type SessionRole } from './session-relationship.js'
 import type { SessionRef } from './types.js'
 
 export interface PolicyEvidenceToolSummary {
@@ -35,6 +36,15 @@ export interface PolicyEvidenceRecord {
     readonly path: string
     readonly cwd: string | null
     readonly mtimeMs: number
+    readonly role?: SessionRole
+    readonly parentSessionId?: string
+    readonly childSessionIds?: readonly string[]
+    readonly depth?: number
+    readonly agentNickname?: string
+    readonly agentRole?: string
+    readonly agentPath?: string
+    readonly taskScope?: 'all' | 'latest' | 'turn' | 'fork-current'
+    readonly turnId?: string
   }
   readonly repo: {
     readonly subjectKey?: string
@@ -156,6 +166,7 @@ export async function buildPolicyEvidenceRecord(
   const loopFindings = pipelines.stuckLoops.findings
   const { firstSpanAt, lastSpanAt } = timeBounds(spans)
   const repo = repoFromSpans(spans)
+  const relationship = describeSessionRelationship(ref, spans)
   const execution = summarizeSpanExecution(spans, {
     experimentId: `traces-policy-evidence:${ref.sessionId}`,
   })
@@ -170,6 +181,15 @@ export async function buildPolicyEvidenceRecord(
       path: ref.path,
       cwd: repo.cwd ?? ref.cwd,
       mtimeMs: ref.mtimeMs,
+      role: relationship.role,
+      childSessionIds: relationship.childSessionIds,
+      ...(relationship.parentSessionId ? { parentSessionId: relationship.parentSessionId } : {}),
+      ...(relationship.depth !== undefined ? { depth: relationship.depth } : {}),
+      ...(relationship.agentNickname ? { agentNickname: relationship.agentNickname } : {}),
+      ...(relationship.agentRole ? { agentRole: relationship.agentRole } : {}),
+      ...(relationship.agentPath ? { agentPath: relationship.agentPath } : {}),
+      ...(relationship.taskScope ? { taskScope: relationship.taskScope } : {}),
+      ...(relationship.turnId ? { turnId: relationship.turnId } : {}),
     },
     repo,
     metrics: {

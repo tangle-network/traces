@@ -3,7 +3,13 @@ import { access, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { commandAnalyzer, commandRedactor, haloAnalyzer, runCommand } from '../src/external.js'
+import {
+  commandAnalyzer,
+  commandRedactor,
+  haloAnalyzer,
+  runCommand,
+  runExternalAnalyzers,
+} from '../src/external.js'
 import { span } from '../src/otlp.js'
 import { applyRedactor } from '../src/redact.js'
 
@@ -141,28 +147,131 @@ describe('commandAnalyzer', () => {
   })
 })
 
+describe('runExternalAnalyzers', () => {
+  it('keeps successful results when another analyzer throws', async () => {
+    const results = await runExternalAnalyzers('/tmp/spans.otlp.jsonl', [
+      {
+        name: 'throws',
+        async analyze() {
+          throw new Error('boom')
+        },
+      },
+      {
+        name: 'works',
+        async analyze() {
+          return {
+            analyzer: 'works',
+            kind: 'report',
+            ok: true,
+            output: 'kept',
+          }
+        },
+      },
+    ])
+
+    expect(results).toEqual([
+      {
+        analyzer: 'throws',
+        kind: 'report',
+        ok: false,
+        output: '',
+        error: 'boom',
+      },
+      {
+        analyzer: 'works',
+        kind: 'report',
+        ok: true,
+        output: 'kept',
+      },
+    ])
+  })
+})
+
 describe('haloAnalyzer', () => {
   it('drives "<cmd> <otlp> -p <prompt> [-m model]" — our artifact is already canonical', async () => {
-    const a = haloAnalyzer({ command: 'echo', model: 'glm-5.2' })
+    const a = haloAnalyzer({
+      command: 'echo',
+      model: 'glm-5.2',
+      maxDepth: 0,
+      maxTurns: 3,
+      maxParallel: 1,
+      instructions: 'Cite exact spans.',
+      reasoningEffort: 'low',
+      telemetry: true,
+    })
     expect(a.name).toBe('halo')
     const res = await a.analyze('/tmp/spans.otlp.jsonl', { prompt: 'diagnose loops' })
     expect(res.ok).toBe(true)
     expect(res.output).toContain('/tmp/spans.otlp.jsonl')
     expect(res.output).toContain('-p diagnose loops')
     expect(res.output).toContain('-m glm-5.2')
+    expect(res.output).toContain('--max-depth 0')
+    expect(res.output).toContain('--max-turns 3')
+    expect(res.output).toContain('--max-parallel 1')
+    expect(res.output).toContain('--instructions Cite exact spans.')
+    expect(res.output).toContain('--reasoning-effort low')
+    expect(res.output).toContain('--telemetry')
+  })
+
+  it('rejects invalid resource limits before running HALO', () => {
+    expect(() => haloAnalyzer({ maxTurns: 0 })).toThrow(/maxTurns/)
+    expect(() => haloAnalyzer({ maxDepth: -1 })).toThrow(/maxDepth/)
+  })
+
+  it('uses bounded defaults instead of HALO upstream resource defaults', async () => {
+    const result = await haloAnalyzer({ command: 'echo' }).analyze('/tmp/spans.otlp.jsonl')
+    expect(result.output).toContain('--max-depth 0')
+    expect(result.output).toContain('--max-turns 3')
+    expect(result.output).toContain('--max-parallel 1')
   })
 })
 
 describe('serializeSpans → canonical OpenInference (one artifact for analysts + HALO)', () => {
-  it('emits top-level kind, resource, scope, string parent', async () => {
+  it('emits top-level kind, resource, scope, string parent, and HALO status names', async () => {
     const { serializeSpans } = await import('../src/otlp.js')
-    const root = span({ traceId: 't', spanId: 'r', name: 'session', kind: 'AGENT', startTime: '2026-01-01T00:00:00Z', service: 'claude-code' })
+    const root = span({
+      traceId: 't',
+      spanId: 'r',
+      name: 'session',
+      kind: 'AGENT',
+      startTime: '2026-01-01T00:00:00Z',
+      status: 'ERROR',
+      statusMessage: 'failed',
+      service: 'claude-code',
+    })
     const [row] = serializeSpans([root]).trim().split('\n').map((l) => JSON.parse(l))
     expect(row.kind).toBe('AGENT') // top-level (HALO), not only in attributes
     expect(row.parent_span_id).toBe('') // root → "" (HALO requires a string)
     expect(row.resource.attributes['service.name']).toBe('claude-code')
     expect(row.scope.name).toBeTruthy()
+    expect(row.status).toEqual({ code: 'STATUS_CODE_ERROR', message: 'failed' })
     expect(row.attributes['openinference.span.kind']).toBe('AGENT') // kept for our reader
+    expect(row.attributes['inference.observation_kind']).toBe('AGENT')
+  })
+
+  it('projects standard OpenInference usage into the fields HALO indexes', async () => {
+    const { serializeSpans } = await import('../src/otlp.js')
+    const llm = span({
+      traceId: 't',
+      spanId: 'llm',
+      name: 'llm.turn',
+      kind: 'LLM',
+      startTime: '2026-01-01T00:00:00Z',
+      agent: 'worker',
+      model: 'gpt-test',
+      inputTokens: 123,
+      outputTokens: 45,
+      costUsd: 0.01,
+    })
+    const [row] = serializeSpans([llm]).trim().split('\n').map((line) => JSON.parse(line))
+
+    expect(row.attributes).toMatchObject({
+      'inference.agent_name': 'worker',
+      'inference.llm.model_name': 'gpt-test',
+      'inference.llm.input_tokens': 123,
+      'inference.llm.output_tokens': 45,
+      'inference.llm.cost.total': 0.01,
+    })
   })
 })
 

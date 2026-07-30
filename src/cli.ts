@@ -4,6 +4,7 @@
  *
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
+ *   traces analyze --harness codex --current --latest-turn --workflow
  *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
  *   traces investigate [input.jsonl] [--format auto] [--out report.md]
  *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
@@ -22,8 +23,7 @@
  * feed as JSONL for visualizers, dashboards, and external agents.
  */
 
-import { createHash } from 'node:crypto'
-import { createReadStream, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { ACTOR_ATTR } from './adapters/conversation.js'
@@ -31,6 +31,7 @@ import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
+import { hodoscopeAnalyzer } from './hodoscope.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import {
@@ -55,11 +56,20 @@ import {
   renderSupervisorRunMarkdown,
   rollupSupervisorRuns,
 } from '@tangle-network/agent-eval/supervisor-run'
+import { createAnalystAi } from '@tangle-network/agent-eval/analyst'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession } from './session-source.js'
+import {
+  describeSessionRelationship,
+} from './session-relationship.js'
+import { collectSessionSelection, type SessionSelection } from './session-selection.js'
+import {
+  type SessionWorkflowIssue,
+  type SessionWorkflowSummary,
+} from './session-workflow.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { CORRUPTION_RECEIPT_DISPLAY_LIMIT } from './report.js'
 import type { ReportSource } from './report.js'
@@ -76,6 +86,9 @@ interface Args {
   all: boolean
   last: number
   current: boolean
+  latestTurn: boolean
+  workflow: boolean
+  maxWorkflowSessions: number
   session?: string
   cwd?: string
   since?: string
@@ -105,6 +118,8 @@ interface Args {
   supervisorRunDir?: string
 }
 
+const DEFAULT_ANALYST_MODEL = 'gpt-5-mini'
+
 function packageVersion(): string {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
   if (typeof pkg.version !== 'string' || !pkg.version) throw new Error('package.json is missing version')
@@ -120,6 +135,9 @@ function parseArgs(argv: string[]): Args {
     all: false,
     last: 0,
     current: false,
+    latestTurn: false,
+    workflow: false,
+    maxWorkflowSessions: 100,
     llm: false,
     interval: 5,
     window: 30,
@@ -141,6 +159,9 @@ function parseArgs(argv: string[]): Args {
       case '--all': a.all = true; break
       case '--last': a.last = Number(next()); break
       case '--current': a.current = true; break
+      case '--latest-turn': a.latestTurn = true; break
+      case '--workflow': a.workflow = true; break
+      case '--max-workflow-sessions': a.maxWorkflowSessions = Number(next()); break
       case '--session': a.session = next(); break
       case '--cwd': a.cwd = next(); break
       case '--supervisor-run-dir': a.supervisorRunDir = next(); break
@@ -191,6 +212,15 @@ const CURRENT_SESSION_COMMANDS = new Set([
   'stream',
 ])
 
+const WORKFLOW_COMMANDS = new Set([
+  'analyze',
+  'investigate',
+  'improve',
+  'convert',
+  'index',
+  'evidence',
+])
+
 function applyCurrentSessionSelection(args: Args): Args {
   if (!args.current) return args
   if (!CURRENT_SESSION_COMMANDS.has(args.command)) {
@@ -208,6 +238,22 @@ function applyCurrentSessionSelection(args: Args): Args {
   const sessionId = process.env.CODEX_THREAD_ID?.trim()
   if (!sessionId) throw new Error('--current requires CODEX_THREAD_ID from the active Codex session')
   return { ...args, session: sessionId }
+}
+
+function validateWorkflowSelection(args: Args): Args {
+  if (!args.workflow && !args.latestTurn) return args
+  if (!WORKFLOW_COMMANDS.has(args.command)) {
+    throw new Error(`${args.workflow ? '--workflow' : '--latest-turn'} is not supported by ${args.command}`)
+  }
+  if (args.input) throw new Error('--workflow and --latest-turn cannot be combined with an input file')
+  if (args.supervisorRunDir) {
+    throw new Error('--workflow and --latest-turn cannot be combined with --supervisor-run-dir')
+  }
+  const selected = resolveAdapter(args.harness)
+  if (args.latestTurn && (args.all || selected?.harness !== 'codex')) {
+    throw new Error('--latest-turn requires --harness codex')
+  }
+  return args
 }
 
 /** Y/N confirm on a TTY (prompt to stderr so stdout stays clean). Non-TTY → false. */
@@ -294,7 +340,7 @@ async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTra
   )
 }
 
-async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
+async function buildAxService(model: string): Promise<import('@ax-llm/ax').AxAIService> {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
     throw new Error(
@@ -305,8 +351,7 @@ async function buildAxService(): Promise<import('@ax-llm/ax').AxAIService> {
   // OPENAI_BASE_URL points the agentic analysts at any OpenAI-compatible gateway
   // (the Tangle router, a local proxy, …) instead of api.openai.com.
   const apiURL = process.env.OPENAI_BASE_URL || undefined
-  const { AxAI } = await import('@ax-llm/ax')
-  return AxAI.create({ name: 'openai', apiKey, ...(apiURL ? { apiURL } : {}) })
+  return createAnalystAi({ apiKey, baseUrl: apiURL, model })
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -326,6 +371,7 @@ interface CollectedSpans {
   harness: string
   cwds: string[]
   sources: SelectedSessionSource[]
+  workflow?: SessionWorkflowSummary
 }
 
 function selectedSessionSource(
@@ -346,6 +392,7 @@ function selectedSessionSource(
     : firstLine
   const role = root?.attributes['traces.session.role']
   const parentSessionId = root?.attributes['traces.parent_session_id']
+  const relationship = describeSessionRelationship(ref, spans)
   const corruptionDigest = root?.attributes[ATTR.CORRUPTION_DIGEST]
   const sessionId = [
     sessionIdOverride,
@@ -359,6 +406,13 @@ function selectedSessionSource(
     subject,
     role: role === 'operator' || role === 'child' ? role : 'unknown',
     ...(typeof parentSessionId === 'string' ? { parentSessionId } : {}),
+    childSessionIds: relationship.childSessionIds,
+    ...(relationship.depth !== undefined ? { depth: relationship.depth } : {}),
+    ...(relationship.agentNickname ? { agentNickname: relationship.agentNickname } : {}),
+    ...(relationship.agentRole ? { agentRole: relationship.agentRole } : {}),
+    ...(relationship.agentPath ? { agentPath: relationship.agentPath } : {}),
+    ...(relationship.taskScope ? { taskScope: relationship.taskScope } : {}),
+    ...(relationship.turnId ? { turnId: relationship.turnId } : {}),
     integrity: ref.integrity?.status ?? 'complete',
     ...(ref.integrity ? {
       corruptionCount: ref.integrity.corruptions.length,
@@ -369,77 +423,79 @@ function selectedSessionSource(
 }
 
 async function collectSpans(args: Args): Promise<CollectedSpans> {
-  if (args.input) return collectImportedSpans(args)
-  if (args.session) {
-    const { adapter, ref } = await resolveSelectedSession(args)
-    const spans = await parseSession(adapter, ref)
-    return {
-      spans,
-      harness: adapter.harness,
-      cwds: ref.cwd ? [ref.cwd] : [],
-      sources: [selectedSessionSource(ref, spans)],
-    }
+  if (args.input) {
+    if (args.workflow) throw new Error('--workflow reads discovered sessions and cannot be combined with an input file')
+    return collectImportedSpans(args)
   }
-  const groups = await discover({ ...args, last: args.last || 1 })
+  const selection = await collectSessionRows(args, false, args.last || 1)
   const spans: OtlpSpan[] = []
-  const harnesses: string[] = []
+  const harnesses = new Set<string>()
   const cwds: string[] = []
   const sources: SelectedSessionSource[] = []
-  for (const { adapter, refs } of groups) {
-    if (refs.length > 0) harnesses.push(adapter.harness)
-    for (const ref of refs) {
-      const parsed = await parseSession(adapter, ref)
-      appendAll(spans, parsed)
-      sources.push(selectedSessionSource(ref, parsed))
-      if (ref.cwd) cwds.push(ref.cwd)
-    }
+  for (const row of selection.rows) {
+    harnesses.add(row.adapter.harness)
+    appendAll(spans, row.spans)
+    sources.push(selectedSessionSource(row.ref, row.spans))
+    if (row.ref.cwd) cwds.push(row.ref.cwd)
   }
-  return { spans, harness: harnesses.join('+') || args.harness, cwds, sources }
+  return {
+    spans,
+    harness: [...harnesses].join('+') || args.harness,
+    cwds,
+    sources,
+    ...(selection.workflow ? { workflow: selection.workflow } : {}),
+  }
 }
 
 async function cmdConvert(args: Args): Promise<void> {
-  const { spans } = await collectSpans(args)
+  const { spans, workflow } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(workflow)
   const path = await writeOtlpFile(spans, args.otlp)
   console.log(`wrote ${spans.length} spans → ${path}`)
 }
 
-interface SessionRow {
-  readonly ref: SessionRef
-  readonly spans: OtlpSpan[]
-  readonly sourceSha256?: string
+function workflowIssueText(issue: SessionWorkflowIssue): string {
+  if (issue.kind === 'cycle') return `cycle: ${issue.sessionIds.join(' -> ')}`
+  if (issue.kind === 'unresolved-parent-task') {
+    return `cannot resolve parent task for child ${issue.childSessionId} in ${issue.parentSessionId}: ${issue.reason}`
+  }
+  if (issue.kind === 'parent-conflict') {
+    return `parent conflict for ${issue.sessionId}: declared ${issue.declaredParentSessionId ?? 'none'}, ` +
+      `referenced by ${issue.referencedParentSessionIds.join(', ') || 'none'}`
+  }
+  return `${issue.kind} ${issue.sessionId}, referenced as ${issue.relation} by ${issue.referencedBySessionId}`
 }
 
-async function sourceSha256(path: string): Promise<string> {
-  const hash = createHash('sha256')
-  for await (const chunk of createReadStream(path)) hash.update(chunk)
-  return hash.digest('hex')
+function warnIncompleteWorkflow(workflow: SessionWorkflowSummary | undefined): void {
+  if (!workflow || workflow.complete) return
+  process.stderr.write(
+    `warning: session workflow is incomplete (${workflow.issues.length} issue(s)): ` +
+      `${workflow.issues.map(workflowIssueText).join('; ')}\n`,
+  )
 }
 
-async function collectSessionRows(args: Args, bindExplicitSource = false): Promise<SessionRow[]> {
-  if (args.session) {
-    const { adapter, ref } = await resolveSelectedSession(args)
-    if (!bindExplicitSource) return [{ ref, spans: await parseSession(adapter, ref) }]
-
-    const before = await sourceSha256(ref.path)
-    const spans = await parseSession(adapter, ref)
-    const after = await sourceSha256(ref.path)
-    if (before !== after) {
-      throw new Error(`session source changed while parsing; refusing unbound evidence: ${ref.path}`)
-    }
-    return [{ ref, spans, sourceSha256: after }]
-  }
-  const groups = await discover({ ...args, last: args.last || 20 })
-  const rows: SessionRow[] = []
-  for (const { adapter, refs } of groups) {
-    for (const ref of refs) rows.push({ ref, spans: await parseSession(adapter, ref) })
-  }
-  return rows
+async function collectSessionRows(
+  args: Args,
+  bindExplicitSource = false,
+  defaultLast = 20,
+): Promise<SessionSelection> {
+  const groups = args.session
+    ? [await resolveSelectedSession(args).then(({ adapter, ref }) => ({ adapter, refs: [ref] }))]
+    : await discover({ ...args, last: args.last || defaultLast })
+  return collectSessionSelection(groups, {
+    workflow: args.workflow,
+    maxWorkflowSessions: args.maxWorkflowSessions,
+    taskScope: args.latestTurn ? 'latest' : 'all',
+    bindSources: bindExplicitSource && Boolean(args.session),
+  })
 }
 
 async function cmdEvidence(args: Args): Promise<void> {
-  const rows = (await collectSessionRows(args, true)).filter((row) => row.spans.length > 0)
+  const selection = await collectSessionRows(args, true)
+  const rows = selection.rows.filter((row) => row.spans.length > 0)
   if (rows.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(selection.workflow)
   const otlpPath = args.otlp ? await writeOtlpFile(rows.flatMap((row) => row.spans), args.otlp) : undefined
   const generatedAt = new Date().toISOString()
   const records = await Promise.all(rows.map((row) =>
@@ -460,8 +516,10 @@ async function cmdEvidence(args: Args): Promise<void> {
 }
 
 async function cmdIndex(args: Args): Promise<void> {
-  const rows = (await collectSessionRows(args)).filter((row) => row.spans.length > 0)
+  const selection = await collectSessionRows(args)
+  const rows = selection.rows.filter((row) => row.spans.length > 0)
   if (rows.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(selection.workflow)
   const index = await buildSessionIndexFromRows(rows, {
     minLoopOccurrences: args.minLoop,
     selection: {
@@ -472,6 +530,8 @@ async function cmdIndex(args: Args): Promise<void> {
       session: args.session,
       cwd: args.cwd,
       since: args.since,
+      latestTurn: args.latestTurn || undefined,
+      ...(selection.workflow ? { workflow: selection.workflow } : {}),
     },
   })
   if (args.out) {
@@ -518,9 +578,10 @@ function traceEvidenceFormat(raw: string | undefined): TraceEvidenceFormatOption
     format !== 'policy-evidence' &&
     format !== 'sandbox-events' &&
     format !== 'openinference' &&
-    format !== 'intelligence-spans'
+    format !== 'intelligence-spans' &&
+    format !== 'chat-trajectory'
   ) {
-    throw new Error('--format must be auto, policy-evidence, sandbox-events, openinference, or intelligence-spans')
+    throw new Error('--format must be auto, policy-evidence, sandbox-events, openinference, intelligence-spans, or chat-trajectory')
   }
   return format
 }
@@ -640,6 +701,8 @@ function externalAnalyzersFromArgs(args: Args) {
   return args.analyzers.map((spec) =>
     spec === 'halo'
       ? haloAnalyzer({ defaultPrompt: args.analyzerPrompt, model: args.model })
+      : spec === 'hodoscope'
+        ? hodoscopeAnalyzer({ summarizeModel: args.model })
       : commandAnalyzer({ name: spec, command: spec, args: (p, prompt) => (prompt ? [p, prompt] : [p]) }),
   )
 }
@@ -655,20 +718,22 @@ async function cmdInvestigate(args: Args): Promise<void> {
 }
 
 async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
-  const { spans, harness, cwds, sources } = await collectSpans(args)
+  const { spans, harness, cwds, sources, workflow } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = args.config !== undefined || options.loadDefaultConfig !== false
     ? await loadTracesConfig(args.config)
     : undefined
-  const ai = args.llm ? await buildAxService() : undefined
+  const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
+  const ai = args.llm ? await buildAxService(analystModel) : undefined
   return runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
     sources,
+    workflow,
     cwds,
     minLoopOccurrences: args.minLoop,
     ai,
-    model: args.model,
+    model: args.llm ? analystModel : args.model,
     budgetUsd: args.budget,
     otlpOutPath: args.otlp,
     externalAnalyzers: externalAnalyzersFromArgs(args),
@@ -678,19 +743,21 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
 }
 
 async function cmdImprove(args: Args): Promise<void> {
-  const { spans, harness, cwds, sources } = await collectSpans(args)
+  const { spans, harness, cwds, sources, workflow } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
-  const ai = args.llm ? await buildAxService() : undefined
+  const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
+  const ai = args.llm ? await buildAxService(analystModel) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
       spans,
       harness,
       sources,
+      workflow,
       cwds,
       minLoopOccurrences: args.minLoop,
       ai,
-      model: args.model,
+      model: args.llm ? analystModel : args.model,
       budgetUsd: args.budget,
       otlpOutPath: args.otlp,
       externalAnalyzers: externalAnalyzersFromArgs(args),
@@ -931,6 +998,7 @@ Input formats:
   sandbox-events   JSON arrays with start/raw/result/done/error events
   openinference    Existing OpenInference JSONL; rewrites through traces redaction
   intelligence-spans  JSONL rows exported from Tangle Intelligence trace spans
+  chat-trajectory  A message array or objects with a messages array
   auto             Detect the format from the file contents (default)
 
 Examples:
@@ -969,7 +1037,11 @@ Options:
   --all            Sweep every known harness
   --last <n>       Most-recent N sessions
   --current        Analyze the active Codex session named by CODEX_THREAD_ID
+  --latest-turn    Limit a resumed Codex session to its latest task turn
   --session <id|path> Analyze one listed session ID or one explicit harness session file
+  --workflow       Expand selected sessions through stable parent/child session IDs
+  --max-workflow-sessions <n>
+                   Stop workflow expansion before parsing more than N files (default 100)
   --cwd <dir>      Filter sessions by working directory
   --supervisor-run-dir <dir>
                    analyze: report a SUPERVISION TREE instead of harness sessions —
@@ -979,7 +1051,7 @@ Options:
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory
   --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
-  --format <kind>  analyze/export file: auto | policy-evidence | sandbox-events | openinference | intelligence-spans
+  --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans | chat-trajectory
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --mode <kind>    stream: visualizer | findings | agent (default visualizer)
@@ -987,10 +1059,10 @@ Options:
   --no-spans       stream: omit per-span pulse events
   --no-findings    stream: omit semantic live-finding events
   --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
-  --model <id>     --llm model id (e.g. a router model like glm-5.2); default is agent-eval's
+  --model <id>     Model for --llm, HALO, and Hodoscope (default for --llm: ${DEFAULT_ANALYST_MODEL})
   --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
   --budget <usd>   USD cap for agentic analysts
-  --analyzer <cmd> analyze: also run an external engine over the OTLP (repeatable; "halo" or any command)
+  --analyzer <id>  analyze: also run halo, hodoscope, or an installed command (repeatable)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
   --interval <s>   watch/stream: poll interval seconds (default 5)
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
@@ -1017,7 +1089,7 @@ async function main(): Promise<void> {
     else usage()
     return
   }
-  const args = applyCurrentSessionSelection(parsedArgs)
+  const args = validateWorkflowSelection(applyCurrentSessionSelection(parsedArgs))
   switch (args.command) {
     case 'help':
       if (args.input === 'export') usageExport()

@@ -378,7 +378,7 @@ describe('trace evidence export', () => {
     outputRows.forEach(expectOpenInferenceRow)
     expect(outputRows[0]!.kind).toBe('AGENT')
     expect(outputRows[0]!.start_time).toBe('2026-06-25T22:44:24.458Z')
-    expect((outputRows[0]!.status as Record<string, unknown>).code).toBe('UNSET')
+    expect((outputRows[0]!.status as Record<string, unknown>).code).toBe('STATUS_CODE_UNSET')
     expect(outputRows[0]!.resource).toEqual(expect.objectContaining({
       attributes: expect.objectContaining({
         'service.name': 'claude-code',

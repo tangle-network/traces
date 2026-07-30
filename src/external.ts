@@ -180,13 +180,38 @@ export function runCommand(
 
 export interface ExternalAnalysisResult {
   analyzer: string
+  kind: ExternalAnalysisKind
   ok: boolean
-  /** Raw text the engine produced (markdown/JSON/plain — engine-specific). */
+  /** Raw text the engine produced. */
   output: string
-  /** Structured findings, when the engine emits parseable JSON. */
-  findings?: AnalystFinding[]
+  /** Confirmed findings with exact evidence. Only valid when kind is findings. */
+  findings?: readonly AnalystFinding[]
+  /** Distinctive actions that still need review. Only valid when kind is discovery. */
+  candidates?: readonly ExternalDiscoveryCandidate[]
   error?: string
 }
+
+export type ExternalAnalysisKind = 'report' | 'findings' | 'discovery'
+
+export interface ExternalDiscoveryCandidate {
+  engine: string
+  engineVersion: string
+  status: 'needs_review'
+  group: string
+  rank: number
+  groupSize: number
+  traceId: string
+  spanId: string
+  evidenceUri: string
+  summary: string
+  actionText: string
+  metadata?: Record<string, unknown>
+}
+
+export type ExternalAnalysisPayload =
+  | { kind: 'report' }
+  | { kind: 'findings'; findings: readonly AnalystFinding[] }
+  | { kind: 'discovery'; candidates: readonly ExternalDiscoveryCandidate[] }
 
 /** An analysis engine that runs over the emitted OTLP-JSONL artifact — a peer to
  *  the built-in analysts, so you get many analyzers beyond our own. */
@@ -202,8 +227,8 @@ export function commandAnalyzer(spec: {
   name: string
   command: string
   args: (otlpPath: string, prompt?: string) => string[]
-  /** Parse stdout into structured findings; omit to keep raw output only. */
-  parse?: (stdout: string) => AnalystFinding[] | undefined
+  /** Explicitly classify structured output; omit to keep a raw report. */
+  parse?: (stdout: string) => ExternalAnalysisPayload
   timeoutMs?: number
 }): ExternalAnalyzer {
   return {
@@ -215,11 +240,24 @@ export function commandAnalyzer(spec: {
           timeoutMs: spec.timeoutMs,
         })
         if (res.code !== 0) {
-          return { analyzer: spec.name, ok: false, output: res.stdout, error: res.stderr.trim() || `exit ${res.code}` }
+          return {
+            analyzer: spec.name,
+            kind: 'report',
+            ok: false,
+            output: res.stdout,
+            error: res.stderr.trim() || `exit ${res.code}`,
+          }
         }
-        return { analyzer: spec.name, ok: true, output: res.stdout.trim(), findings: spec.parse?.(res.stdout) }
+        const payload = spec.parse?.(res.stdout) ?? { kind: 'report' as const }
+        return { analyzer: spec.name, ok: true, output: res.stdout.trim(), ...payload }
       } catch (e) {
-        return { analyzer: spec.name, ok: false, output: '', error: e instanceof Error ? e.message : String(e) }
+        return {
+          analyzer: spec.name,
+          kind: 'report',
+          ok: false,
+          output: '',
+          error: e instanceof Error ? e.message : String(e),
+        }
       }
     },
   }
@@ -230,7 +268,34 @@ export function commandAnalyzer(spec: {
  *  OpenInference, so HALO reads the artifact directly — no conversion. Install
  *  HALO yourself and configure its LLM provider (it uses the OpenAI client —
  *  `OPENAI_BASE_URL` / `OPENAI_API_KEY`); this just drives it. */
-export function haloAnalyzer(opts: { command?: string; defaultPrompt?: string; model?: string; timeoutMs?: number } = {}): ExternalAnalyzer {
+export type HaloReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+
+export interface HaloAnalyzerOptions {
+  command?: string
+  defaultPrompt?: string
+  model?: string
+  maxDepth?: number
+  maxTurns?: number
+  maxParallel?: number
+  instructions?: string
+  reasoningEffort?: HaloReasoningEffort
+  telemetry?: boolean
+  timeoutMs?: number
+}
+
+function assertIntegerOption(name: string, value: number | undefined, minimum: number): void {
+  if (value !== undefined && (!Number.isInteger(value) || value < minimum)) {
+    throw new RangeError(`${name} must be an integer >= ${minimum}`)
+  }
+}
+
+export function haloAnalyzer(opts: HaloAnalyzerOptions = {}): ExternalAnalyzer {
+  const maxDepth = opts.maxDepth ?? 0
+  const maxTurns = opts.maxTurns ?? 3
+  const maxParallel = opts.maxParallel ?? 1
+  assertIntegerOption('maxDepth', maxDepth, 0)
+  assertIntegerOption('maxTurns', maxTurns, 1)
+  assertIntegerOption('maxParallel', maxParallel, 1)
   const defaultPrompt = opts.defaultPrompt ?? 'diagnose'
   return commandAnalyzer({
     name: 'halo',
@@ -238,6 +303,12 @@ export function haloAnalyzer(opts: { command?: string; defaultPrompt?: string; m
     args: (otlpPath, prompt) => {
       const args = [otlpPath, '-p', prompt ?? defaultPrompt]
       if (opts.model) args.push('-m', opts.model)
+      args.push('--max-depth', String(maxDepth))
+      args.push('--max-turns', String(maxTurns))
+      args.push('--max-parallel', String(maxParallel))
+      if (opts.instructions) args.push('--instructions', opts.instructions)
+      if (opts.reasoningEffort) args.push('--reasoning-effort', opts.reasoningEffort)
+      if (opts.telemetry) args.push('--telemetry')
       return args
     },
     timeoutMs: opts.timeoutMs,
@@ -251,7 +322,19 @@ export function runExternalAnalyzers(
   analyzers: readonly ExternalAnalyzer[],
   opts: { prompt?: string; signal?: AbortSignal } = {},
 ): Promise<ExternalAnalysisResult[]> {
-  return Promise.all(analyzers.map((a) => a.analyze(otlpPath, opts)))
+  return Promise.all(analyzers.map(async (analyzer) => {
+    try {
+      return await analyzer.analyze(otlpPath, opts)
+    } catch (error) {
+      return {
+        analyzer: analyzer.name,
+        kind: 'report',
+        ok: false,
+        output: '',
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }))
 }
 
 // ──────────────────────────────── redactors ────────────────────────────────

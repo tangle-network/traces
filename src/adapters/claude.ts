@@ -507,6 +507,22 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     return join(homedir(), '.claude', 'projects')
   }
 
+  async sourcePaths(ref: SessionRef): Promise<readonly string[]> {
+    const subDir = join(ref.path.replace(/\.jsonl$/, ''), 'subagents')
+    const subagentFiles = await listSubagentFiles(subDir)
+    const metadataFiles: string[] = []
+    for (const file of subagentFiles) {
+      const path = file.replace(/\.jsonl$/, '.meta.json')
+      try {
+        const source = await stat(path)
+        if (source.isFile()) metadataFiles.push(path)
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error
+      }
+    }
+    return [ref.path, ...subagentFiles, ...metadataFiles].sort()
+  }
+
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
     const root = this.root()
     let projectDirs: string[]

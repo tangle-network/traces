@@ -105,7 +105,11 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
       if (opts.signal?.aborted) return
       let spans: OtlpSpan[]
       try {
-        spans = await parseSession(adapter, ref, { corruptionMode: opts.corruptionMode })
+        spans = await parseSession(adapter, ref, {
+          corruptionMode: opts.corruptionMode,
+          taskScope: opts.taskScope,
+          taskTurnId: opts.taskTurnId,
+        })
       } catch (err) {
         if (!opts.onError) throw err
         opts.onError(err, ref)

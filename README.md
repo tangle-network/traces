@@ -22,7 +22,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [Session index](#session-index)
 - [Policy-mining evidence](#policy-mining-evidence)
 - [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
-- [External engines (bring your own)](#external-engines-bring-your-own)
+- [Trace analysts](#trace-analysts)
 - [Library (SDK)](#library-sdk)
 - [Examples](#examples)
 - [Develop](#develop)
@@ -53,7 +53,9 @@ That's the command in the demo above. The **deterministic pass** checks stuck lo
 
 Add `--llm` for the **agentic analysts**. `traces` first uses free local signals to choose the smallest useful set: a failure review always runs, while knowledge and edit reviews run only when failures, repeated calls, or corrective feedback support them. They call OpenAI and respect `--budget <usd>`.
 
-Every run also writes a **canonical OpenInference JSONL artifact**, so you can run external engines like [HALO](https://github.com/context-labs/halo) over it directly with `--analyzer halo`. See [External engines](#external-engines-bring-your-own). Analysis is never locked to one engine.
+Every run also writes a **canonical OpenInference JSONL artifact**.
+Use it with [HALO](https://github.com/context-labs/halo), [Hodoscope](https://github.com/ManifoldRG/hodoscope), or any command that reads the file.
+See [Trace analysts](#trace-analysts).
 
 `traces improve` is the reviewable action path.
 It writes one typed result, one report, flattened evidence rows, and the canonical OTLP trace.
@@ -91,7 +93,13 @@ The deterministic pass (free, no key) surfaces:
 | `github-copilot` (`copilot`) | `~/.copilot/session-state/<id>/events.jsonl` | fixture |
 | `forge` (`forgecode`) | `/dump` JSON exports | fixture |
 
-Every adapter captures the full conversation: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage. (`github-copilot` is the one exception: its log format carries no user prompt.) Factory stores token totals in `.settings.json`, not per turn. Forge reads `/dump` JSON exports (live SQLite is a follow-up). ACP-only bridges may not persist a local transcript.
+Every adapter captures the conversation stored in one session file: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage.
+Claude Code's nested subagent files are folded into the parent trace.
+Codex stores each worker in a separate session file; add `--workflow` to resolve the connected coordinator and worker files.
+`github-copilot` is the one exception: its log format carries no user prompt.
+Factory stores token totals in `.settings.json`, not per turn.
+Forge reads `/dump` JSON exports; live SQLite remains unsupported.
+ACP-only bridges may not persist a local transcript.
 
 ## CLI reference
 
@@ -99,6 +107,7 @@ Every adapter captures the full conversation: the **user's prompt** and the **as
 traces list     --harness claude-code --last 20    # discover sessions
 traces analyze  --harness codex --session <id>     # pin one ID printed by `list`
 traces analyze  --harness codex --current          # this session, even when a child wrote later
+traces analyze --harness codex --current --latest-turn --workflow  # current turn plus workers
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
@@ -122,7 +131,10 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--all` | Every known harness |
 | `--last <n>` | Most-recent N sessions |
 | `--current` | Active Codex session from `CODEX_THREAD_ID` |
+| `--latest-turn` | Limit a resumed Codex session to its latest task turn |
 | `--session <id\|path>` | One listed session ID or explicit session file |
+| `--workflow` | Expand selected files through stable parent and child session IDs |
+| `--max-workflow-sessions <n>` | Stop workflow expansion before parsing more than `n` files; default `100` |
 | `--cwd <dir>` | Filter by working directory |
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
@@ -218,6 +230,7 @@ The config can export:
 - `liveAnalysts`: deterministic online analysts that implement the `TraceLiveAnalyst` contract for `traces stream`
 - `registry`: a prebuilt `AnalystRegistry`
 - `externalAnalyzers`: HALO or any command/model adapter that reads the OTLP artifact
+
 Traces does not pretend that an action is a measured candidate.
 Use `agent-eval` to propose and compare candidate changes, `agent-runtime` to package an approved improvement, and `agent-interface` to represent profile edits.
 
@@ -251,7 +264,15 @@ traces evidence --all --since 24h --out policy-evidence.jsonl --otlp spans.otlp.
 ```
 
 `--last` follows recent file activity and may select a child session in multi-agent work.
-Use `--harness codex --current` for the invoking Codex session, or select an exact ID.
+Use `--harness codex --current --latest-turn --workflow` for the invoking Codex turn plus its connected workers.
+Omit `--latest-turn` when the full history of a resumed session is the intended unit.
+Workflow expansion follows session IDs, never timestamps or worker names.
+For a latest Codex child, it selects the last parent task that structurally spawned or targeted that child ID, then includes only workers referenced by that parent task.
+This requires the parent log to record the child ID on a spawn, send, follow-up, or lifecycle event and to associate that event with a stable turn ID.
+If either field is absent, the workflow is reported incomplete instead of widening to the parent's full history.
+Missing files, duplicate IDs, contradictory parents, and cycles are reported explicitly.
+Claude Code subagent files are already folded into their parent trace, so `--workflow` normally resolves one Claude session file.
+Cross-harness parent/child trees are not inferred.
 For a reproducible report, run `traces list` first and pass its session ID with `--session`.
 Ephemeral `codex exec --json` output has no discovery location, so select its file with `--harness codex-exec --session <path>`.
 The adapter rejects empty, incomplete, or other JSONL formats instead of emitting zero-valued session evidence.
@@ -259,7 +280,7 @@ The adapter rejects empty, incomplete, or other JSONL formats instead of emittin
 Each JSONL row is one session:
 
 - session provenance: harness, session id, cwd, path, mtime
-- explicit-session source binding: `provenance.sourceSha256` over the exact stable input bytes
+- explicit-session source binding: `provenance.sourceSha256` over every adapter-declared input file, including Claude worker and metadata files
 - repo labels: `tangle.subject.key`, `git.repository`, branch, commit
 - behavior metrics: span counts, LLM turns, tool calls, errored tool calls, tokens, models, tool histogram
 - mining signals: stuck loops and tool error rate
@@ -274,6 +295,7 @@ If you already have compact evidence or event captures on disk, convert them to 
 ```bash
 traces export policy-evidence.jsonl --out spans.openinference.jsonl
 traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
+traces export trajectory.json --format chat-trajectory --out spans.openinference.jsonl
 halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 ```
 
@@ -282,6 +304,7 @@ halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 - compact `traces.policy_evidence.session` JSONL from `traces evidence`
 - JSON arrays with `start`, `raw`, `result`, `done`, and `error` events
 - existing OpenInference JSONL, rewritten through the local redaction path
+- chat message arrays and objects with a `messages` array
 
 Run `traces export --help` for the full command reference.
 
@@ -309,19 +332,24 @@ It does **not** catch free-form PII such as names, postal addresses, or phone nu
 
 Always `--dry-run` first to see exactly what would be sent.
 
-## External engines (bring your own)
+## Trace analysts
 
-`traces` hosts analysis engines and PII scrubbers it does **not** bundle. You install the tool; `traces` drives it over a thin command adapter. Same pattern for any future engine or model.
-
-**Analyzers** run over the emitted OTLP artifact as peers to the built-in analysts:
+Use the local checks by default.
+Add a model-backed engine only when the question needs semantic judgment or behavior discovery.
 
 ```bash
-traces analyze --last 1 --analyzer halo                         # run HALO too
+traces analyze --last 1
+traces analyze --last 1 --llm --budget 0.50
 traces analyze --last 1 --analyzer halo --analyzer-prompt "find token waste"
-traces analyze --last 1 --analyzer halo --analyzer my-engine    # repeatable
+traces analyze --all --last 20 --analyzer hodoscope
+traces analyze --last 1 --analyzer my-installed-command
 ```
 
-Our OTLP artifact is **canonical OpenInference** (top-level `kind`, `resource`, `scope`), so HALO reads it directly with no conversion. HALO runs its *own* LLM. Set `OPENAI_BASE_URL` / `OPENAI_API_KEY`, or use HALO's provider; `--model` is forwarded to it. `traces` supplies the trace and drives the CLI; it does not pay for or configure HALO's model.
+HALO returns a diagnosis report.
+Hodoscope samples distinct behaviors and marks every sample `needs_review`.
+An arbitrary command returns a raw report unless its SDK adapter explicitly parses a stricter output type.
+
+Read [Trace analysts](./docs/trace-analysts.md) for the output contract, a minimal custom analyst, and labeled benchmark setup.
 
 **Redactors** scrub prompt/response prose with an external PII model (catching names/addresses the regex pass can't), running *after* the built-in redaction:
 
@@ -330,7 +358,8 @@ Our OTLP artifact is **canonical OpenInference** (top-level `kind`, `resource`, 
 traces upload --since 24h --dry-run --redactor "my-pii-scrubber"
 ```
 
-In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnalyzer`, `commandAnalyzer`, `commandRedactor`, `applyRedactor`, `runExternalAnalyzers`). See [`examples/external-engines.ts`](./examples/external-engines.ts).
+In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnalyzer`, `hodoscopeAnalyzer`, `commandAnalyzer`, `commandRedactor`, `applyRedactor`, `runExternalAnalyzers`).
+See [`examples/external-engines.ts`](./examples/external-engines.ts).
 
 > For the built-in agentic analysts (`--llm`), set `OPENAI_API_KEY`, or point at any OpenAI-compatible gateway with `OPENAI_BASE_URL` (e.g. an internal router) to use a non-OpenAI key.
 
@@ -368,6 +397,8 @@ The CLI is a thin consumer of these exports.
 | `inspectSessionIndex` | `(TraceSessionIndex) → TraceInspectionReport` | rank improvement findings from an index without rescanning sessions |
 | `buildPolicyEvidenceRecord` | `(ref, spans, opts?) → PolicyEvidenceRecord` | summarize one session for downstream policy mining |
 | `collectPolicyEvidence` | `(ScanOptions) → PolicyEvidenceRecord[]` | scan harness sessions and emit policy-evidence rows |
+| `collectSessionWorkflow` | `(adapter, seeds, opts?) → SessionWorkflow` | resolve a bounded parent/child session tree with explicit relationship issues |
+| `collectSessionSelection` | `(groups, opts?) → SessionSelection` | parse, expand, and optionally byte-bind selected session groups |
 | `exportTraceEvidenceFile` | `(path, opts?) → { format, spans, redactionCount }` | convert compact evidence/events/OpenInference files to redacted OpenInference spans |
 | `scanSessions` | `(ScanOptions) → AsyncIterable<ScannedSession>` | the shared locate→parse iterator |
 | `collectSessions` | `(CollectOptions) → SessionBatch[]` | redacted per-session batches for your own pipeline |
@@ -375,7 +406,7 @@ The CLI is a thin consumer of these exports.
 | `planUpload` / `executeUpload` | `(…, { backend? }) → …` | redact + dedup + send to any sink |
 | `selectAdapters` / `listAdapters` / `resolveAdapter` | adapter selection + the harness registry |
 | `HarnessTraceAdapter` | interface (`locate` + `parse`) | implement to add a harness |
-| `ExternalAnalyzer` / `Redactor` | `haloAnalyzer` / `commandAnalyzer` / `commandRedactor` | drive engines/models you install (not bundled) |
+| `ExternalAnalyzer` / `Redactor` | `haloAnalyzer` / `hodoscopeAnalyzer` / `commandAnalyzer` / `commandRedactor` | drive engines/models you install |
 
 ```ts
 import { watchSessions, streamSessions, analyzeSpans, AnalystRegistry, makeFinding } from '@tangle-network/traces'
@@ -409,7 +440,7 @@ Runnable, in [`examples/`](./examples):
 | [`improvement-config.mjs`](./examples/improvement-config.mjs) | plug in BYO analysts for `traces stream` / `traces improve` |
 | [`custom-backend.ts`](./examples/custom-backend.ts) | redact + dedup + upload to your own sink |
 | [`register-harness.ts`](./examples/register-harness.ts) | add a new harness by implementing `HarnessTraceAdapter` |
-| [`external-engines.ts`](./examples/external-engines.ts) | drive HALO + an external PII scrubber you install yourself |
+| [`external-engines.ts`](./examples/external-engines.ts) | drive HALO, Hodoscope, and an external PII scrubber |
 
 ## Develop
 

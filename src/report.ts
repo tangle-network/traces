@@ -15,6 +15,7 @@ import type {
 import type { AdoptionReport } from './adoption.js'
 import type { PipelineReport } from './pipelines.js'
 import type { ReactionReport } from './reactions.js'
+import type { SessionWorkflowIssue, SessionWorkflowSummary } from './session-workflow.js'
 import type { SessionCorruptionReceipt } from './types.js'
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
@@ -37,6 +38,7 @@ export interface ReportMeta {
   execution: ExecutionReport
   deterministic?: DeterministicSummary
   sources?: readonly ReportSource[]
+  workflow?: SessionWorkflowSummary
 }
 
 export interface ReportSource {
@@ -45,6 +47,13 @@ export interface ReportSource {
   subject: string
   role: 'operator' | 'child' | 'unknown'
   parentSessionId?: string
+  childSessionIds?: readonly string[]
+  depth?: number
+  agentNickname?: string
+  agentRole?: string
+  agentPath?: string
+  taskScope?: 'all' | 'latest' | 'turn' | 'fork-current'
+  turnId?: string
   integrity?: 'complete' | 'degraded_not_lossless'
   corruptionCount?: number
   corruptionDigest?: string
@@ -70,6 +79,27 @@ function deterministicSummaryText(summary: DeterministicSummary): string {
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return count === 1 ? singular : pluralForm
+}
+
+function workflowIssueText(issue: SessionWorkflowIssue): string {
+  if (issue.kind === 'cycle') return `Cycle: ${issue.sessionIds.map((id) => `\`${tableCell(id)}\``).join(' -> ')}`
+  if (issue.kind === 'unresolved-parent-task') {
+    return `Could not resolve parent task for child \`${tableCell(issue.childSessionId)}\` ` +
+      `in \`${tableCell(issue.parentSessionId)}\`: ${issue.reason}`
+  }
+  if (issue.kind === 'parent-conflict') {
+    return `Parent conflict for \`${tableCell(issue.sessionId)}\`: declared ` +
+      `${issue.declaredParentSessionId ? `\`${tableCell(issue.declaredParentSessionId)}\`` : 'none'}, ` +
+      `referenced by ${issue.referencedParentSessionIds.length > 0
+        ? issue.referencedParentSessionIds.map((id) => `\`${tableCell(id)}\``).join(', ')
+        : 'none'}`
+  }
+  const paths = issue.kind === 'ambiguous-session'
+    ? `; candidates: ${issue.paths.map((path) => `\`${tableCell(path)}\``).join(', ')}`
+    : ''
+  return `${issue.kind === 'missing-session' ? 'Missing' : 'Ambiguous'} session ` +
+    `\`${tableCell(issue.sessionId)}\`, referenced as ${issue.relation} by ` +
+    `\`${tableCell(issue.referencedBySessionId)}\`${paths}`
 }
 
 function tableCell(value: string): string {
@@ -231,34 +261,52 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
     lines.push('')
   }
 
+  if (meta.workflow) {
+    lines.push(
+      `> Session workflow: ${meta.workflow.seedSessionIds.length} seed ` +
+        `${plural(meta.workflow.seedSessionIds.length, 'session')}, ${meta.sessionCount} resolved ` +
+        `${plural(meta.sessionCount, 'session')}, ${meta.workflow.issues.length} relationship ` +
+        `${plural(meta.workflow.issues.length, 'issue')}.`,
+    )
+    lines.push('')
+    if (!meta.workflow.complete) {
+      for (const issue of meta.workflow.issues) lines.push(`- ${workflowIssueText(issue)}`)
+      lines.push('')
+    }
+  }
+
   lines.push(renderExecution(meta.execution))
   lines.push('')
 
   if (meta.sources && meta.sources.length > 0) {
     lines.push('## Selected sessions')
     lines.push('')
-    lines.push('| Role | Session ID | Parent session | Integrity | Subject (first prompt line) | Source path |')
-    lines.push('|---|---|---|---|---|---|')
+    lines.push('| Role | Depth | Agent | Turn | Session ID | Parent session | Children | Integrity | Subject (first prompt line) | Source path |')
+    lines.push('|---|---:|---|---|---|---|---:|---|---|---|')
     for (const source of meta.sources.slice(0, SOURCE_DISPLAY_LIMIT)) {
       const corruptionCount = source.corruptionCount ?? source.corruptions?.length ?? 0
       const integrity = source.integrity === 'degraded_not_lossless'
         ? `degraded, not lossless (${corruptionCount} corrupt ${plural(corruptionCount, 'record')})`
         : 'complete'
+      const agent = [source.agentNickname, source.agentRole, source.agentPath].filter(Boolean).join(' / ')
+      const turn = [source.taskScope, source.turnId].filter(Boolean).join(': ')
       lines.push(
-        `| ${source.role} | \`${tableCell(source.sessionId)}\` | ` +
+        `| ${source.role} | ${source.depth ?? '-'} | ${tableCell(agent) || '-'} | ${tableCell(turn) || '-'} | ` +
+          `\`${tableCell(source.sessionId)}\` | ` +
           `${source.parentSessionId ? `\`${tableCell(source.parentSessionId)}\`` : '—'} | ` +
+          `${source.childSessionIds?.length ?? 0} | ` +
           `${integrity} | ` +
           `${tableCell(source.subject) || '(no prompt captured)'} | \`${tableCell(source.path)}\` |`,
       )
     }
     if (meta.sources.length > SOURCE_DISPLAY_LIMIT) {
       lines.push(
-        `| … | ${meta.sources.length - SOURCE_DISPLAY_LIMIT} additional sessions omitted | — | — | — | — |`,
+        `| ... | - | - | - | ${meta.sources.length - SOURCE_DISPLAY_LIMIT} additional sessions omitted | - | - | - | - | - |`,
       )
     }
     lines.push('')
     const childCount = meta.sources.filter((source) => source.role === 'child').length
-    if (childCount > 0) {
+    if (childCount > 0 && !meta.workflow) {
       lines.push(
         `> Scope: ${childCount}/${meta.sources.length} selected session(s) are children. ` +
           'Counts below describe only the selected files, not their parent operator sessions.',
@@ -371,7 +419,7 @@ export function renderPipelines(pr: PipelineReport): string {
   const lines: string[] = ['## reliability, loops & waste (deterministic)', '']
 
   lines.push(
-    `- **Execution failures:** ${pr.failureClusters.totalFailures}/${pr.failureClusters.totalRuns} run(s)`,
+    `- **Terminal failures:** ${pr.failureClusters.totalFailures}/${pr.failureClusters.totalRuns} run(s)`,
   )
   if (pr.failureClusters.clusters.length > 0) {
     lines.push('')

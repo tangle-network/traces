@@ -18,7 +18,19 @@ export type CorruptionMode = 'recover' | 'strict'
 export interface ParseOptions {
   /** Recover valid JSONL records by default; strict rejects the first corruption. */
   corruptionMode?: CorruptionMode
+  /** For resumed session formats, parse all turns, the latest turn, or one exact turn. */
+  taskScope?: 'all' | 'latest' | 'turn'
+  /** Stable turn identifier required when taskScope is `turn`. */
+  taskTurnId?: string
 }
+
+export type ParentTaskResolution =
+  | { readonly kind: 'resolved'; readonly turnId: string }
+  | {
+      readonly kind: 'unavailable'
+      readonly reason: 'child-reference-not-found' | 'parent-turn-metadata-missing' | 'ambiguous'
+      readonly turnIds?: readonly string[]
+    }
 
 export interface SessionCorruptionReceipt extends JsonlCorruptionReceipt {
   harness: string
@@ -60,6 +72,19 @@ export interface HarnessTraceAdapter {
   readonly aliases?: readonly string[]
   /** Discover session files for this harness on disk. */
   locate(opts?: LocateOptions): Promise<SessionRef[]>
+  /** Resolve all files for one stable session ID without cataloging unrelated sessions. */
+  locateBySessionId?(sessionId: string, opts?: LocateOptions): Promise<SessionRef[]>
   /** Parse one discovered session into normalized OTLP spans. */
   parse(ref: SessionRef, options?: ParseOptions): Promise<OtlpSpan[]>
+  /** Every file whose bytes can affect parse output. Defaults to ref.path. */
+  sourcePaths?(ref: SessionRef): Promise<readonly string[]>
+  /**
+   * Resolve the exact parent task that referenced a child by stable session ID.
+   * Adapters must not infer this from names or timestamps.
+   */
+  resolveParentTask?(
+    ref: SessionRef,
+    childSessionId: string,
+    options?: Pick<ParseOptions, 'corruptionMode'>,
+  ): Promise<ParentTaskResolution>
 }

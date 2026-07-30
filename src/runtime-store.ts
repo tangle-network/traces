@@ -37,14 +37,15 @@ export async function toRuntimeStore(spans: readonly OtlpSpan[]): Promise<Runtim
   for (const item of spans) {
     const startedAt = ms(item.start_time)
     const endedAt = ms(item.end_time)
+    const terminalFailure = item.parent_span_id === null && item.status.code === 'ERROR'
     const current = runs.get(item.trace_id)
     runs.set(item.trace_id, current
       ? {
           startedAt: Math.min(current.startedAt, startedAt),
           endedAt: Math.max(current.endedAt, endedAt),
-          failed: current.failed || item.status.code === 'ERROR',
+          failed: current.failed || terminalFailure,
         }
-      : { startedAt, endedAt, failed: item.status.code === 'ERROR' })
+      : { startedAt, endedAt, failed: terminalFailure })
   }
 
   for (const [runId, run] of runs) {

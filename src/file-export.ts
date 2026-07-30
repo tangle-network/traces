@@ -21,6 +21,11 @@ import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { capText } from './adapters/conversation.js'
 import { toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
 import { appendAll } from './arrays.js'
+import {
+  chatTrajectoryToSpans,
+  isChatTrajectory,
+  isChatTrajectoryMessage,
+} from './chat-trajectory.js'
 import type { PolicyEvidenceRecord } from './evidence.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
@@ -29,7 +34,12 @@ import { redactSpans } from './redact.js'
 
 type JsonObject = Record<string, unknown>
 
-export type TraceEvidenceInputFormat = 'policy-evidence' | 'sandbox-events' | 'openinference' | 'intelligence-spans'
+export type TraceEvidenceInputFormat =
+  | 'policy-evidence'
+  | 'sandbox-events'
+  | 'openinference'
+  | 'intelligence-spans'
+  | 'chat-trajectory'
 export type TraceEvidenceFormatOption = TraceEvidenceInputFormat | 'auto'
 
 export interface TraceEvidenceExportOptions {
@@ -190,8 +200,9 @@ function detectFormat(rows: readonly unknown[], requested: TraceEvidenceFormatOp
   if (rows.every(isPolicyEvidenceRow)) return 'policy-evidence'
   if (rows.every(isOpenInferenceRow)) return 'openinference'
   if (rows.every(isIntelligenceSpanRow)) return 'intelligence-spans'
+  if (rows.every(isChatTrajectory) || rows.every(isChatTrajectoryMessage)) return 'chat-trajectory'
   if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
-  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, openinference, or intelligence-spans')
+  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, openinference, intelligence-spans, or chat-trajectory')
 }
 
 function requirePolicyEvidenceRows(rows: readonly unknown[]): readonly PolicyEvidenceRecord[] {
@@ -217,6 +228,19 @@ function requireIntelligenceSpanRows(rows: readonly unknown[]): readonly JsonObj
 function requireObjectRows(rows: readonly unknown[]): readonly JsonObject[] {
   if (!rows.every(isObject)) throw new Error('sandbox-events input must contain only JSON object events')
   return rows
+}
+
+function chatTrajectoryRowsToSpans(
+  rows: readonly unknown[],
+  sourcePath?: string,
+): OtlpSpan[] {
+  if (rows.every(isChatTrajectoryMessage)) {
+    return chatTrajectoryToSpans(rows, { sourcePath })
+  }
+  if (!rows.every(isChatTrajectory)) {
+    throw new Error('chat-trajectory input must be one message array or trajectory objects')
+  }
+  return rows.flatMap((trajectory) => chatTrajectoryToSpans(trajectory, { sourcePath }))
 }
 
 function evidenceTimeBounds(record: PolicyEvidenceRecord): { start: string; end: string } {
@@ -462,7 +486,9 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
 }
 
 function statusCode(value: unknown): OtlpStatusCode {
-  return value === 'OK' || value === 'ERROR' || value === 'UNSET' ? value : 'UNSET'
+  if (value === 'OK' || value === 'STATUS_CODE_OK') return 'OK'
+  if (value === 'ERROR' || value === 'STATUS_CODE_ERROR') return 'ERROR'
+  return 'UNSET'
 }
 
 function numberValue(value: unknown): number | undefined {
@@ -717,7 +743,9 @@ export function exportTraceEvidenceRows(
         ? openInferenceToSpans(requireOpenInferenceRows(rows))
         : format === 'intelligence-spans'
           ? intelligenceSpansToSpans(requireIntelligenceSpanRows(rows))
-          : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
+          : format === 'chat-trajectory'
+            ? chatTrajectoryRowsToSpans(rows, opts.sourcePath)
+            : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
   const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)

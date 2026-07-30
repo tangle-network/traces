@@ -1,6 +1,6 @@
 /**
  * Add support for a new harness: implement HarnessTraceAdapter (locate + parse),
- * then use it via the `adapters` option — no registry edit, no fork.
+ * then use it via the `adapters` option. No registry edit and no fork.
  *
  *   tsx examples/register-harness.ts
  */

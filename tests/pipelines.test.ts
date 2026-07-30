@@ -186,7 +186,7 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
     expect(text).not.toContain('% retry')
   })
 
-  it('clusters failed runs from any errored span without treating incomplete runs as failures', async () => {
+  it('clusters terminal failures without treating recovered tool errors as failed runs', async () => {
     const spans = [
       span({
         traceId: 'failed',
@@ -195,6 +195,8 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
         kind: 'AGENT',
         startTime: '2026-01-01T00:00:00.000Z',
         endTime: '2026-01-01T00:00:01.000Z',
+        status: 'ERROR',
+        statusMessage: 'Task failed',
       }),
       span({
         traceId: 'failed',
@@ -215,6 +217,17 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
         startTime: '2026-01-01T00:00:02.000Z',
         endTime: '2026-01-01T00:00:03.000Z',
       }),
+      span({
+        traceId: 'successful',
+        spanId: 'recovered-operation',
+        parentSpanId: 'successful-root',
+        name: 'tool.execution',
+        kind: 'TOOL',
+        startTime: '2026-01-01T00:00:02.100Z',
+        endTime: '2026-01-01T00:00:02.200Z',
+        status: 'ERROR',
+        statusMessage: 'Recovered command failure',
+      }),
     ]
 
     const result = await runPipelines(spans)
@@ -224,11 +237,11 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
       expect.objectContaining({
         failureClass: 'unknown',
         runCount: 1,
-        exampleError: 'Shell command failed',
+        exampleError: 'Task failed',
       }),
     ])
     const report = renderPipelines(result)
-    expect(report).toContain('**Execution failures:** 1/2 run(s)')
-    expect(report).toContain('| unknown | 1 | not captured | `failed` | Shell command failed |')
+    expect(report).toContain('**Terminal failures:** 1/2 run(s)')
+    expect(report).toContain('| unknown | 1 | not captured | `failed` | Task failed |')
   })
 })
