@@ -1121,7 +1121,7 @@ describe('conversation capture — JSONL adapters', () => {
       lines: [
         { type: 'session', id: 'trace-123', timestamp: '2026-06-20T10:00:00Z' },
         { type: 'message', id: 'm0', timestamp: '2026-06-20T10:00:01Z', message: { role: 'user', content: [{ type: 'text', text: 'hello world' }] } },
-        { type: 'message', id: 'm1', timestamp: '2026-06-20T10:00:02Z', message: { role: 'assistant', model: 'claude-opus', content: [{ type: 'text', text: 'on it' }, { type: 'tool_call', id: 'tc1', toolName: 'test_tool', input: { p: 1 } }] } },
+        { type: 'message', id: 'm1', timestamp: '2026-06-20T10:00:02Z', message: { role: 'assistant', model: 'claude-opus', stopReason: 'stop', content: [{ type: 'text', text: 'on it' }, { type: 'tool_call', id: 'tc1', toolName: 'test_tool', input: { p: 1 } }] } },
       ],
     },
     {
@@ -1139,7 +1139,7 @@ describe('conversation capture — JSONL adapters', () => {
       writeFileSync(path, c.lines.map((l) => JSON.stringify(l)).join('\n'))
       const spans = await c.make().parse(refFor(path, c.name))
       if (c.name === 'pi') {
-        expect(traceShapeDigest(spans)).toBe('bf3cbbead044c361a625eaacb2894535c0cc7a68c72f1ad5c9ed9f2a44e17fad')
+        expect(traceShapeDigest(spans)).toBe('a33c1884e81287def1a9d6f55330ef7f3b2805c15aaaf6dad54d228325b1f2ce')
       }
       expect(userPrompt(spans)?.attributes['content']).toBe('hello world')
       expect(hasContent(spans, 'on it')).toBe(true)
@@ -1152,6 +1152,121 @@ describe('conversation capture — JSONL adapters', () => {
 })
 
 describe('pi tool results', () => {
+  it('preserves Pi token dimensions and derives terminal status from the final message', async () => {
+    const successfulPath = join(dir, 'pi-successful-terminal.jsonl')
+    writeFileSync(
+      successfulPath,
+      [
+        { type: 'session', id: 'pi-successful', timestamp: '2026-07-30T04:00:00Z' },
+        {
+          type: 'message',
+          id: 'm1',
+          timestamp: '2026-07-30T04:00:01Z',
+          message: {
+            role: 'assistant',
+            model: 'glm-5.2',
+            stopReason: 'stop',
+            usage: {
+              input: 100,
+              output: 20,
+              reasoning: 12,
+              cacheRead: 80,
+              cacheWrite: 5,
+            },
+            content: [{ type: 'text', text: 'complete' }],
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join('\n'),
+    )
+
+    const successful = await new PiAdapter().parse(refFor(successfulPath, 'pi'))
+    const root = successful.find((item) => item.name === 'session')
+    const assistant = successful.find((item) => item.name === 'message.assistant')
+
+    expect(root).toMatchObject({
+      status: { code: 'OK' },
+      attributes: { 'traces.pi.stop_reason': 'stop' },
+    })
+    expect(assistant?.attributes).toMatchObject({
+      'llm.token_count.prompt': 100,
+      'llm.token_count.completion': 20,
+      'llm.token_count.reasoning': 12,
+      'llm.token_count.prompt_cache_hit': 80,
+      'llm.token_count.prompt_cache_write': 5,
+    })
+  })
+
+  it('marks terminal Pi model errors as failed and unfinished tool sessions as unknown', async () => {
+    const errorPath = join(dir, 'pi-error-terminal.jsonl')
+    writeFileSync(
+      errorPath,
+      [
+        { type: 'session', id: 'pi-error', timestamp: '2026-07-30T04:00:00Z' },
+        {
+          type: 'message',
+          id: 'm1',
+          timestamp: '2026-07-30T04:00:01Z',
+          message: {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'Stream ended without finish_reason',
+            usage: { input: 0, output: 0 },
+            content: [{ type: 'thinking', thinking: 'partial work' }],
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join('\n'),
+    )
+    const unfinishedPath = join(dir, 'pi-unfinished-terminal.jsonl')
+    writeFileSync(
+      unfinishedPath,
+      [
+        { type: 'session', id: 'pi-unfinished', timestamp: '2026-07-30T04:00:00Z' },
+        {
+          type: 'message',
+          id: 'm1',
+          timestamp: '2026-07-30T04:00:01Z',
+          message: {
+            role: 'assistant',
+            stopReason: 'toolUse',
+            content: [{ type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'true' } }],
+          },
+        },
+        {
+          type: 'message',
+          id: 'm2',
+          timestamp: '2026-07-30T04:00:02Z',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call-1',
+            toolName: 'bash',
+            content: [{ type: 'text', text: 'ok' }],
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join('\n'),
+    )
+
+    const failed = await new PiAdapter().parse(refFor(errorPath, 'pi'))
+    const unfinished = await new PiAdapter().parse(refFor(unfinishedPath, 'pi'))
+
+    expect(failed.find((item) => item.name === 'session')).toMatchObject({
+      status: { code: 'ERROR', message: 'Stream ended without finish_reason' },
+      attributes: { 'traces.pi.stop_reason': 'error' },
+    })
+    expect(unfinished.find((item) => item.name === 'session')).toMatchObject({
+      status: {
+        code: 'UNSET',
+        message: 'Pi session ended after toolResult with stopReason "missing"',
+      },
+      attributes: { 'traces.pi.stop_reason': 'missing' },
+    })
+  })
+
   it('captures arguments from Pi toolCall blocks', async () => {
     const path = join(dir, 'pi-tool-arguments.jsonl')
     writeFileSync(

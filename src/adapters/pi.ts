@@ -3,7 +3,8 @@
  *
  * Line types: `session` (id + cwd), `model_change`, `thinking_level_change`,
  * and `message`. A `message` line wraps `message.{role, model, provider,
- * content[], usage.{input,output}, stopReason, errorMessage}`. Tool calls
+ * content[], usage.{input,output,reasoning,cacheRead,cacheWrite}, stopReason,
+ * errorMessage}`. Tool calls
  * ride inside assistant `message.content[]` blocks; their completions are
  * separate `role: "toolResult"` messages keyed by `message.toolCallId`.
  */
@@ -52,7 +53,13 @@ interface PiLine {
     content?: PiContentBlock[]
     stopReason?: string
     errorMessage?: string
-    usage?: { input?: number; output?: number }
+    usage?: {
+      input?: number
+      output?: number
+      reasoning?: number
+      cacheRead?: number
+      cacheWrite?: number
+    }
     toolCallId?: string
     toolName?: string
     isError?: boolean
@@ -67,6 +74,41 @@ interface PiToolResult {
   output: unknown
   errorMessage: string
   step: number
+}
+
+interface PiTerminalMessage {
+  role: string
+  stopReason?: string
+  errorMessage?: string
+}
+
+function terminalStatus(message: PiTerminalMessage | undefined): {
+  status: 'OK' | 'ERROR' | 'UNSET'
+  statusMessage?: string
+  stopReason: string
+} {
+  const stopReason = message?.stopReason ?? 'missing'
+  if (message?.role === 'assistant' && stopReason === 'stop') {
+    return { status: 'OK', stopReason }
+  }
+  if (
+    message?.role === 'assistant'
+    && (stopReason === 'error' || message.errorMessage)
+  ) {
+    return {
+      status: 'ERROR',
+      statusMessage: message.errorMessage?.slice(0, 500) ?? 'Pi assistant stopped with an error',
+      stopReason,
+    }
+  }
+  return {
+    status: 'UNSET',
+    statusMessage:
+      message === undefined
+        ? 'Pi session contained no messages'
+        : `Pi session ended after ${message.role} with stopReason "${stopReason}"`,
+    stopReason,
+  }
 }
 
 function isToolBlock(b: PiContentBlock): boolean {
@@ -158,6 +200,7 @@ export class PiAdapter implements HarnessTraceAdapter {
     let firstTimestamp: string | undefined
     let lastTimestamp: string | undefined
     let sessionLine: Pick<PiLine, 'id' | 'timestamp'> | undefined
+    let terminalMessage: PiTerminalMessage | undefined
     let sawLine = false
     let step = 0
 
@@ -175,6 +218,11 @@ export class PiAdapter implements HarnessTraceAdapter {
       const ts = l.timestamp ?? new Date(0).toISOString()
       const mid = l.id ?? `m${step}`
       const msg = l.message
+      terminalMessage = {
+        role: msg.role ?? 'unknown',
+        stopReason: msg.stopReason,
+        errorMessage: msg.errorMessage,
+      }
       const llmId = `llm:${mid}`
       if (msg.role === 'toolResult') {
         const callId = msg.toolCallId ?? `${mid}:result`
@@ -231,6 +279,9 @@ export class PiAdapter implements HarnessTraceAdapter {
             model: msg.model ?? null,
             inputTokens: msg.usage?.input ?? null,
             outputTokens: msg.usage?.output ?? null,
+            reasoningTokens: msg.usage?.reasoning ?? null,
+            cachedInputTokens: msg.usage?.cacheRead ?? null,
+            cacheWriteInputTokens: msg.usage?.cacheWrite ?? null,
             step,
             content: textOf(msg.content) || null,
           }),
@@ -303,6 +354,7 @@ export class PiAdapter implements HarnessTraceAdapter {
 
     const traceId = sessionLine?.id ?? sourceTraceId
     const rootId = `root:${traceId}`
+    const terminal = terminalStatus(terminalMessage)
     for (const item of spans) {
       item.trace_id = traceId
       if (item.parent_span_id === sourceRootId) item.parent_span_id = rootId
@@ -315,8 +367,11 @@ export class PiAdapter implements HarnessTraceAdapter {
       kind: 'AGENT',
       startTime: sessionLine?.timestamp ?? firstTimestamp ?? new Date(0).toISOString(),
       endTime: lastTimestamp,
+      status: terminal.status,
+      statusMessage: terminal.statusMessage,
       service: SERVICE,
       agent: SERVICE,
+      extra: { 'traces.pi.stop_reason': terminal.stopReason },
     })
     return [root, ...spans]
   }
