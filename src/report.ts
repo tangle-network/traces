@@ -108,6 +108,29 @@ function tableCell(value: string): string {
 
 const ANALYST_DETAIL_MAX_CHARS = 240
 
+/** The Python bridge prints this marker before its own failure reason. */
+const BRIDGE_FAILURE_MARKER = 'DSPY-BRIDGE-FAILURE:'
+
+/**
+ * Condense an analyst engine error to one actionable line. The bridge's
+ * `DSPY-BRIDGE-FAILURE:` reason wins when present; otherwise keep head AND
+ * tail, because a Python traceback names its terminal exception at the end —
+ * head-only truncation would cut exactly the part worth reading.
+ */
+export function condenseAnalystError(raw: string, maxChars: number): string {
+  const flat = raw.replace(/\s+/g, ' ').trim()
+  const marker = flat.indexOf(BRIDGE_FAILURE_MARKER)
+  let text = flat
+  if (marker >= 0) {
+    const fromMarker = flat.slice(marker)
+    const traceback = fromMarker.indexOf(' Traceback (most recent call last)')
+    text = traceback > 0 ? fromMarker.slice(0, traceback) : fromMarker
+  }
+  if (text.length <= maxChars) return text
+  const headChars = Math.floor(maxChars * 0.4)
+  return `${text.slice(0, headChars)} … ${text.slice(text.length - (maxChars - headChars))}`
+}
+
 /**
  * Why a failed/skipped analyst produced nothing, condensed to one table cell.
  * Failed engine runs die with the whole bridge stderr in the error message;
@@ -120,8 +143,7 @@ export function analystRunDetail(summary: AnalystRunSummary): string {
       ? summary.reason
       : ''
   if (!raw) return '—'
-  const cell = tableCell(raw)
-  return cell.length > ANALYST_DETAIL_MAX_CHARS ? `${cell.slice(0, ANALYST_DETAIL_MAX_CHARS)}…` : cell
+  return tableCell(condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS))
 }
 
 function count(value: number): string {

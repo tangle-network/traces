@@ -574,8 +574,7 @@ describe('agentic failure surfacing', () => {
       { requiredBridgeVersion: '0.139.3' },
     )
     expect(message).toContain('all 2 agentic analyst(s) failed')
-    expect(message).toContain('failure-mode: Error: DSPy RLM trace analysis exited 1.')
-    expect(message).toContain('DSPY-BRIDGE-FAILURE')
+    expect(message).toContain('failure-mode: DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
     expect(message).toContain('improvement: Error: broken pipeline')
     expect(message).toContain('…')
     expect(message).toContain('agent-eval-rpc[dspy]==0.139.3')

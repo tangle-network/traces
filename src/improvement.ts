@@ -29,6 +29,7 @@ import type { OtlpSpan } from './otlp.js'
 import { type PipelineReport, runPipelines } from './pipelines.js'
 import { analyzeReactions, type ReactionReport } from './reactions.js'
 import {
+  condenseAnalystError,
   renderAdoption,
   renderPipelines,
   renderReactions,
@@ -684,10 +685,7 @@ function condensedReason(summary: AnalystRunSummary): string {
   const raw = summary.error
     ? `${summary.error.class}: ${summary.error.message}`
     : 'failed without an error message'
-  const flat = raw.replace(/\s+/g, ' ').trim()
-  return flat.length > AGENTIC_FAILURE_REASON_MAX_CHARS
-    ? `${flat.slice(0, AGENTIC_FAILURE_REASON_MAX_CHARS)}…`
-    : flat
+  return condenseAnalystError(raw, AGENTIC_FAILURE_REASON_MAX_CHARS)
 }
 
 /**

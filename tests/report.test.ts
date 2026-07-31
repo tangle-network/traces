@@ -399,19 +399,40 @@ describe('analystRunDetail', () => {
     expect(report).toContain('| `efficiency-behavioral` | ok | 0 | 347ms | — |')
   })
 
-  it('condenses whitespace and truncates an oversized error to one cell', () => {
+  it('condenses an oversized error while keeping the terminal exception', () => {
     const detail = analystRunDetail({
       analyst_id: 'failure-mode',
       status: 'failed',
       findings_count: 0,
       latency_ms: 1,
       usage,
-      error: { class: 'Error', message: `stack line one\n  stack line two ${'x'.repeat(500)}` },
+      error: {
+        class: 'Error',
+        message: `stack line one\n  ${'x'.repeat(500)}\n  AdapterParseError: LM response was not parseable`,
+      },
     })
-    expect(detail).toContain('Error: stack line one stack line two')
+    expect(detail).toContain('Error: stack line one')
+    expect(detail).toContain(' … ')
+    expect(detail).toContain('AdapterParseError: LM response was not parseable')
     expect(detail).not.toContain('\n')
-    expect(detail.endsWith('…')).toBe(true)
-    expect(detail.length).toBeLessThanOrEqual(241)
+    expect(detail.length).toBeLessThanOrEqual(243)
+  })
+
+  it('extracts the DSPY-BRIDGE-FAILURE line and drops the trailing traceback', () => {
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 141,
+      usage,
+      error: {
+        class: 'Error',
+        message:
+          'DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: bad input ' +
+          'Traceback (most recent call last): File "bridge.py", line 1, in main stdout=',
+      },
+    })
+    expect(detail).toBe('DSPY-BRIDGE-FAILURE: ValueError: bad input')
   })
 
   it('reports the skip reason and stays silent for clean rows', () => {
