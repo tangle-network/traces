@@ -399,7 +399,9 @@ describe('analystRunDetail', () => {
     expect(report).toContain('| `efficiency-behavioral` | ok | 0 | 347ms | — |')
   })
 
-  it('condenses an oversized error while keeping the terminal exception', () => {
+  it('condenses a markerless bridge traceback while keeping the terminal exception', () => {
+    // The pinned agent-eval-rpc release emits no DSPY-BRIDGE-FAILURE marker;
+    // its failures are raw tracebacks whose actionable line is the LAST one.
     const detail = analystRunDetail({
       analyst_id: 'failure-mode',
       status: 'failed',
@@ -408,14 +410,48 @@ describe('analystRunDetail', () => {
       usage,
       error: {
         class: 'Error',
-        message: `stack line one\n  ${'x'.repeat(500)}\n  AdapterParseError: LM response was not parseable`,
+        message:
+          'DSPy RLM trace analysis exited 1. stderr=Traceback (most recent call last):\n' +
+          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 210, in _main\n' +
+          '    output = _analyze(validated)\n'.repeat(30) +
+          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 547, in _parse_findings_json\n' +
+          'ValueError: DSPy RLM findings_json must be valid JSON stdout=',
       },
     })
-    expect(detail).toContain('Error: stack line one')
+    expect(detail).toContain('Error: DSPy RLM trace analysis exited 1.')
     expect(detail).toContain(' … ')
-    expect(detail).toContain('AdapterParseError: LM response was not parseable')
+    expect(detail).toContain('ValueError: DSPy RLM findings_json must be valid JSON')
     expect(detail).not.toContain('\n')
     expect(detail.length).toBeLessThanOrEqual(243)
+  })
+
+  it('never splits a surrogate pair at a truncation boundary', () => {
+    // Emoji land exactly around both slice points of the head+tail split.
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      // The composed 'Error: ' prefix is 7 UTF-16 units, so every emoji sits
+      // at an odd offset and a code-unit slice must cut through a pair.
+      error: { class: 'Error', message: '💥'.repeat(400) },
+    })
+    // A /u regex can only match \p{Surrogate} against a LONE surrogate; a
+    // correctly paired emoji decodes to one code point and never matches.
+    expect(/\p{Surrogate}/u.test(detail)).toBe(false)
+    expect(detail).toContain(' … ')
+  })
+
+  it('renders a whitespace-only error as the empty-cell dash', () => {
+    expect(analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      error: { class: '', message: ' \n\t ' },
+    })).toBe('—')
   })
 
   it('extracts the DSPY-BRIDGE-FAILURE line and drops the trailing traceback', () => {

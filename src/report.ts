@@ -108,14 +108,20 @@ function tableCell(value: string): string {
 
 const ANALYST_DETAIL_MAX_CHARS = 240
 
-/** The Python bridge prints this marker before its own failure reason. */
+/**
+ * Failure-reason marker printed by newer (currently unreleased) agent-eval
+ * bridges. The pinned agent-eval-rpc release never emits it, so the head+tail
+ * condensation below is the supported path today — but skew failures come
+ * precisely from mismatched newer bridges, which is when the marker appears.
+ */
 const BRIDGE_FAILURE_MARKER = 'DSPY-BRIDGE-FAILURE:'
 
 /**
  * Condense an analyst engine error to one actionable line. The bridge's
  * `DSPY-BRIDGE-FAILURE:` reason wins when present; otherwise keep head AND
  * tail, because a Python traceback names its terminal exception at the end —
- * head-only truncation would cut exactly the part worth reading.
+ * head-only truncation would cut exactly the part worth reading. Slicing is
+ * code-point-safe so a boundary never splits a surrogate pair.
  */
 export function condenseAnalystError(raw: string, maxChars: number): string {
   const flat = raw.replace(/\s+/g, ' ').trim()
@@ -126,9 +132,10 @@ export function condenseAnalystError(raw: string, maxChars: number): string {
     const traceback = fromMarker.indexOf(' Traceback (most recent call last)')
     text = traceback > 0 ? fromMarker.slice(0, traceback) : fromMarker
   }
-  if (text.length <= maxChars) return text
+  const chars = [...text]
+  if (chars.length <= maxChars) return text
   const headChars = Math.floor(maxChars * 0.4)
-  return `${text.slice(0, headChars)} … ${text.slice(text.length - (maxChars - headChars))}`
+  return `${chars.slice(0, headChars).join('')} … ${chars.slice(chars.length - (maxChars - headChars)).join('')}`
 }
 
 /**
@@ -138,12 +145,12 @@ export function condenseAnalystError(raw: string, maxChars: number): string {
  */
 export function analystRunDetail(summary: AnalystRunSummary): string {
   const raw = summary.status === 'failed' && summary.error
-    ? `${summary.error.class}: ${summary.error.message}`
+    ? [summary.error.class, summary.error.message].map((part) => part.trim()).filter(Boolean).join(': ')
     : summary.status === 'skipped' && summary.reason
       ? summary.reason
       : ''
-  if (!raw) return '—'
-  return tableCell(condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS))
+  const cell = tableCell(condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS))
+  return cell === '' ? '—' : cell
 }
 
 function count(value: number): string {

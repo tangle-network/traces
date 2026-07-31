@@ -677,31 +677,38 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
  * already on that analyst's `[analyst] FAIL` stderr line. */
 const AGENTIC_FAILURE_REASON_MAX_CHARS = 400
 
-/** Startup-class bridge failures whose fix is aligning the Python bridge with
- * the bundled `@tangle-network/agent-eval` version. */
-const BRIDGE_MISMATCH_PATTERN = /DSPY-BRIDGE-FAILURE|agent_eval_rpc|No module named|could not start/
+/**
+ * Signatures of engine↔bridge version skew (or a missing bridge install) —
+ * the failures the reinstall hint actually fixes. Every bridge traceback
+ * names the `agent_eval_rpc` module path, so matching on the module name or
+ * a generic marker alone would point mid-analysis model errors at pip.
+ */
+const BRIDGE_MISMATCH_PATTERN = /must contain exactly|No module named ['"]?agent_eval_rpc|could not start/
 
 function condensedReason(summary: AnalystRunSummary): string {
-  const raw = summary.error
-    ? `${summary.error.class}: ${summary.error.message}`
-    : 'failed without an error message'
+  const raw = summary.status === 'skipped'
+    ? `skipped — ${summary.reason ?? 'no reason recorded'}`
+    : summary.error
+      ? `${summary.error.class}: ${summary.error.message}`
+      : 'failed without an error message'
   return condenseAnalystError(raw, AGENTIC_FAILURE_REASON_MAX_CHARS)
 }
 
 /**
  * Operator-facing message for a fully dead agentic pass: non-empty exactly
- * when an agentic pass ran and EVERY analyst in it failed. Partial failures
- * return undefined — some agentic findings were produced, and the per-analyst
- * report table carries the individual reasons.
+ * when an agentic pass ran and NO analyst in it succeeded — failed and
+ * skipped both count as "produced nothing", so one skip cannot silence the
+ * alarm. Partial success returns undefined: some agentic findings were
+ * produced, and the per-analyst report table carries the individual reasons.
  */
 export function totalAgenticFailureMessage(
   agenticPerAnalyst: readonly AnalystRunSummary[] | undefined,
   opts: { requiredBridgeVersion?: string } = {},
 ): string | undefined {
   if (!agenticPerAnalyst || agenticPerAnalyst.length === 0) return undefined
-  if (agenticPerAnalyst.some((summary) => summary.status !== 'failed')) return undefined
+  if (agenticPerAnalyst.some((summary) => summary.status === 'ok')) return undefined
   const lines = [
-    `LLM analysis produced nothing: all ${agenticPerAnalyst.length} agentic analyst(s) failed. ` +
+    `LLM analysis produced nothing: none of the ${agenticPerAnalyst.length} agentic analyst(s) succeeded. ` +
       'The reported findings are from the deterministic pass only.',
     ...agenticPerAnalyst.map((summary) => `  ${summary.analyst_id}: ${condensedReason(summary)}`),
   ]

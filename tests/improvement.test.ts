@@ -561,7 +561,7 @@ describe('agentic failure surfacing', () => {
     expect(totalAgenticFailureMessage(result.agenticPerAnalyst)).toBeUndefined()
   })
 
-  it('builds the failure message only when every agentic analyst failed', () => {
+  it('builds the failure message only when no agentic analyst succeeded', () => {
     expect(totalAgenticFailureMessage(undefined)).toBeUndefined()
     expect(totalAgenticFailureMessage([])).toBeUndefined()
     expect(totalAgenticFailureMessage([
@@ -573,19 +573,54 @@ describe('agentic failure surfacing', () => {
       [failedSummary('failure-mode', BRIDGE_ERROR), failedSummary('improvement', `broken pipeline\n${'x'.repeat(600)}`)],
       { requiredBridgeVersion: '0.139.3' },
     )
-    expect(message).toContain('all 2 agentic analyst(s) failed')
+    expect(message).toContain('none of the 2 agentic analyst(s) succeeded')
     expect(message).toContain('failure-mode: DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
     expect(message).toContain('improvement: Error: broken pipeline')
     expect(message).toContain('…')
     expect(message).toContain('agent-eval-rpc[dspy]==0.139.3')
   })
 
-  it('omits the bridge-version hint for non-bridge failures', () => {
+  it('fires when the only non-failed analysts were skipped — a skip must not read as success', () => {
+    const message = totalAgenticFailureMessage([
+      failedSummary('failure-mode', BRIDGE_ERROR),
+      failedSummary('knowledge-poisoning', BRIDGE_ERROR),
+      failedSummary('improvement', BRIDGE_ERROR),
+      {
+        analyst_id: 'knowledge-gap',
+        status: 'skipped',
+        reason: 'missing input: traceStore',
+        findings_count: 0,
+        latency_ms: 0,
+        usage: { calls: 0, tokens: { input: 0, output: 0 }, cost: { kind: 'observed', usd: 0 } },
+      },
+    ])
+    expect(message).toContain('none of the 4 agentic analyst(s) succeeded')
+    expect(message).toContain('knowledge-gap: skipped — missing input: traceStore')
+  })
+
+  it('omits the bridge-version hint when a mid-analysis traceback merely names the bridge module', () => {
+    // Realistic mid-analysis failure: the traceback traverses the installed
+    // agent_eval_rpc module path, but nothing about it is version skew.
+    const midAnalysisError =
+      'DSPy RLM trace analysis exited 1. stderr=Traceback (most recent call last): ' +
+      'File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 254, in _analyze ' +
+      'findings = _parse_findings_json(_prediction_string(prediction, "findings_json")) ' +
+      'ValueError: DSPy RLM findings_json must be valid JSON stdout='
     const message = totalAgenticFailureMessage(
-      [failedSummary('failure-mode', 'provider returned 429: quota exhausted')],
+      [failedSummary('failure-mode', midAnalysisError)],
       { requiredBridgeVersion: '0.139.3' },
     )
-    expect(message).toContain('all 1 agentic analyst(s) failed')
+    expect(message).toContain('none of the 1 agentic analyst(s) succeeded')
+    expect(message).toContain('findings_json must be valid JSON')
     expect(message).not.toContain('agent-eval-rpc[dspy]==')
+  })
+
+  it('adds the bridge-version hint for a missing bridge install', () => {
+    const message = totalAgenticFailureMessage(
+      [failedSummary('failure-mode',
+        "DSPy RLM trace analysis exited 1. stderr=ModuleNotFoundError: No module named 'agent_eval_rpc' stdout=")],
+      { requiredBridgeVersion: '0.139.3' },
+    )
+    expect(message).toContain('agent-eval-rpc[dspy]==0.139.3')
   })
 })

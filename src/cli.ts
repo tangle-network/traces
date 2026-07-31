@@ -364,7 +364,7 @@ async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTra
  * selectable via TRACES_PYTHON. Every deterministic command is unaffected and
  * still needs neither a key nor Python.
  */
-function buildAnalysisEngine(model: string): TraceAnalysisEngine {
+function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEngine {
   // The router is the default endpoint, so TANGLE_API_KEY alone is enough.
   // OPENAI_API_KEY still works and, when it is the only key present, points at
   // OpenAI directly — otherwise a plain OpenAI key would be sent to the router.
@@ -386,12 +386,22 @@ function buildAnalysisEngine(model: string): TraceAnalysisEngine {
     apiKey,
     baseUrl,
     model,
-    // agent-eval 0.139.3's engine default (4096) is below what current coding
-    // models emit for one findings array: glm-5.2 counts reasoning tokens in
-    // completion_tokens, the first real completion breaches its cost
+    // agent-eval 0.139.3's engine defaults are tuned below what real runs
+    // need. maxOutputTokens 4096 is under what current coding models emit for
+    // one findings array: glm-5.2 counts reasoning tokens in
+    // completion_tokens, the first oversized completion breaches its cost
     // reservation, and the fail-closed ledger then refuses every later call
-    // in the run. Spend stays bounded by --budget / the engine's maxCostUsd.
+    // in the run.
     maxOutputTokens: 16_384,
+    // maxCostUsd defaults to $1 per analyst — a proxy-side ceiling separate
+    // from --budget. With the larger token cap the per-call reservation grows
+    // ~4x, so that default binds before the registry's --budget allocation
+    // and kills analysts mid-run. --budget is the operator's spend authority
+    // and the registry still splits it across analysts, so forwarding it here
+    // only stops the engine's own default from cutting runs short.
+    ...(budgetUsd !== undefined && Number.isFinite(budgetUsd) && budgetUsd > 0
+      ? { maxCostUsd: budgetUsd }
+      : {}),
     ...(python ? { runner: { command: python } } : {}),
   })
 }
@@ -417,12 +427,15 @@ function requiredBridgeVersion(): string {
 /**
  * `--llm` promises agentic findings; delivering a deterministic-only report
  * with exit 0 when every agentic analyst died reads as success. Throwing after
- * the report is written keeps the deterministic output AND fails loud.
+ * the report is written keeps the deterministic output AND fails loud. The
+ * bridge-version read happens only once total failure is established, so a
+ * package.json problem can never turn a successful run into exit 1.
  */
 function assertAgenticAnalystsRan(args: Args, agenticPerAnalyst: TraceInvestigationResult['agenticPerAnalyst']): void {
   if (!args.llm) return
+  if (!totalAgenticFailureMessage(agenticPerAnalyst)) return
   const message = totalAgenticFailureMessage(agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })
-  if (message) throw new Error(message)
+  throw new Error(message!)
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -858,7 +871,7 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
     ? await loadTracesConfig(args.config)
     : undefined
   const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const engine = args.llm ? buildAnalysisEngine(analystModel) : undefined
+  const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
   return runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
@@ -881,7 +894,7 @@ async function cmdImprove(args: Args): Promise<void> {
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const engine = args.llm ? buildAnalysisEngine(analystModel) : undefined
+  const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
       spans,
