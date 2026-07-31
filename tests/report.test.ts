@@ -4,7 +4,7 @@ import { summarizeExecution } from '@tangle-network/agent-eval/contract'
 import { describe, expect, it } from 'vitest'
 import type { PipelineReport } from '../src/pipelines.js'
 import type { ReactionReport } from '../src/reactions.js'
-import { renderPipelines, renderReport, summarizeDeterministicSignals } from '../src/report.js'
+import { analystRunDetail, renderPipelines, renderReport, summarizeDeterministicSignals } from '../src/report.js'
 
 const EMPTY_EXECUTION = summarizeExecution({ runs: [] })
 
@@ -364,5 +364,72 @@ describe('summarizeDeterministicSignals', () => {
       failedRuns: 2,
       totalSignals: 11,
     })
+  })
+})
+
+describe('analystRunDetail', () => {
+  const usage = {
+    calls: 0,
+    tokens: { input: 0, output: 0 },
+    cost: { kind: 'observed', usd: 0 },
+  } as const
+
+  it('carries the engine error for a failed analyst into the report table', () => {
+    const bridgeError =
+      "DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly ['controlAdapter', 'instructions', 'limits', 'modelProxy', 'operation', 'question', 'toolCallback', 'toolSpecs'] stdout="
+    const result = emptyResult()
+    result.per_analyst.push({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 141,
+      usage,
+      error: { class: 'Error', message: bridgeError },
+    })
+
+    const report = renderReport(result, {
+      harness: 'claude-code',
+      sessionCount: 1,
+      spanCount: 10,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      execution: EMPTY_EXECUTION,
+    })
+    expect(report).toContain('| Analyst | Status | Findings | Latency | Detail |')
+    expect(report).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
+    expect(report).toContain('| `efficiency-behavioral` | ok | 0 | 347ms | — |')
+  })
+
+  it('condenses whitespace and truncates an oversized error to one cell', () => {
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      error: { class: 'Error', message: `stack line one\n  stack line two ${'x'.repeat(500)}` },
+    })
+    expect(detail).toContain('Error: stack line one stack line two')
+    expect(detail).not.toContain('\n')
+    expect(detail.endsWith('…')).toBe(true)
+    expect(detail.length).toBeLessThanOrEqual(241)
+  })
+
+  it('reports the skip reason and stays silent for clean rows', () => {
+    const skipped = analystRunDetail({
+      analyst_id: 'knowledge-gap',
+      status: 'skipped',
+      reason: 'missing input: traceStore',
+      findings_count: 0,
+      latency_ms: 0,
+      usage,
+    })
+    expect(skipped).toBe('missing input: traceStore')
+    expect(analystRunDetail({
+      analyst_id: 'efficiency-behavioral',
+      status: 'ok',
+      findings_count: 2,
+      latency_ms: 5,
+      usage,
+    })).toBe('—')
   })
 })

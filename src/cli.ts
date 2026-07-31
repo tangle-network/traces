@@ -43,6 +43,8 @@ import {
   runTraceImprovement,
   runTraceInvestigation,
   saveReport,
+  totalAgenticFailureMessage,
+  type TraceInvestigationResult,
 } from './improvement.js'
 import {
   serializeTraceStreamEvent,
@@ -384,8 +386,43 @@ function buildAnalysisEngine(model: string): TraceAnalysisEngine {
     apiKey,
     baseUrl,
     model,
+    // agent-eval 0.139.3's engine default (4096) is below what current coding
+    // models emit for one findings array: glm-5.2 counts reasoning tokens in
+    // completion_tokens, the first real completion breaches its cost
+    // reservation, and the fail-closed ledger then refuses every later call
+    // in the run. Spend stays bounded by --budget / the engine's maxCostUsd.
+    maxOutputTokens: 16_384,
     ...(python ? { runner: { command: python } } : {}),
   })
+}
+
+/**
+ * The published version of the Python bridge (`agent-eval-rpc` on PyPI) that
+ * speaks this CLI's engine protocol. The bridge validates its input with
+ * exact-key checks, so any skew between the interpreter's installed bridge and
+ * this package's `@tangle-network/agent-eval` dependency kills every agentic
+ * analyst at startup, before any model call.
+ */
+function requiredBridgeVersion(): string {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    dependencies?: Record<string, unknown>
+  }
+  const version = pkg.dependencies?.['@tangle-network/agent-eval']
+  if (typeof version !== 'string' || !version) {
+    throw new Error('package.json is missing the @tangle-network/agent-eval dependency')
+  }
+  return version
+}
+
+/**
+ * `--llm` promises agentic findings; delivering a deterministic-only report
+ * with exit 0 when every agentic analyst died reads as success. Throwing after
+ * the report is written keeps the deterministic output AND fails loud.
+ */
+function assertAgenticAnalystsRan(args: Args, agenticPerAnalyst: TraceInvestigationResult['agenticPerAnalyst']): void {
+  if (!args.llm) return
+  const message = totalAgenticFailureMessage(agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })
+  if (message) throw new Error(message)
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -708,6 +745,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   } else {
     console.log(result.report)
   }
+  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
 }
 
 /**
@@ -781,6 +819,17 @@ async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
   }
 }
 
+/**
+ * Analyst progress log for stderr. The registry's `[analyst] FAIL <id>` line
+ * carries its reason only in the structured fields; a message-only sink turns
+ * every engine-startup failure into an unactionable one-liner.
+ */
+function analystLog(msg: string, fields?: Record<string, unknown>): void {
+  const error = typeof fields?.error === 'string' && fields.error ? fields.error : undefined
+  const errorClass = typeof fields?.error_class === 'string' && fields.error_class ? `${fields.error_class}: ` : ''
+  process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
+}
+
 function externalAnalyzersFromArgs(args: Args) {
   return args.analyzers.map((spec) =>
     spec === 'halo'
@@ -799,6 +848,7 @@ async function cmdInvestigate(args: Args): Promise<void> {
   } else {
     console.log(result.report)
   }
+  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
 }
 
 async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
@@ -822,7 +872,7 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
     otlpOutPath: args.otlp,
     externalAnalyzers: externalAnalyzersFromArgs(args),
     analyzerPrompt: args.analyzerPrompt,
-    log: (msg) => process.stderr.write(`${msg}\n`),
+    log: analystLog,
   }, config))
 }
 
@@ -846,7 +896,7 @@ async function cmdImprove(args: Args): Promise<void> {
       otlpOutPath: args.otlp,
       externalAnalyzers: externalAnalyzersFromArgs(args),
       analyzerPrompt: args.analyzerPrompt,
-      log: (msg) => process.stderr.write(`${msg}\n`),
+      log: analystLog,
     }, config),
     outDir: args.dir ?? args.out,
   })
@@ -856,6 +906,7 @@ async function cmdImprove(args: Args): Promise<void> {
     `improvement artifacts → ${dir}  ` +
       `(${result.findings.length} findings with actions and checks, OTLP: ${result.otlpPath})`,
   )
+  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
 }
 
 function summarizeFindingEvidence(finding: TraceLiveFinding): string {
@@ -1164,7 +1215,9 @@ Options:
   --llm            Enable agentic RLM analysts. Runs on the Tangle router by
                    default (TANGLE_API_KEY); OPENAI_API_KEY alone targets OpenAI,
                    OPENAI_BASE_URL overrides the endpoint. Needs Python with
-                   agent-eval-rpc[dspy] (TRACES_PYTHON selects the interpreter).
+                   agent-eval-rpc[dspy] (TRACES_PYTHON selects the interpreter),
+                   version-matched to this package's @tangle-network/agent-eval.
+                   Exits 1 when every agentic analyst fails, with each reason.
   --model <id>     Model for --llm, HALO, and Hodoscope (default for --llm: ${DEFAULT_ANALYST_MODEL})
   --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
   --budget <usd>   USD cap for agentic analysts

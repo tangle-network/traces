@@ -4,11 +4,13 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ACTOR_ATTR } from '../src/adapters/conversation.js'
 import type { ExternalAnalyzer } from '../src/external.js'
+import type { AnalystRunSummary, TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 import {
   buildTraceFindingPacket,
   loadTracesConfig,
   runTraceImprovement,
   runTraceInvestigation,
+  totalAgenticFailureMessage,
   type TraceEvidenceRow,
 } from '../src/improvement.js'
 import { type OtlpSpan, span } from '../src/otlp.js'
@@ -503,5 +505,88 @@ describe('loadTracesConfig', () => {
     const config = await loadTracesConfig(configPath)
     expect(config?.externalAnalyzers).toHaveLength(1)
     expect(config?.externalAnalyzers?.[0]!.name).toBe('cfg-engine')
+  })
+})
+
+describe('agentic failure surfacing', () => {
+  const BRIDGE_ERROR =
+    "DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly ['controlAdapter', 'instructions', 'limits', 'modelProxy', 'operation', 'question', 'toolCallback', 'toolSpecs'] stdout="
+
+  function failingEngine(message: string): TraceAnalysisEngine {
+    return {
+      id: 'failing-test-engine',
+      description: 'Engine whose startup always fails, before any model call.',
+      model: 'test-model',
+      version: '1.0.0',
+      executionConfig: { base_url: 'http://127.0.0.1:1/v1', api_key_provided: true },
+      analyze: async () => {
+        throw new Error(message)
+      },
+    }
+  }
+
+  function failedSummary(id: string, message: string): AnalystRunSummary {
+    return {
+      analyst_id: id,
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 135,
+      usage: { calls: 0, tokens: { input: 0, output: 0 }, cost: { kind: 'observed', usd: 0 } },
+      error: { class: 'Error', message },
+    }
+  }
+
+  it('carries each engine failure into agenticPerAnalyst and the report table', async () => {
+    const result = await runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      engine: failingEngine(BRIDGE_ERROR),
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    expect(result.agenticPerAnalyst).toBeDefined()
+    expect(result.agenticPerAnalyst!.length).toBeGreaterThan(0)
+    expect(result.agenticPerAnalyst!.every((summary) => summary.status === 'failed')).toBe(true)
+    expect(result.agenticPerAnalyst!.every((summary) => summary.error?.message === BRIDGE_ERROR)).toBe(true)
+    expect(result.report).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
+  })
+
+  it('leaves agenticPerAnalyst unset for a deterministic-only run', async () => {
+    const result = await runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    })
+    expect(result.agenticPerAnalyst).toBeUndefined()
+    expect(totalAgenticFailureMessage(result.agenticPerAnalyst)).toBeUndefined()
+  })
+
+  it('builds the failure message only when every agentic analyst failed', () => {
+    expect(totalAgenticFailureMessage(undefined)).toBeUndefined()
+    expect(totalAgenticFailureMessage([])).toBeUndefined()
+    expect(totalAgenticFailureMessage([
+      failedSummary('failure-mode', BRIDGE_ERROR),
+      { ...failedSummary('knowledge-gap', BRIDGE_ERROR), status: 'ok', error: undefined },
+    ])).toBeUndefined()
+
+    const message = totalAgenticFailureMessage(
+      [failedSummary('failure-mode', BRIDGE_ERROR), failedSummary('improvement', `broken pipeline\n${'x'.repeat(600)}`)],
+      { requiredBridgeVersion: '0.139.3' },
+    )
+    expect(message).toContain('all 2 agentic analyst(s) failed')
+    expect(message).toContain('failure-mode: Error: DSPy RLM trace analysis exited 1.')
+    expect(message).toContain('DSPY-BRIDGE-FAILURE')
+    expect(message).toContain('improvement: Error: broken pipeline')
+    expect(message).toContain('…')
+    expect(message).toContain('agent-eval-rpc[dspy]==0.139.3')
+  })
+
+  it('omits the bridge-version hint for non-bridge failures', () => {
+    const message = totalAgenticFailureMessage(
+      [failedSummary('failure-mode', 'provider returned 429: quota exhausted')],
+      { requiredBridgeVersion: '0.139.3' },
+    )
+    expect(message).toContain('all 1 agentic analyst(s) failed')
+    expect(message).not.toContain('agent-eval-rpc[dspy]==')
   })
 })

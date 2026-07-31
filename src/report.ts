@@ -6,7 +6,7 @@
  * the actionable output for improving a stuck/looping agent.
  */
 
-import type { AnalystFinding, AnalystRunResult } from '@tangle-network/agent-eval/analyst'
+import type { AnalystFinding, AnalystRunResult, AnalystRunSummary } from '@tangle-network/agent-eval/analyst'
 import type {
   ExecutionReport,
   ScalarDistribution,
@@ -104,6 +104,24 @@ function workflowIssueText(issue: SessionWorkflowIssue): string {
 
 function tableCell(value: string): string {
   return value.replace(/\s+/g, ' ').replaceAll('|', '\\|').trim()
+}
+
+const ANALYST_DETAIL_MAX_CHARS = 240
+
+/**
+ * Why a failed/skipped analyst produced nothing, condensed to one table cell.
+ * Failed engine runs die with the whole bridge stderr in the error message;
+ * without this cell the report scores the analyst without saying why.
+ */
+export function analystRunDetail(summary: AnalystRunSummary): string {
+  const raw = summary.status === 'failed' && summary.error
+    ? `${summary.error.class}: ${summary.error.message}`
+    : summary.status === 'skipped' && summary.reason
+      ? summary.reason
+      : ''
+  if (!raw) return '—'
+  const cell = tableCell(raw)
+  return cell.length > ANALYST_DETAIL_MAX_CHARS ? `${cell.slice(0, ANALYST_DETAIL_MAX_CHARS)}…` : cell
 }
 
 function count(value: number): string {
@@ -366,10 +384,10 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   }
 
   // Analyst run summary.
-  lines.push('| Analyst | Status | Findings | Latency |')
-  lines.push('|---|---|---|---|')
+  lines.push('| Analyst | Status | Findings | Latency | Detail |')
+  lines.push('|---|---|---|---|---|')
   for (const s of result.per_analyst) {
-    lines.push(`| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms |`)
+    lines.push(`| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms | ${analystRunDetail(s)} |`)
   }
   lines.push('')
 
