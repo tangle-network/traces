@@ -734,7 +734,8 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
     // nothing" rather than "you pointed me at the wrong directory".
     if (isUnavailable(report.orchestration.workersSpawned)) {
       throw new Error(
-        `no supervisor run found at ${runDir} — expected <runDir>/ws/.loops/supervisor/<id>, ` +
+        `no supervisor run found at ${runDir} — expected <runDir>/ws/.agent/supervisor/<id> ` +
+          '(or the pre-rename <runDir>/ws/.loops/supervisor/<id>), ' +
           'or a parent directory containing such runs',
       )
     }
