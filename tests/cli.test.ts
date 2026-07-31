@@ -857,3 +857,85 @@ describe('traces CLI', () => {
     )
   }, 120_000)
 })
+
+describe('traces analyze --llm failure surfacing', () => {
+  it('exits non-zero and surfaces the bridge stderr when every agentic analyst dies at startup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-llm-fail-'))
+    const input = join(dir, 'spans.openinference.jsonl')
+    const report = join(dir, 'report.md')
+    const fakeBridge = join(dir, 'failing-bridge.sh')
+    const bridgeReason =
+      "DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly ['controlAdapter', 'instructions', 'limits', 'modelProxy', 'operation', 'question', 'toolCallback', 'toolSpecs']"
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace-llm-fail',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'claude-code',
+        extra: { 'session.id': 'session-llm-fail' },
+      }),
+      span({
+        traceId: 'trace-llm-fail',
+        spanId: 'assistant',
+        parentSpanId: 'root',
+        name: 'llm.turn',
+        kind: 'LLM',
+        startTime: '2026-01-01T00:00:01.000Z',
+        service: 'claude-code',
+        step: 1,
+        content: 'Working on the task.',
+        extra: { 'session.id': 'session-llm-fail' },
+      }),
+    ]), 'utf8')
+    // Stands in for `python -m agent_eval_rpc.dspy_rlm_bridge`: dies at startup
+    // with the failure line on stderr, before any model call.
+    await writeFile(fakeBridge, `#!/bin/sh\necho "${bridgeReason}" >&2\nexit 1\n`, { mode: 0o755 })
+
+    const run = execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'analyze',
+      input,
+      '--format',
+      'openinference',
+      '--llm',
+      '--budget',
+      '1',
+      '--out',
+      report,
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        FORCE_COLOR: '',
+        TANGLE_API_KEY: 'test-key-never-sent-upstream',
+        OPENAI_API_KEY: '',
+        OPENAI_BASE_URL: '',
+        TRACES_PYTHON: fakeBridge,
+      },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 60_000,
+    })
+
+    const failure = await run.then(
+      () => {
+        throw new Error('analyze --llm exited 0 although every agentic analyst failed')
+      },
+      (error: Error & { code?: number; stdout?: string; stderr?: string }) => error,
+    )
+    expect(failure.code).toBe(1)
+    // (a) the FAIL line carries the underlying bridge stderr.
+    expect(failure.stderr).toMatch(/\[analyst\] FAIL failure-mode — Error: .*DSPY-BRIDGE-FAILURE: ValueError/)
+    // (b) the run ends with an unmissable total-failure banner.
+    expect(failure.stderr).toContain('LLM analysis produced nothing')
+    expect(failure.stderr).toContain('agent-eval-rpc[dspy]==')
+    // The deterministic report is still written, and its analyst table names the reason.
+    const reportText = await readFile(report, 'utf8')
+    expect(reportText).toContain('| Analyst | Status | Findings | Latency | Detail |')
+    expect(reportText).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
+  }, 60_000)
+})

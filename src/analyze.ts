@@ -16,6 +16,7 @@ import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   type AnalystFinding,
   type AnalystRegistry,
+  type AnalystRunSummary,
   buildDefaultAnalystRegistry,
   type TraceAnalysisEngine,
   type TraceAnalystDefinition,
@@ -61,6 +62,13 @@ export interface AnalyzeResult {
   otlpPath: string
   execution: ExecutionReport
   result: Awaited<ReturnType<ReturnType<typeof buildDefaultAnalystRegistry>['run']>>
+  /**
+   * Per-analyst summaries from the agentic pass alone (also merged into
+   * `result.per_analyst`). Present only when an agentic pass ran; callers use
+   * it to tell "the engine produced nothing" apart from "deterministic-only
+   * run", which the merged list cannot express.
+   */
+  agenticPerAnalyst?: readonly AnalystRunSummary[]
 }
 
 /**
@@ -112,6 +120,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
 
   // Agentic pass — default ceiling so each tool call stays context-bounded;
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
+  let agenticPerAnalyst: readonly AnalystRunSummary[] | undefined
   if (opts.engine || opts.agenticRegistry) {
     const agStore = new OtlpFileTraceStore({ path: otlpPath, maxFileBytes: GENERATED_TRACE_FILE_CEILING })
     await agStore.ensureIndexed()
@@ -129,6 +138,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
         ? { priorFindings: { '*': opts.agenticPriorFindings } }
         : {}),
     })
+    agenticPerAnalyst = [...agResult.per_analyst]
     result.findings.push(...agResult.findings)
     result.per_analyst.push(...agResult.per_analyst)
     const totalCostUsd = result.total_cost_usd + agResult.total_cost_usd
@@ -141,5 +151,5 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   }
 
   opts.signal?.throwIfAborted()
-  return { otlpPath, execution, result }
+  return { otlpPath, execution, result, ...(agenticPerAnalyst ? { agenticPerAnalyst } : {}) }
 }

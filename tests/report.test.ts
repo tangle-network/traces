@@ -4,7 +4,7 @@ import { summarizeExecution } from '@tangle-network/agent-eval/contract'
 import { describe, expect, it } from 'vitest'
 import type { PipelineReport } from '../src/pipelines.js'
 import type { ReactionReport } from '../src/reactions.js'
-import { renderPipelines, renderReport, summarizeDeterministicSignals } from '../src/report.js'
+import { analystRunDetail, renderPipelines, renderReport, summarizeDeterministicSignals } from '../src/report.js'
 
 const EMPTY_EXECUTION = summarizeExecution({ runs: [] })
 
@@ -364,5 +364,129 @@ describe('summarizeDeterministicSignals', () => {
       failedRuns: 2,
       totalSignals: 11,
     })
+  })
+})
+
+describe('analystRunDetail', () => {
+  const usage = {
+    calls: 0,
+    tokens: { input: 0, output: 0 },
+    cost: { kind: 'observed', usd: 0 },
+  } as const
+
+  it('carries the engine error for a failed analyst into the report table', () => {
+    const bridgeError =
+      "DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly ['controlAdapter', 'instructions', 'limits', 'modelProxy', 'operation', 'question', 'toolCallback', 'toolSpecs'] stdout="
+    const result = emptyResult()
+    result.per_analyst.push({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 141,
+      usage,
+      error: { class: 'Error', message: bridgeError },
+    })
+
+    const report = renderReport(result, {
+      harness: 'claude-code',
+      sessionCount: 1,
+      spanCount: 10,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      execution: EMPTY_EXECUTION,
+    })
+    expect(report).toContain('| Analyst | Status | Findings | Latency | Detail |')
+    expect(report).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
+    expect(report).toContain('| `efficiency-behavioral` | ok | 0 | 347ms | — |')
+  })
+
+  it('condenses a markerless bridge traceback while keeping the terminal exception', () => {
+    // The pinned agent-eval-rpc release emits no DSPY-BRIDGE-FAILURE marker;
+    // its failures are raw tracebacks whose actionable line is the LAST one.
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      error: {
+        class: 'Error',
+        message:
+          'DSPy RLM trace analysis exited 1. stderr=Traceback (most recent call last):\n' +
+          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 210, in _main\n' +
+          '    output = _analyze(validated)\n'.repeat(30) +
+          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 547, in _parse_findings_json\n' +
+          'ValueError: DSPy RLM findings_json must be valid JSON stdout=',
+      },
+    })
+    expect(detail).toContain('Error: DSPy RLM trace analysis exited 1.')
+    expect(detail).toContain(' … ')
+    expect(detail).toContain('ValueError: DSPy RLM findings_json must be valid JSON')
+    expect(detail).not.toContain('\n')
+    expect(detail.length).toBeLessThanOrEqual(243)
+  })
+
+  it('never splits a surrogate pair at a truncation boundary', () => {
+    // Emoji land exactly around both slice points of the head+tail split.
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      // The composed 'Error: ' prefix is 7 UTF-16 units, so every emoji sits
+      // at an odd offset and a code-unit slice must cut through a pair.
+      error: { class: 'Error', message: '💥'.repeat(400) },
+    })
+    // A /u regex can only match \p{Surrogate} against a LONE surrogate; a
+    // correctly paired emoji decodes to one code point and never matches.
+    expect(/\p{Surrogate}/u.test(detail)).toBe(false)
+    expect(detail).toContain(' … ')
+  })
+
+  it('renders a whitespace-only error as the empty-cell dash', () => {
+    expect(analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      error: { class: '', message: ' \n\t ' },
+    })).toBe('—')
+  })
+
+  it('extracts the DSPY-BRIDGE-FAILURE line and drops the trailing traceback', () => {
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 141,
+      usage,
+      error: {
+        class: 'Error',
+        message:
+          'DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: bad input ' +
+          'Traceback (most recent call last): File "bridge.py", line 1, in main stdout=',
+      },
+    })
+    expect(detail).toBe('DSPY-BRIDGE-FAILURE: ValueError: bad input')
+  })
+
+  it('reports the skip reason and stays silent for clean rows', () => {
+    const skipped = analystRunDetail({
+      analyst_id: 'knowledge-gap',
+      status: 'skipped',
+      reason: 'missing input: traceStore',
+      findings_count: 0,
+      latency_ms: 0,
+      usage,
+    })
+    expect(skipped).toBe('missing input: traceStore')
+    expect(analystRunDetail({
+      analyst_id: 'efficiency-behavioral',
+      status: 'ok',
+      findings_count: 2,
+      latency_ms: 5,
+      usage,
+    })).toBe('—')
   })
 })

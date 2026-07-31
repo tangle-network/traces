@@ -6,7 +6,7 @@
  * the actionable output for improving a stuck/looping agent.
  */
 
-import type { AnalystFinding, AnalystRunResult } from '@tangle-network/agent-eval/analyst'
+import type { AnalystFinding, AnalystRunResult, AnalystRunSummary } from '@tangle-network/agent-eval/analyst'
 import type {
   ExecutionReport,
   ScalarDistribution,
@@ -104,6 +104,53 @@ function workflowIssueText(issue: SessionWorkflowIssue): string {
 
 function tableCell(value: string): string {
   return value.replace(/\s+/g, ' ').replaceAll('|', '\\|').trim()
+}
+
+const ANALYST_DETAIL_MAX_CHARS = 240
+
+/**
+ * Failure-reason marker printed by newer (currently unreleased) agent-eval
+ * bridges. The pinned agent-eval-rpc release never emits it, so the head+tail
+ * condensation below is the supported path today — but skew failures come
+ * precisely from mismatched newer bridges, which is when the marker appears.
+ */
+const BRIDGE_FAILURE_MARKER = 'DSPY-BRIDGE-FAILURE:'
+
+/**
+ * Condense an analyst engine error to one actionable line. The bridge's
+ * `DSPY-BRIDGE-FAILURE:` reason wins when present; otherwise keep head AND
+ * tail, because a Python traceback names its terminal exception at the end —
+ * head-only truncation would cut exactly the part worth reading. Slicing is
+ * code-point-safe so a boundary never splits a surrogate pair.
+ */
+export function condenseAnalystError(raw: string, maxChars: number): string {
+  const flat = raw.replace(/\s+/g, ' ').trim()
+  const marker = flat.indexOf(BRIDGE_FAILURE_MARKER)
+  let text = flat
+  if (marker >= 0) {
+    const fromMarker = flat.slice(marker)
+    const traceback = fromMarker.indexOf(' Traceback (most recent call last)')
+    text = traceback > 0 ? fromMarker.slice(0, traceback) : fromMarker
+  }
+  const chars = [...text]
+  if (chars.length <= maxChars) return text
+  const headChars = Math.floor(maxChars * 0.4)
+  return `${chars.slice(0, headChars).join('')} … ${chars.slice(chars.length - (maxChars - headChars)).join('')}`
+}
+
+/**
+ * Why a failed/skipped analyst produced nothing, condensed to one table cell.
+ * Failed engine runs die with the whole bridge stderr in the error message;
+ * without this cell the report scores the analyst without saying why.
+ */
+export function analystRunDetail(summary: AnalystRunSummary): string {
+  const raw = summary.status === 'failed' && summary.error
+    ? [summary.error.class, summary.error.message].map((part) => part.trim()).filter(Boolean).join(': ')
+    : summary.status === 'skipped' && summary.reason
+      ? summary.reason
+      : ''
+  const cell = tableCell(condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS))
+  return cell === '' ? '—' : cell
 }
 
 function count(value: number): string {
@@ -366,10 +413,10 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   }
 
   // Analyst run summary.
-  lines.push('| Analyst | Status | Findings | Latency |')
-  lines.push('|---|---|---|---|')
+  lines.push('| Analyst | Status | Findings | Latency | Detail |')
+  lines.push('|---|---|---|---|---|')
   for (const s of result.per_analyst) {
-    lines.push(`| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms |`)
+    lines.push(`| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms | ${analystRunDetail(s)} |`)
   }
   lines.push('')
 

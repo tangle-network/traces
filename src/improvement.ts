@@ -8,6 +8,7 @@ import {
   type Analyst,
   type AnalystFinding,
   type AnalystRunResult,
+  type AnalystRunSummary,
   AnalystRegistry,
   buildDefaultAnalystRegistry,
   makeFinding,
@@ -28,6 +29,7 @@ import type { OtlpSpan } from './otlp.js'
 import { type PipelineReport, runPipelines } from './pipelines.js'
 import { analyzeReactions, type ReactionReport } from './reactions.js'
 import {
+  condenseAnalystError,
   renderAdoption,
   renderPipelines,
   renderReactions,
@@ -104,6 +106,13 @@ export interface TraceInvestigationResult {
   readonly adoption: AdoptionReport
   /** Deterministic routing record for the agentic trace-analysis pass. */
   readonly agenticRoute?: TraceAgenticRoute
+  /**
+   * Per-analyst summaries from the agentic pass alone. Present only when an
+   * agentic pass ran; failed entries carry the engine's error (bridge stderr
+   * included), so callers can fail loud instead of reporting the deterministic
+   * findings as if the requested LLM analysis had happened.
+   */
+  readonly agenticPerAnalyst?: readonly AnalystRunSummary[]
   readonly external: readonly ExternalAnalysisResult[]
   readonly report: string
 }
@@ -657,10 +666,62 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     reactions,
     adoption,
     ...(agenticRoute ? { agenticRoute } : {}),
+    ...(analysis.agenticPerAnalyst ? { agenticPerAnalyst: analysis.agenticPerAnalyst } : {}),
     external,
   }
   const result = { ...partial, report: '' }
   return { ...result, report: renderInvestigationReport(result, analysis.result) }
+}
+
+/** Cap for one analyst's reason inside the failure banner; the full error is
+ * already on that analyst's `[analyst] FAIL` stderr line. */
+const AGENTIC_FAILURE_REASON_MAX_CHARS = 400
+
+/**
+ * Signatures of engine↔bridge version skew (or a missing bridge install) —
+ * the failures the reinstall hint actually fixes. Every bridge traceback
+ * names the `agent_eval_rpc` module path, so matching on the module name or
+ * a generic marker alone would point mid-analysis model errors at pip.
+ */
+const BRIDGE_MISMATCH_PATTERN = /must contain exactly|No module named ['"]?agent_eval_rpc|could not start/
+
+function condensedReason(summary: AnalystRunSummary): string {
+  const raw = summary.status === 'skipped'
+    ? `skipped — ${summary.reason ?? 'no reason recorded'}`
+    : summary.error
+      ? `${summary.error.class}: ${summary.error.message}`
+      : 'failed without an error message'
+  return condenseAnalystError(raw, AGENTIC_FAILURE_REASON_MAX_CHARS)
+}
+
+/**
+ * Operator-facing message for a fully dead agentic pass: non-empty exactly
+ * when an agentic pass ran and NO analyst in it succeeded — failed and
+ * skipped both count as "produced nothing", so one skip cannot silence the
+ * alarm. Partial success returns undefined: some agentic findings were
+ * produced, and the per-analyst report table carries the individual reasons.
+ */
+export function totalAgenticFailureMessage(
+  agenticPerAnalyst: readonly AnalystRunSummary[] | undefined,
+  opts: { requiredBridgeVersion?: string } = {},
+): string | undefined {
+  if (!agenticPerAnalyst || agenticPerAnalyst.length === 0) return undefined
+  if (agenticPerAnalyst.some((summary) => summary.status === 'ok')) return undefined
+  const lines = [
+    `LLM analysis produced nothing: none of the ${agenticPerAnalyst.length} agentic analyst(s) succeeded. ` +
+      'The reported findings are from the deterministic pass only.',
+    ...agenticPerAnalyst.map((summary) => `  ${summary.analyst_id}: ${condensedReason(summary)}`),
+  ]
+  if (
+    opts.requiredBridgeVersion &&
+    agenticPerAnalyst.some((summary) => BRIDGE_MISMATCH_PATTERN.test(summary.error?.message ?? ''))
+  ) {
+    lines.push(
+      'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
+        `agent-eval-rpc[dspy]==${opts.requiredBridgeVersion} (matching this package's @tangle-network/agent-eval).`,
+    )
+  }
+  return lines.join('\n')
 }
 
 export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOptions): Promise<TraceStoreInvestigationResult> {
