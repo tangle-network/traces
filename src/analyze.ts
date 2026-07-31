@@ -11,14 +11,14 @@
  * same artifact, no conversion. Analysis is never locked to one engine.
  */
 
-import type { AxAIService } from '@ax-llm/ax'
 import type { RunCostProvenance } from '@tangle-network/agent-eval'
 import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   type AnalystFinding,
   type AnalystRegistry,
   buildDefaultAnalystRegistry,
-  type TraceAnalystKindSpec,
+  type TraceAnalysisEngine,
+  type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
 import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
 import { summarizeSpanExecution } from './execution.js'
@@ -26,8 +26,12 @@ import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
 
 export interface AnalyzeOptions {
-  /** Ax service enabling the agentic RLM kinds. Omit → deterministic only. */
-  ai?: AxAIService
+  /**
+   * Recursive analysis engine enabling the agentic analyst kinds. Omit →
+   * deterministic only. The engine's id, version, and model become the
+   * exact-run identity of every analyst it executes.
+   */
+  engine?: TraceAnalysisEngine
   model?: string
   /** USD cap across agentic analysts. */
   budgetUsd?: number
@@ -42,7 +46,7 @@ export interface AnalyzeOptions {
    * deterministic pass and receives its compact findings as prior context. */
   agenticRegistry?: AnalystRegistry
   /** Select a subset of agent-eval's maintained trace analyst kinds. */
-  agenticKinds?: readonly TraceAnalystKindSpec[]
+  agenticKinds?: readonly TraceAnalystDefinition[]
   /** Compact deterministic findings that agents receive before reading spans. */
   agenticPriorFindings?: readonly AnalystFinding[]
   /** Where to write the OTLP-JSONL artifact. Defaults to a temp file. */
@@ -108,13 +112,12 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
 
   // Agentic pass — default ceiling so each tool call stays context-bounded;
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
-  if (opts.ai || opts.agenticRegistry) {
+  if (opts.engine || opts.agenticRegistry) {
     const agStore = new OtlpFileTraceStore({ path: otlpPath, maxFileBytes: GENERATED_TRACE_FILE_CEILING })
     await agStore.ensureIndexed()
     const agRegistry = opts.agenticRegistry ?? buildDefaultAnalystRegistry({
-      ai: opts.ai!,
-      model: opts.model,
-      kinds: opts.agenticKinds,
+      engine: opts.engine!,
+      ...(opts.agenticKinds ? { definitions: opts.agenticKinds } : {}),
       includeBehavioral: false,
       registry: { log: opts.log },
     })

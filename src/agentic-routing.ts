@@ -1,6 +1,6 @@
 import {
   DEFAULT_TRACE_ANALYST_KINDS,
-  type TraceAnalystKindSpec,
+  type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
 import type { PipelineReport } from './pipelines.js'
 import type { ReactionReport } from './reactions.js'
@@ -83,7 +83,7 @@ export function planTraceAgenticRoute(
 }
 
 /** Resolve a route into the maintained agent-eval kind specifications. */
-export function traceAgenticKinds(route: TraceAgenticRoute): readonly TraceAnalystKindSpec[] {
+export function traceAgenticKinds(route: TraceAgenticRoute): readonly TraceAnalystDefinition[] {
   const selected = new Set(route.analystIds)
   return DEFAULT_TRACE_ANALYST_KINDS.filter((spec) => selected.has(spec.id))
 }

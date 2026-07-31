@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { AxAIService } from '@ax-llm/ax'
+import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   type Analyst,
@@ -51,7 +51,7 @@ export interface TraceInvestigationOptions {
   readonly workflow?: SessionWorkflowSummary
   readonly cwds?: readonly string[]
   readonly minLoopOccurrences?: number
-  readonly ai?: AxAIService
+  readonly engine?: TraceAnalysisEngine
   readonly model?: string
   readonly budgetUsd?: number
   readonly registry?: AnalystRegistry
@@ -127,7 +127,7 @@ export interface BuildTraceFindingPacketOptions {
 export interface TraceStoreInvestigationOptions {
   readonly traceStore: TraceAnalysisStore
   readonly registry?: AnalystRegistry
-  readonly ai?: AxAIService
+  readonly engine?: TraceAnalysisEngine
   readonly model?: string
   readonly budgetUsd?: number
   readonly runId?: string
@@ -610,11 +610,11 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
   const deterministic = deterministicFindings(pipelines, reactions, adoption, opts.spans)
   // A supplied registry owns its own composition. Only describe a route when
   // this package builds the maintained agent-eval suite itself.
-  const agenticRoute = opts.ai && !opts.agenticRegistry
+  const agenticRoute = opts.engine && !opts.agenticRegistry
     ? planTraceAgenticRoute(pipelines, reactions)
     : undefined
   const analysis = await analyzeSpans(opts.spans, {
-    ai: opts.ai,
+    engine: opts.engine,
     model: opts.model,
     budgetUsd: opts.budgetUsd,
     registry: opts.registry,
@@ -667,8 +667,7 @@ export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOp
   opts.signal?.throwIfAborted()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
   const registry = opts.registry ?? buildDefaultAnalystRegistry({
-    ai: opts.ai,
-    model: opts.model,
+    ...(opts.engine ? { engine: opts.engine } : {}),
     registry: { log: opts.log },
   })
   const runId = opts.runId ?? `traces-store-investigation-${Date.parse(generatedAt) || Date.now()}`

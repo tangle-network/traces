@@ -59,7 +59,7 @@ import {
   renderSupervisorRunMarkdown,
   rollupSupervisorRuns,
 } from '@tangle-network/agent-eval/supervisor-run'
-import { createAnalystAi } from '@tangle-network/agent-eval/analyst'
+import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
@@ -125,6 +125,9 @@ interface Args {
 }
 
 const DEFAULT_ANALYST_MODEL = 'gpt-5-mini'
+
+/** Default `--llm` endpoint: the Tangle router, reached with TANGLE_API_KEY. */
+const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
 
 function packageVersion(): string {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
@@ -352,18 +355,37 @@ async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTra
   )
 }
 
-async function buildAxService(model: string): Promise<import('@ax-llm/ax').AxAIService> {
-  const apiKey = process.env.OPENAI_API_KEY
+/**
+ * The recursive analysis engine behind `--llm`. agent-eval's model-backed
+ * analysts run through DSPy RLM, which drives `agent-eval-rpc[dspy]` out of
+ * process — so `--llm` needs a Python interpreter with that extra installed,
+ * selectable via TRACES_PYTHON. Every deterministic command is unaffected and
+ * still needs neither a key nor Python.
+ */
+function buildAnalysisEngine(model: string): TraceAnalysisEngine {
+  // The router is the default endpoint, so TANGLE_API_KEY alone is enough.
+  // OPENAI_API_KEY still works and, when it is the only key present, points at
+  // OpenAI directly — otherwise a plain OpenAI key would be sent to the router.
+  const tangleKey = process.env.TANGLE_API_KEY
+  const openAiKey = process.env.OPENAI_API_KEY
+  const apiKey = tangleKey || openAiKey
   if (!apiKey) {
     throw new Error(
-      '--llm needs OPENAI_API_KEY: an OpenAI key, or a router/gateway key with OPENAI_BASE_URL set to an ' +
-        'OpenAI-compatible endpoint (e.g. the Tangle router). Deterministic analysis needs no key.',
+      '--llm needs a model key: TANGLE_API_KEY for the Tangle router (the default endpoint), or ' +
+        'OPENAI_API_KEY for OpenAI. Set OPENAI_BASE_URL to target any other OpenAI-compatible ' +
+        'gateway. Deterministic analysis needs no key.',
     )
   }
-  // OPENAI_BASE_URL points the agentic analysts at any OpenAI-compatible gateway
-  // (the Tangle router, a local proxy, …) instead of api.openai.com.
-  const apiURL = process.env.OPENAI_BASE_URL || undefined
-  return createAnalystAi({ apiKey, baseUrl: apiURL, model })
+  const baseUrl =
+    process.env.OPENAI_BASE_URL ||
+    (tangleKey ? TANGLE_ROUTER_BASE_URL : 'https://api.openai.com/v1')
+  const python = process.env.TRACES_PYTHON
+  return createDspyRlmTraceEngine({
+    apiKey,
+    baseUrl,
+    model,
+    ...(python ? { runner: { command: python } } : {}),
+  })
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -785,7 +807,7 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
     ? await loadTracesConfig(args.config)
     : undefined
   const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const ai = args.llm ? await buildAxService(analystModel) : undefined
+  const engine = args.llm ? buildAnalysisEngine(analystModel) : undefined
   return runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
@@ -793,7 +815,7 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
     workflow,
     cwds,
     minLoopOccurrences: args.minLoop,
-    ai,
+    engine,
     model: args.llm ? analystModel : args.model,
     budgetUsd: args.budget,
     otlpOutPath: args.otlp,
@@ -808,7 +830,7 @@ async function cmdImprove(args: Args): Promise<void> {
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const ai = args.llm ? await buildAxService(analystModel) : undefined
+  const engine = args.llm ? buildAnalysisEngine(analystModel) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
       spans,
@@ -817,7 +839,7 @@ async function cmdImprove(args: Args): Promise<void> {
       workflow,
       cwds,
       minLoopOccurrences: args.minLoop,
-      ai,
+      engine,
       model: args.llm ? analystModel : args.model,
       budgetUsd: args.budget,
       otlpOutPath: args.otlp,
@@ -1138,7 +1160,10 @@ Options:
   --replay, --once stream: scan once and exit (default for positional input / --session)
   --no-spans       stream: omit per-span pulse events
   --no-findings    stream: omit semantic live-finding events
-  --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
+  --llm            Enable agentic RLM analysts. Runs on the Tangle router by
+                   default (TANGLE_API_KEY); OPENAI_API_KEY alone targets OpenAI,
+                   OPENAI_BASE_URL overrides the endpoint. Needs Python with
+                   agent-eval-rpc[dspy] (TRACES_PYTHON selects the interpreter).
   --model <id>     Model for --llm, HALO, and Hodoscope (default for --llm: ${DEFAULT_ANALYST_MODEL})
   --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
   --budget <usd>   USD cap for agentic analysts
