@@ -974,7 +974,13 @@ describe('claude adapter (conversation capture)', () => {
     expect(spans[0]?.end_time).toBe('2026-01-01T00:00:03Z')
   })
 
-  it('rejects duplicate subagent ids instead of silently assigning the wrong parent', async () => {
+  // Was: rejects duplicate ids by throwing. The invariant it protected is unchanged — a
+  // `parentAgentId` pointing at a duplicated id must never be resolved to a guess — but throwing
+  // took the whole tool down on data that legitimately occurs (two workflow transcript dirs, or a
+  // subagent continued across sessions; three such collisions exist on one developer machine, and
+  // `traces watch` died on them before printing anything). The ambiguity is in those agents'
+  // parentage, not in the run, so the edge is refused and every transcript is still read.
+  it('keeps both duplicate-id transcripts and refuses only the ambiguous parent edge', async () => {
     const path = join(dir, 'claude-duplicate-subagents.jsonl')
     writeFileSync(
       path,
@@ -1011,9 +1017,20 @@ describe('claude adapter (conversation capture)', () => {
       )
     }
 
-    await expect(new ClaudeAdapter().parse(refFor(path, 'claude-code'))).rejects.toThrow(
-      'Duplicate Claude subagent id: same',
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+    const texts = spans.flatMap((item) =>
+      typeof item.attributes.content === 'string' ? [item.attributes.content] : [],
     )
+    // Neither transcript is dropped.
+    expect(texts.some((t) => t.includes('workflow-a'))).toBe(true)
+    expect(texts.some((t) => t.includes('workflow-b'))).toBe(true)
+    // And neither is parented to the other — the ambiguous edge is refused, not guessed.
+    const dupes = spans.filter(
+      (item) => typeof item.attributes['agent.name'] === 'string' &&
+        String(item.attributes['agent.name']).includes('same'),
+    )
+    const dupeIds = new Set(dupes.map((d) => d.span_id))
+    for (const d of dupes) expect(dupeIds.has(d.parent_span_id ?? '')).toBe(false)
   })
 
   it('preserves complete output while folding subagents under their Agent call', async () => {
