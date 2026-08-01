@@ -49,6 +49,55 @@ A high divergence rate is a finding about replayability, not a failure of the to
 - **Environment drift shows up as divergence.** The sandbox mounts a workspace at `/home/agent` and injects platform env; recorded observations that depend on exact `ls` output or env contents can differ while returncodes still match. Only returncodes drive the divergence count.
 - **The failure signature is derived, not assumed.** Default: the first recorded-output line containing "error". Compiler quote glyphs vary with locale, so prefer an explicit `--signature` with an ASCII-stable substring.
 
+## Batch mode — replayability and fix-flip rates
+
+`traces replay-verify-batch` runs the proof at corpus scale over gold-labeled CodeTraceBench corpora and measures two headline numbers nobody had before:
+
+- **Replayability rate** — fraction of replayable cases where the prefix replays with ≤10% returncode divergence AND arm A reproduces the recorded returncode at the gold step k (k = the first gold incorrect step from `incorrect_stages[].incorrect_step_ids`).
+- **Fix-flip rate** — fraction of arm-B-executed cases where a generated corrected command made the failure vanish.
+
+```sh
+traces replay-verify-batch \
+  --corpus dev-32=<labels.json>::<prepared-dir> \
+  --corpus holdout-1=<labels.json>::<prepared-dir> \
+  --out ./replay-batch-out \
+  --fix generate --max-fix-cases 30 --seed 17 \
+  --base-url http://127.0.0.1:4097 --api-key-env SANDBOX_API_KEY \
+  --fix-api-key-env ZAI_GLM_API_KEY
+```
+
+A corpus is a gold label file plus a prepared directory (`normalized/<traj_id>/steps.json` + `extracted/<traj_id>/swe_raw/**`). Replayable = the raw trajectory carries `info.docker_config.base_image` AND the labels mark ≥1 gold incorrect step. The batch:
+
+- reports the true replayable count and a per-reason exclusion table (`--enumerate-only` prints both without touching a sandbox);
+- derives the working directory from the recorded run config (`info.config.environment.cwd`), falling back to `docker_config.cwd`, then to the first `pwd` observation;
+- builds and caches a uid-1000 derived image per (base image, cwd) pair — `ctb-replay:<hash>-uid1000` — because the sandbox platform pins commands to a non-root identity;
+- runs every case serially (image pulls contend on disk and registry bandwidth) and records pull/build failures as report rows, never silent skips;
+- uses the recorded per-step timeout (`info.config.environment.timeout`) unless `--step-timeout` overrides it.
+
+Fix generation (`--fix generate`) runs ONE chat completion per arm-A-reproduced case against an OpenAI-compatible endpoint (default: glm-5.2 on z.ai). The prompt carries the gold step's action and observation, ±3 surrounding steps, and the task statement; the reply must be a single corrected shell command. Cases beyond `--max-fix-cases` are excluded by a seeded random sample and marked `sampled-out` in the report. Arm B replays the prefix in its own fresh sandbox and executes the corrected command; `failureVanished` = exit 0 with the failure signature absent.
+
+Honest-reporting notes baked into the report:
+
+- A gold step whose recorded observation carries **no returncode** (typically the end-of-run submit step) can never satisfy "arm A reproduces the recorded returncode": it counts against the replayability rate and the per-case table says why.
+- A gold step recorded with **returncode 0** (the labeled mistake succeeded — a wrong-direction action, not a crash) reproduces trivially; for such cases `failureVanished` is vacuous, so read the fix-flip rate on the recorded-rc≠0 subset the report breaks out.
+
+Outputs: `batch-report.json`, `batch-report.md` (headline + exclusion + pull-failure + per-case tables), `cases.jsonl` (incremental, crash-safe), and one directory per case with the full `replay-verify` artifacts plus `armB-result.json`.
+
+## Analyst wire — finding in, executed proof out
+
+`replayVerifyFinding` (exported from the package root, `src/replay-wire.ts`) is the entry point the analyst product calls:
+
+```ts
+import { replayVerifyFinding } from '@tangle-network/traces'
+
+const { invocation, fixCommand, verdict } = await replayVerifyFinding(
+  { trajId: 'miniswe-…-zstd-1733-786102c1', subject: 'incorrect-steps-37-37-unescaped-consequence-39' },
+  { corpora, out: './proof', fixCaller, baseUrl, apiKey },
+)
+```
+
+The subject grammar is the analyst benchmark's `incorrect-steps-<first>-<last>-<escaped|unescaped>-consequence-<step>`; `--at` is the finding's **first** incorrect step (the finding's claim, which may differ from the gold label). The wire resolves the trajectory across the given corpora, generates the arm-B fix through the same one-call generator (or accepts a pre-supplied `fixCommand`), and returns the full `ReplayVerdict`. It throws with a precise reason when the finding cannot be replayed (malformed subject, unknown trajectory, non-SWE case, step out of range) — the product surfaces that reason instead of a proof.
+
 ## Orchestrator prerequisites
 
 replay-verify talks to a sandbox API (`--base-url`); in local development that is the sandbox SDK adapter in front of an orchestrator running the docker driver.
