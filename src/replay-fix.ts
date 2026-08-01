@@ -43,6 +43,21 @@ export function zaiChatCaller(options: ZaiChatCallerOptions): ChatCompletionCall
   const fetchImpl = options.fetchImpl ?? fetch
   return {
     async complete(system: string, user: string): Promise<ChatOutcome> {
+      // Reasoning models spend output budget on reasoning before content; a cap
+      // that fits the answer alone returns finish_reason=length with EMPTY
+      // content. Base cap follows the engine's glm-5.2 floor; one doubled retry
+      // covers long-reasoning cases without masking real provider errors.
+      const baseCap = options.maxTokens ?? 16_384
+      let lastError = 'empty completion content'
+      for (const cap of [baseCap, baseCap * 2]) {
+        const outcome = await callOnce(cap)
+        if (outcome.succeeded) return outcome
+        lastError = outcome.error
+        if (!/finish_reason":"length/.test(outcome.error)) return outcome
+      }
+      return { succeeded: false, error: lastError }
+
+      async function callOnce(maxTokens: number): Promise<ChatOutcome> {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 180_000)
       try {
@@ -59,7 +74,7 @@ export function zaiChatCaller(options: ZaiChatCallerOptions): ChatCompletionCall
               { role: 'user', content: user },
             ],
             temperature: 0,
-            max_tokens: options.maxTokens ?? 8192,
+            max_tokens: maxTokens,
           }),
           signal: controller.signal,
         })
@@ -86,6 +101,7 @@ export function zaiChatCaller(options: ZaiChatCallerOptions): ChatCompletionCall
         return { succeeded: false, error: err instanceof Error ? err.message : String(err) }
       } finally {
         clearTimeout(timer)
+      }
       }
     },
   }
