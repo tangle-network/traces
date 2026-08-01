@@ -43,9 +43,21 @@ export type ReplayExclusionReason =
   | 'unreadable-raw-trajectory'
   | 'no-docker-image'
   | 'no-gold-incorrect-step'
+  | 'gold-only-submit-step'
   | 'missing-steps-json'
   | 'gold-step-outside-steps'
   | 'cwd-underivable'
+
+/** mini-SWE's end-of-run submit convention: the agent echoes this sentinel
+ *  and dumps the diff. A gold label on this step marks a bad SUBMIT DECISION,
+ *  not a failed command — there is no executable failure to reproduce, so it
+ *  is never a counterfactual replay target (split3's gold labels concentrate
+ *  here, which is why a constant accuse-the-submit rule scores well there). */
+export const SUBMIT_ACTION_SIGNATURE = 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'
+
+export function isSubmitAction(action: string): boolean {
+  return action.includes(SUBMIT_ACTION_SIGNATURE)
+}
 
 export interface ExcludedCase {
   readonly corpus: string
@@ -73,10 +85,12 @@ export interface CaseResources {
 export interface ReplayableCase extends CaseResources {
   /** 1-based gold incorrect step ids, ascending. */
   readonly goldIncorrectSteps: readonly number[]
-  /** k — the first gold incorrect step; the batch replays the prefix to here. */
+  /** k — the first gold incorrect step that is a real mid-trajectory action;
+   *  submit-command golds are skipped (see SUBMIT_ACTION_SIGNATURE). */
   readonly k: number
-  /** Recorded returncode at k; null means the gold step carries no
-   *  verifiable failure signature (typically an end-of-run submit step). */
+  /** Gold steps before k skipped because their action is the submit command. */
+  readonly submitGoldsSkipped: number
+  /** Recorded returncode at k; null when the observation carries none. */
   readonly recordedReturncodeAtK: number | null
 }
 
@@ -230,7 +244,10 @@ export interface EnumerationResult {
 
 /**
  * Replayable = SWE-style raw trajectory with a docker image AND at least one
- * gold incorrect step. Exclusion reasons are reported in resolution order:
+ * gold incorrect step that is a real mid-trajectory action. Gold steps whose
+ * action is the submit command are skipped when choosing k (counted per case);
+ * a case whose golds are ALL submit steps is excluded as gold-only-submit-step.
+ * Exclusion reasons are reported in resolution order:
  * raw trajectory → docker image → gold labels → steps.json → k range → cwd.
  */
 export function enumerateReplayableCases(corpora: readonly CorpusSpec[]): EnumerationResult {
@@ -251,22 +268,46 @@ export function enumerateReplayableCases(corpora: readonly CorpusSpec[]): Enumer
         excluded.push({ corpus: corpus.name, trajId, reason: 'no-gold-incorrect-step' })
         continue
       }
-      const k = gold[0]!
       const resources = resolution.resources
-      const target = resources.steps.find((s) => s.step_id === k)
-      if (!target) {
+      let submitGoldsSkipped = 0
+      let target: CodeTraceBenchStep | null = null
+      let missingGoldId: number | null = null
+      for (const goldId of gold) {
+        const step = resources.steps.find((s) => s.step_id === goldId)
+        if (!step) {
+          missingGoldId = goldId
+          break
+        }
+        if (isSubmitAction(step.action)) {
+          submitGoldsSkipped += 1
+          continue
+        }
+        target = step
+        break
+      }
+      if (missingGoldId !== null) {
         excluded.push({
           corpus: corpus.name,
           trajId,
           reason: 'gold-step-outside-steps',
-          detail: `k=${k}, steps=${resources.steps.length}`,
+          detail: `k=${missingGoldId}, steps=${resources.steps.length}`,
+        })
+        continue
+      }
+      if (!target) {
+        excluded.push({
+          corpus: corpus.name,
+          trajId,
+          reason: 'gold-only-submit-step',
+          detail: `${submitGoldsSkipped} gold step(s), all submit commands`,
         })
         continue
       }
       replayable.push({
         ...resources,
         goldIncorrectSteps: gold,
-        k,
+        k: target.step_id,
+        submitGoldsSkipped,
         recordedReturncodeAtK: parseRecordedReturncode(target.observation),
       })
     }

@@ -133,6 +133,61 @@ describe('enumerateReplayableCases', () => {
     const { replayable } = enumerateReplayableCases([corpus])
     expect(replayable[0]!.taskStatement).toBe('Fix zstd build please.')
   })
+
+  it('skips submit-command golds when choosing k and excludes submit-only cases', () => {
+    const submitAction =
+      'echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached'
+    const dir = makeRoot()
+    const corpus = writeFixtureCorpus(dir, 'submit', [
+      {
+        // Gold 2 is the submit command, gold 3 a real failed action: k must be 3.
+        trajId: 'traj-skip-to-real',
+        steps: [
+          fixtureStep(1, 'ls', 0),
+          fixtureStep(2, submitAction, null),
+          fixtureStep(3, 'make target', 2, 'error: broken'),
+          fixtureStep(4, 'echo done', 0),
+        ],
+        goldIncorrectSteps: [2, 3],
+        raw: { baseImage: 'example/img:1', runConfigCwd: '/r' },
+      },
+      {
+        trajId: 'traj-submit-only',
+        steps: [fixtureStep(1, 'ls', 0), fixtureStep(2, submitAction, null)],
+        goldIncorrectSteps: [2],
+        raw: { baseImage: 'example/img:2', runConfigCwd: '/r' },
+      },
+      {
+        trajId: 'traj-no-submit-gold',
+        steps: failingSteps(),
+        goldIncorrectSteps: [3],
+        raw: { baseImage: 'example/img:3', runConfigCwd: '/r' },
+      },
+    ])
+    const { replayable, excluded } = enumerateReplayableCases([corpus])
+    expect(replayable.map((c) => c.trajId).sort()).toEqual([
+      'traj-no-submit-gold',
+      'traj-skip-to-real',
+    ])
+    expect(replayable.find((c) => c.trajId === 'traj-skip-to-real')).toMatchObject({
+      k: 3,
+      submitGoldsSkipped: 1,
+      recordedReturncodeAtK: 2,
+      goldIncorrectSteps: [2, 3],
+    })
+    expect(replayable.find((c) => c.trajId === 'traj-no-submit-gold')).toMatchObject({
+      k: 3,
+      submitGoldsSkipped: 0,
+    })
+    expect(excluded).toEqual([
+      {
+        corpus: 'submit',
+        trajId: 'traj-submit-only',
+        reason: 'gold-only-submit-step',
+        detail: '1 gold step(s), all submit commands',
+      },
+    ])
+  })
 })
 
 describe('replay-fix', () => {
@@ -248,6 +303,15 @@ describe('runReplayBatch', () => {
         raw: { baseImage: 'example/missing:1', runConfigCwd: '/repo' },
       },
       { trajId: 'traj-not-swe', steps: failingSteps(), goldIncorrectSteps: [3] },
+      {
+        trajId: 'traj-submit-sentinel',
+        steps: [
+          fixtureStep(1, 'ls', 0),
+          fixtureStep(2, 'echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git diff', null),
+        ],
+        goldIncorrectSteps: [2],
+        raw: { baseImage: 'example/ok:3', runConfigCwd: '/repo' },
+      },
     ])
     const out = join(dir, 'out')
     const caller: ChatCompletionCaller = {
@@ -278,8 +342,14 @@ describe('runReplayBatch', () => {
         }),
     })
 
-    expect(report.totals).toMatchObject({ labelEntries: 4, replayable: 3, executed: 3 })
-    expect(report.totals.excludedByReason).toEqual({ 'no-swe-raw-trajectory': 1 })
+    expect(report.totals).toMatchObject({ labelEntries: 5, replayable: 3, executed: 3 })
+    expect(report.totals.excludedByReason).toEqual({
+      'no-swe-raw-trajectory': 1,
+      'gold-only-submit-step': 1,
+    })
+    expect(report.totals.submitGoldsByCorpus).toEqual({
+      batch: { submitOnlyCases: 1, goldsSkippedWithinReplayable: 0 },
+    })
     expect(report.pullFailures).toEqual([
       {
         corpus: 'batch',
@@ -297,6 +367,7 @@ describe('runReplayBatch', () => {
     })
     expect(report.headline.signatureStrictRate.numerator).toBe(1)
     expect(report.headline.fixFlipRate).toEqual({ numerator: 1, denominator: 1, value: 1 })
+    expect(report.headline.fixFlipRateNonzeroRc).toEqual({ numerator: 1, denominator: 1, value: 1 })
     expect(report.llm).toEqual({
       model: 'fake-model',
       calls: 1,
@@ -331,6 +402,7 @@ describe('runReplayBatch', () => {
     expect(markdown).toContain('Replayability rate: 33.3%')
     expect(markdown).toContain('Fix-flip rate: 100.0%')
     expect(markdown).toContain('pull example/missing:1: not found')
+    expect(markdown).toContain('| batch | 1 | 0 |')
     const verdictPath = join(out, 'batch--traj-reproduces', 'replay-verdict.json')
     expect(existsSync(verdictPath)).toBe(true)
     expect(existsSync(join(out, 'batch--traj-reproduces', 'armB-result.json'))).toBe(true)

@@ -209,6 +209,8 @@ export interface ReplayBatchCaseRow {
   readonly k: number
   readonly stepCount: number
   readonly goldIncorrectSteps: readonly number[]
+  /** Gold steps before k skipped because their action is the submit command. */
+  readonly submitGoldsSkipped: number
   readonly recordedReturncodeAtK: number | null
   readonly signature: string | null
   readonly status: 'ok' | 'image-unavailable' | 'replay-error'
@@ -235,11 +237,24 @@ export interface ReplayBatchReport {
     readonly replayable: number
     readonly executed: number
     readonly excludedByReason: Record<string, number>
+    /** Per-corpus submit-gold accounting: cases dropped because every gold is
+     *  the submit command, and golds skipped inside still-replayable cases. */
+    readonly submitGoldsByCorpus: Record<
+      string,
+      { submitOnlyCases: number; goldsSkippedWithinReplayable: number }
+    >
   }
   readonly headline: {
     readonly replayabilityRate: { numerator: number; denominator: number; value: number | null }
     readonly signatureStrictRate: { numerator: number; denominator: number; value: number | null }
     readonly fixFlipRate: { numerator: number; denominator: number; value: number | null } | null
+    /** Fix-flip restricted to cases whose recorded returncode at k is nonzero —
+     *  real recorded failures, where "the failure vanished" is not vacuous. */
+    readonly fixFlipRateNonzeroRc: {
+      numerator: number
+      denominator: number
+      value: number | null
+    } | null
   }
   readonly llm: {
     readonly model: string
@@ -385,6 +400,7 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
       k: replayCase.k,
       stepCount: replayCase.steps.length,
       goldIncorrectSteps: replayCase.goldIncorrectSteps,
+      submitGoldsSkipped: replayCase.submitGoldsSkipped,
       recordedReturncodeAtK: replayCase.recordedReturncodeAtK,
     }
     if (!preparation.succeeded) {
@@ -634,9 +650,27 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
   )
   const armBExecuted = rows.filter((r) => r.fix?.attempted && r.fix.failureVanished !== null)
   const flipped = armBExecuted.filter((r) => r.fix!.failureVanished === true)
+  const armBNonzeroRc = armBExecuted.filter(
+    (r) => r.recordedReturncodeAtK !== null && r.recordedReturncodeAtK !== 0,
+  )
+  const flippedNonzeroRc = armBNonzeroRc.filter((r) => r.fix!.failureVanished === true)
   const excludedByReason: Record<string, number> = {}
   for (const excluded of enumeration.excluded) {
     excludedByReason[excluded.reason] = (excludedByReason[excluded.reason] ?? 0) + 1
+  }
+  const submitGoldsByCorpus: Record<
+    string,
+    { submitOnlyCases: number; goldsSkippedWithinReplayable: number }
+  > = {}
+  const submitEntry = (corpus: string) =>
+    (submitGoldsByCorpus[corpus] ??= { submitOnlyCases: 0, goldsSkippedWithinReplayable: 0 })
+  for (const excluded of enumeration.excluded) {
+    if (excluded.reason === 'gold-only-submit-step') submitEntry(excluded.corpus).submitOnlyCases += 1
+  }
+  for (const replayCase of enumeration.replayable) {
+    if (replayCase.submitGoldsSkipped > 0) {
+      submitEntry(replayCase.corpus).goldsSkippedWithinReplayable += replayCase.submitGoldsSkipped
+    }
   }
 
   const report: ReplayBatchReport = {
@@ -651,6 +685,7 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
       replayable: enumeration.replayable.length,
       executed: selected.length,
       excludedByReason,
+      submitGoldsByCorpus,
     },
     headline: {
       replayabilityRate: {
@@ -669,6 +704,14 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
               numerator: flipped.length,
               denominator: armBExecuted.length,
               value: rate(flipped.length, armBExecuted.length),
+            }
+          : null,
+      fixFlipRateNonzeroRc:
+        options.fix === 'generate'
+          ? {
+              numerator: flippedNonzeroRc.length,
+              denominator: armBNonzeroRc.length,
+              value: rate(flippedNonzeroRc.length, armBNonzeroRc.length),
             }
           : null,
     },
@@ -717,6 +760,12 @@ export function renderBatchReport(report: ReplayBatchReport): string {
         `(${headline.fixFlipRate.numerator}/${headline.fixFlipRate.denominator} arm-B-executed cases where the generated fix made the failure vanish).`,
     )
   }
+  if (headline.fixFlipRateNonzeroRc) {
+    lines.push(
+      `- Fix-flip rate on recorded-rc≠0 cases: ${pct(headline.fixFlipRateNonzeroRc.value)} ` +
+        `(${headline.fixFlipRateNonzeroRc.numerator}/${headline.fixFlipRateNonzeroRc.denominator}; real recorded failures — a gold step recorded with rc 0 flips vacuously).`,
+    )
+  }
   lines.push('')
   lines.push('## Enumeration')
   lines.push('')
@@ -729,6 +778,20 @@ export function renderBatchReport(report: ReplayBatchReport): string {
   lines.push('| --- | --- |')
   for (const [reason, count] of Object.entries(totals.excludedByReason).sort((a, b) => b[1] - a[1])) {
     lines.push(`| ${reason} | ${count} |`)
+  }
+  const submitEntries = Object.entries(totals.submitGoldsByCorpus)
+  if (submitEntries.length > 0) {
+    lines.push('')
+    lines.push(
+      'Submit-command golds are never counterfactual targets ' +
+        '(a gold on the submit step marks a bad submit decision, not a failed command):',
+    )
+    lines.push('')
+    lines.push('| corpus | cases excluded (all golds = submit) | golds skipped within replayable cases |')
+    lines.push('| --- | --- | --- |')
+    for (const [corpus, stats] of submitEntries.sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`| ${corpus} | ${stats.submitOnlyCases} | ${stats.goldsSkippedWithinReplayable} |`)
+    }
   }
   if (report.pullFailures.length > 0) {
     lines.push('')
@@ -882,9 +945,13 @@ Usage:
       [--base-url URL] [--api-key-env SANDBOX_API_KEY] [--max-lifetime SECONDS]
 
   Replayable = the raw trajectory carries info.docker_config.base_image AND the
-  labels mark at least one gold incorrect step. k = the first gold incorrect
-  step. Excluded cases and image pull failures are report rows, never skipped
-  silently. --enumerate-only prints the enumeration without touching a sandbox.
+  labels mark at least one gold incorrect step that is a real mid-trajectory
+  action. k = the first such gold step; golds whose action is the agent's
+  submit command (COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT) are skipped and
+  counted, and cases whose golds are all submit steps are excluded as
+  gold-only-submit-step. Excluded cases and image pull failures are report
+  rows, never skipped silently. --enumerate-only prints the enumeration
+  without touching a sandbox.
 
   --fix generate runs ONE LLM call per arm-A-reproduced case (cap
   --max-fix-cases, seeded sample beyond it) and executes the corrected command
@@ -915,6 +982,7 @@ export async function cmdReplayVerifyBatch(argv: readonly string[]): Promise<voi
             cwd: c.cwd,
             cwdSource: c.cwdSource,
             k: c.k,
+            submitGoldsSkipped: c.submitGoldsSkipped,
             recordedReturncodeAtK: c.recordedReturncodeAtK,
             goldIncorrectSteps: c.goldIncorrectSteps,
           })),

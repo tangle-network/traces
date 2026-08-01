@@ -53,7 +53,7 @@ A high divergence rate is a finding about replayability, not a failure of the to
 
 `traces replay-verify-batch` runs the proof at corpus scale over gold-labeled CodeTraceBench corpora and measures two headline numbers nobody had before:
 
-- **Replayability rate** — fraction of replayable cases where the prefix replays with ≤10% returncode divergence AND arm A reproduces the recorded returncode at the gold step k (k = the first gold incorrect step from `incorrect_stages[].incorrect_step_ids`).
+- **Replayability rate** — fraction of replayable cases where the prefix replays with ≤10% returncode divergence AND arm A reproduces the recorded returncode at the gold step k (k = the first gold incorrect step from `incorrect_stages[].incorrect_step_ids` that is a real mid-trajectory action; see the submit-step rule below).
 - **Fix-flip rate** — fraction of arm-B-executed cases where a generated corrected command made the failure vanish.
 
 ```sh
@@ -66,9 +66,10 @@ traces replay-verify-batch \
   --fix-api-key-env ZAI_GLM_API_KEY
 ```
 
-A corpus is a gold label file plus a prepared directory (`normalized/<traj_id>/steps.json` + `extracted/<traj_id>/swe_raw/**`). Replayable = the raw trajectory carries `info.docker_config.base_image` AND the labels mark ≥1 gold incorrect step. The batch:
+A corpus is a gold label file plus a prepared directory (`normalized/<traj_id>/steps.json` + `extracted/<traj_id>/swe_raw/**`). Replayable = the raw trajectory carries `info.docker_config.base_image` AND the labels mark ≥1 gold incorrect step that is a real mid-trajectory action. The batch:
 
 - reports the true replayable count and a per-reason exclusion table (`--enumerate-only` prints both without touching a sandbox);
+- **skips submit-command golds when choosing k.** A gold step whose action is the agent's end-of-run submit (`COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`) marks a bad submit *decision*, not a failed command — there is no executable failure to reproduce, so it is never a counterfactual target. k advances to the first non-submit gold; a case whose golds are all submit steps is excluded as `gold-only-submit-step`. The report carries a per-corpus table of both counts (this matters most for split3, whose gold labels concentrate on the submit decision);
 - derives the working directory from the recorded run config (`info.config.environment.cwd`), falling back to `docker_config.cwd`, then to the first `pwd` observation;
 - builds and caches a uid-1000 derived image per (base image, cwd) pair — `ctb-replay:<hash>-uid1000` — because the sandbox platform pins commands to a non-root identity;
 - runs every case serially (image pulls contend on disk and registry bandwidth) and records pull/build failures as report rows, never silent skips;
@@ -78,8 +79,8 @@ Fix generation (`--fix generate`) runs ONE chat completion per arm-A-reproduced 
 
 Honest-reporting notes baked into the report:
 
-- A gold step whose recorded observation carries **no returncode** (typically the end-of-run submit step) can never satisfy "arm A reproduces the recorded returncode": it counts against the replayability rate and the per-case table says why.
-- A gold step recorded with **returncode 0** (the labeled mistake succeeded — a wrong-direction action, not a crash) reproduces trivially; for such cases `failureVanished` is vacuous, so read the fix-flip rate on the recorded-rc≠0 subset the report breaks out.
+- A gold step whose recorded observation carries **no returncode** can never satisfy "arm A reproduces the recorded returncode": it counts against the replayability rate and the per-case table says why.
+- A gold step recorded with **returncode 0** (the labeled mistake succeeded — a wrong-direction action, not a crash) reproduces trivially; for such cases `failureVanished` is vacuous, so read the headline's separate fix-flip rate on the recorded-rc≠0 subset.
 
 Outputs: `batch-report.json`, `batch-report.md` (headline + exclusion + pull-failure + per-case tables), `cases.jsonl` (incremental, crash-safe), and one directory per case with the full `replay-verify` artifacts plus `armB-result.json`.
 
