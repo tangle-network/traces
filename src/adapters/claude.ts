@@ -924,13 +924,30 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     }
 
     const agentsById = new Map<string, ClaudeSubagentFile>()
+    /** Ids carried by more than one transcript, so any parent reference to them is unresolvable. */
+    const ambiguousAgentIds = new Set<string>()
     const childrenByParent = new Map<string, ClaudeSubagentFile[]>()
     for (const agent of agents) {
-      if (agentsById.has(agent.agentId)) {
-        throw new Error(`Duplicate Claude subagent id: ${agent.agentId}`)
-      }
-      agentsById.set(agent.agentId, agent)
-      if (agent.meta.parentAgentId) {
+      // `agentId` is a FILE BASENAME, so the same id legitimately reaches one parse from two
+      // directories — two workflow transcript dirs, or a subagent continued across sessions.
+      // Three such collisions exist on one developer machine, and this used to THROW, taking the
+      // whole tool down before it printed anything.
+      //
+      // Throwing was protecting a real invariant: a `parentAgentId` pointing at a duplicated id is
+      // genuinely ambiguous, and picking one silently attaches a transcript under the wrong
+      // parent. That must not happen. But refusing to start is not the only way to avoid it, and
+      // it is the worst one — an observability tool that crashes on the data it exists to read
+      // helps nobody, and the ambiguity is in TWO agents' parentage, not in the whole run.
+      //
+      // So: record the collision, keep every transcript, and refuse only the thing that is
+      // actually unresolvable — the parent EDGE. A child pointing at an ambiguous id is left to
+      // default parenting rather than bound to a guess. Nothing is silently mis-parented and
+      // nothing is lost.
+      if (agentsById.has(agent.agentId)) ambiguousAgentIds.add(agent.agentId)
+      else agentsById.set(agent.agentId, agent)
+      // An edge into an ambiguous id names two possible parents, so it names none. Skipping it
+      // here is what keeps "never silently assign the wrong parent" true without a crash.
+      if (agent.meta.parentAgentId && !ambiguousAgentIds.has(agent.meta.parentAgentId)) {
         const siblings = childrenByParent.get(agent.meta.parentAgentId) ?? []
         siblings.push(agent)
         childrenByParent.set(agent.meta.parentAgentId, siblings)

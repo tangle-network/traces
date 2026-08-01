@@ -79,6 +79,19 @@ export * from './hodoscope.js' // hodoscopeAnalyzer / writeHodoscopeInput
 export * from './live.js' // streamSessions(), traceStreamEventsFromSpans(), semantic live findings
 export * from './observer.js' // watchSessions({ onLoop, onReport, signal })
 
+// ── Run trees: the live view `traces watch <target>` renders ─────────────
+// Two sources behind one view. The GENERAL one folds OTLP spans by
+// trace_id/span_id/parent_span_id, so any emitter is watchable. The SPECIFIC
+// one reads agent-runtime's durable spawn journal, which carries the authored
+// budget and settlement telemetry does not, and is also a second implementation
+// of agent-eval's SupervisorRunReader port. All ANALYSIS stays in agent-eval:
+// pass the reader to `analyzeSupervisorRun` / `rollupSupervisorRuns`.
+export * from './run-span-tree.js' // general: OTLP spans → tree
+export * from './supervisor-run-context.js' // specific: spawn journal → tree + reader
+export * from './supervisor-run-watch.js' // the journal view
+export * from './run-view-format.js' // shared formatting; unknown is never zero
+export * from './run-watch.js' // target resolution + the tail
+
 // ── Privacy + batch collection + upload (pluggable backend) ───────────────
 export * from './redact.js' // redactSpans(), TRACES_REDACTION_RULES
 export * from './collect.js' // collectSessions() — redacted batches

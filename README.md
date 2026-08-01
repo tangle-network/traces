@@ -18,6 +18,7 @@ It reads the transcripts your harness leaves on disk, reconstructs the run as sp
 - [Supported harnesses](#supported-harnesses)
 - [CLI reference](#cli-reference)
 - [Live stream](#live-stream)
+- [Watch a run tree](#watch-a-run-tree)
 - [Improvement engine](#improvement-engine)
 - [Session index](#session-index)
 - [Policy-mining evidence](#policy-mining-evidence)
@@ -124,6 +125,10 @@ traces evidence --harness codex-exec --session /tmp/codex.jsonl --cwd "$PWD" --o
 traces export   policy-evidence.jsonl --out spans.openinference.jsonl
 traces import-codetracebench verified.jsonl --trajectory-dir normalized --out traces --revision <40-or-64-character-hex>
 traces watch    --all                              # live observer; loops + semantic findings
+traces watch    runs/my-run                        # live run tree: status, budget, driver vs child spend
+traces watch    runs/my-run --once                 # one snapshot, then exit
+traces watch    traces.otlp.jsonl                  # any OTLP span file, any emitter
+traces analyze  --supervisor-run-dir runs/my-run   # the full tree report
 traces stream   --all --mode findings              # low-volume semantic feed
 traces stream   --all --mode agent                 # findings + deterministic report events
 traces stream   spans.openinference.jsonl --format openinference --no-spans
@@ -149,10 +154,12 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `TANGLE_API_KEY` + Python with `agent-eval-rpc[dspy]`) / cap their spend |
 | `--config <path>` | `analyze` / `investigate` / `improve` / `stream`: load BYO analysts, live analysts, and external analyzers |
-| `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (default 5) / active-session window minutes (default 30) |
+| `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (sessions 5, run tree 2) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |
-| `--replay` / `--once` | `stream`: scan once, then exit |
+| `--supervisor-run-dir <dir>` | `analyze`: report one run tree; `watch`: tail it live |
+| `--replay` | `stream`: scan once, then exit |
+| `--once` | `stream`: scan once; `watch <target>`: print ONE snapshot and exit |
 | `--no-spans` / `--no-findings` | `stream`: suppress raw span rows / finding rows |
 | `--no-content` | `upload`: send metadata only; strip all prompt/response text |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
@@ -206,6 +213,56 @@ export default {
   }],
 }
 ```
+
+## Watch a run tree
+
+`traces watch <target>` tails ONE run that fans work out to other agents, instead of one harness session.
+It prints the tree at any depth: per node the status, the runtime, the authored budget, and the actual spend.
+Plain stdout, no cursor control, no extra dependency — it works over SSH, in a CI log, and through a pipe.
+
+```bash
+traces watch runs/my-run                 # live: reprints only when something changed
+traces watch runs/my-run --once          # one snapshot, for a script or an agent
+traces watch traces.otlp.jsonl           # spans only, for any emitter
+```
+
+Two sources sit behind the one verb, and the output always names which number came from which:
+
+| Source | Reads | Gives you | Cannot give you |
+|---|---|---|---|
+| **General** — OTLP spans | `trace_id` / `span_id` / `parent_span_id` in any `*.otlp.jsonl`, `*.spans.jsonl`, `*.traces.jsonl` | tree shape, wall time, per-turn tokens, cost when the emitter priced it | the authored budget — no span vocabulary carries one |
+| **Specific** — the spawn journal | `spawn-journal.jsonl` written by agent-runtime's `createFileRunContext` | authored budget, settled spend, settlement status, blocking questions, steers, the typed result | per-turn detail the journal does not tap |
+
+The general source is the one that matters for a system nobody has written yet: anything that emits a parent span pointer gets a tree, whether it is a supervisor, a pi session, a Claude subagent fan-out, or a custom fanout.
+Attributes are read through `@tangle-network/agent-eval/trace-attributes` alias lists, so both live vocabularies — OpenInference's `llm.token_count.*` and GenAI semconv's `gen_ai.usage.*` — already work, and no key is invented here.
+
+Two rules the view will not bend on:
+
+- **Driver inference and child work never merge.** A node that drove and the work it delegated are separate lines, because one total cannot answer "which half spent the budget" — the decisive question in three real runs.
+- **Unknown is never rendered as zero.** A turn the harness did not price reads `cost unknown (n unpriced)`, never `$0.0000`. A recorded `$0` paid on real tokens is printed AND flagged, because "free" and "unmetered" are different facts.
+
+```
+run proof-harness-mcp-20260731i
+  2 node(s) · depth 1 · elapsed 9m59s
+  driver total    in 639,632 · out 35,077 · $0.0000 (zero across 58 priced)
+  worker total    in 47,965 · out 515 · cost unknown (1 unpriced)
+
+● · root  [pending]  supervisor  inline  budget 12it/400,000tok/$2.00/15m00s
+    driver    58 turn(s) · in 639,632 · out 35,077 · $0.0000 (zero across 58 priced) · 169% tok of budget
+    children  1 settled · in 47,965 · out 515 · cost unknown (1 unpriced)
+└─ ✗ artifact-writer-s0  [failed]  worker  pi  budget 6it/80,000tok  wall 20.8s
+       settled   3it · in 47,965 · out 515 · cost unknown (1 unpriced) · 50% it, 61% tok of budget
+
+  ! spend recorded $0 with tokens spent: usdKnown was never set false, so this reads as FREE rather
+    than unmetered. A harness-billed brain (a CLI on a subscription) looks exactly like this.
+
+RESULT no-winner · budget-exhausted
+```
+
+`traces analyze --supervisor-run-dir <dir>` writes the full report for the same run.
+Every metric there comes from `@tangle-network/agent-eval/supervisor-run`; this package contributes a reader, never an analysis.
+
+Replay and resume are a separate concern: they belong to the durable spawn journal, and nothing here routes them through telemetry.
 
 ## Improvement engine
 

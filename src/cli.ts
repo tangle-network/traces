@@ -17,17 +17,20 @@
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces stream  [input.jsonl] [--replay] [--all] [--format auto]
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
+ *   traces watch   <run-dir | spans.otlp.jsonl> [--once] [--interval 2]
  *
  * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
  * loop/waste pipelines; +agentic RLM kinds with `--llm`). `watch` is the
- * online observer: it tails active sessions and prints notifications when a
- * stuck loop or semantic live finding appears. `stream` emits the same live
- * feed as JSONL for visualizers, dashboards, and external agents.
+ * online observer: with no path it tails active sessions and prints
+ * notifications when a stuck loop or semantic live finding appears; given a
+ * run directory or an OTLP span file it tails that run's tree instead. `stream`
+ * emits the same live feed as JSONL for visualizers, dashboards, and external
+ * agents.
  */
 
 import { readFileSync } from 'node:fs'
-import { readFile, stat, writeFile } from 'node:fs/promises'
-import { basename, resolve } from 'node:path'
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { basename, join, resolve } from 'node:path'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
@@ -61,6 +64,8 @@ import {
   renderSupervisorRunMarkdown,
   rollupSupervisorRuns,
 } from '@tangle-network/agent-eval/supervisor-run'
+import { fileRunContextSupervisorRunReader, isFileRunContextDir } from './supervisor-run-context.js'
+import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
 import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
@@ -103,6 +108,8 @@ interface Args {
   llm: boolean
   budget?: number
   interval: number
+  /** True when `--interval` was given, so a command can keep its own default. */
+  intervalExplicit: boolean
   window: number
   minLoop: number
   dryRun: boolean
@@ -116,6 +123,8 @@ interface Args {
   format?: string
   mode?: string
   replay: boolean
+  /** `--once`: a single pass instead of a live tail. */
+  once: boolean
   noSpans: boolean
   noFindings: boolean
   metadata?: string
@@ -151,6 +160,7 @@ function parseArgs(argv: string[]): Args {
     maxWorkflowSessions: 100,
     llm: false,
     interval: 5,
+    intervalExplicit: false,
     window: 30,
     minLoop: 3,
     dryRun: false,
@@ -158,6 +168,7 @@ function parseArgs(argv: string[]): Args {
     noContent: false,
     analyzers: [],
     replay: false,
+    once: false,
     noSpans: false,
     noFindings: false,
     attrs: [],
@@ -191,13 +202,15 @@ function parseArgs(argv: string[]): Args {
       case '--mode': a.mode = next(); break
       case '--metadata': a.metadata = next(); break
       case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
-      case '--interval': a.interval = Number(next()); break
+      case '--interval': a.interval = Number(next()); a.intervalExplicit = true; break
       case '--window': a.window = Number(next()); break
       case '--min-loop': a.minLoop = Number(next()); break
       case '--dry-run': a.dryRun = true; break
       case '--no-content': a.noContent = true; break
-      case '--replay':
-      case '--once': a.replay = true; break
+      case '--replay': a.replay = true; break
+      // `stream --once` has always meant "one pass"; `watch --once` means the
+      // same thing over a run directory, so one flag drives both.
+      case '--once': a.once = true; a.replay = true; break
       case '--no-spans': a.noSpans = true; break
       case '--no-findings': a.noFindings = true; break
       case '--analyzer': { const v = next(); if (v) a.analyzers.push(v); break }
@@ -767,13 +780,33 @@ async function cmdAnalyze(args: Args): Promise<void> {
  * this CLI, which reports what happened inside one harness session.
  *
  * Every metric comes from `@tangle-network/agent-eval/supervisor-run` — this
- * function only picks single-run vs rollup and prints. No analysis is
- * duplicated here, and none may be added.
+ * function only picks a READER, then single-run vs rollup, then prints. No
+ * analysis is duplicated here, and none may be added.
+ *
+ * Two on-disk layouts reach the same analyzer through the same port: the loops
+ * supervisor's `<runDir>/ws/.agent/supervisor/<id>`, and agent-runtime's
+ * `createFileRunContext` directory (`spawn-journal.jsonl` at the top level).
+ * The run-context layout is checked first because it is identified by a file
+ * that is actually there, rather than by the absence of another layout.
  */
 async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
-  const nested = await findSupervisorRunDirs(runDir)
+  const runContextDirs = await findFileRunContextDirs(runDir)
+  const nested = runContextDirs.length > 0 ? [] : await findSupervisorRunDirs(runDir)
   let markdown: string
-  if (nested.length > 0) {
+  if (runContextDirs.length > 1) {
+    markdown = renderSupervisorRollupMarkdown(
+      rollupSupervisorRuns(
+        await Promise.all(
+          runContextDirs.map((dir) => analyzeSupervisorRun(fileRunContextSupervisorRunReader(dir))),
+        ),
+      ),
+      `Supervisor rollup — ${runDir}`,
+    )
+  } else if (runContextDirs.length === 1) {
+    markdown = renderSupervisorRunMarkdown(
+      await analyzeSupervisorRun(fileRunContextSupervisorRunReader(runContextDirs[0] as string)),
+    )
+  } else if (nested.length > 0) {
     markdown = renderSupervisorRollupMarkdown(
       rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
       `Supervisor rollup — ${runDir}`,
@@ -785,21 +818,38 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
     // nothing" rather than "you pointed me at the wrong directory".
     if (isUnavailable(report.orchestration.workersSpawned)) {
       throw new Error(
-        `no supervisor run found at ${runDir} — expected <runDir>/ws/.agent/supervisor/<id> ` +
+        `no supervisor run found at ${runDir} — expected <runDir>/spawn-journal.jsonl ` +
+          '(agent-runtime createFileRunContext), <runDir>/ws/.agent/supervisor/<id> ' +
           '(or the pre-rename <runDir>/ws/.loops/supervisor/<id>), ' +
           'or a parent directory containing such runs',
       )
     }
     markdown = renderSupervisorRunMarkdown(report)
   }
+  const runs = Math.max(runContextDirs.length, nested.length, 1)
   if (args.out) {
     await saveReport(args.out, markdown)
-    console.log(
-      `supervisor report → ${args.out}  (${nested.length > 0 ? `${nested.length} runs` : '1 run'})`,
-    )
+    console.log(`supervisor report → ${args.out}  (${runs === 1 ? '1 run' : `${runs} runs`})`)
   } else {
     console.log(markdown)
   }
+}
+
+/**
+ * The run-context directories at or immediately under `dir`. One level only:
+ * a run directory is the unit a caller names, and a deep walk would sweep up
+ * unrelated runs that merely share a parent.
+ */
+async function findFileRunContextDirs(dir: string): Promise<string[]> {
+  if (await isFileRunContextDir(dir)) return [dir]
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+  const found: string[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const child = join(dir, entry.name)
+    if (await isFileRunContextDir(child)) found.push(child)
+  }
+  return found.sort()
 }
 
 async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
@@ -1043,7 +1093,15 @@ async function cmdStream(args: Args): Promise<void> {
   })
 }
 
+/**
+ * Two watches share one verb because they answer the same question one level
+ * apart: `traces watch` (no path) tails live HARNESS SESSIONS, and
+ * `traces watch <target>` tails one RUN TREE. The existing no-positional form
+ * is untouched; a path selects the tree view.
+ */
 async function cmdWatch(args: Args): Promise<void> {
+  const target = args.supervisorRunDir ?? args.input
+  if (target !== undefined) return cmdWatchRunTarget(target, args)
   const all = args.all || (!args.harnessExplicit && !args.cwd)
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
@@ -1072,6 +1130,35 @@ async function cmdWatch(args: Args): Promise<void> {
       process.stdout.write(`${formatLiveFinding(finding)}\n`)
     },
   })
+}
+
+/**
+ * Live view of one run tree. The target is an OTLP span file (the general
+ * source, which works for any emitter), an agent-runtime `createFileRunContext`
+ * directory (the specific source, which carries budget and settlement), or a
+ * directory holding both. Read-only, plain stdout; `--once` prints a single
+ * snapshot, which is what a script or an agent wants.
+ */
+async function cmdWatchRunTarget(dir: string, args: Args): Promise<void> {
+  const target = await resolveRunWatchTarget(resolve(dir))
+  const controller = new AbortController()
+  if (!args.once) {
+    process.once('SIGINT', () => controller.abort())
+    process.stderr.write(
+      `traces watch: tailing ${target.requested} every ${args.interval}s; read-only, ` +
+        `${target.runDir === null ? 'span source only — Ctrl-C to stop' : 'stops when result.json lands. Ctrl-C to stop'}.\n`,
+    )
+  }
+  const snapshot = await watchRunTarget(target, {
+    once: args.once,
+    // A tree view wants a tighter poll than the session observer's 5s default:
+    // a blocking question is worth surfacing the moment it lands.
+    intervalMs: args.intervalExplicit ? Math.max(250, args.interval * 1000) : 2000,
+    signal: controller.signal,
+  })
+  // A terminal run that ended badly should not look like a success to a script.
+  const result = snapshot.journal?.result ?? null
+  if (result !== null && result.errorMessage !== null) process.exitCode = 1
 }
 
 async function cmdUpload(args: Args): Promise<void> {
@@ -1197,6 +1284,7 @@ Commands:
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
+            (watch <target> tails ONE run tree instead: a run directory or a span file)
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
 Options:
@@ -1214,6 +1302,8 @@ Options:
                    analyze: report a SUPERVISION TREE instead of harness sessions —
                    steers, spawn waves, concurrency, idle wall, cost by role,
                    accepted vs rejected. Rolls up when the dir holds many runs.
+                   watch: same directory, live. Reads the loops layout, the
+                   agent-runtime createFileRunContext journal, and OTLP span files.
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory
@@ -1223,6 +1313,7 @@ Options:
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --mode <kind>    stream: visualizer | findings | agent (default visualizer)
   --replay, --once stream: scan once and exit (default for positional input / --session)
+  --once           watch <target>: print ONE snapshot and exit, for scripts and agents
   --no-spans       stream: omit per-span pulse events
   --no-findings    stream: omit semantic live-finding events
   --llm            Enable agentic RLM analysts. Runs on the Tangle router by
@@ -1236,7 +1327,7 @@ Options:
   --budget <usd>   USD cap for agentic analysts
   --analyzer <id>  analyze: also run halo, hodoscope, or an installed command (repeatable)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
-  --interval <s>   watch/stream: poll interval seconds (default 5)
+  --interval <s>   watch/stream: poll interval seconds (sessions 5, run tree 2)
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
@@ -1245,6 +1336,13 @@ Options:
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version
   --help, -h       Show help (use \`traces export --help\` or \`traces import-codetracebench --help\`)
+
+Watch a run tree (any depth; driver spend and child spend stay separate,
+and a cost the harness never priced reads "unknown", never $0):
+  traces watch runs/my-run                 live tree: status, budget, driver vs child spend
+  traces watch runs/my-run --once          one snapshot, then exit
+  traces watch traces.otlp.jsonl           OTLP spans only — works for ANY emitter
+  traces analyze --supervisor-run-dir runs/my-run   the full tree report
 
 Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)
 }
