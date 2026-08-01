@@ -470,15 +470,15 @@ const profile = { name: 'trace-reviewer', resources: { skills } }
 
 ## Release automation
 
-Merging to `main` publishes a patch release automatically:
+Releases use a reviewed version commit because `main` is protected:
 
-1. The Publish workflow bumps `package.json` from `X.Y.Z` to `X.Y.(Z+1)`.
-2. It commits `chore(release): vX.Y.(Z+1) [skip release]` back to `main`.
-3. It pushes the matching `vX.Y.(Z+1)` tag.
-4. The same workflow verifies the tag, builds, publishes to npm, and creates a GitHub release.
+1. Update `package.json` and `pnpm-lock.yaml` to the intended version on a branch.
+2. Merge that change through a pull request.
+3. Tag the exact merge commit as `vX.Y.Z` and push the tag.
+4. The Publish workflow verifies that the tag is merged into `main` and matches `package.json`, then builds, publishes to npm, and creates a GitHub release.
 5. `pnpm check:package` proves the npm tarball contains the `traces` binary before release.
 
-Minor releases are manual. Run the Publish workflow from GitHub Actions and choose `minor`; it publishes `X.(Y+1).0`. Use manual `patch` only when you need a patch release without merging a new code change.
+To retry a failed publish without changing source or version, manually run the Publish workflow with the existing tag.
 
 ## Library (SDK)
 
