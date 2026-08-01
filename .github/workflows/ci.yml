@@ -16,6 +16,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # An explicit step, not a lifecycle hook: `ignore-scripts=true` in any
+      # .npmrc disables prepare/postinstall silently, so a hook cannot be the
+      # gate that decides whether a broken source tree is allowed to look green.
+      - name: Check source is text
+        run: pnpm check:source
       - name: Typecheck
         run: pnpm typecheck
       - name: Test

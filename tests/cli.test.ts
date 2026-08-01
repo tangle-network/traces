@@ -65,7 +65,7 @@ describe('traces CLI', () => {
       'intelligence-spans',
       '--out',
       report,
-      '--otlp',
+      '--otlp-out',
       otlp,
     ], {
       cwd: process.cwd(),
@@ -349,7 +349,7 @@ describe('traces CLI', () => {
       session,
       '--out',
       report,
-      '--otlp',
+      '--otlp-out',
       otlp,
     ], {
       cwd: process.cwd(),

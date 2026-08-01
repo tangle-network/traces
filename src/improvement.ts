@@ -21,6 +21,21 @@ import {
   type TraceAgenticRoute,
 } from './agentic-routing.js'
 import { analyzeSpans } from './analyze.js'
+import type { TraceValidation } from '@tangle-network/agent-trace-contract'
+import { conformanceOfSpans, renderConformance, unavailableCapabilities } from './conformance.js'
+import {
+  analyzeLoopConvergence,
+  analyzeSteeringChain,
+  type LoopConvergenceReport,
+  type SteeringChainReport,
+} from './loop-analysis.js'
+import type {
+  OtlpFieldWithheld,
+  OtlpIngestIssue,
+  OtlpInputFile,
+  SkippedInputFile,
+  UnreadableSourceRows,
+} from './otlp-input.js'
 import type { ExternalAnalysisResult, ExternalAnalyzer } from './external.js'
 import { spanEvidenceUri } from './external-analysis-validation.js'
 import { runExternalAnalyzers } from './external.js'
@@ -31,9 +46,11 @@ import { analyzeReactions, type ReactionReport } from './reactions.js'
 import {
   condenseAnalystError,
   renderAdoption,
+  renderLoopConvergence,
   renderPipelines,
   renderReactions,
   renderReport,
+  renderSteeringChain,
   type ReportSource,
   summarizeDeterministicSignals,
 } from './report.js'
@@ -63,6 +80,24 @@ export interface TraceInvestigationOptions {
   readonly analyzerPrompt?: string
   readonly otlpOutPath?: string
   readonly generatedAt?: string
+  /**
+   * Conformance of the SOURCE the spans were read from. Supply it when the
+   * source was a foreign OTLP file, so the report grades what the producer
+   * wrote; omitted, it is computed from the spans themselves.
+   */
+  readonly conformance?: TraceValidation
+  /** What was validated, named in the conformance section (default: the harness). */
+  readonly conformanceSubject?: string
+  /** OTLP files read, when the spans came from `--otlp`. */
+  readonly conformanceFiles?: readonly OtlpInputFile[]
+  /** JSONL files that were not OTLP, when the spans came from `--otlp` on a directory. */
+  readonly conformanceSkipped?: readonly SkippedInputFile[]
+  /** Rows that never became spans, when the spans came from `--otlp`. */
+  readonly conformanceIssues?: readonly OtlpIngestIssue[]
+  /** Rows analysed with one field withheld, when the spans came from `--otlp`. */
+  readonly conformanceWithheld?: readonly OtlpFieldWithheld[]
+  /** Source rows absent from the file read, including any earlier export's. */
+  readonly conformanceUnreadable?: UnreadableSourceRows
   readonly signal?: AbortSignal
   readonly log?: (msg: string, fields?: Record<string, unknown>) => void
 }
@@ -98,12 +133,22 @@ export interface TraceInvestigationResult {
   readonly workflow?: SessionWorkflowSummary
   readonly spanCount: number
   readonly otlpPath: string
+  /**
+   * What these spans can and cannot answer. Every report carries it: a thin
+   * report that does not explain its own thinness reads as "the agent did
+   * nothing" when the truth is "the trace never recorded it".
+   */
+  readonly conformance: TraceValidation
   readonly execution: ExecutionReport
   readonly analystResult: AnalystRunResult
   readonly findings: readonly AnalystFinding[]
   readonly pipelines: PipelineReport
   readonly reactions: ReactionReport
   readonly adoption: AdoptionReport
+  /** Did round N+1 improve on round N, per loop. */
+  readonly loopConvergence: LoopConvergenceReport
+  /** Which verdict caused which subsequent round. */
+  readonly steeringChain: SteeringChainReport
   /** Deterministic routing record for the agentic trace-analysis pass. */
   readonly agenticRoute?: TraceAgenticRoute
   /**
@@ -534,7 +579,25 @@ function renderAgenticRoute(route: TraceAgenticRoute | undefined): string {
   return lines.join('\n')
 }
 
-function renderInvestigationReport(result: TraceInvestigationResult, analystResult: Awaited<ReturnType<typeof analyzeSpans>>['result']): string {
+function renderInvestigationReport(
+  result: TraceInvestigationResult,
+  analystResult: Awaited<ReturnType<typeof analyzeSpans>>['result'],
+  opts: TraceInvestigationOptions,
+): string {
+  // Conformance sits directly under the header, before any number it qualifies:
+  // reading a 0-token table first and its explanation last is how a measurement
+  // gap gets mistaken for a measurement. The same verdict is threaded into
+  // every section it gates, so the warning travels with the number.
+  const conformance = renderConformance(result.conformance, {
+    subject: opts.conformanceSubject ?? result.harness,
+    spans: opts.spans,
+    ...(opts.conformanceFiles ? { files: opts.conformanceFiles } : {}),
+    ...(opts.conformanceSkipped ? { skipped: opts.conformanceSkipped } : {}),
+    ...(opts.conformanceIssues ? { issues: opts.conformanceIssues } : {}),
+    ...(opts.conformanceWithheld ? { withheld: opts.conformanceWithheld } : {}),
+    ...(opts.conformanceUnreadable ? { unreadable: opts.conformanceUnreadable } : {}),
+  })
+  const unavailable = unavailableCapabilities(result.conformance)
   const base =
     `${renderReport({ ...analystResult, findings: [...result.findings] }, {
       harness: result.harness,
@@ -546,8 +609,13 @@ function renderInvestigationReport(result: TraceInvestigationResult, analystResu
       deterministic: summarizeDeterministicSignals(result.pipelines, result.reactions),
       sources: result.sources,
       workflow: result.workflow,
+      conformance,
+      unavailableCapabilities: unavailable,
     })}\n${renderAgenticRoute(result.agenticRoute)}` +
-    `${renderPipelines(result.pipelines)}\n${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
+    `${renderPipelines(result.pipelines, unavailable)}\n` +
+    `${renderLoopConvergence(result.loopConvergence, unavailable)}\n` +
+    `${renderSteeringChain(result.steeringChain, unavailable)}\n` +
+    `${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
   const external = renderExternal(result.external)
   return external ? `${base}\n${external}` : base
 }
@@ -659,18 +727,21 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     workflow: opts.workflow,
     spanCount: opts.spans.length,
     otlpPath: analysis.otlpPath,
+    conformance: opts.conformance ?? conformanceOfSpans(opts.spans),
     execution: analysis.execution,
     analystResult: analysis.result,
     findings,
     pipelines,
     reactions,
     adoption,
+    loopConvergence: analyzeLoopConvergence(opts.spans),
+    steeringChain: analyzeSteeringChain(opts.spans),
     ...(agenticRoute ? { agenticRoute } : {}),
     ...(analysis.agenticPerAnalyst ? { agenticPerAnalyst: analysis.agenticPerAnalyst } : {}),
     external,
   }
   const result = { ...partial, report: '' }
-  return { ...result, report: renderInvestigationReport(result, analysis.result) }
+  return { ...result, report: renderInvestigationReport(result, analysis.result, opts) }
 }
 
 /** Cap for one analyst's reason inside the failure banner; the full error is

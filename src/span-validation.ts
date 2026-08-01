@@ -43,6 +43,7 @@ export function validateOtlpSpans(
       throw new TypeError(`${path}.status.message must be a string when present`)
     }
     requireObject(record.attributes, `${path}.attributes`)
+    requireLinks(record.links, `${path}.links`)
 
     const identity = JSON.stringify([traceId, spanId])
     if (identities.has(identity)) {
@@ -52,6 +53,24 @@ export function validateOtlpSpans(
     spans.push(value as OtlpSpan)
   }
   return spans
+}
+
+/**
+ * Links are the causal edges (steered-by / retry-of). A link missing either id
+ * points at nothing, so it would serialize as an edge a reader cannot follow —
+ * reject it here rather than emit a broken chain. Ingest of FOREIGN traces
+ * never reaches this: `readOtlpInput` repairs or drops such links and reports
+ * them as findings, because a foreign file must never crash the tool.
+ */
+function requireLinks(value: unknown, path: string): void {
+  if (value === undefined) return
+  if (!Array.isArray(value)) throw new TypeError(`${path} must be an array when present`)
+  for (const [index, entry] of value.entries()) {
+    const link = requireObject(entry, `${path}[${index}]`)
+    requireNonEmptyString(link.trace_id, `${path}[${index}].trace_id`)
+    requireNonEmptyString(link.span_id, `${path}[${index}].span_id`)
+    if (link.attributes !== undefined) requireObject(link.attributes, `${path}[${index}].attributes`)
+  }
 }
 
 function parseTimestamp(value: string, path: string): number {

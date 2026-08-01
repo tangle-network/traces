@@ -1,7 +1,7 @@
 {
   "name": "@tangle-network/traces",
-  "version": "0.11.0",
-  "description": "Point it at your coding-agent session traces (Claude Code, Codex, OpenCode, Gemini, Pi, \u2026) and get failure-mode + efficiency findings. CLI + SDK over the @tangle-network/agent-eval analyst suite \u2014 observe live sessions, run your own analysts, redact, and upload to the Tangle Intelligence Platform.",
+  "version": "0.11.1",
+  "description": "Point it at your coding-agent session traces (Claude Code, Codex, OpenCode, Gemini, Pi, …) and get failure-mode + efficiency findings. CLI + SDK over the @tangle-network/agent-eval analyst suite — observe live sessions, run your own analysts, redact, and upload to the Tangle Intelligence Platform.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -51,14 +51,17 @@
     "dev": "tsx src/cli.ts",
     "build": "tsup src/index.ts src/cli.ts --format esm --target node22 --clean --dts",
     "check:package": "node scripts/check-package-bin.mjs",
+    "check:source": "node scripts/check-source-text.mjs",
+    "prepare": "node scripts/check-source-text.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm build && pnpm check:package"
+    "prepublishOnly": "pnpm check:source && pnpm build && pnpm check:package"
   },
   "dependencies": {
     "@tangle-network/agent-eval": "0.140.0",
     "@tangle-network/agent-runtime": "0.116.0",
+    "@tangle-network/agent-trace-contract": "^1.0.2",
     "@tangle-network/sandbox": "0.15.2"
   },
   "devDependencies": {

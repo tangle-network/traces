@@ -4,7 +4,15 @@ import { summarizeExecution } from '@tangle-network/agent-eval/contract'
 import { describe, expect, it } from 'vitest'
 import type { PipelineReport } from '../src/pipelines.js'
 import type { ReactionReport } from '../src/reactions.js'
-import { analystRunDetail, renderPipelines, renderReport, summarizeDeterministicSignals } from '../src/report.js'
+import type { UnavailableCapabilities } from '../src/conformance.js'
+import type { LoopConvergenceReport } from '../src/loop-analysis.js'
+import {
+  analystRunDetail,
+  renderLoopConvergence,
+  renderPipelines,
+  renderReport,
+  summarizeDeterministicSignals,
+} from '../src/report.js'
 
 const EMPTY_EXECUTION = summarizeExecution({ runs: [] })
 
@@ -243,6 +251,169 @@ describe('renderReport', () => {
       '2 identified session(s) + 13 traces without a single stable session identity, 2880 spans',
     )
     expect(report).toContain('Their spans were analyzed but were not relabeled as sessions.')
+  })
+})
+
+describe('latency gating', () => {
+  const LATENCY_UNAVAILABLE: UnavailableCapabilities = new Map([
+    ['latency-analysis', '1 spans end before they start'],
+  ])
+
+  function toolPipelines(): PipelineReport {
+    return {
+      stuckLoops: { findings: [], affectedRunRatio: 0, totalRuns: 1 },
+      failureClusters: { clusters: [], totalFailures: 0, totalRuns: 1 },
+      toolUse: [{
+        runId: 'run-latency-test',
+        totalCalls: 10,
+        callsWithCapturedArgs: 10,
+        byTool: {
+          bash: { calls: 10, callsWithCapturedArgs: 10, errors: 0, duplicates: 0, avgLatencyMs: 5 },
+        },
+        duplicateRate: 0,
+        errorRate: 0,
+        retryRate: 0,
+      }],
+    }
+  }
+
+  // The tool table and the round table both print a duration, and neither was
+  // gated on `latency-analysis` — so a report could say "latency-analysis
+  // unavailable" at the top and then print a mean latency and a 279,042,860ms
+  // round duration with no marker on either.
+  it('marks the tool table and withholds its latency column', () => {
+    const report = renderPipelines(toolPipelines(), LATENCY_UNAVAILABLE)
+
+    expect(report).toContain('`latency-analysis` unavailable')
+    expect(report).toContain('| `bash` | 10 | 10/10 | 0/10 | 0/10 | not measurable |')
+    expect(report).not.toContain('5.0ms')
+  })
+
+  it('prints the latency column when latency IS available', () => {
+    const report = renderPipelines(toolPipelines(), new Map([['token-accounting', 'no token attrs']]))
+
+    expect(report).not.toContain('`latency-analysis` unavailable')
+    expect(report).toContain('| `bash` | 10 | 10/10 | 0/10 | 0/10 | 5.0ms |')
+  })
+
+  const LOOP_CONVERGENCE_UNAVAILABLE: UnavailableCapabilities = new Map([
+    ['loop-convergence', 'agent.loop.iteration is present on 2 spans and always has the value 1'],
+  ])
+
+  it('marks the round table and withholds its duration column', () => {
+    const convergence: LoopConvergenceReport = {
+      iterationSpans: 2,
+      loops: [{
+        loopId: 'loop-a',
+        traceId: 'trace-a',
+        trend: 'improved',
+        basis: 'score',
+        detail: 'score 0.4 → 0.9',
+        iterations: [
+          {
+            iteration: 1,
+            spanId: 'round-1',
+            name: 'round 1',
+            outcome: 'fail',
+            score: 0.4,
+            verdictSpanId: 'verdict-1',
+            startTime: '2026-01-01T00:00:00.000Z',
+            durationMs: 279042860,
+          },
+        ],
+      }],
+    }
+    const report = renderLoopConvergence(convergence, LATENCY_UNAVAILABLE)
+
+    expect(report).toContain('`latency-analysis` unavailable')
+    expect(report).toContain('| 1 | `round-1` | fail | 0.4 | `verdict-1` | not measurable |')
+    expect(report).not.toContain('279,042,860ms')
+  })
+
+  it('withholds the trend verdict when loop-convergence is unavailable', () => {
+    // Every span declaring `agent.loop.iteration: 1` is one round: a trend
+    // across it compares a series to itself. The marker at the top of the
+    // section is not enough — a reader takes the word in the Trend column.
+    const convergence: LoopConvergenceReport = {
+      iterationSpans: 2,
+      loops: [{
+        loopId: 'loop-a',
+        traceId: 'trace-a',
+        trend: 'improved',
+        basis: 'score',
+        detail: 'score 0.4 → 0.9 across 2 graded round(s) (round 1 → 1)',
+        iterations: [
+          {
+            iteration: 1,
+            spanId: 'round-1',
+            name: 'round 1',
+            outcome: 'fail',
+            score: 0.4,
+            verdictSpanId: 'verdict-1',
+            startTime: '2026-01-01T00:00:00.000Z',
+            durationMs: 12,
+          },
+          {
+            iteration: 1,
+            spanId: 'round-2',
+            name: 'round 2',
+            outcome: 'pass',
+            score: 0.9,
+            verdictSpanId: 'verdict-2',
+            startTime: '2026-01-01T00:00:01.000Z',
+            durationMs: 12,
+          },
+        ],
+      }],
+    }
+    const report = renderLoopConvergence(convergence, LOOP_CONVERGENCE_UNAVAILABLE)
+
+    expect(report).toContain('`loop-convergence` unavailable')
+    expect(report).not.toContain('improved')
+    expect(report).not.toContain('score 0.4 → 0.9')
+    expect(report).not.toContain('1 improved')
+    expect(report).toContain('not measurable')
+    // The rounds themselves are still facts read from the trace.
+    expect(report).toContain('| 1 | `round-1` | fail | 0.4 | `verdict-1` | 12ms |')
+  })
+
+  it('prints the trend verdict when loop-convergence is available', () => {
+    const convergence: LoopConvergenceReport = {
+      iterationSpans: 2,
+      loops: [{
+        loopId: 'loop-a',
+        traceId: 'trace-a',
+        trend: 'improved',
+        basis: 'score',
+        detail: 'score 0.4 → 0.9',
+        iterations: [
+          {
+            iteration: 1,
+            spanId: 'round-1',
+            name: 'round 1',
+            outcome: 'fail',
+            score: 0.4,
+            verdictSpanId: 'verdict-1',
+            startTime: '2026-01-01T00:00:00.000Z',
+            durationMs: 12,
+          },
+          {
+            iteration: 2,
+            spanId: 'round-2',
+            name: 'round 2',
+            outcome: 'pass',
+            score: 0.9,
+            verdictSpanId: 'verdict-2',
+            startTime: '2026-01-01T00:00:01.000Z',
+            durationMs: 12,
+          },
+        ],
+      }],
+    }
+    const report = renderLoopConvergence(convergence, new Map())
+
+    expect(report).toContain('1 improved')
+    expect(report).toContain('score 0.4 → 0.9')
   })
 })
 

@@ -19,6 +19,9 @@ importers:
       '@tangle-network/agent-runtime':
         specifier: 0.116.0
         version: 0.116.0(@tangle-network/agent-eval@0.140.0)(@tangle-network/agent-interface@0.40.0)(@tangle-network/sandbox@0.15.2)
+      '@tangle-network/agent-trace-contract':
+        specifier: ^1.0.2
+        version: 1.0.2
       '@tangle-network/sandbox':
         specifier: 0.15.2
         version: 0.15.2
@@ -538,6 +541,9 @@ packages:
         optional: true
       playwright:
         optional: true
+
+  '@tangle-network/agent-trace-contract@1.0.2':
+    resolution: {integrity: sha512-v7uMh56jkEp4vckevEU9xKsIatbs5dqzGPp69dFLSSXUVit0RP6VD6EANMXVlTCUk+6wVKBLHJx23XspVCEiIA==}
 
   '@tangle-network/sandbox@0.15.2':
     resolution: {integrity: sha512-haEdX9shY5jXQABwfipxmkrnz0Po42Dvtk41VTNCh88uw4iXcSgJdGBTBLYoriHZZZfJEenQPjlPjpgj8sm3NQ==}
@@ -1513,6 +1519,8 @@ snapshots:
       - bare-abort-controller
       - bare-buffer
       - react-native-b4a
+
+  '@tangle-network/agent-trace-contract@1.0.2': {}
 
   '@tangle-network/sandbox@0.15.2':
     dependencies:

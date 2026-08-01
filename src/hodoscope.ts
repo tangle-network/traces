@@ -379,7 +379,7 @@ function duplicateLlmAssistantRows(
 }
 
 function openInferenceKind(row: OpenInferenceRow): string {
-  return row.kind ?? stringAttribute(row.attributes['openinference.span.kind']) ?? 'SPAN'
+  return row.kind ?? stringAttribute(row.attributes['openinference.span.kind']) ?? 'UNKNOWN'
 }
 
 function sourceMapEntry(traceId: string, spanId: string, turnId: number): HodoscopeSourceMapEntry {

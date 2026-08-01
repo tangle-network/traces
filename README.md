@@ -1,6 +1,6 @@
 # traces
 
-> Point `traces` at the session logs your coding agent already writes to disk: Claude Code, Codex, OpenCode, Gemini, and more. Get failure-mode and efficiency findings with zero instrumentation. A CLI *and* an SDK.
+> Point `traces` at any agent trace — OTLP spans your own system emits, or the session logs Claude Code, Codex, OpenCode and Gemini already write to disk. Get failure-mode and efficiency findings, plus a straight answer about what the trace cannot tell you. A CLI *and* an SDK.
 
 ![traces analyzing a real Claude Code session](https://raw.githubusercontent.com/tangle-network/traces/main/docs/demo.gif)
 
@@ -8,12 +8,22 @@
 [![license](https://img.shields.io/npm/l/@tangle-network/traces.svg)](./LICENSE)
 [![node](https://img.shields.io/node/v/@tangle-network/traces.svg)](https://nodejs.org)
 
-It reads the transcripts your harness leaves on disk, reconstructs the run as spans, and reports where the agent got stuck, burned tokens, or stopped checking its own work. The deterministic pass runs locally, with no API key and no cost.
+It reads a run as spans and reports where the agent got stuck, burned tokens, or stopped checking its own work. The deterministic pass runs locally, with no API key and no cost.
+
+There are two ways in, and they are not equal:
+
+| | Use when | How |
+|---|---|---|
+| **Emit the contract** | You control the system | Emit [`@tangle-network/agent-trace-contract`](https://github.com/tangle-network/agent-sdk/tree/main/packages/agent-trace-contract) spans, then `traces analyze --otlp <file\|dir>` |
+| **Adapters** | You do *not* control the format | `traces analyze --harness claude-code` reads a proprietary session store and translates it |
+
+Emitting the contract is the supported way to integrate a new system. The adapters are the legacy edge — they exist because the coding agents write formats nobody standardised, and each one is a translation somebody has to maintain. If you can choose, choose `--otlp`.
 
 ## Contents
 
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Integrate your own system](#integrate-your-own-system)
 - [What it finds](#what-it-finds)
 - [Supported harnesses](#supported-harnesses)
 - [CLI reference](#cli-reference)
@@ -45,7 +55,9 @@ Requires Node ≥ 22.
 ## Quick start
 
 ```bash
-traces analyze --harness claude-code --last 1
+traces validate spans.otlp.jsonl                  # what can this trace answer?
+traces analyze  --otlp spans.otlp.jsonl           # analyse it, no adapter involved
+traces analyze --harness claude-code --last 1     # or read a coding agent's own log
 traces improve --harness claude-code --last 5 --dir .traces/improvement
 traces watch --all
 traces stream --all --mode findings
@@ -66,6 +78,110 @@ See [Trace analysts](#trace-analysts).
 It writes one typed result, one report, flattened evidence rows, and the canonical OTLP trace.
 Each finding already contains the claim, evidence, recommended action, confidence, and validation plan.
 
+## Integrate your own system
+
+No adapter, no plugin. Emit the span contract and point `--otlp` at the file.
+
+```bash
+npm i @tangle-network/agent-trace-contract    # zero runtime dependencies
+```
+
+You install it to PRODUCE spans. This package already depends on it to read
+them, so `npx @tangle-network/traces@latest` arrives with the contract-backed
+analyses working: trace conformance, `traces validate`, `--otlp` inbound
+reading, round-over-round convergence and the steering chain, and OpenInference
+/ intelligence-spans conversion.
+
+```ts
+import { llmSpan, loopSpan, steeredBy, toolSpan } from '@tangle-network/agent-trace-contract'
+
+// One round of a loop, the model call and tool call inside it, then the next
+// round — linked to the verdict that CAUSED it, not parented to it.
+const round1 = loopSpan({ traceId, spanId: 'round-1', parentSpanId: null, name: 'round 1',
+  loopId: 'fix-loop', iteration: 1, startTime, endTime })
+const call = llmSpan({ traceId, spanId: 'llm-1', parentSpanId: 'round-1', name: 'coder turn',
+  model: 'glm-5.2', inputTokens: 1200, outputTokens: 340, costUsd: 0.0042, startTime, endTime })
+const tool = toolSpan({ traceId, spanId: 'tool-1', parentSpanId: 'round-1', name: 'bash',
+  toolName: 'bash', startTime, endTime })
+const round2 = loopSpan({ traceId, spanId: 'round-2', parentSpanId: null, name: 'round 2',
+  loopId: 'fix-loop', iteration: 2, resumed: true, startTime, endTime,
+  links: [steeredBy('llm-1', traceId)] })
+```
+
+Write one span per line to a `.jsonl` file, then:
+
+```bash
+traces validate spans.otlp.jsonl        # exit 1 only when the file is not a trace
+traces analyze --otlp spans.otlp.jsonl  # a directory reads the OTLP files under it
+```
+
+A directory is a run directory, not a span directory: it holds the span export
+next to raw event, stream and SDK logs that are also `*.jsonl`. Only the OTLP
+files are read — every other JSONL is listed in the report with what it actually
+holds, rather than counted as several hundred broken spans. Put the exports in an
+`otlp/` subdirectory and that decides it outright.
+
+On a writing command (`convert`, `export`, `evidence`, `upload`), `--otlp` is the
+DEPRECATED spelling of `--otlp-out`. It still works, with a warning, and is
+removed in 0.12.
+
+`parent_span_id` is CONTAINMENT — this span happened inside that one. `links` is
+CAUSALITY — that verdict caused this retry. Encoding causality as a parent claims
+a nesting that never existed, so the two edges stay separate and both survive a
+round-trip through `traces`.
+
+### What a trace cannot tell you, said out loud
+
+`validate` reports the conformance of any OTLP file, conforming or not — it never
+throws on a foreign trace, it reports it:
+
+- **findings** by severity, each naming the *consequence* of the defect and the capabilities it blocks
+- **the capability table** — `token-accounting`, `cost-attribution`, `tool-usage`, `loop-convergence`, `tree-comparison`, `steering-chain`, `latency-analysis` — available or not, with the trace's own reason
+- **span structure** — how much of the tree actually attaches, and how many rows could not be read at all
+
+Exit code is 1 on exactly one condition: not one entry could be read as a span,
+so the file is not a trace. Severity says what a finding claims about the INPUT,
+not how loud it is — `error` is "nothing readable", `warn` is "readable but
+degraded", `info` is "nothing measurable lost" — so a `warn` exits 0 and the
+capability table, not the exit code, says what the degradation cost.
+
+#### A re-export never validates cleaner than its source
+
+`--otlp-out` writes the spans that were analysed. Anywhere this package
+normalized a field to analyse it — an `end_time` that precedes its `start_time`,
+a status code the contract does not recognise — the export writes what the
+PRODUCER wrote and keeps the normalized value in an attribute beside it, so
+`negative-duration` and `invalid-status` are still findings against the copy.
+
+A row that never became a span is the one thing that cannot be re-emitted: the
+artifact is also the file the analysts read, so a non-span line in it is garbage
+fed to the analysis and a repaired one is invented work. The export refuses the
+equivalence instead — it carries `traces.source.unreadable_rows` and the kinds
+behind it, accumulating across every hop, and `validate` on a re-export leads
+with how much of the original is missing from it. Round-tripping a defective
+trace through `traces` cannot produce a clean bill of health.
+
+`analyze` prints the same section, plus an **analyses skipped, and why** list —
+and, crucially, carries that verdict INTO the report. A section whose inputs are
+incomplete says so in its own heading and again directly above its table, so a
+number and the reason it is wrong can never end up forty lines apart. A capability
+the trace supports that this package has no analysis for yet is listed as
+`⚠️ available, unused` rather than quietly dropped.
+
+Two of those analyses are why the loop shape exists at all:
+
+- **round-over-round convergence** — per `agent.loop.id`, the per-round outcome
+  and score series, and whether it improved, plateaued, regressed, or peaked and
+  fell back. The verdict is read from the round's own `agent.outcome` or from the
+  shallowest EVALUATOR span under it.
+- **steering chain** — follows `links` (`agent.link.kind`) to report which verdict
+  caused which subsequent round. A link whose target is missing is kept and marked,
+  because a shorter chain than the producer recorded is the opposite of the truth.
+
+Nothing is repaired on the way in. A span with an unreadable timestamp is
+reported and excluded, because a synthesized value would put invented work into a
+total.
+
 ## What it finds
 
 The deterministic pass (free, no key) surfaces:
@@ -81,6 +197,10 @@ The deterministic pass (free, no key) surfaces:
 `--llm` adds agentic analysts that read the conversation and cluster higher-order failure and improvement signals. They receive the compact deterministic findings first, then share their earlier findings with later analysts. With `traces improve`, the selected analysts and reasons are saved in `result.json` and the report, so another agent can reuse the packet without rereading the raw trace.
 
 ## Supported harnesses
+
+Adapters are the **legacy edge**: they exist for coding agents whose on-disk format we do not
+control, and each is a translation from a proprietary session store onto the span model. They are
+not the way to integrate a system you own — for that, [emit the contract](#integrate-your-own-system).
 
 "Verified" = tested against real sessions; "fixture" = tested against schema-accurate fixtures (no real sessions available).
 
@@ -117,7 +237,11 @@ traces analyze --harness claude-code --session <path> --latest-turn # latest tas
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
-traces convert  --harness claude-code --last 1 --otlp spans.jsonl   # OTLP only
+traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
+traces validate results/sessions --out conformance.md  # a whole directory of exports
+traces analyze  --otlp spans.otlp.jsonl            # analyse foreign OTLP, no adapter
+traces analyze  --otlp results/sessions --out report.md
+traces convert  --harness claude-code --last 1 --otlp-out spans.jsonl   # OTLP only
 traces index    --all --since 24h --out session-index.json
 traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
@@ -150,7 +274,8 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory |
-| `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
+| `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `analyze`, `investigate`, `improve`, `stream` |
+| `--otlp-out <path>` | **WRITE** the OTLP artifact here (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `TANGLE_API_KEY` + Python with `agent-eval-rpc[dspy]`) / cap their spend |
 | `--config <path>` | `analyze` / `investigate` / `improve` / `stream`: load BYO analysts, live analysts, and external analyzers |
@@ -323,7 +448,7 @@ It is intentionally read-only: it points to repeated-call loops, high tool-error
 `traces` does **not** emit benchmark campaign cells. It emits normalized coding-agent session evidence that another system can mine.
 
 ```bash
-traces evidence --all --since 24h --out policy-evidence.jsonl --otlp spans.otlp.jsonl
+traces evidence --all --since 24h --out policy-evidence.jsonl --otlp-out spans.otlp.jsonl
 ```
 
 `--last` follows recent file activity and may select a child session in multi-agent work.
@@ -481,6 +606,16 @@ The CLI is a thin consumer of these exports.
 
 | Export | Signature | Use |
 |---|---|---|
+| `readOtlpInput` | `(file\|dir) → { files, skipped, rows, spans, validation, issues }` | ingest OTLP from **any** system — no adapter; never throws on a foreign trace |
+| `validateTraceSpans` | `(spans) → { ok, findings, capabilities }` | the contract's conformance check, re-exported |
+| `conformanceOfSpans` | `(spans) → TraceValidation` | grade spans this package produced, on the artifact a consumer receives |
+| `renderValidation` / `renderConformance` | `(validation, opts) → string` | the `validate` report / the section embedded in an analysis report |
+| `skippedAnalyses` | `(validation) → SkippedAnalysis[]` | which analyses a missing capability empties, and why |
+| `unavailableCapabilities` / `incompleteInputsNote` | `(validation) → Map` / `(map, name) → string` | the gate: what the trace cannot support, and the marker each affected section carries |
+| `summarizeSpanStructure` | `(spans) → SpanStructure` | how much of the tree attaches: rootless, orphans, links |
+| `analyzeLoopConvergence` | `(spans) → LoopConvergenceReport` | per loop, the per-round outcome/score series and whether it improved, plateaued, regressed or fell back |
+| `analyzeSteeringChain` | `(spans) → SteeringChainReport` | which verdict span caused which subsequent round, following `links` |
+| `llmSpan` / `toolSpan` / `loopSpan` / `branchSpan` / `steeredBy` | contract builders, re-exported | emit conforming spans from your own system |
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run built-in analysts, or **your own** via `registry` |
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings with actions/checks, execution facts, external analyzer output, and report |
 | `runTraceImprovement` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full findings, evidence, report, and trace artifact pack |
@@ -509,7 +644,15 @@ The CLI is a thin consumer of these exports.
 | `ExternalAnalyzer` / `Redactor` | `haloAnalyzer` / `hodoscopeAnalyzer` / `commandAnalyzer` / `commandRedactor` | drive engines/models you install |
 
 ```ts
-import { watchSessions, streamSessions, analyzeSpans, AnalystRegistry, makeFinding } from '@tangle-network/traces'
+import {
+  AnalystRegistry, analyzeSpans, makeFinding, readOtlpInput, renderValidation,
+  streamSessions, watchSessions,
+} from '@tangle-network/traces'
+
+// Read OTLP any system emitted, and find out what it can answer before analysing:
+const input = await readOtlpInput('spans.otlp.jsonl')   // or a directory
+console.log(renderValidation(input.validation, { subject: 'spans.otlp.jsonl', spans: input.spans }))
+if (input.validation.ok) await analyzeSpans(input.spans)
 
 // Observe live sessions, feed findings anywhere (read-only, cancellable):
 const c = new AbortController()
