@@ -134,7 +134,12 @@ traces stream   --all --mode agent                 # findings + deterministic re
 traces stream   spans.openinference.jsonl --format openinference --no-spans
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
+traces replay-verify --steps steps.json --image <docker-image> --at 37 --cwd /home --out ./replay-out \
+  --fix-command "<corrected step>"                 # executed proof: replay prefix, reproduce failure, show fix
 ```
+
+`replay-verify` replays a CodeTraceBench-style trajectory prefix in a real sandbox and executes step k twice — recorded (does the failure reproduce?) and corrected (does it vanish?).
+See [Replay verification](./docs/replay-verify.md) for setup, semantics, and honest limits (SWE-style trajectories with a docker image only; commands run as the non-root sandbox user).
 
 | Flag | Meaning |
 |---|---|

@@ -36,6 +36,7 @@ import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
+import { cmdReplayVerify } from './replay-verify.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -1281,6 +1282,9 @@ Commands:
   export    Convert evidence/events files to OpenInference JSONL for HALO
   import-codetracebench
             Convert CodeTracer-normalized CodeTraceBench trajectories in bulk
+  replay-verify
+            Replay a trajectory prefix in a sandbox, execute step k both recorded
+            and corrected, and emit an executed-proof verdict (--help for flags)
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
@@ -1351,6 +1355,11 @@ async function main(): Promise<void> {
   const rawArgs = process.argv.slice(2)
   if (rawArgs[0] === '--version' || rawArgs[0] === '-v' || rawArgs[0] === 'version') {
     console.log(`traces ${packageVersion()}`)
+    return
+  }
+  // replay-verify owns its flag set; dispatch before the shared parser.
+  if (rawArgs[0] === 'replay-verify') {
+    await cmdReplayVerify(rawArgs.slice(1))
     return
   }
   const parsedArgs = parseArgs(rawArgs)
