@@ -95,6 +95,7 @@ export * from './run-watch.js' // target resolution + the tail
 // ── Privacy + batch collection + upload (pluggable backend) ───────────────
 export * from './redact.js' // redactSpans(), TRACES_REDACTION_RULES
 export * from './collect.js' // collectSessions() — redacted batches
+export * from './replay-verify.js' // sandbox-backed counterfactual replay + verdict
 export * from './upload.js' // planUpload / executeUpload({ backend? })
 export * from './upload-state.js' // dedup state
 
