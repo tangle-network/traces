@@ -560,5 +560,10 @@ describe('CodeTraceBench bulk import', () => {
       },
     )
     expect(help).toContain('--revision <40-or-64-character-hex>')
-  })
+    // This test spawns TWO cold Node processes that each type-strip and load
+    // the whole CLI graph, and it already allows each 30s. vitest's default
+    // per-test budget is 5s, so the two budgets disagreed and the test failed
+    // on nothing but a loaded machine — reproducible at 2/3 under three
+    // concurrent suite runs. The outer budget has to cover the inner ones.
+  }, 90_000)
 })

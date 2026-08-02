@@ -215,7 +215,7 @@ function asString(value: unknown): string | undefined {
 }
 
 function spanKind(span: OtlpSpan): string {
-  return asString(span.attributes['openinference.span.kind'])?.toUpperCase() ?? 'SPAN'
+  return asString(span.attributes['openinference.span.kind'])?.toUpperCase() ?? 'UNKNOWN'
 }
 
 function spanContent(span: OtlpSpan): string {

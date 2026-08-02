@@ -225,8 +225,8 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
     const parentKey =
       span.parent_span_id === null
         ? null
-        : byId.has(`${span.trace_id} ${span.parent_span_id}`)
-          ? `${span.trace_id} ${span.parent_span_id}`
+        : byId.has(`${span.trace_id}\x00${span.parent_span_id}`)
+          ? `${span.trace_id}\x00${span.parent_span_id}`
           : null
     // A span whose parent is absent is still real work; re-root it rather than
     // drop it, and say how many were re-rooted.
@@ -364,7 +364,7 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
 }
 
 function spanKey(span: OtlpSpan): string {
-  return `${span.trace_id} ${span.span_id}`
+  return `${span.trace_id}\x00${span.span_id}`
 }
 
 /**

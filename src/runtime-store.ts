@@ -18,12 +18,23 @@ import type { OtlpSpan, OtlpSpanKind } from './otlp.js'
 import { validateOtlpSpans } from './span-validation.js'
 import { parseIsoToEpochMs as ms } from './time.js'
 
+/**
+ * Contract span kind → runtime span kind.
+ *
+ * EVALUATOR and RETRIEVER map to `custom`, not to the runtime's `judge` /
+ * `retrieval`: those shapes REQUIRE fields an OTLP span does not carry
+ * (`judgeId`/`targetSpanId`/`dimension`/`score`, `query`/`hits`), so claiming
+ * them would hand the pipelines a span with invented values. The OTLP-level
+ * kind is preserved verbatim in `attributes`.
+ */
 const KIND: Record<OtlpSpanKind, Span['kind']> = {
   AGENT: 'agent',
   LLM: 'llm',
   TOOL: 'tool',
   CHAIN: 'custom',
-  SPAN: 'custom',
+  EVALUATOR: 'custom',
+  RETRIEVER: 'custom',
+  UNKNOWN: 'custom',
 }
 
 export interface RuntimeTrace {

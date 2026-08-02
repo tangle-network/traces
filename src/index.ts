@@ -12,7 +12,28 @@
 
 // ── Core span model + adapters (read / convert / extend) ──────────────────
 export * from './types.js' // HarnessTraceAdapter, SessionRef, LocateOptions
-export * from './otlp.js' // OtlpSpan, span(), serializeSpans(), writeOtlpFile()
+export * from './otlp.js' // OtlpSpan, OtlpSpanLink, span(), serializeSpans(), writeOtlpFile()
+// Ingest OTLP from ANY system, no adapter. Exported by name, not with `*`: the
+// module's internals (attribute bridging, tool-io normalization, row readers)
+// are implementation of the ONE entry point below and would otherwise become
+// API this package has to keep.
+export {
+  inferSpanKind,
+  otlpRowToSpan,
+  readOtlpInput,
+  resolveOtlpInputFiles,
+} from './otlp-input.js'
+export type {
+  OtlpIngestIssue,
+  OtlpIngestIssueKind,
+  OtlpInput,
+  OtlpInputFile,
+  OtlpRowConversion,
+  ResolvedOtlpInput,
+  SkippedInputFile,
+} from './otlp-input.js'
+export * from './conformance.js' // what a trace can/cannot answer, and the analyses it costs
+export * from './loop-analysis.js' // did round N+1 improve on N; which verdict caused which retry
 export * from './codetracebench.js'
 export * from './attributes.js' // ATTR keys, INGEST_SOURCE_CLI, DEFAULT_HARNESS
 export * from './time.js' // parseIsoToEpochMs(), parseSince()
@@ -109,6 +130,21 @@ export type { Analyst, AnalystContext, AnalystFinding } from '@tangle-network/ag
 export { createHostedClient, hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 export type { HostedClient } from '@tangle-network/agent-eval/hosted'
 export { DEFAULT_REDACTION_RULES, redactString, redactValue } from '@tangle-network/agent-eval/traces'
+// The span contract — emit it and `--otlp` reads you with no adapter.
+//
+// Its BUILDERS are not re-exported. A producer installs
+// `@tangle-network/agent-trace-contract` directly: that is the whole point of a
+// shared vocabulary — one package everyone imports, not one package plus a
+// second copy of its names shipped by a consumer, which is how two spellings of
+// the same attribute end up in one trace. Only its TYPES appear here, so a
+// caller can name what this package's own functions return.
+export type {
+  Capability,
+  ConformanceFinding,
+  ContractSpan,
+  SpanLink,
+  TraceValidation,
+} from '@tangle-network/agent-trace-contract'
 export type {
   ErrorCluster,
   RedactionReport,
