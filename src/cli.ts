@@ -46,6 +46,7 @@ import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
+import { cmdReplayVerifyBatch } from './replay-batch.js'
 import { cmdReplayVerify } from './replay-verify.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
@@ -1511,6 +1512,9 @@ Commands:
   replay-verify
             Replay a trajectory prefix in a sandbox, execute step k both recorded
             and corrected, and emit an executed-proof verdict (--help for flags)
+  replay-verify-batch
+            Measure replayability + fix-flip rates across gold-labeled corpora:
+            arm A per replayable case, LLM-generated arm-B fixes (--help for flags)
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
@@ -1592,9 +1596,13 @@ async function main(): Promise<void> {
     console.log(`traces ${packageVersion()}`)
     return
   }
-  // replay-verify owns its flag set; dispatch before the shared parser.
+  // replay-verify and replay-verify-batch own their flag sets; dispatch before the shared parser.
   if (rawArgs[0] === 'replay-verify') {
     await cmdReplayVerify(rawArgs.slice(1))
+    return
+  }
+  if (rawArgs[0] === 'replay-verify-batch') {
+    await cmdReplayVerifyBatch(rawArgs.slice(1))
     return
   }
   const parsedArgs = parseArgs(rawArgs)
