@@ -32,10 +32,21 @@ export const CODING_REDACTION_RULES: RedactionRule[] = [
     id: 'private-key',
     pattern: /-----BEGIN(?:[A-Z ]+)?PRIVATE KEY-----[\s\S]*?-----END(?:[A-Z ]+)?PRIVATE KEY-----/g,
   },
+  // Match the whole identifier because underscores prevent a word boundary before a secret suffix.
   {
     id: 'assigned-secret',
     pattern:
-      /\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)\b\s*[:=]\s*["']?[A-Za-z0-9._\-]{12,}["']?/gi,
+      /(?<![A-Za-z0-9_-])(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)(?![A-Za-z0-9_-])\+?=(?:\$\((?:\\.|[^\\\r\n])*\)|\$\{(?:\\.|[^}\\\r\n])*\}|`(?:\\.|[^`\\\r\n])*`|\$?'(?:\\.|[^'\\\r\n])*'|\$?"(?:\\.|[^"\\\r\n])*"|\\[^\r\n]|[^\s;&|<>()"'`\\\r\n])+/gi,
+  },
+  // Config-file secrets (YAML/INI line keys, JSON quoted keys) — the coverage the shell
+  // rule above deliberately gave up to spare prose ("Narrative token: x") and type
+  // annotations ("(token: string)"). The line anchor is the discriminator: config keys
+  // start their line, prose colons never do; JSON keys are safe anywhere because both
+  // sides are quoted. Identifiers must END in a secret word, same as the shell rule.
+  {
+    id: 'config-secret',
+    pattern:
+      /(?:^[ \t]*["']?(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)(?![A-Za-z0-9_-])["']?[ \t]*[:=][ \t]*|["'](?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)["']\s*:\s*)["']?[A-Za-z0-9._\-]{12,}["']?/gim,
   },
   // Credentials embedded in URLs — common when a prompt pastes a curl/clone line.
   { id: 'url-userinfo', pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi },

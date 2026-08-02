@@ -70,6 +70,89 @@ describe('redactSpans', () => {
     expect(report.redactionCount).toBe(0)
   })
 
+  it('scrubs values assigned to identifiers ending in secret suffixes', () => {
+    const suffixes = [
+      'API_KEY',
+      'APIKEY',
+      'SECRET',
+      'TOKEN',
+      'PASSWORD',
+      'PASSWD',
+      'ACCESS_TOKEN',
+      'CLIENT_SECRET',
+    ]
+    const prefixes = ['', 'VENDOR_', 'MULTI_VENDOR_', '_', 'VENDOR']
+    const cases = suffixes.flatMap((suffix) => prefixes.map((prefix) => `${prefix}${suffix}`))
+    const protectedFragments: string[] = []
+    const source = cases
+      .map((identifier, index) => {
+        const first = index === 18 ? 'fake' : `synthetic-${index}-alpha`
+        const second = `synthetic-${index}-bravo`
+        protectedFragments.push(first)
+        if (index % 8 === 0) return `${identifier}=${first}`
+        protectedFragments.push(second)
+        if (index % 8 === 1) return `export ${identifier}="${first} ${second}"`
+        if (index % 8 === 2) return `${identifier}='${first} ${second}'`
+        if (index % 8 === 3) return `${identifier}=$'${first} ${second}'`
+        if (index % 8 === 4) return `${identifier}=${first}"${second}"`
+        if (index % 8 === 5) return `${identifier}=${first}\\ ${second}`
+        if (index % 8 === 6) return `${identifier}=$(printf '${first} ${second}')`
+        return `${identifier}=$"${first} ${second}"`
+      })
+      .join('\n')
+
+    const { spans, report } = redactSpans([toolSpan(source)])
+    const content = String(spans[0]!.attributes.content)
+    for (const fragment of protectedFragments) expect(content).not.toContain(fragment)
+    expect(report.byRule['assigned-secret']).toBe(cases.length)
+  })
+
+  it('preserves the command after a shell environment assignment', () => {
+    const { spans, report } = redactSpans([
+      toolSpan('SERVICE_TOKEN=synthetic-assigned-value printf-safe-command'),
+    ])
+    const content = String(spans[0]!.attributes.content)
+    expect(content).not.toContain('synthetic-assigned-value')
+    expect(content).toContain('printf-safe-command')
+    expect(report.byRule['assigned-secret']).toBe(1)
+  })
+
+  it('preserves assignments whose identifiers do not end in secret suffixes', () => {
+    const source = [
+      'RETRY_TOKEN_COUNT=123456789012',
+      'API_KEY_NAME=primary',
+      'PASSWORD_POLICY=strict',
+      'CLIENT_SECRET_FILE=/tmp/synthetic',
+      'SECRETARY_MODE=enabled',
+      'TOKENIZER_MODEL=local',
+      'MONKEY=synthetic-value',
+      'function parse(token: string) {}',
+      'Narrative token: synthetic-value',
+      'PASSWORD_POLICY = strict-mode-enabled',
+      'API_KEY_NAME: primary-synthetic-name',
+    ].join('\n')
+
+    const { spans, report } = redactSpans([toolSpan(source)])
+    expect(spans[0]!.attributes.content).toBe(source)
+    expect(report.redactionCount).toBe(0)
+  })
+
+  it('scrubs config-file secrets: YAML line keys, INI spaced assignments, JSON quoted keys', () => {
+    const source = [
+      'api_key: synthetic-yaml-value-123',
+      '  vendor_access_token: "synthetic-nested-yaml-456"',
+      'password = synthetic-ini-value-789',
+      '{"client_secret": "synthetic-json-value-012"}',
+    ].join('\n')
+    const { spans, report } = redactSpans([toolSpan(source)])
+    const c = String(spans[0]!.attributes.content)
+    expect(c).not.toContain('synthetic-yaml-value-123')
+    expect(c).not.toContain('synthetic-nested-yaml-456')
+    expect(c).not.toContain('synthetic-ini-value-789')
+    expect(c).not.toContain('synthetic-json-value-012')
+    expect(report.byRule['config-secret']).toBe(4)
+  })
+
   it('scrubs credentials embedded in URLs (userinfo + secret query params)', () => {
     const { spans } = redactSpans([
       toolSpan('git clone https://bob:p4ssw0rd-secret@github.com/x/y.git; curl "https://api.x.com/v1?api_key=ABCDEF123456&page=2"'),
