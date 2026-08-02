@@ -128,11 +128,29 @@ describe('redactSpans', () => {
       'MONKEY=synthetic-value',
       'function parse(token: string) {}',
       'Narrative token: synthetic-value',
+      'PASSWORD_POLICY = strict-mode-enabled',
+      'API_KEY_NAME: primary-synthetic-name',
     ].join('\n')
 
     const { spans, report } = redactSpans([toolSpan(source)])
     expect(spans[0]!.attributes.content).toBe(source)
     expect(report.redactionCount).toBe(0)
+  })
+
+  it('scrubs config-file secrets: YAML line keys, INI spaced assignments, JSON quoted keys', () => {
+    const source = [
+      'api_key: synthetic-yaml-value-123',
+      '  vendor_access_token: "synthetic-nested-yaml-456"',
+      'password = synthetic-ini-value-789',
+      '{"client_secret": "synthetic-json-value-012"}',
+    ].join('\n')
+    const { spans, report } = redactSpans([toolSpan(source)])
+    const c = String(spans[0]!.attributes.content)
+    expect(c).not.toContain('synthetic-yaml-value-123')
+    expect(c).not.toContain('synthetic-nested-yaml-456')
+    expect(c).not.toContain('synthetic-ini-value-789')
+    expect(c).not.toContain('synthetic-json-value-012')
+    expect(report.byRule['config-secret']).toBe(4)
   })
 
   it('scrubs credentials embedded in URLs (userinfo + secret query params)', () => {
