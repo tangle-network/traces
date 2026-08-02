@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * `traces`: analyze your own coding-agent sessions.
+ * `traces`: analyze agent traces — yours, or any system's.
  *
+ *   traces validate <file|dir>
+ *   traces analyze --otlp <file|dir> [--out report.md] [--llm]
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces analyze --harness codex --current --latest-turn --workflow
@@ -9,7 +11,7 @@
  *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
  *   traces investigate [input.jsonl] [--format auto] [--out report.md]
  *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
- *   traces convert [--harness claude-code] [--last 1] --otlp spans.jsonl
+ *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces inspect session-index.json [--out inspection-report.md]
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
@@ -17,22 +19,34 @@
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces stream  [input.jsonl] [--replay] [--all] [--format auto]
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
+ *   traces watch   <run-dir | spans.otlp.jsonl> [--once] [--interval 2]
+ *
+ * Two ways in. `--otlp` reads spans a system already emitted in the
+ * `@tangle-network/agent-trace-contract` shape and skips translation entirely —
+ * the way to integrate a system you control. `--harness` runs an adapter over a
+ * proprietary session store, for the coding agents whose format we do not own.
  *
  * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
- * loop/waste pipelines; +agentic RLM kinds with `--llm`). `watch` is the
- * online observer: it tails active sessions and prints notifications when a
- * stuck loop or semantic live finding appears. `stream` emits the same live
- * feed as JSONL for visualizers, dashboards, and external agents.
+ * loop/waste pipelines; +agentic RLM kinds with `--llm`) and reports which
+ * analyses the spans could not support, and why. `validate` reports that
+ * conformance alone, before a run is spent. `watch` is the online observer:
+ * with no path it tails active sessions and prints notifications when a stuck
+ * loop or semantic live finding appears; given a run directory or an OTLP span
+ * file it tails that run's tree instead. `stream` emits the same live feed as
+ * JSONL for visualizers, dashboards, and external agents.
+ *
+ * `--otlp <file|dir>` READS OTLP; `--otlp-out <path>` WRITES the artifact.
  */
 
 import { readFileSync } from 'node:fs'
-import { readFile, stat, writeFile } from 'node:fs/promises'
-import { basename, resolve } from 'node:path'
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { basename, join, resolve } from 'node:path'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { appendAll } from './arrays.js'
 import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
 import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
+import { cmdReplayVerify } from './replay-verify.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -43,6 +57,8 @@ import {
   runTraceImprovement,
   runTraceInvestigation,
   saveReport,
+  totalAgenticFailureMessage,
+  type TraceInvestigationResult,
 } from './improvement.js'
 import {
   serializeTraceStreamEvent,
@@ -59,9 +75,21 @@ import {
   renderSupervisorRunMarkdown,
   rollupSupervisorRuns,
 } from '@tangle-network/agent-eval/supervisor-run'
-import { createAnalystAi } from '@tangle-network/agent-eval/analyst'
+import { fileRunContextSupervisorRunReader, isFileRunContextDir } from './supervisor-run-context.js'
+import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
+import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
+import type {
+  OtlpFieldWithheld,
+  OtlpIngestIssue,
+  OtlpInputFile,
+  SkippedInputFile,
+  UnreadableSourceRows,
+} from './otlp-input.js'
+import { readOtlpInput } from './otlp-input.js'
+import { renderValidation, validationExitCode } from './conformance.js'
+import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession } from './session-source.js'
@@ -97,10 +125,15 @@ interface Args {
   since?: string
   out?: string
   dir?: string
+  /** OTLP-JSONL file or directory to READ. */
   otlp?: string
+  /** Where to WRITE the OTLP-JSONL artifact. */
+  otlpOut?: string
   llm: boolean
   budget?: number
   interval: number
+  /** True when `--interval` was given, so a command can keep its own default. */
+  intervalExplicit: boolean
   window: number
   minLoop: number
   dryRun: boolean
@@ -114,6 +147,8 @@ interface Args {
   format?: string
   mode?: string
   replay: boolean
+  /** `--once`: a single pass instead of a live tail. */
+  once: boolean
   noSpans: boolean
   noFindings: boolean
   metadata?: string
@@ -125,6 +160,9 @@ interface Args {
 }
 
 const DEFAULT_ANALYST_MODEL = 'gpt-5-mini'
+
+/** Default `--llm` endpoint: the Tangle router, reached with TANGLE_API_KEY. */
+const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
 
 function packageVersion(): string {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
@@ -146,6 +184,7 @@ function parseArgs(argv: string[]): Args {
     maxWorkflowSessions: 100,
     llm: false,
     interval: 5,
+    intervalExplicit: false,
     window: 30,
     minLoop: 3,
     dryRun: false,
@@ -153,6 +192,7 @@ function parseArgs(argv: string[]): Args {
     noContent: false,
     analyzers: [],
     replay: false,
+    once: false,
     noSpans: false,
     noFindings: false,
     attrs: [],
@@ -179,6 +219,7 @@ function parseArgs(argv: string[]): Args {
       case '--out': a.out = next(); break
       case '--dir': a.dir = next(); break
       case '--otlp': a.otlp = next(); break
+      case '--otlp-out': a.otlpOut = next(); break
       case '--llm': a.llm = true; break
       case '--budget': a.budget = Number(next()); break
       case '--model': a.model = next(); break
@@ -186,13 +227,15 @@ function parseArgs(argv: string[]): Args {
       case '--mode': a.mode = next(); break
       case '--metadata': a.metadata = next(); break
       case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
-      case '--interval': a.interval = Number(next()); break
+      case '--interval': a.interval = Number(next()); a.intervalExplicit = true; break
       case '--window': a.window = Number(next()); break
       case '--min-loop': a.minLoop = Number(next()); break
       case '--dry-run': a.dryRun = true; break
       case '--no-content': a.noContent = true; break
-      case '--replay':
-      case '--once': a.replay = true; break
+      case '--replay': a.replay = true; break
+      // `stream --once` has always meant "one pass"; `watch --once` means the
+      // same thing over a run directory, so one flag drives both.
+      case '--once': a.once = true; a.replay = true; break
       case '--no-spans': a.noSpans = true; break
       case '--no-findings': a.noFindings = true; break
       case '--analyzer': { const v = next(); if (v) a.analyzers.push(v); break }
@@ -210,6 +253,47 @@ function parseArgs(argv: string[]): Args {
     }
   }
   return a
+}
+
+/**
+ * Commands that READ OTLP with `--otlp`. Everything else WRITES its OTLP
+ * artifact with `--otlp-out`: one flag, one direction, no command where the
+ * same word means read here and write there.
+ */
+const OTLP_INPUT_COMMANDS = new Set(['analyze', 'investigate', 'improve', 'stream', 'validate'])
+
+/**
+ * `--otlp` used to mean "write the artifact here" on every command. It now
+ * means "read this" — so on a WRITING command the old spelling is honoured for
+ * one minor with a warning, rather than turning a working script into a hard
+ * error at the moment the reader was introduced. Removed in 0.12.
+ */
+function migrateWritingOtlpFlag(args: Args): Args {
+  if (args.otlp === undefined || OTLP_INPUT_COMMANDS.has(args.command)) return args
+  if (args.otlpOut !== undefined) {
+    throw new Error(
+      `${args.command} was given both --otlp and --otlp-out. --otlp is the deprecated spelling of ` +
+        '--otlp-out on writing commands; pass only --otlp-out.',
+    )
+  }
+  console.error(
+    `warning: --otlp is deprecated on \`${args.command}\` and will be removed in 0.12. ` +
+      '--otlp now READS OTLP-JSONL; use --otlp-out <path> to write the artifact. ' +
+      'Treating it as --otlp-out for this run.',
+  )
+  return { ...args, otlpOut: args.otlp, otlp: undefined }
+}
+
+function validateOtlpSelection(raw: Args): Args {
+  const args = migrateWritingOtlpFlag(raw)
+  if (args.otlp === undefined) return args
+  if (args.input) throw new Error('--otlp cannot be combined with an input file')
+  if (args.session) throw new Error('--otlp reads a file and cannot be combined with --session')
+  if (args.supervisorRunDir) throw new Error('--otlp cannot be combined with --supervisor-run-dir')
+  if (args.workflow || args.latestTurn) {
+    throw new Error('--workflow and --latest-turn expand harness sessions and cannot be combined with --otlp')
+  }
+  return args
 }
 
 const CURRENT_SESSION_COMMANDS = new Set([
@@ -352,18 +436,85 @@ async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTra
   )
 }
 
-async function buildAxService(model: string): Promise<import('@ax-llm/ax').AxAIService> {
-  const apiKey = process.env.OPENAI_API_KEY
+/**
+ * The recursive analysis engine behind `--llm`. agent-eval's model-backed
+ * analysts run through DSPy RLM, which drives `agent-eval-rpc[dspy]` out of
+ * process — so `--llm` needs a Python interpreter with that extra installed,
+ * selectable via TRACES_PYTHON. Every deterministic command is unaffected and
+ * still needs neither a key nor Python.
+ */
+function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEngine {
+  // The router is the default endpoint, so TANGLE_API_KEY alone is enough.
+  // OPENAI_API_KEY still works and, when it is the only key present, points at
+  // OpenAI directly — otherwise a plain OpenAI key would be sent to the router.
+  const tangleKey = process.env.TANGLE_API_KEY
+  const openAiKey = process.env.OPENAI_API_KEY
+  const apiKey = tangleKey || openAiKey
   if (!apiKey) {
     throw new Error(
-      '--llm needs OPENAI_API_KEY: an OpenAI key, or a router/gateway key with OPENAI_BASE_URL set to an ' +
-        'OpenAI-compatible endpoint (e.g. the Tangle router). Deterministic analysis needs no key.',
+      '--llm needs a model key: TANGLE_API_KEY for the Tangle router (the default endpoint), or ' +
+        'OPENAI_API_KEY for OpenAI. Set OPENAI_BASE_URL to target any other OpenAI-compatible ' +
+        'gateway. Deterministic analysis needs no key.',
     )
   }
-  // OPENAI_BASE_URL points the agentic analysts at any OpenAI-compatible gateway
-  // (the Tangle router, a local proxy, …) instead of api.openai.com.
-  const apiURL = process.env.OPENAI_BASE_URL || undefined
-  return createAnalystAi({ apiKey, baseUrl: apiURL, model })
+  const baseUrl =
+    process.env.OPENAI_BASE_URL ||
+    (tangleKey ? TANGLE_ROUTER_BASE_URL : 'https://api.openai.com/v1')
+  const python = process.env.TRACES_PYTHON
+  return createDspyRlmTraceEngine({
+    apiKey,
+    baseUrl,
+    model,
+    // agent-eval 0.139.3's engine defaults are tuned below what real runs
+    // need. maxOutputTokens 4096 is under what current coding models emit for
+    // one findings array: glm-5.2 counts reasoning tokens in
+    // completion_tokens, the first oversized completion breaches its cost
+    // reservation, and the fail-closed ledger then refuses every later call
+    // in the run.
+    maxOutputTokens: 16_384,
+    // maxCostUsd defaults to $1 per analyst — a proxy-side ceiling separate
+    // from --budget. With the larger token cap the per-call reservation grows
+    // ~4x, so that default binds before the registry's --budget allocation
+    // and kills analysts mid-run. --budget is the operator's spend authority
+    // and the registry still splits it across analysts, so forwarding it here
+    // only stops the engine's own default from cutting runs short.
+    ...(budgetUsd !== undefined && Number.isFinite(budgetUsd) && budgetUsd > 0
+      ? { maxCostUsd: budgetUsd }
+      : {}),
+    ...(python ? { runner: { command: python } } : {}),
+  })
+}
+
+/**
+ * The published version of the Python bridge (`agent-eval-rpc` on PyPI) that
+ * speaks this CLI's engine protocol. The bridge validates its input with
+ * exact-key checks, so any skew between the interpreter's installed bridge and
+ * this package's `@tangle-network/agent-eval` dependency kills every agentic
+ * analyst at startup, before any model call.
+ */
+function requiredBridgeVersion(): string {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    dependencies?: Record<string, unknown>
+  }
+  const version = pkg.dependencies?.['@tangle-network/agent-eval']
+  if (typeof version !== 'string' || !version) {
+    throw new Error('package.json is missing the @tangle-network/agent-eval dependency')
+  }
+  return version
+}
+
+/**
+ * `--llm` promises agentic findings; delivering a deterministic-only report
+ * with exit 0 when every agentic analyst died reads as success. Throwing after
+ * the report is written keeps the deterministic output AND fails loud. The
+ * bridge-version read happens only once total failure is established, so a
+ * package.json problem can never turn a successful run into exit 1.
+ */
+function assertAgenticAnalystsRan(args: Args, agenticPerAnalyst: TraceInvestigationResult['agenticPerAnalyst']): void {
+  if (!args.llm) return
+  if (!totalAgenticFailureMessage(agenticPerAnalyst)) return
+  const message = totalAgenticFailureMessage(agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })
+  throw new Error(message!)
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -384,6 +535,17 @@ interface CollectedSpans {
   cwds: string[]
   sources: SelectedSessionSource[]
   workflow?: SessionWorkflowSummary
+  /**
+   * Conformance of the SOURCE, present when the spans were read from OTLP.
+   * Absent for adapter output, which is graded from the spans themselves.
+   */
+  conformance?: TraceValidation
+  conformanceSubject?: string
+  conformanceFiles?: readonly OtlpInputFile[]
+  conformanceSkipped?: readonly SkippedInputFile[]
+  conformanceIssues?: readonly OtlpIngestIssue[]
+  conformanceWithheld?: readonly OtlpFieldWithheld[]
+  conformanceUnreadable?: UnreadableSourceRows
 }
 
 function selectedSessionSource(
@@ -434,7 +596,52 @@ function selectedSessionSource(
   }
 }
 
+/**
+ * Read OTLP spans a foreign system emitted, skipping the adapter stage
+ * entirely: the analysis engine is already OTLP-native, so conforming spans
+ * need no translation to be analysed.
+ */
+async function collectOtlpSpans(path: string): Promise<CollectedSpans> {
+  const input = await readOtlpInput(path)
+  if (input.spans.length === 0) {
+    throw new Error(
+      `no analyzable spans in ${path} (${input.files.length} file(s), ${input.rows.length} row(s), ` +
+        `${input.issues.length} unusable). Run \`traces validate ${path}\` for the per-finding reason.`,
+    )
+  }
+  const fileByTrace = new Map<string, string>()
+  for (const file of input.files) {
+    for (const traceId of file.traceIds) if (!fileByTrace.has(traceId)) fileByTrace.set(traceId, file.path)
+  }
+  const byTrace = new Map<string, OtlpSpan[]>()
+  for (const span of input.spans) {
+    const grouped = byTrace.get(span.trace_id) ?? []
+    grouped.push(span)
+    byTrace.set(span.trace_id, grouped)
+  }
+  return {
+    spans: [...input.spans],
+    harness: 'otlp',
+    cwds: [],
+    sources: [...byTrace].map(([traceId, spans]) => selectedSessionSource({
+      harness: 'otlp',
+      sessionId: traceId,
+      path: fileByTrace.get(traceId) ?? path,
+      cwd: null,
+      mtimeMs: 0,
+    }, spans, traceId)),
+    conformance: input.validation,
+    conformanceSubject: path,
+    conformanceFiles: input.files,
+    conformanceSkipped: input.skipped,
+    conformanceIssues: input.issues,
+    conformanceWithheld: input.withheld,
+    conformanceUnreadable: input.unreadable,
+  }
+}
+
 async function collectSpans(args: Args): Promise<CollectedSpans> {
+  if (args.otlp) return collectOtlpSpans(args.otlp)
   if (args.input) {
     if (args.workflow) throw new Error('--workflow reads discovered sessions and cannot be combined with an input file')
     return collectImportedSpans(args)
@@ -459,11 +666,48 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
   }
 }
 
+/**
+ * `traces validate <file|dir>` — what a trace can and cannot answer, before
+ * anyone spends a run on it. Exits non-zero on exactly one condition: the input
+ * is not a trace, because not one entry in it could be read as a span. A
+ * degraded trace exits 0 and states its degradation per capability; a gate that
+ * fails on thinness would stop every real-world trace on day one.
+ */
+async function cmdValidate(args: Args): Promise<void> {
+  const path = args.otlp ?? args.input
+  if (!path) {
+    throw new Error('validate needs an OTLP-JSONL file or directory: `traces validate <file|dir>`')
+  }
+  const input = await readOtlpInput(path)
+  const report = renderValidation(input.validation, {
+    subject: path,
+    files: input.files,
+    skipped: input.skipped,
+    issues: input.issues,
+    withheld: input.withheld,
+    unreadable: input.unreadable,
+    spans: input.spans,
+  })
+  const validation = input.validation
+  if (args.out) {
+    await saveReport(args.out, report)
+    console.log(
+      `conformance report → ${args.out}  (${validation.findings.length} finding(s), ` +
+        `${validation.capabilities.filter((capability) => capability.available).length}/` +
+        `${validation.capabilities.length} capabilities available)`,
+    )
+  } else {
+    console.log(report)
+  }
+  // `validate` is read by CI: an error finding must not exit 0.
+  process.exitCode = validationExitCode(validation)
+}
+
 async function cmdConvert(args: Args): Promise<void> {
   const { spans, workflow } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(workflow)
-  const path = await writeOtlpFile(spans, args.otlp)
+  const path = await writeOtlpFile(spans, args.otlpOut)
   console.log(`wrote ${spans.length} spans → ${path}`)
 }
 
@@ -508,7 +752,7 @@ async function cmdEvidence(args: Args): Promise<void> {
   const rows = selection.rows.filter((row) => row.spans.length > 0)
   if (rows.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(selection.workflow)
-  const otlpPath = args.otlp ? await writeOtlpFile(rows.flatMap((row) => row.spans), args.otlp) : undefined
+  const otlpPath = args.otlpOut ? await writeOtlpFile(rows.flatMap((row) => row.spans), args.otlpOut) : undefined
   const generatedAt = new Date().toISOString()
   const records = await Promise.all(rows.map((row) =>
     buildPolicyEvidenceRecord(row.ref, row.spans, {
@@ -570,7 +814,7 @@ async function cmdExport(args: Args): Promise<void> {
   if (!args.input) throw new Error('export needs an input file; run `traces export --help` for examples')
   const format = traceEvidenceFormat(args.format)
   const attributes = await loadExportAttributes(args)
-  const outPath = args.out ?? args.otlp
+  const outPath = args.out ?? args.otlpOut
   if (outPath) {
     const result = await writeTraceEvidenceExportFile(args.input, outPath, { format, attributes })
     console.log(
@@ -686,6 +930,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   } else {
     console.log(result.report)
   }
+  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
 }
 
 /**
@@ -694,13 +939,33 @@ async function cmdAnalyze(args: Args): Promise<void> {
  * this CLI, which reports what happened inside one harness session.
  *
  * Every metric comes from `@tangle-network/agent-eval/supervisor-run` — this
- * function only picks single-run vs rollup and prints. No analysis is
- * duplicated here, and none may be added.
+ * function only picks a READER, then single-run vs rollup, then prints. No
+ * analysis is duplicated here, and none may be added.
+ *
+ * Two on-disk layouts reach the same analyzer through the same port: the loops
+ * supervisor's `<runDir>/ws/.agent/supervisor/<id>`, and agent-runtime's
+ * `createFileRunContext` directory (`spawn-journal.jsonl` at the top level).
+ * The run-context layout is checked first because it is identified by a file
+ * that is actually there, rather than by the absence of another layout.
  */
 async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
-  const nested = await findSupervisorRunDirs(runDir)
+  const runContextDirs = await findFileRunContextDirs(runDir)
+  const nested = runContextDirs.length > 0 ? [] : await findSupervisorRunDirs(runDir)
   let markdown: string
-  if (nested.length > 0) {
+  if (runContextDirs.length > 1) {
+    markdown = renderSupervisorRollupMarkdown(
+      rollupSupervisorRuns(
+        await Promise.all(
+          runContextDirs.map((dir) => analyzeSupervisorRun(fileRunContextSupervisorRunReader(dir))),
+        ),
+      ),
+      `Supervisor rollup — ${runDir}`,
+    )
+  } else if (runContextDirs.length === 1) {
+    markdown = renderSupervisorRunMarkdown(
+      await analyzeSupervisorRun(fileRunContextSupervisorRunReader(runContextDirs[0] as string)),
+    )
+  } else if (nested.length > 0) {
     markdown = renderSupervisorRollupMarkdown(
       rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
       `Supervisor rollup — ${runDir}`,
@@ -712,20 +977,38 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
     // nothing" rather than "you pointed me at the wrong directory".
     if (isUnavailable(report.orchestration.workersSpawned)) {
       throw new Error(
-        `no supervisor run found at ${runDir} — expected <runDir>/ws/.loops/supervisor/<id>, ` +
+        `no supervisor run found at ${runDir} — expected <runDir>/spawn-journal.jsonl ` +
+          '(agent-runtime createFileRunContext), <runDir>/ws/.agent/supervisor/<id> ' +
+          '(or the pre-rename <runDir>/ws/.loops/supervisor/<id>), ' +
           'or a parent directory containing such runs',
       )
     }
     markdown = renderSupervisorRunMarkdown(report)
   }
+  const runs = Math.max(runContextDirs.length, nested.length, 1)
   if (args.out) {
     await saveReport(args.out, markdown)
-    console.log(
-      `supervisor report → ${args.out}  (${nested.length > 0 ? `${nested.length} runs` : '1 run'})`,
-    )
+    console.log(`supervisor report → ${args.out}  (${runs === 1 ? '1 run' : `${runs} runs`})`)
   } else {
     console.log(markdown)
   }
+}
+
+/**
+ * The run-context directories at or immediately under `dir`. One level only:
+ * a run directory is the unit a caller names, and a deep walk would sweep up
+ * unrelated runs that merely share a parent.
+ */
+async function findFileRunContextDirs(dir: string): Promise<string[]> {
+  if (await isFileRunContextDir(dir)) return [dir]
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+  const found: string[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const child = join(dir, entry.name)
+    if (await isFileRunContextDir(child)) found.push(child)
+  }
+  return found.sort()
 }
 
 async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
@@ -758,6 +1041,17 @@ async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
   }
 }
 
+/**
+ * Analyst progress log for stderr. The registry's `[analyst] FAIL <id>` line
+ * carries its reason only in the structured fields; a message-only sink turns
+ * every engine-startup failure into an unactionable one-liner.
+ */
+function analystLog(msg: string, fields?: Record<string, unknown>): void {
+  const error = typeof fields?.error === 'string' && fields.error ? fields.error : undefined
+  const errorClass = typeof fields?.error_class === 'string' && fields.error_class ? `${fields.error_class}: ` : ''
+  process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
+}
+
 function externalAnalyzersFromArgs(args: Args) {
   return args.analyzers.map((spec) =>
     spec === 'halo'
@@ -776,16 +1070,31 @@ async function cmdInvestigate(args: Args): Promise<void> {
   } else {
     console.log(result.report)
   }
+  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
+}
+
+/** Conformance fields threaded from the source into the investigation options. */
+function conformanceOptions(collected: CollectedSpans) {
+  return {
+    ...(collected.conformance ? { conformance: collected.conformance } : {}),
+    ...(collected.conformanceSubject ? { conformanceSubject: collected.conformanceSubject } : {}),
+    ...(collected.conformanceFiles ? { conformanceFiles: collected.conformanceFiles } : {}),
+    ...(collected.conformanceSkipped ? { conformanceSkipped: collected.conformanceSkipped } : {}),
+    ...(collected.conformanceIssues ? { conformanceIssues: collected.conformanceIssues } : {}),
+    ...(collected.conformanceWithheld ? { conformanceWithheld: collected.conformanceWithheld } : {}),
+    ...(collected.conformanceUnreadable ? { conformanceUnreadable: collected.conformanceUnreadable } : {}),
+  }
 }
 
 async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
-  const { spans, harness, cwds, sources, workflow } = await collectSpans(args)
+  const collected = await collectSpans(args)
+  const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = args.config !== undefined || options.loadDefaultConfig !== false
     ? await loadTracesConfig(args.config)
     : undefined
   const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const ai = args.llm ? await buildAxService(analystModel) : undefined
+  const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
   return runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
@@ -793,22 +1102,24 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
     workflow,
     cwds,
     minLoopOccurrences: args.minLoop,
-    ai,
+    engine,
     model: args.llm ? analystModel : args.model,
     budgetUsd: args.budget,
-    otlpOutPath: args.otlp,
+    otlpOutPath: args.otlpOut,
     externalAnalyzers: externalAnalyzersFromArgs(args),
     analyzerPrompt: args.analyzerPrompt,
-    log: (msg) => process.stderr.write(`${msg}\n`),
+    log: analystLog,
+    ...conformanceOptions(collected),
   }, config))
 }
 
 async function cmdImprove(args: Args): Promise<void> {
-  const { spans, harness, cwds, sources, workflow } = await collectSpans(args)
+  const collected = await collectSpans(args)
+  const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const ai = args.llm ? await buildAxService(analystModel) : undefined
+  const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
       spans,
@@ -817,13 +1128,14 @@ async function cmdImprove(args: Args): Promise<void> {
       workflow,
       cwds,
       minLoopOccurrences: args.minLoop,
-      ai,
+      engine,
       model: args.llm ? analystModel : args.model,
       budgetUsd: args.budget,
-      otlpOutPath: args.otlp,
+      otlpOutPath: args.otlpOut,
       externalAnalyzers: externalAnalyzersFromArgs(args),
       analyzerPrompt: args.analyzerPrompt,
-      log: (msg) => process.stderr.write(`${msg}\n`),
+      log: analystLog,
+      ...conformanceOptions(collected),
     }, config),
     outDir: args.dir ?? args.out,
   })
@@ -833,6 +1145,7 @@ async function cmdImprove(args: Args): Promise<void> {
     `improvement artifacts → ${dir}  ` +
       `(${result.findings.length} findings with actions and checks, OTLP: ${result.otlpPath})`,
   )
+  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
 }
 
 function summarizeFindingEvidence(finding: TraceLiveFinding): string {
@@ -899,12 +1212,15 @@ async function streamExplicitSession(args: Args, extraAnalysts: readonly TraceLi
 async function cmdStream(args: Args): Promise<void> {
   const config = await loadTracesConfig(args.config)
   const preset = streamPreset(args)
-  if (args.input) {
-    const { spans, harness } = await collectImportedSpans(args)
+  const source = args.otlp ?? args.input
+  if (source) {
+    const { spans, harness } = args.otlp
+      ? await collectOtlpSpans(args.otlp)
+      : await collectImportedSpans(args)
     const ref: SessionRef = {
       harness,
-      sessionId: basename(args.input),
-      path: resolve(args.input),
+      sessionId: basename(source),
+      path: resolve(source),
       cwd: args.cwd ?? null,
       mtimeMs: Date.now(),
     }
@@ -956,7 +1272,15 @@ async function cmdStream(args: Args): Promise<void> {
   })
 }
 
+/**
+ * Two watches share one verb because they answer the same question one level
+ * apart: `traces watch` (no path) tails live HARNESS SESSIONS, and
+ * `traces watch <target>` tails one RUN TREE. The existing no-positional form
+ * is untouched; a path selects the tree view.
+ */
 async function cmdWatch(args: Args): Promise<void> {
+  const target = args.supervisorRunDir ?? args.input
+  if (target !== undefined) return cmdWatchRunTarget(target, args)
   const all = args.all || (!args.harnessExplicit && !args.cwd)
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
@@ -985,6 +1309,35 @@ async function cmdWatch(args: Args): Promise<void> {
       process.stdout.write(`${formatLiveFinding(finding)}\n`)
     },
   })
+}
+
+/**
+ * Live view of one run tree. The target is an OTLP span file (the general
+ * source, which works for any emitter), an agent-runtime `createFileRunContext`
+ * directory (the specific source, which carries budget and settlement), or a
+ * directory holding both. Read-only, plain stdout; `--once` prints a single
+ * snapshot, which is what a script or an agent wants.
+ */
+async function cmdWatchRunTarget(dir: string, args: Args): Promise<void> {
+  const target = await resolveRunWatchTarget(resolve(dir))
+  const controller = new AbortController()
+  if (!args.once) {
+    process.once('SIGINT', () => controller.abort())
+    process.stderr.write(
+      `traces watch: tailing ${target.requested} every ${args.interval}s; read-only, ` +
+        `${target.runDir === null ? 'span source only — Ctrl-C to stop' : 'stops when result.json lands. Ctrl-C to stop'}.\n`,
+    )
+  }
+  const snapshot = await watchRunTarget(target, {
+    once: args.once,
+    // A tree view wants a tighter poll than the session observer's 5s default:
+    // a blocking question is worth surfacing the moment it lands.
+    intervalMs: args.intervalExplicit ? Math.max(250, args.interval * 1000) : 2000,
+    signal: controller.signal,
+  })
+  // A terminal run that ended badly should not look like a success to a script.
+  const result = snapshot.journal?.result ?? null
+  if (result !== null && result.errorMessage !== null) process.exitCode = 1
 }
 
 async function cmdUpload(args: Args): Promise<void> {
@@ -1024,7 +1377,7 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   if (args.dryRun) {
-    const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlp, stripContent: args.noContent, redactor })
+    const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlpOut, stripContent: args.noContent, redactor })
     console.log(`dry run: ${candidates.length - res.skippedSessions} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
@@ -1092,24 +1445,76 @@ The command validates every native step, rejects annotation leakage, writes
 codetracebench-import.json. The output directory must not already exist.`)
 }
 
+function usageValidate(): void {
+  console.log(`traces validate: report what a trace can and cannot answer
+
+Usage:
+  traces validate <file.jsonl|dir> [--out conformance.md]
+
+Reads OTLP-JSONL and prints the conformance report from
+@tangle-network/agent-trace-contract:
+
+  - findings by severity, each naming the CONSEQUENCE of the defect and the
+    capabilities it blocks
+  - the capability table: token-accounting, cost-attribution, tool-usage,
+    loop-convergence, tree-comparison, steering-chain, latency-analysis —
+    available or not, with the trace's own reason
+  - rows that could not be read at all, with the line and the reason
+
+A directory reads the OTLP files under it, recursively — only the otlp/
+subdirectory when the producer made one. A run directory's raw event, stream and
+SDK logs are also *.jsonl; they are listed with what they actually hold, not read
+as several hundred broken spans. Identical re-declarations of a span across
+per-shot files are counted as repeats, not defects; only a repeat with DIFFERENT
+content is an error.
+
+Exit code:
+  0  no error findings, and at least one capability available (warnings mean
+     thinner analysis, not wrong analysis)
+  1  an error finding, or nothing analysable at all — an empty file, or one
+     whose every line was unreadable, answers no question and is not a pass
+
+Nothing is fixed up: a span with an unreadable timestamp is reported, never
+repaired, because a synthesized value puts invented work into a total.
+
+Examples:
+  traces validate spans.otlp.jsonl
+  traces validate results/sessions --out conformance.md
+  traces validate spans.otlp.jsonl && traces analyze --otlp spans.otlp.jsonl`)
+}
+
 function usage(): void {
-  console.log(`traces: analyze, observe & upload coding-agent sessions
+  console.log(`traces: analyze agent traces — yours, or any system's
+
+Two ways in:
+  --otlp <file|dir>   Spans a system already emitted in the
+                      @tangle-network/agent-trace-contract shape. No adapter, no
+                      translation. This is how you integrate a NEW system.
+  --harness <id>      Run an adapter over a coding agent's proprietary session
+                      store (Claude Code, Codex, OpenCode, …) — the legacy edge,
+                      for formats we do not control.
 
 Commands:
+  validate  Report what a trace can and cannot answer (exit 1 on error findings)
   list      List discovered sessions
-  analyze   Run analyst suite + loop/waste pipelines over sessions or an input file
+  analyze   Run analyst suite + loop/waste pipelines over OTLP (--otlp), sessions,
+            or an input file; names every analysis the spans could not support
             (--supervisor-run-dir <dir> reports a supervision tree instead)
   investigate Run typed investigation flow, including BYO config + evidence-backed actions
   improve   Write findings, evidence, report, and canonical trace artifacts
-  convert   Emit OTLP-JSONL only (HALO: use analyze --analyzer halo)
+  convert   Emit OTLP-JSONL only, to --otlp-out (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
   inspect   Read a session index and print ranked improvement findings
   export    Convert evidence/events files to OpenInference JSONL for HALO
   import-codetracebench
             Convert CodeTracer-normalized CodeTraceBench trajectories in bulk
+  replay-verify
+            Replay a trajectory prefix in a sandbox, execute step k both recorded
+            and corrected, and emit an executed-proof verdict (--help for flags)
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
+            (watch <target> tails ONE run tree instead: a run directory or a span file)
   upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
 
 Options:
@@ -1127,24 +1532,40 @@ Options:
                    analyze: report a SUPERVISION TREE instead of harness sessions —
                    steers, spawn waves, concurrency, idle wall, cost by role,
                    accepted vs rejected. Rolls up when the dir holds many runs.
+                   watch: same directory, live. Reads the loops layout, the
+                   agent-runtime createFileRunContext journal, and OTLP span files.
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory
-  --otlp <path>    OTLP artifact path (also evidence provenance / dry-run upload preview)
+  --otlp <file|dir>  READ OTLP-JSONL emitted by any system, skipping the adapters.
+                   A directory reads the OTLP files under it — only the otlp/
+                   subdirectory when the producer made one — and names the JSONL
+                   that is not OTLP instead of reading it as broken spans.
+                   Supported by: validate, analyze, investigate, improve, stream.
+                   On a WRITING command it is the deprecated spelling of
+                   --otlp-out; it still works, with a warning, until 0.12.
+  --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
+                   provenance / dry-run upload preview)
   --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans | chat-trajectory
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --mode <kind>    stream: visualizer | findings | agent (default visualizer)
   --replay, --once stream: scan once and exit (default for positional input / --session)
+  --once           watch <target>: print ONE snapshot and exit, for scripts and agents
   --no-spans       stream: omit per-span pulse events
   --no-findings    stream: omit semantic live-finding events
-  --llm            Enable agentic RLM analysts (needs OPENAI_API_KEY / OPENAI_BASE_URL)
+  --llm            Enable agentic RLM analysts. Runs on the Tangle router by
+                   default (TANGLE_API_KEY); OPENAI_API_KEY alone targets OpenAI,
+                   OPENAI_BASE_URL overrides the endpoint. Needs Python with
+                   agent-eval-rpc[dspy] (TRACES_PYTHON selects the interpreter),
+                   version-matched to this package's @tangle-network/agent-eval.
+                   Exits 1 when every agentic analyst fails, with each reason.
   --model <id>     Model for --llm, HALO, and Hodoscope (default for --llm: ${DEFAULT_ANALYST_MODEL})
   --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
   --budget <usd>   USD cap for agentic analysts
   --analyzer <id>  analyze: also run halo, hodoscope, or an installed command (repeatable)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
-  --interval <s>   watch/stream: poll interval seconds (default 5)
+  --interval <s>   watch/stream: poll interval seconds (sessions 5, run tree 2)
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
@@ -1152,7 +1573,15 @@ Options:
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version
-  --help, -h       Show help (use \`traces export --help\` or \`traces import-codetracebench --help\`)
+  --help, -h       Show help (use \`traces validate --help\`, \`traces export --help\`,
+                   or \`traces import-codetracebench --help\`)
+
+Watch a run tree (any depth; driver spend and child spend stay separate,
+and a cost the harness never priced reads "unknown", never $0):
+  traces watch runs/my-run                 live tree: status, budget, driver vs child spend
+  traces watch runs/my-run --once          one snapshot, then exit
+  traces watch traces.otlp.jsonl           OTLP spans only — works for ANY emitter
+  traces analyze --supervisor-run-dir runs/my-run   the full tree report
 
 Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)
 }
@@ -1163,6 +1592,11 @@ async function main(): Promise<void> {
     console.log(`traces ${packageVersion()}`)
     return
   }
+  // replay-verify owns its flag set; dispatch before the shared parser.
+  if (rawArgs[0] === 'replay-verify') {
+    await cmdReplayVerify(rawArgs.slice(1))
+    return
+  }
   const parsedArgs = parseArgs(rawArgs)
   if (parsedArgs.help) {
     if (
@@ -1170,18 +1604,21 @@ async function main(): Promise<void> {
       (parsedArgs.command === 'help' && parsedArgs.input === 'import-codetracebench')
     ) usageImportCodeTraceBench()
     else if (parsedArgs.command === 'export' || (parsedArgs.command === 'help' && parsedArgs.input === 'export')) usageExport()
+    else if (parsedArgs.command === 'validate' || (parsedArgs.command === 'help' && parsedArgs.input === 'validate')) usageValidate()
     else usage()
     return
   }
-  const args = validateWorkflowSelection(applyCurrentSessionSelection(parsedArgs))
+  const args = validateOtlpSelection(validateWorkflowSelection(applyCurrentSessionSelection(parsedArgs)))
   switch (args.command) {
     case 'help':
       if (args.input === 'import-codetracebench') usageImportCodeTraceBench()
       else if (args.input === 'export') usageExport()
+      else if (args.input === 'validate') usageValidate()
       else usage()
       break
     case 'list': await cmdList(args); break
     case 'analyze': await cmdAnalyze(args); break
+    case 'validate': await cmdValidate(args); break
     case 'investigate': await cmdInvestigate(args); break
     case 'improve': await cmdImprove(args); break
     case 'convert': await cmdConvert(args); break

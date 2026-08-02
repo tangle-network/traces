@@ -443,12 +443,21 @@ describe('trace evidence export', () => {
       },
       {
         ...base,
-        span_id: 'execution',
+        span_id: 'declared-execution',
         parent_span_id: 'tool',
         name: 'claude_code.tool.execution',
         kind: 'TOOL',
         attributes: {
           'openinference.span.kind': 'TOOL',
+          'span.type': 'tool.execution',
+        },
+      },
+      {
+        ...base,
+        span_id: 'undeclared-execution',
+        parent_span_id: 'tool',
+        name: 'claude_code.tool.execution',
+        attributes: {
           'span.type': 'tool.execution',
         },
       },
@@ -459,9 +468,19 @@ describe('trace evidence export', () => {
       'input.value': 'pnpm test --filter api',
       'tool.args_captured': true,
     }))
+    // A kind the producer DECLARED survives the round trip. Demoting it to
+    // CHAIN made `tool-usage` available on the source file and unavailable on
+    // our own re-export of it — the same trace answering two different
+    // questions depending on which copy you read.
     expect(result.spans[1]!.attributes).toEqual(expect.objectContaining({
+      'openinference.span.kind': 'TOOL',
+    }))
+    expect(result.spans[1]!.attributes['traces.raw_attribute.openinference.span.kind']).toBeUndefined()
+    // The demotion still fires where it was always aimed: an execution child
+    // that declares no contract kind. Counting it as a second call would double
+    // every tool total in the file.
+    expect(result.spans[2]!.attributes).toEqual(expect.objectContaining({
       'openinference.span.kind': 'CHAIN',
-      'traces.raw_attribute.openinference.span.kind': 'TOOL',
     }))
 
     const partialReads = exportTraceEvidenceRows([0, 1, 2].map((offset) => ({
@@ -516,19 +535,32 @@ describe('strict exported span validation', () => {
   it('rejects malformed and non-finite timestamps', () => {
     expect(() => exportTraceEvidenceRows([
       completeOpenInferenceRow({ start_time: 'not-a-date' }),
-    ], { format: 'openinference' })).toThrow(/start_time must be a finite/)
+    ], { format: 'openinference' })).toThrow(/span-hostile has no readable start_time/)
     expect(() => exportTraceEvidenceRows([
       completeOpenInferenceRow({ start_time: '999999999999999999999999' }),
-    ], { format: 'openinference' })).toThrow(/start_time must be a finite/)
+    ], { format: 'openinference' })).toThrow(/span-hostile has no readable start_time/)
   })
 
-  it('rejects intervals whose end precedes their start', () => {
-    expect(() => exportTraceEvidenceRows([
+  it('keeps an interval whose end precedes its start, and re-exports it unrepaired', () => {
+    // Refusing the whole file for one bad timestamp threw away every other span
+    // in it. The span is kept, its interval is withheld for analysis, and the
+    // EXPORT carries the producer's own end_time — writing the clamp instead
+    // would make the copy validate clean where the original did not.
+    const result = exportTraceEvidenceRows([
       completeOpenInferenceRow({
         start_time: '2026-01-01T00:00:02.000Z',
         end_time: '2026-01-01T00:00:01.000Z',
       }),
-    ], { format: 'openinference' })).toThrow(/end_time must not precede start_time/)
+    ], { format: 'openinference' })
+
+    expect(result.spans).toHaveLength(1)
+    expect(result.spans[0]!.start_time).toBe('2026-01-01T00:00:02.000Z')
+    expect(result.spans[0]!.end_time).toBe('2026-01-01T00:00:02.000Z')
+    expect(result.spans[0]!.attributes['traces.duration_unmeasurable']).toBe(true)
+    expect(result.spans[0]!.attributes['traces.raw_attribute.end_time']).toBe('2026-01-01T00:00:01.000Z')
+
+    const [written] = parseRows(serializeSpans(result.spans))
+    expect(written!.end_time).toBe('2026-01-01T00:00:01.000Z')
   })
 
   it('rejects missing required fields instead of inventing them', () => {

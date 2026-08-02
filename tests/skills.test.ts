@@ -46,6 +46,6 @@ it('uses the durable output flag for trace conversion', async () => {
   const content = await readFile(skillUrl, 'utf8')
   const convertCommand = content.match(/traces convert[\s\S]*?```/)?.[0] ?? ''
 
-  expect(convertCommand).toContain('--otlp ')
+  expect(convertCommand).toContain('--otlp-out ')
   expect(convertCommand).not.toContain('--out ')
 })

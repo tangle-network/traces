@@ -12,7 +12,28 @@
 
 // ── Core span model + adapters (read / convert / extend) ──────────────────
 export * from './types.js' // HarnessTraceAdapter, SessionRef, LocateOptions
-export * from './otlp.js' // OtlpSpan, span(), serializeSpans(), writeOtlpFile()
+export * from './otlp.js' // OtlpSpan, OtlpSpanLink, span(), serializeSpans(), writeOtlpFile()
+// Ingest OTLP from ANY system, no adapter. Exported by name, not with `*`: the
+// module's internals (attribute bridging, tool-io normalization, row readers)
+// are implementation of the ONE entry point below and would otherwise become
+// API this package has to keep.
+export {
+  inferSpanKind,
+  otlpRowToSpan,
+  readOtlpInput,
+  resolveOtlpInputFiles,
+} from './otlp-input.js'
+export type {
+  OtlpIngestIssue,
+  OtlpIngestIssueKind,
+  OtlpInput,
+  OtlpInputFile,
+  OtlpRowConversion,
+  ResolvedOtlpInput,
+  SkippedInputFile,
+} from './otlp-input.js'
+export * from './conformance.js' // what a trace can/cannot answer, and the analyses it costs
+export * from './loop-analysis.js' // did round N+1 improve on N; which verdict caused which retry
 export * from './codetracebench.js'
 export * from './attributes.js' // ATTR keys, INGEST_SOURCE_CLI, DEFAULT_HARNESS
 export * from './time.js' // parseIsoToEpochMs(), parseSince()
@@ -79,9 +100,23 @@ export * from './hodoscope.js' // hodoscopeAnalyzer / writeHodoscopeInput
 export * from './live.js' // streamSessions(), traceStreamEventsFromSpans(), semantic live findings
 export * from './observer.js' // watchSessions({ onLoop, onReport, signal })
 
+// ── Run trees: the live view `traces watch <target>` renders ─────────────
+// Two sources behind one view. The GENERAL one folds OTLP spans by
+// trace_id/span_id/parent_span_id, so any emitter is watchable. The SPECIFIC
+// one reads agent-runtime's durable spawn journal, which carries the authored
+// budget and settlement telemetry does not, and is also a second implementation
+// of agent-eval's SupervisorRunReader port. All ANALYSIS stays in agent-eval:
+// pass the reader to `analyzeSupervisorRun` / `rollupSupervisorRuns`.
+export * from './run-span-tree.js' // general: OTLP spans → tree
+export * from './supervisor-run-context.js' // specific: spawn journal → tree + reader
+export * from './supervisor-run-watch.js' // the journal view
+export * from './run-view-format.js' // shared formatting; unknown is never zero
+export * from './run-watch.js' // target resolution + the tail
+
 // ── Privacy + batch collection + upload (pluggable backend) ───────────────
 export * from './redact.js' // redactSpans(), TRACES_REDACTION_RULES
 export * from './collect.js' // collectSessions() — redacted batches
+export * from './replay-verify.js' // sandbox-backed counterfactual replay + verdict
 export * from './upload.js' // planUpload / executeUpload({ backend? })
 export * from './upload-state.js' // dedup state
 
@@ -95,6 +130,21 @@ export type { Analyst, AnalystContext, AnalystFinding } from '@tangle-network/ag
 export { createHostedClient, hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 export type { HostedClient } from '@tangle-network/agent-eval/hosted'
 export { DEFAULT_REDACTION_RULES, redactString, redactValue } from '@tangle-network/agent-eval/traces'
+// The span contract — emit it and `--otlp` reads you with no adapter.
+//
+// Its BUILDERS are not re-exported. A producer installs
+// `@tangle-network/agent-trace-contract` directly: that is the whole point of a
+// shared vocabulary — one package everyone imports, not one package plus a
+// second copy of its names shipped by a consumer, which is how two spellings of
+// the same attribute end up in one trace. Only its TYPES appear here, so a
+// caller can name what this package's own functions return.
+export type {
+  Capability,
+  ConformanceFinding,
+  ContractSpan,
+  SpanLink,
+  TraceValidation,
+} from '@tangle-network/agent-trace-contract'
 export type {
   ErrorCluster,
   RedactionReport,

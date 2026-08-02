@@ -6,13 +6,15 @@
  * the actionable output for improving a stuck/looping agent.
  */
 
-import type { AnalystFinding, AnalystRunResult } from '@tangle-network/agent-eval/analyst'
+import type { AnalystFinding, AnalystRunResult, AnalystRunSummary } from '@tangle-network/agent-eval/analyst'
 import type {
   ExecutionReport,
   ScalarDistribution,
   TokenUsageInsight,
 } from '@tangle-network/agent-eval/contract'
 import type { AdoptionReport } from './adoption.js'
+import { incompleteInputsNote, type UnavailableCapabilities } from './conformance.js'
+import type { LoopConvergenceReport, SteeringChainReport } from './loop-analysis.js'
 import type { PipelineReport } from './pipelines.js'
 import type { ReactionReport } from './reactions.js'
 import type { SessionWorkflowIssue, SessionWorkflowSummary } from './session-workflow.js'
@@ -39,6 +41,19 @@ export interface ReportMeta {
   deterministic?: DeterministicSummary
   sources?: readonly ReportSource[]
   workflow?: SessionWorkflowSummary
+  /**
+   * Rendered trace-conformance section (see `src/conformance.ts`). Printed
+   * BEFORE the execution facts, because a reader who meets a 0-token table
+   * first and its explanation last reads a measurement gap as a measurement.
+   */
+  conformance?: string
+  /**
+   * Capabilities the trace cannot support → the trace's own reason. Every
+   * section computed from a missing field is marked AT THE TABLE with this;
+   * a conformance section that only narrates, while the tables below print
+   * confident totals, is worse than no conformance section at all.
+   */
+  unavailableCapabilities?: UnavailableCapabilities
 }
 
 export interface ReportSource {
@@ -106,6 +121,53 @@ function tableCell(value: string): string {
   return value.replace(/\s+/g, ' ').replaceAll('|', '\\|').trim()
 }
 
+const ANALYST_DETAIL_MAX_CHARS = 240
+
+/**
+ * Failure-reason marker printed by newer (currently unreleased) agent-eval
+ * bridges. The pinned agent-eval-rpc release never emits it, so the head+tail
+ * condensation below is the supported path today — but skew failures come
+ * precisely from mismatched newer bridges, which is when the marker appears.
+ */
+const BRIDGE_FAILURE_MARKER = 'DSPY-BRIDGE-FAILURE:'
+
+/**
+ * Condense an analyst engine error to one actionable line. The bridge's
+ * `DSPY-BRIDGE-FAILURE:` reason wins when present; otherwise keep head AND
+ * tail, because a Python traceback names its terminal exception at the end —
+ * head-only truncation would cut exactly the part worth reading. Slicing is
+ * code-point-safe so a boundary never splits a surrogate pair.
+ */
+export function condenseAnalystError(raw: string, maxChars: number): string {
+  const flat = raw.replace(/\s+/g, ' ').trim()
+  const marker = flat.indexOf(BRIDGE_FAILURE_MARKER)
+  let text = flat
+  if (marker >= 0) {
+    const fromMarker = flat.slice(marker)
+    const traceback = fromMarker.indexOf(' Traceback (most recent call last)')
+    text = traceback > 0 ? fromMarker.slice(0, traceback) : fromMarker
+  }
+  const chars = [...text]
+  if (chars.length <= maxChars) return text
+  const headChars = Math.floor(maxChars * 0.4)
+  return `${chars.slice(0, headChars).join('')} … ${chars.slice(chars.length - (maxChars - headChars)).join('')}`
+}
+
+/**
+ * Why a failed/skipped analyst produced nothing, condensed to one table cell.
+ * Failed engine runs die with the whole bridge stderr in the error message;
+ * without this cell the report scores the analyst without saying why.
+ */
+export function analystRunDetail(summary: AnalystRunSummary): string {
+  const raw = summary.status === 'failed' && summary.error
+    ? [summary.error.class, summary.error.message].map((part) => part.trim()).filter(Boolean).join(': ')
+    : summary.status === 'skipped' && summary.reason
+      ? summary.reason
+      : ''
+  const cell = tableCell(condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS))
+  return cell === '' ? '—' : cell
+}
+
 function count(value: number): string {
   return Math.round(value).toLocaleString('en-US')
 }
@@ -147,7 +209,66 @@ function analysisCost(result: AnalystRunResult): string {
   return `Known analysis cost: ${cost}; additional cost was not captured.`
 }
 
-export function renderExecution(report: ExecutionReport): string {
+/** Push an incomplete-inputs marker for `capability`, if it is unavailable. */
+function pushGate(lines: string[], unavailable: UnavailableCapabilities | undefined, capability: string): void {
+  const note = incompleteInputsNote(unavailable, capability)
+  if (note === '') return
+  lines.push(note)
+  lines.push('')
+}
+
+/**
+ * Every capability a table's numbers depend on, marked before the table.
+ *
+ * A table gated on ONE of its inputs is a table that prints confident numbers
+ * whenever the OTHER input is the missing one — which is how a report came to
+ * say "latency-analysis unavailable" at the top and then print a mean-latency
+ * column and a `279,042,860ms` round duration with no marker on either. Any
+ * table carrying a duration lists `latency-analysis` here, not only the
+ * capability that decides whether the table appears at all.
+ */
+function pushGates(
+  lines: string[],
+  unavailable: UnavailableCapabilities | undefined,
+  capabilities: readonly string[],
+): void {
+  for (const capability of capabilities) pushGate(lines, unavailable, capability)
+}
+
+/**
+ * A duration cell for a table whose latency inputs are incomplete. The number
+ * is withheld rather than printed with a warning forty lines away: a millisecond
+ * count computed from spans that failed their own timestamp check is not a
+ * measurement of anything, and printing it invites exactly one reading.
+ */
+function latencyCell(
+  unavailable: UnavailableCapabilities | undefined,
+  render: () => string,
+): string {
+  return unavailable?.has('latency-analysis') === true ? 'not measurable' : render()
+}
+
+/**
+ * A round-over-round verdict for a trace whose loop inputs are incomplete,
+ * withheld for the same reason a duration is.
+ *
+ * `loop-convergence` unavailable is not a thinner answer, it is no answer. Its
+ * commonest cause is every span declaring `agent.loop.iteration: 1`: there is
+ * one round, and a trend computed across it compares a series to itself. A word
+ * like `plateaued` in a Trend column is read as the finding, whatever marker
+ * sits above the table — so the word does not get printed.
+ */
+function trendCell(
+  unavailable: UnavailableCapabilities | undefined,
+  render: () => string,
+): string {
+  return unavailable?.has('loop-convergence') === true ? 'not measurable' : render()
+}
+
+export function renderExecution(
+  report: ExecutionReport,
+  unavailable?: UnavailableCapabilities,
+): string {
   const execution = report.execution
   const lines = ['## execution facts', '']
   lines.push(
@@ -166,6 +287,7 @@ export function renderExecution(report: ExecutionReport): string {
   )
   lines.push('- **Task quality:** not measured; these traces do not include comparable task outcome labels.')
   lines.push('')
+  pushGate(lines, unavailable, 'latency-analysis')
   lines.push('| Time | Sessions measured | Min | Mean | p50 | p95 | Max |')
   lines.push('|---|---:|---:|---:|---:|---:|---:|')
   lines.push(distributionRow('Recorded session interval', execution.durationMs, 'ms'))
@@ -173,8 +295,9 @@ export function renderExecution(report: ExecutionReport): string {
   lines.push('')
   lines.push('Recorded session interval is first-to-last trace time and can include idle time; it is not active agent runtime.')
   lines.push('')
-  lines.push('### Direct model usage')
+  lines.push(`### Direct model usage${unavailable?.has('token-accounting') ? ' — inputs incomplete' : ''}`)
   lines.push('')
+  pushGate(lines, unavailable, 'token-accounting')
   lines.push('| Token category | Total | Runs measured | Mean | p50 | p95 | Max |')
   lines.push('|---|---:|---:|---:|---:|---:|---:|')
   lines.push(...tokenRows(execution.tokenUsage))
@@ -185,8 +308,9 @@ export function renderExecution(report: ExecutionReport): string {
     lines.push(`| \`${tableCell(model.model)}\` | ${count(model.runs)} |`)
   }
   lines.push('')
-  lines.push('### Cost coverage')
+  lines.push(`### Cost coverage${unavailable?.has('cost-attribution') ? ' — inputs incomplete' : ''}`)
   lines.push('')
+  pushGate(lines, unavailable, 'cost-attribution')
   lines.push('| Source | Runs | Total USD |')
   lines.push('|---|---:|---:|')
   lines.push(`| Observed | ${count(report.costProvenance.observed.n)} | $${report.costProvenance.observed.totalUsd.toFixed(6)} |`)
@@ -196,8 +320,9 @@ export function renderExecution(report: ExecutionReport): string {
   lines.push(`Known cost coverage: ${decimal(report.costProvenance.knownFraction * 100, 2)}%.`)
   lines.push('')
   if (execution.aggregateUsage.runs > 0) {
-    lines.push('### Orchestration-reported usage')
+    lines.push(`### Orchestration-reported usage${unavailable?.has('token-accounting') ? ' — inputs incomplete' : ''}`)
     lines.push('')
+    pushGate(lines, unavailable, 'token-accounting')
     lines.push(
       `Kept separate from direct model usage because orchestration totals can overlap model-call telemetry. ` +
         `${count(execution.aggregateUsage.runs)} run(s) reported aggregate values.`,
@@ -275,7 +400,12 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
     }
   }
 
-  lines.push(renderExecution(meta.execution))
+  if (meta.conformance) {
+    lines.push(meta.conformance)
+    lines.push('')
+  }
+
+  lines.push(renderExecution(meta.execution, meta.unavailableCapabilities))
   lines.push('')
 
   if (meta.sources && meta.sources.length > 0) {
@@ -366,10 +496,10 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   }
 
   // Analyst run summary.
-  lines.push('| Analyst | Status | Findings | Latency |')
-  lines.push('|---|---|---|---|')
+  lines.push('| Analyst | Status | Findings | Latency | Detail |')
+  lines.push('|---|---|---|---|---|')
   for (const s of result.per_analyst) {
-    lines.push(`| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms |`)
+    lines.push(`| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms | ${analystRunDetail(s)} |`)
   }
   lines.push('')
 
@@ -415,8 +545,10 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
  * Render the deterministic loop/stall/waste pipelines (agent-eval's shipped
  * detectors). This is the "is the agent stuck" view.
  */
-export function renderPipelines(pr: PipelineReport): string {
+export function renderPipelines(pr: PipelineReport, unavailable?: UnavailableCapabilities): string {
   const lines: string[] = ['## reliability, loops & waste (deterministic)', '']
+  // The tool table carries a mean-latency column, so it depends on BOTH.
+  pushGates(lines, unavailable, ['tool-usage', 'latency-analysis'])
 
   lines.push(
     `- **Terminal failures:** ${pr.failureClusters.totalFailures}/${pr.failureClusters.totalRuns} run(s)`,
@@ -511,10 +643,132 @@ export function renderPipelines(pr: PipelineReport): string {
         lines.push(
           `| \`${tableCell(name)}\` | ${stats.calls} | ${stats.captured}/${stats.calls} | ` +
             `${stats.duplicates}/${stats.captured} | ${stats.errors}/${stats.calls} | ` +
-            `${(stats.latencyMs / stats.calls).toFixed(1)}ms |`,
+            `${latencyCell(unavailable, () => `${(stats.latencyMs / stats.calls).toFixed(1)}ms`)} |`,
         )
       }
     }
+  }
+  lines.push('')
+  return lines.join('\n')
+}
+
+const TREND_BADGE: Record<string, string> = {
+  improved: '📈 improved',
+  plateaued: '➖ plateaued',
+  regressed: '📉 regressed',
+  mixed: '🔀 mixed (peaked, then fell back)',
+  unscored: '· unscored',
+}
+
+const LOOP_DISPLAY_LIMIT = 20
+const EDGE_DISPLAY_LIMIT = 50
+
+/**
+ * Round-over-round convergence: the reason a loop trace exists. A flat event
+ * list can say what happened and in what order; only `agent.loop.iteration`
+ * plus a verdict can say whether round N+1 was BETTER than round N.
+ */
+export function renderLoopConvergence(
+  report: LoopConvergenceReport,
+  unavailable?: UnavailableCapabilities,
+): string {
+  const lines: string[] = ['## round-over-round convergence', '']
+  // The per-round table carries a Duration column, so it depends on BOTH.
+  pushGates(lines, unavailable, ['loop-convergence', 'latency-analysis'])
+  if (report.loops.length === 0) {
+    lines.push(
+      `- No rounds recorded: ${report.iterationSpans} span(s) carry \`agent.loop.iteration\`. ` +
+        'Without it a retry is indistinguishable from a first attempt, so improvement cannot be measured.',
+    )
+    lines.push('')
+    return lines.join('\n')
+  }
+
+  const byTrend = new Map<string, number>()
+  for (const loop of report.loops) byTrend.set(loop.trend, (byTrend.get(loop.trend) ?? 0) + 1)
+  lines.push(
+    `- **Loops:** ${report.loops.length} across ${report.iterationSpans} round span(s) — ` +
+      trendCell(unavailable, () => [...byTrend].map(([trend, n]) => `${n} ${trend}`).join(', ')),
+  )
+  lines.push('')
+  lines.push('| Loop | Trace | Rounds | Trend | Basis | Series |')
+  lines.push('|---|---|---:|---|---|---|')
+  for (const loop of report.loops.slice(0, LOOP_DISPLAY_LIMIT)) {
+    lines.push(
+      `| \`${tableCell(loop.loopId)}\` | \`${tableCell(loop.traceId)}\` | ${loop.iterations.length} | ` +
+        `${trendCell(unavailable, () => TREND_BADGE[loop.trend] ?? loop.trend)} | ${loop.basis} | ` +
+        // The series text ("score 0.4 → 0.9 across 3 graded round(s)") states the
+        // same verdict in prose; withholding only the badge would leave it standing.
+        `${trendCell(unavailable, () => tableCell(loop.detail))} |`,
+    )
+  }
+  if (report.loops.length > LOOP_DISPLAY_LIMIT) {
+    lines.push(`| ... | - | - | - | - | ${report.loops.length - LOOP_DISPLAY_LIMIT} more omitted |`)
+  }
+  lines.push('')
+
+  for (const loop of report.loops.slice(0, LOOP_DISPLAY_LIMIT)) {
+    lines.push(
+      `### loop \`${tableCell(loop.loopId)}\` — ` +
+        trendCell(unavailable, () => TREND_BADGE[loop.trend] ?? loop.trend),
+    )
+    lines.push('')
+    lines.push('| Round | Span | Outcome | Score | Graded by | Duration |')
+    lines.push('|---:|---|---|---:|---|---:|')
+    for (const round of loop.iterations) {
+      lines.push(
+        `| ${round.iteration} | \`${tableCell(round.spanId)}\` | ${round.outcome ?? 'not captured'} | ` +
+          `${round.score ?? 'not captured'} | ` +
+          `${round.verdictSpanId ? `\`${tableCell(round.verdictSpanId)}\`` : 'not captured'} | ` +
+          `${latencyCell(unavailable, () => (round.durationMs === null ? 'not captured' : `${count(round.durationMs)}ms`))} |`,
+      )
+    }
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
+/**
+ * The steering chain. `parent_span_id` would claim round N+1 happened INSIDE
+ * round N; the link says round N's verdict CAUSED it, which is the edge this
+ * table follows — backwards from the caused work to the verdict that caused it.
+ */
+export function renderSteeringChain(
+  report: SteeringChainReport,
+  unavailable?: UnavailableCapabilities,
+): string {
+  const lines: string[] = ['## steering chain (which verdict caused which retry)', '']
+  pushGate(lines, unavailable, 'steering-chain')
+  if (report.links === 0) {
+    lines.push(
+      '- No causal links recorded. Containment was captured; causality was not, so the chain from a ' +
+        'verdict to the round it steered cannot be followed.',
+    )
+    lines.push('')
+    return lines.join('\n')
+  }
+
+  lines.push(
+    `- **Links:** ${report.links} (${report.dangling} point at a span absent from this export) — ` +
+      Object.entries(report.byKind)
+        .sort((left, right) => right[1] - left[1])
+        .map(([kind, n]) => `${n} \`${kind}\``)
+        .join(', '),
+  )
+  lines.push('')
+  lines.push('| Caused round | Caused span | Link | Caused by | Its outcome | Its score |')
+  lines.push('|---|---|---|---|---|---:|')
+  for (const edge of report.edges.slice(0, EDGE_DISPLAY_LIMIT)) {
+    const cause = edge.resolved
+      ? `\`${tableCell(edge.causeName ?? edge.causeSpanId)}\``
+      : `\`${tableCell(edge.causeSpanId)}\` (absent from export)`
+    lines.push(
+      `| ${edge.effectIteration ?? '—'} | \`${tableCell(edge.effectName)}\` | \`${tableCell(edge.linkKind)}\` | ` +
+        `${cause} | ${edge.causeOutcome ?? 'not captured'} | ${edge.causeScore ?? 'not captured'} |`,
+    )
+  }
+  if (report.edges.length > EDGE_DISPLAY_LIMIT) {
+    lines.push(`| ... | - | - | ${report.edges.length - EDGE_DISPLAY_LIMIT} more omitted | - | - |`)
   }
   lines.push('')
   return lines.join('\n')

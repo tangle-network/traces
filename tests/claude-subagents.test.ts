@@ -169,3 +169,54 @@ describe('Claude subagent folding', () => {
     })
   })
 })
+
+describe('duplicate subagent ids', () => {
+  // `agentId` is a FILE BASENAME, so the same id legitimately reaches one parse from two
+  // different directories — a subagent continued across sessions, or a workflow transcript dir
+  // pulled in beside the session's own. Three such collisions exist on a single developer
+  // machine, and this used to throw, taking `traces watch` down before it printed anything.
+  //
+  // An observability tool that crashes on the data it exists to read is worse than one that
+  // resolves an ambiguity, so both files are still parsed and emitted.
+  it('parses both files instead of throwing when two share an agent id', async () => {
+    const path = join(dir, 'dup-ids.jsonl')
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'assistant',
+          uuid: 'root-assistant',
+          sessionId: 'dup-ids',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: {
+            id: 'root-message',
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'call-one', name: 'Agent', input: {} }],
+          },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+    const subDir = join(dir, 'dup-ids', 'subagents')
+    writeChild({
+      subDir,
+      id: 'collides',
+      toolUseId: 'call-one',
+      timestamp: '2026-01-01T00:00:02Z',
+      content: 'FIRST',
+    })
+    // Same basename, different directory — exactly the on-disk shape that crashed.
+    writeChild({
+      subDir: join(subDir, 'nested'),
+      id: 'collides',
+      toolUseId: 'call-one',
+      timestamp: '2026-01-01T00:00:03Z',
+      content: 'SECOND',
+    })
+
+    const spans = await new ClaudeAdapter().parse(refFor(path))
+    const contents = contentOrder(spans)
+    // Neither file is dropped: deduping the parent-lookup map must not drop a transcript.
+    expect(contents.some((c) => c.startsWith('FIRST'))).toBe(true)
+    expect(contents.some((c) => c.startsWith('SECOND'))).toBe(true)
+  })
+})

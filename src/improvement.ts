@@ -2,12 +2,13 @@ import { access, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { AxAIService } from '@ax-llm/ax'
+import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   type Analyst,
   type AnalystFinding,
   type AnalystRunResult,
+  type AnalystRunSummary,
   AnalystRegistry,
   buildDefaultAnalystRegistry,
   makeFinding,
@@ -20,6 +21,21 @@ import {
   type TraceAgenticRoute,
 } from './agentic-routing.js'
 import { analyzeSpans } from './analyze.js'
+import type { TraceValidation } from '@tangle-network/agent-trace-contract'
+import { conformanceOfSpans, renderConformance, unavailableCapabilities } from './conformance.js'
+import {
+  analyzeLoopConvergence,
+  analyzeSteeringChain,
+  type LoopConvergenceReport,
+  type SteeringChainReport,
+} from './loop-analysis.js'
+import type {
+  OtlpFieldWithheld,
+  OtlpIngestIssue,
+  OtlpInputFile,
+  SkippedInputFile,
+  UnreadableSourceRows,
+} from './otlp-input.js'
 import type { ExternalAnalysisResult, ExternalAnalyzer } from './external.js'
 import { spanEvidenceUri } from './external-analysis-validation.js'
 import { runExternalAnalyzers } from './external.js'
@@ -28,10 +44,13 @@ import type { OtlpSpan } from './otlp.js'
 import { type PipelineReport, runPipelines } from './pipelines.js'
 import { analyzeReactions, type ReactionReport } from './reactions.js'
 import {
+  condenseAnalystError,
   renderAdoption,
+  renderLoopConvergence,
   renderPipelines,
   renderReactions,
   renderReport,
+  renderSteeringChain,
   type ReportSource,
   summarizeDeterministicSignals,
 } from './report.js'
@@ -51,7 +70,7 @@ export interface TraceInvestigationOptions {
   readonly workflow?: SessionWorkflowSummary
   readonly cwds?: readonly string[]
   readonly minLoopOccurrences?: number
-  readonly ai?: AxAIService
+  readonly engine?: TraceAnalysisEngine
   readonly model?: string
   readonly budgetUsd?: number
   readonly registry?: AnalystRegistry
@@ -61,6 +80,24 @@ export interface TraceInvestigationOptions {
   readonly analyzerPrompt?: string
   readonly otlpOutPath?: string
   readonly generatedAt?: string
+  /**
+   * Conformance of the SOURCE the spans were read from. Supply it when the
+   * source was a foreign OTLP file, so the report grades what the producer
+   * wrote; omitted, it is computed from the spans themselves.
+   */
+  readonly conformance?: TraceValidation
+  /** What was validated, named in the conformance section (default: the harness). */
+  readonly conformanceSubject?: string
+  /** OTLP files read, when the spans came from `--otlp`. */
+  readonly conformanceFiles?: readonly OtlpInputFile[]
+  /** JSONL files that were not OTLP, when the spans came from `--otlp` on a directory. */
+  readonly conformanceSkipped?: readonly SkippedInputFile[]
+  /** Rows that never became spans, when the spans came from `--otlp`. */
+  readonly conformanceIssues?: readonly OtlpIngestIssue[]
+  /** Rows analysed with one field withheld, when the spans came from `--otlp`. */
+  readonly conformanceWithheld?: readonly OtlpFieldWithheld[]
+  /** Source rows absent from the file read, including any earlier export's. */
+  readonly conformanceUnreadable?: UnreadableSourceRows
   readonly signal?: AbortSignal
   readonly log?: (msg: string, fields?: Record<string, unknown>) => void
 }
@@ -96,14 +133,31 @@ export interface TraceInvestigationResult {
   readonly workflow?: SessionWorkflowSummary
   readonly spanCount: number
   readonly otlpPath: string
+  /**
+   * What these spans can and cannot answer. Every report carries it: a thin
+   * report that does not explain its own thinness reads as "the agent did
+   * nothing" when the truth is "the trace never recorded it".
+   */
+  readonly conformance: TraceValidation
   readonly execution: ExecutionReport
   readonly analystResult: AnalystRunResult
   readonly findings: readonly AnalystFinding[]
   readonly pipelines: PipelineReport
   readonly reactions: ReactionReport
   readonly adoption: AdoptionReport
+  /** Did round N+1 improve on round N, per loop. */
+  readonly loopConvergence: LoopConvergenceReport
+  /** Which verdict caused which subsequent round. */
+  readonly steeringChain: SteeringChainReport
   /** Deterministic routing record for the agentic trace-analysis pass. */
   readonly agenticRoute?: TraceAgenticRoute
+  /**
+   * Per-analyst summaries from the agentic pass alone. Present only when an
+   * agentic pass ran; failed entries carry the engine's error (bridge stderr
+   * included), so callers can fail loud instead of reporting the deterministic
+   * findings as if the requested LLM analysis had happened.
+   */
+  readonly agenticPerAnalyst?: readonly AnalystRunSummary[]
   readonly external: readonly ExternalAnalysisResult[]
   readonly report: string
 }
@@ -127,7 +181,7 @@ export interface BuildTraceFindingPacketOptions {
 export interface TraceStoreInvestigationOptions {
   readonly traceStore: TraceAnalysisStore
   readonly registry?: AnalystRegistry
-  readonly ai?: AxAIService
+  readonly engine?: TraceAnalysisEngine
   readonly model?: string
   readonly budgetUsd?: number
   readonly runId?: string
@@ -525,7 +579,25 @@ function renderAgenticRoute(route: TraceAgenticRoute | undefined): string {
   return lines.join('\n')
 }
 
-function renderInvestigationReport(result: TraceInvestigationResult, analystResult: Awaited<ReturnType<typeof analyzeSpans>>['result']): string {
+function renderInvestigationReport(
+  result: TraceInvestigationResult,
+  analystResult: Awaited<ReturnType<typeof analyzeSpans>>['result'],
+  opts: TraceInvestigationOptions,
+): string {
+  // Conformance sits directly under the header, before any number it qualifies:
+  // reading a 0-token table first and its explanation last is how a measurement
+  // gap gets mistaken for a measurement. The same verdict is threaded into
+  // every section it gates, so the warning travels with the number.
+  const conformance = renderConformance(result.conformance, {
+    subject: opts.conformanceSubject ?? result.harness,
+    spans: opts.spans,
+    ...(opts.conformanceFiles ? { files: opts.conformanceFiles } : {}),
+    ...(opts.conformanceSkipped ? { skipped: opts.conformanceSkipped } : {}),
+    ...(opts.conformanceIssues ? { issues: opts.conformanceIssues } : {}),
+    ...(opts.conformanceWithheld ? { withheld: opts.conformanceWithheld } : {}),
+    ...(opts.conformanceUnreadable ? { unreadable: opts.conformanceUnreadable } : {}),
+  })
+  const unavailable = unavailableCapabilities(result.conformance)
   const base =
     `${renderReport({ ...analystResult, findings: [...result.findings] }, {
       harness: result.harness,
@@ -537,8 +609,13 @@ function renderInvestigationReport(result: TraceInvestigationResult, analystResu
       deterministic: summarizeDeterministicSignals(result.pipelines, result.reactions),
       sources: result.sources,
       workflow: result.workflow,
+      conformance,
+      unavailableCapabilities: unavailable,
     })}\n${renderAgenticRoute(result.agenticRoute)}` +
-    `${renderPipelines(result.pipelines)}\n${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
+    `${renderPipelines(result.pipelines, unavailable)}\n` +
+    `${renderLoopConvergence(result.loopConvergence, unavailable)}\n` +
+    `${renderSteeringChain(result.steeringChain, unavailable)}\n` +
+    `${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
   const external = renderExternal(result.external)
   return external ? `${base}\n${external}` : base
 }
@@ -610,11 +687,11 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
   const deterministic = deterministicFindings(pipelines, reactions, adoption, opts.spans)
   // A supplied registry owns its own composition. Only describe a route when
   // this package builds the maintained agent-eval suite itself.
-  const agenticRoute = opts.ai && !opts.agenticRegistry
+  const agenticRoute = opts.engine && !opts.agenticRegistry
     ? planTraceAgenticRoute(pipelines, reactions)
     : undefined
   const analysis = await analyzeSpans(opts.spans, {
-    ai: opts.ai,
+    engine: opts.engine,
     model: opts.model,
     budgetUsd: opts.budgetUsd,
     registry: opts.registry,
@@ -650,25 +727,79 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     workflow: opts.workflow,
     spanCount: opts.spans.length,
     otlpPath: analysis.otlpPath,
+    conformance: opts.conformance ?? conformanceOfSpans(opts.spans),
     execution: analysis.execution,
     analystResult: analysis.result,
     findings,
     pipelines,
     reactions,
     adoption,
+    loopConvergence: analyzeLoopConvergence(opts.spans),
+    steeringChain: analyzeSteeringChain(opts.spans),
     ...(agenticRoute ? { agenticRoute } : {}),
+    ...(analysis.agenticPerAnalyst ? { agenticPerAnalyst: analysis.agenticPerAnalyst } : {}),
     external,
   }
   const result = { ...partial, report: '' }
-  return { ...result, report: renderInvestigationReport(result, analysis.result) }
+  return { ...result, report: renderInvestigationReport(result, analysis.result, opts) }
+}
+
+/** Cap for one analyst's reason inside the failure banner; the full error is
+ * already on that analyst's `[analyst] FAIL` stderr line. */
+const AGENTIC_FAILURE_REASON_MAX_CHARS = 400
+
+/**
+ * Signatures of engine↔bridge version skew (or a missing bridge install) —
+ * the failures the reinstall hint actually fixes. Every bridge traceback
+ * names the `agent_eval_rpc` module path, so matching on the module name or
+ * a generic marker alone would point mid-analysis model errors at pip.
+ */
+const BRIDGE_MISMATCH_PATTERN = /must contain exactly|No module named ['"]?agent_eval_rpc|could not start/
+
+function condensedReason(summary: AnalystRunSummary): string {
+  const raw = summary.status === 'skipped'
+    ? `skipped — ${summary.reason ?? 'no reason recorded'}`
+    : summary.error
+      ? `${summary.error.class}: ${summary.error.message}`
+      : 'failed without an error message'
+  return condenseAnalystError(raw, AGENTIC_FAILURE_REASON_MAX_CHARS)
+}
+
+/**
+ * Operator-facing message for a fully dead agentic pass: non-empty exactly
+ * when an agentic pass ran and NO analyst in it succeeded — failed and
+ * skipped both count as "produced nothing", so one skip cannot silence the
+ * alarm. Partial success returns undefined: some agentic findings were
+ * produced, and the per-analyst report table carries the individual reasons.
+ */
+export function totalAgenticFailureMessage(
+  agenticPerAnalyst: readonly AnalystRunSummary[] | undefined,
+  opts: { requiredBridgeVersion?: string } = {},
+): string | undefined {
+  if (!agenticPerAnalyst || agenticPerAnalyst.length === 0) return undefined
+  if (agenticPerAnalyst.some((summary) => summary.status === 'ok')) return undefined
+  const lines = [
+    `LLM analysis produced nothing: none of the ${agenticPerAnalyst.length} agentic analyst(s) succeeded. ` +
+      'The reported findings are from the deterministic pass only.',
+    ...agenticPerAnalyst.map((summary) => `  ${summary.analyst_id}: ${condensedReason(summary)}`),
+  ]
+  if (
+    opts.requiredBridgeVersion &&
+    agenticPerAnalyst.some((summary) => BRIDGE_MISMATCH_PATTERN.test(summary.error?.message ?? ''))
+  ) {
+    lines.push(
+      'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
+        `agent-eval-rpc[dspy]==${opts.requiredBridgeVersion} (matching this package's @tangle-network/agent-eval).`,
+    )
+  }
+  return lines.join('\n')
 }
 
 export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOptions): Promise<TraceStoreInvestigationResult> {
   opts.signal?.throwIfAborted()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
   const registry = opts.registry ?? buildDefaultAnalystRegistry({
-    ai: opts.ai,
-    model: opts.model,
+    ...(opts.engine ? { engine: opts.engine } : {}),
     registry: { log: opts.log },
   })
   const runId = opts.runId ?? `traces-store-investigation-${Date.parse(generatedAt) || Date.now()}`

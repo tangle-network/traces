@@ -19,7 +19,7 @@ import {
 } from '@tangle-network/agent-eval/trace-attributes'
 import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { capText } from './adapters/conversation.js'
-import { toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
+import { toolIoAttributes } from './adapters/tool-io.js'
 import { appendAll } from './arrays.js'
 import {
   chatTrajectoryToSpans,
@@ -29,6 +29,7 @@ import {
 import type { PolicyEvidenceRecord } from './evidence.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
+import { capturedToolIo, inferSpanKind, otlpRowToSpan } from './otlp-input.js'
 import { serializeSpans, span } from './otlp.js'
 import { redactSpans } from './redact.js'
 import { validateOtlpSpans } from './span-validation.js'
@@ -160,19 +161,28 @@ function isPolicyEvidenceRow(row: unknown): row is PolicyEvidenceRecord {
   return isObject(row) && row.kind === 'traces.policy_evidence.session'
 }
 
+/**
+ * An OTLP/OpenInference span row. `resource`, `scope` and `parent_span_id` are
+ * OPTIONAL: they are optional in OTLP itself, and a conforming
+ * `@tangle-network/agent-trace-contract` span omits `scope` entirely. Requiring
+ * them sent contract-shaped files down the `intelligence-spans` reader, which
+ * rewrites rather than preserves — detection has to accept the standard shape,
+ * not only this package's own emission of it.
+ */
 function isOpenInferenceRow(row: unknown): row is JsonObject {
   if (!isObject(row)) return false
   return (
     typeof row.trace_id === 'string' &&
     typeof row.span_id === 'string' &&
-    (row.parent_span_id === null || typeof row.parent_span_id === 'string') &&
+    (row.parent_span_id == null || typeof row.parent_span_id === 'string') &&
     typeof row.name === 'string' &&
     typeof row.start_time === 'string' &&
     typeof row.end_time === 'string' &&
     isObject(row.status) &&
     isObject(row.attributes) &&
-    isObject(row.resource) &&
-    isObject(row.scope)
+    (row.resource === undefined || isObject(row.resource)) &&
+    (row.scope === undefined || isObject(row.scope)) &&
+    (row.links === undefined || Array.isArray(row.links))
   )
 }
 
@@ -550,56 +560,6 @@ function preserveRawAttributes(attrs: JsonObject): JsonObject {
   return preserved
 }
 
-function capturedToolIo(attrs: JsonObject): ReturnType<typeof toolIoAttributes> {
-  const input =
-    attrs['input.value'] ??
-    attrs['tool.input'] ??
-    attrs.tool_input ??
-    attrs['tool.arguments'] ??
-    attrs.tool_arguments ??
-    attrs.arguments ??
-    attrs.args ??
-    attrs.full_command
-  const capture = toolArgumentsFromAttributes({ ...attrs, 'input.value': input })
-  return toolIoAttributes({
-    input: capture.args,
-    output: attrs['output.value'] ?? attrs['tool.output'] ?? attrs.tool_output,
-    argsCaptured: capture.argsCaptured,
-  })
-}
-
-function isToolTelemetrySpan(attrs: JsonObject): boolean {
-  const spanType = stringValue(attrs['span.type'])?.toLowerCase()
-  return spanType === 'tool.execution' || spanType === 'tool.blocked_on_user'
-}
-
-function otlpSpanKind(value: unknown): OtlpSpanKind | undefined {
-  return value === 'AGENT' || value === 'LLM' || value === 'TOOL' || value === 'CHAIN' || value === 'SPAN'
-    ? value
-    : undefined
-}
-
-function intelligenceSpanKind(name: string, attrs: JsonObject): OtlpSpanKind {
-  const lowered = name.toLowerCase()
-  const spanType = stringValue(attrs['span.type'])?.toLowerCase()
-  if (spanType === 'llm_request' || lowered.includes('llm')) return 'LLM'
-  // Execution/wait children describe the parent tool call and must not count as another call.
-  if (isToolTelemetrySpan(attrs)) return 'CHAIN'
-  if (
-    spanType === 'tool' ||
-    lowered.includes('tool') ||
-    attrs['tool.name'] != null ||
-    attrs.tool_name != null ||
-    attrs['mcp.tool.name'] != null ||
-    attrs['tool.input'] != null ||
-    attrs['tool.output'] != null
-  ) {
-    return 'TOOL'
-  }
-  if (spanType === 'interaction' || lowered.includes('interaction') || lowered.includes('agent')) return 'AGENT'
-  return 'CHAIN'
-}
-
 function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
   return rows.map((row, index) => {
     const attrs = { ...(objectValue(row.attributes) ?? {}) }
@@ -625,7 +585,7 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
       stringValue(attrs['tool.name']) ??
       stringValue(attrs.tool_name) ??
       stringValue(attrs['mcp.tool.name'])
-    const kind = intelligenceSpanKind(name, attrs)
+    const kind = inferSpanKind(name, attrs)
     const sourceStatus = objectValue(row.status)
     const sessionId = stringValue(row.session_id) ?? sessionIdFromAttributes(attrs)
     const extra: JsonObject = {
@@ -678,46 +638,44 @@ function intelligenceSpansToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
   })
 }
 
+/**
+ * Every status spelling an OpenInference/OTLP row may use. Anything else is a
+ * value this package cannot map, and mapping it to UNSET would silently turn an
+ * unreadable verdict into "no verdict recorded".
+ */
+const OPEN_INFERENCE_STATUS_CODES = new Set([
+  'OK',
+  'ERROR',
+  'UNSET',
+  'STATUS_CODE_OK',
+  'STATUS_CODE_ERROR',
+  'STATUS_CODE_UNSET',
+])
+
+/**
+ * OpenInference/OTLP rows to spans, through the ONE row reader
+ * (`otlpRowToSpan`) that `--otlp` ingest also uses — same normalization, same
+ * link preservation, no second definition of "what an OTLP span means here".
+ *
+ * The two callers differ only in policy at this boundary: `export` is an
+ * explicit conversion of a file the caller vouched for, so an unreadable row —
+ * including an unmappable status code — fails loud; `readOtlpInput` reads
+ * FOREIGN traces, so it reports the same defect as a finding and continues.
+ */
 function openInferenceToSpans(rows: readonly JsonObject[]): OtlpSpan[] {
   return rows.map((row) => {
-    const attrs = isObject(row.attributes) ? { ...row.attributes } : {}
-    const resource = objectValue(row.resource)
-    const resourceAttrs = objectValue(resource?.attributes)
-    if (resourceAttrs) copyDefined(attrs, resourceAttrs)
-    const name = stringValue(row.name) ?? 'span'
-    const declaredKind =
-      otlpSpanKind(attrs['openinference.span.kind']) ?? otlpSpanKind(row.kind)
-    const kind = isToolTelemetrySpan(attrs)
-      ? 'CHAIN'
-      : declaredKind ?? intelligenceSpanKind(name, attrs)
-    if (declaredKind && declaredKind !== kind) {
-      attrs['traces.raw_attribute.openinference.span.kind'] = declaredKind
-    }
-    attrs['openinference.span.kind'] = kind
-    if (kind === 'TOOL') Object.assign(attrs, capturedToolIo(attrs))
     const status = objectValue(row.status)
-    const message = stringValue(status?.message)
-    return {
-      trace_id: row.trace_id as string,
-      span_id: row.span_id as string,
-      parent_span_id: stringValue(row.parent_span_id) || null,
-      name: row.name as string,
-      start_time: row.start_time as string,
-      end_time: row.end_time as string,
-      status: {
-        code: openInferenceStatusCode(status?.code),
-        ...(message ? { message } : {}),
-      },
-      attributes: attrs,
+    const code = status?.code
+    if (code != null && !(typeof code === 'string' && OPEN_INFERENCE_STATUS_CODES.has(code))) {
+      throw new TypeError('OpenInference status.code must be OK, ERROR, UNSET, or its STATUS_CODE_* form')
     }
+    const traceId = stringValue(row.trace_id)
+    const converted = otlpRowToSpan(row, traceId ?? 'openinference')
+    if (!converted.span) {
+      throw new TypeError(`openinference row is not a usable span: ${converted.issue?.detail ?? 'unknown reason'}`)
+    }
+    return converted.span
   })
-}
-
-function openInferenceStatusCode(value: unknown): OtlpStatusCode {
-  if (value === 'OK' || value === 'STATUS_CODE_OK') return 'OK'
-  if (value === 'ERROR' || value === 'STATUS_CODE_ERROR') return 'ERROR'
-  if (value === 'UNSET' || value === 'STATUS_CODE_UNSET') return 'UNSET'
-  throw new TypeError('OpenInference status.code must be OK, ERROR, UNSET, or its STATUS_CODE_* form')
 }
 
 function normalizeAttributes(attributes: JsonObject | undefined): JsonObject {

@@ -25,6 +25,15 @@ interface DescendantFixture {
   parentScript: string
 }
 
+/**
+ * `sentinelDelayMs` is how long the terminator gets before the escaped
+ * descendant proves it survived. It is a budget for the KILL, not part of the
+ * invariant: the sentinel must never appear, whatever the budget. Every caller
+ * uses the same 1.5s, because the two that used 500ms failed on a loaded
+ * machine — walking /proc and signalling a process tree takes longer than half
+ * a second when 32 cores are saturated, and a budget that tight tests the
+ * machine rather than the code.
+ */
 function descendantFixture(onReady: string, sentinelDelayMs: number): DescendantFixture {
   const directory = mkdtempSync(join(tmpdir(), 'traces-process-tree-'))
   const startedPath = join(directory, 'descendant-started')
@@ -152,7 +161,7 @@ describe('runCommand', () => {
   })
 
   it('terminates the detached descendant tree before rejecting output overflow', async () => {
-    const fixture = descendantFixture(`process.stdout.write('x'.repeat(4096))`, 500)
+    const fixture = descendantFixture(`process.stdout.write('x'.repeat(4096))`, 1_500)
     try {
       await expect(
         runCommand(process.execPath, ['-e', fixture.parentScript], {
@@ -167,7 +176,7 @@ describe('runCommand', () => {
   })
 
   it('terminates the detached descendant tree before rejecting cancellation', async () => {
-    const fixture = descendantFixture(`process.stdout.write('ready')`, 500)
+    const fixture = descendantFixture(`process.stdout.write('ready')`, 1_500)
     const controller = new AbortController()
     try {
       const result = runCommand(process.execPath, ['-e', fixture.parentScript], {

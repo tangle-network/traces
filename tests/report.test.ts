@@ -4,7 +4,15 @@ import { summarizeExecution } from '@tangle-network/agent-eval/contract'
 import { describe, expect, it } from 'vitest'
 import type { PipelineReport } from '../src/pipelines.js'
 import type { ReactionReport } from '../src/reactions.js'
-import { renderPipelines, renderReport, summarizeDeterministicSignals } from '../src/report.js'
+import type { UnavailableCapabilities } from '../src/conformance.js'
+import type { LoopConvergenceReport } from '../src/loop-analysis.js'
+import {
+  analystRunDetail,
+  renderLoopConvergence,
+  renderPipelines,
+  renderReport,
+  summarizeDeterministicSignals,
+} from '../src/report.js'
 
 const EMPTY_EXECUTION = summarizeExecution({ runs: [] })
 
@@ -246,6 +254,169 @@ describe('renderReport', () => {
   })
 })
 
+describe('latency gating', () => {
+  const LATENCY_UNAVAILABLE: UnavailableCapabilities = new Map([
+    ['latency-analysis', '1 spans end before they start'],
+  ])
+
+  function toolPipelines(): PipelineReport {
+    return {
+      stuckLoops: { findings: [], affectedRunRatio: 0, totalRuns: 1 },
+      failureClusters: { clusters: [], totalFailures: 0, totalRuns: 1 },
+      toolUse: [{
+        runId: 'run-latency-test',
+        totalCalls: 10,
+        callsWithCapturedArgs: 10,
+        byTool: {
+          bash: { calls: 10, callsWithCapturedArgs: 10, errors: 0, duplicates: 0, avgLatencyMs: 5 },
+        },
+        duplicateRate: 0,
+        errorRate: 0,
+        retryRate: 0,
+      }],
+    }
+  }
+
+  // The tool table and the round table both print a duration, and neither was
+  // gated on `latency-analysis` — so a report could say "latency-analysis
+  // unavailable" at the top and then print a mean latency and a 279,042,860ms
+  // round duration with no marker on either.
+  it('marks the tool table and withholds its latency column', () => {
+    const report = renderPipelines(toolPipelines(), LATENCY_UNAVAILABLE)
+
+    expect(report).toContain('`latency-analysis` unavailable')
+    expect(report).toContain('| `bash` | 10 | 10/10 | 0/10 | 0/10 | not measurable |')
+    expect(report).not.toContain('5.0ms')
+  })
+
+  it('prints the latency column when latency IS available', () => {
+    const report = renderPipelines(toolPipelines(), new Map([['token-accounting', 'no token attrs']]))
+
+    expect(report).not.toContain('`latency-analysis` unavailable')
+    expect(report).toContain('| `bash` | 10 | 10/10 | 0/10 | 0/10 | 5.0ms |')
+  })
+
+  const LOOP_CONVERGENCE_UNAVAILABLE: UnavailableCapabilities = new Map([
+    ['loop-convergence', 'agent.loop.iteration is present on 2 spans and always has the value 1'],
+  ])
+
+  it('marks the round table and withholds its duration column', () => {
+    const convergence: LoopConvergenceReport = {
+      iterationSpans: 2,
+      loops: [{
+        loopId: 'loop-a',
+        traceId: 'trace-a',
+        trend: 'improved',
+        basis: 'score',
+        detail: 'score 0.4 → 0.9',
+        iterations: [
+          {
+            iteration: 1,
+            spanId: 'round-1',
+            name: 'round 1',
+            outcome: 'fail',
+            score: 0.4,
+            verdictSpanId: 'verdict-1',
+            startTime: '2026-01-01T00:00:00.000Z',
+            durationMs: 279042860,
+          },
+        ],
+      }],
+    }
+    const report = renderLoopConvergence(convergence, LATENCY_UNAVAILABLE)
+
+    expect(report).toContain('`latency-analysis` unavailable')
+    expect(report).toContain('| 1 | `round-1` | fail | 0.4 | `verdict-1` | not measurable |')
+    expect(report).not.toContain('279,042,860ms')
+  })
+
+  it('withholds the trend verdict when loop-convergence is unavailable', () => {
+    // Every span declaring `agent.loop.iteration: 1` is one round: a trend
+    // across it compares a series to itself. The marker at the top of the
+    // section is not enough — a reader takes the word in the Trend column.
+    const convergence: LoopConvergenceReport = {
+      iterationSpans: 2,
+      loops: [{
+        loopId: 'loop-a',
+        traceId: 'trace-a',
+        trend: 'improved',
+        basis: 'score',
+        detail: 'score 0.4 → 0.9 across 2 graded round(s) (round 1 → 1)',
+        iterations: [
+          {
+            iteration: 1,
+            spanId: 'round-1',
+            name: 'round 1',
+            outcome: 'fail',
+            score: 0.4,
+            verdictSpanId: 'verdict-1',
+            startTime: '2026-01-01T00:00:00.000Z',
+            durationMs: 12,
+          },
+          {
+            iteration: 1,
+            spanId: 'round-2',
+            name: 'round 2',
+            outcome: 'pass',
+            score: 0.9,
+            verdictSpanId: 'verdict-2',
+            startTime: '2026-01-01T00:00:01.000Z',
+            durationMs: 12,
+          },
+        ],
+      }],
+    }
+    const report = renderLoopConvergence(convergence, LOOP_CONVERGENCE_UNAVAILABLE)
+
+    expect(report).toContain('`loop-convergence` unavailable')
+    expect(report).not.toContain('improved')
+    expect(report).not.toContain('score 0.4 → 0.9')
+    expect(report).not.toContain('1 improved')
+    expect(report).toContain('not measurable')
+    // The rounds themselves are still facts read from the trace.
+    expect(report).toContain('| 1 | `round-1` | fail | 0.4 | `verdict-1` | 12ms |')
+  })
+
+  it('prints the trend verdict when loop-convergence is available', () => {
+    const convergence: LoopConvergenceReport = {
+      iterationSpans: 2,
+      loops: [{
+        loopId: 'loop-a',
+        traceId: 'trace-a',
+        trend: 'improved',
+        basis: 'score',
+        detail: 'score 0.4 → 0.9',
+        iterations: [
+          {
+            iteration: 1,
+            spanId: 'round-1',
+            name: 'round 1',
+            outcome: 'fail',
+            score: 0.4,
+            verdictSpanId: 'verdict-1',
+            startTime: '2026-01-01T00:00:00.000Z',
+            durationMs: 12,
+          },
+          {
+            iteration: 2,
+            spanId: 'round-2',
+            name: 'round 2',
+            outcome: 'pass',
+            score: 0.9,
+            verdictSpanId: 'verdict-2',
+            startTime: '2026-01-01T00:00:01.000Z',
+            durationMs: 12,
+          },
+        ],
+      }],
+    }
+    const report = renderLoopConvergence(convergence, new Map())
+
+    expect(report).toContain('1 improved')
+    expect(report).toContain('score 0.4 → 0.9')
+  })
+})
+
 describe('renderPipelines', () => {
   it('labels retries as a fraction of failed calls and prints raw counts', () => {
     const report = renderPipelines({
@@ -364,5 +535,129 @@ describe('summarizeDeterministicSignals', () => {
       failedRuns: 2,
       totalSignals: 11,
     })
+  })
+})
+
+describe('analystRunDetail', () => {
+  const usage = {
+    calls: 0,
+    tokens: { input: 0, output: 0 },
+    cost: { kind: 'observed', usd: 0 },
+  } as const
+
+  it('carries the engine error for a failed analyst into the report table', () => {
+    const bridgeError =
+      "DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly ['controlAdapter', 'instructions', 'limits', 'modelProxy', 'operation', 'question', 'toolCallback', 'toolSpecs'] stdout="
+    const result = emptyResult()
+    result.per_analyst.push({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 141,
+      usage,
+      error: { class: 'Error', message: bridgeError },
+    })
+
+    const report = renderReport(result, {
+      harness: 'claude-code',
+      sessionCount: 1,
+      spanCount: 10,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      execution: EMPTY_EXECUTION,
+    })
+    expect(report).toContain('| Analyst | Status | Findings | Latency | Detail |')
+    expect(report).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
+    expect(report).toContain('| `efficiency-behavioral` | ok | 0 | 347ms | — |')
+  })
+
+  it('condenses a markerless bridge traceback while keeping the terminal exception', () => {
+    // The pinned agent-eval-rpc release emits no DSPY-BRIDGE-FAILURE marker;
+    // its failures are raw tracebacks whose actionable line is the LAST one.
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      error: {
+        class: 'Error',
+        message:
+          'DSPy RLM trace analysis exited 1. stderr=Traceback (most recent call last):\n' +
+          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 210, in _main\n' +
+          '    output = _analyze(validated)\n'.repeat(30) +
+          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 547, in _parse_findings_json\n' +
+          'ValueError: DSPy RLM findings_json must be valid JSON stdout=',
+      },
+    })
+    expect(detail).toContain('Error: DSPy RLM trace analysis exited 1.')
+    expect(detail).toContain(' … ')
+    expect(detail).toContain('ValueError: DSPy RLM findings_json must be valid JSON')
+    expect(detail).not.toContain('\n')
+    expect(detail.length).toBeLessThanOrEqual(243)
+  })
+
+  it('never splits a surrogate pair at a truncation boundary', () => {
+    // Emoji land exactly around both slice points of the head+tail split.
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      // The composed 'Error: ' prefix is 7 UTF-16 units, so every emoji sits
+      // at an odd offset and a code-unit slice must cut through a pair.
+      error: { class: 'Error', message: '💥'.repeat(400) },
+    })
+    // A /u regex can only match \p{Surrogate} against a LONE surrogate; a
+    // correctly paired emoji decodes to one code point and never matches.
+    expect(/\p{Surrogate}/u.test(detail)).toBe(false)
+    expect(detail).toContain(' … ')
+  })
+
+  it('renders a whitespace-only error as the empty-cell dash', () => {
+    expect(analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      error: { class: '', message: ' \n\t ' },
+    })).toBe('—')
+  })
+
+  it('extracts the DSPY-BRIDGE-FAILURE line and drops the trailing traceback', () => {
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 141,
+      usage,
+      error: {
+        class: 'Error',
+        message:
+          'DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: bad input ' +
+          'Traceback (most recent call last): File "bridge.py", line 1, in main stdout=',
+      },
+    })
+    expect(detail).toBe('DSPY-BRIDGE-FAILURE: ValueError: bad input')
+  })
+
+  it('reports the skip reason and stays silent for clean rows', () => {
+    const skipped = analystRunDetail({
+      analyst_id: 'knowledge-gap',
+      status: 'skipped',
+      reason: 'missing input: traceStore',
+      findings_count: 0,
+      latency_ms: 0,
+      usage,
+    })
+    expect(skipped).toBe('missing input: traceStore')
+    expect(analystRunDetail({
+      analyst_id: 'efficiency-behavioral',
+      status: 'ok',
+      findings_count: 2,
+      latency_ms: 5,
+      usage,
+    })).toBe('—')
   })
 })
