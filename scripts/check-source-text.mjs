@@ -93,4 +93,4 @@ if (problems.length > 0) {
   process.exit(1)
 }
 
-console.log('source text ok: no raw control bytes in any tracked or new file')
+console.error('source text ok: no raw control bytes in any tracked or new file')
