@@ -444,7 +444,11 @@ async function roundTrip(fixture: RoundTripFixture): Promise<RoundTrip> {
 
 describe('re-exporting a trace does not change what a validator says about it', () => {
   for (const fixture of FIXTURES) {
-    it(fixture.name, async () => {
+    // The 250k-entry fixture writes, reads, validates, re-exports and re-validates a
+    // quarter-million spans twice; fine on a dev box, over vitest's 30s default on a
+    // cold CI runner. The bound-exercising fixture gets the time it genuinely needs.
+    const timeout = fixture.name === 'more entries than a validator will read' ? 180_000 : undefined
+    it(fixture.name, { timeout }, async () => {
       const trip = await roundTrip(fixture)
 
       // The fixture exercises what it claims to, or it is testing nothing.
