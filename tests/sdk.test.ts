@@ -304,7 +304,7 @@ describe('analyzeSpans (bring-your-own analysts)', () => {
 
   it('retains token findings when every paired transition supports the stated trend', async () => {
     const { result } = await analyzeSpans(
-      tokenTrajectorySpans([100, 200, 300, 400], [400, 300, 200, 100]),
+      tokenTrajectorySpans([100, 200, 300, 400, 500], [500, 400, 300, 200, 100]),
     )
     const subjects = result.findings.map((finding) => finding.subject)
     expect(subjects).toContain('monotonic-input-growth')

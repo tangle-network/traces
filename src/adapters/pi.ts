@@ -1,5 +1,6 @@
 /**
- * Pi adapter — `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`.
+ * Pi adapter — the default `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`
+ * layout or a caller-supplied session directory containing JSONL files directly.
  *
  * Line types: `session` (id + cwd), `model_change`, `thinking_level_change`,
  * and `message`. A `message` line wraps `message.{role, model, provider,
@@ -9,12 +10,13 @@
  * separate `role: "toolResult"` messages keyed by `message.toolCallId`.
  */
 
+import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingPathError } from '../json.js'
-import { readJsonl } from '../jsonl.js'
+import { readJsonl, takeJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
@@ -144,49 +146,86 @@ function completeToolSpan(toolSpan: OtlpSpan, result: PiToolResult): void {
   recordToolOutput(toolSpan, result.output)
 }
 
+export interface PiAdapterOptions {
+  /** Pi's effective session directory, including PI_CODING_AGENT_SESSION_DIR overrides. */
+  sessionsRoot?: string
+}
+
 export class PiAdapter implements HarnessTraceAdapter {
   readonly harness = 'pi'
+  private readonly sessionsRoot: string
+
+  constructor(options: PiAdapterOptions = {}) {
+    this.sessionsRoot = resolve(options.sessionsRoot ?? join(homedir(), '.pi', 'agent', 'sessions'))
+  }
 
   private root(): string {
-    return join(homedir(), '.pi', 'agent', 'sessions')
+    return this.sessionsRoot
   }
 
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
     const root = this.root()
-    let dirs: string[]
+    let entries: Dirent[]
     try {
-      dirs = await readdir(root)
+      entries = await readdir(root, { withFileTypes: true })
     } catch (error) {
       if (isMissingPathError(error)) return []
       throw error
     }
-    const refs: SessionRef[] = []
-    for (const dir of dirs) {
-      const dp = join(root, dir)
+    const paths: string[] = []
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        paths.push(join(root, entry.name))
+        continue
+      }
+      if (!entry.isDirectory()) continue
+      const dir = join(root, entry.name)
       let files: string[]
       try {
-        files = await readdir(dp)
+        files = await readdir(dir)
       } catch (error) {
         if (isMissingPathError(error)) continue
         throw error
       }
-      // Encoded cwd: leading/trailing `--`, separators as `-`.
-      const cwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
-      if (opts.cwd && !cwd.startsWith(opts.cwd)) continue
-      for (const f of files) {
-        if (!f.endsWith('.jsonl')) continue
-        const path = join(dp, f)
-        let st: Awaited<ReturnType<typeof stat>>
-        try {
-          st = await stat(path)
-        } catch (error) {
-          if (isMissingPathError(error)) continue
-          throw error
-        }
-        if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
-        const id = basename(f, '.jsonl').replace(/^[\dTZ.-]+_/, '')
-        refs.push({ harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs })
+      for (const file of files) {
+        if (file.endsWith('.jsonl')) paths.push(join(dir, file))
       }
+    }
+    const refs: SessionRef[] = []
+    for (const path of paths) {
+      const f = basename(path)
+      let st: Awaited<ReturnType<typeof stat>>
+      try {
+        st = await stat(path)
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
+      }
+      if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
+      let id = basename(f, '.jsonl').replace(/^[\dTZ.-]+_/, '')
+      let cwd: string | null = null
+      const ref: SessionRef = {
+        harness: this.harness,
+        sessionId: id,
+        path,
+        cwd,
+        mtimeMs: st.mtimeMs,
+      }
+      const [session] = await takeJsonl<PiLine>(path, 1, sessionJsonlOptions(ref))
+      if (session?.type === 'session') {
+        if (session.id) id = session.id
+        if (session.cwd) cwd = session.cwd
+      }
+      ref.sessionId = id
+      ref.cwd = cwd
+      if (ref.integrity) {
+        ref.integrity.corruptions = ref.integrity.corruptions.map((receipt) => ({
+          ...receipt,
+          sessionId: id,
+        }))
+      }
+      if (opts.cwd && (!cwd || !cwd.startsWith(opts.cwd))) continue
+      refs.push(ref)
     }
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
