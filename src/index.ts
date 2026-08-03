@@ -121,6 +121,7 @@ export * from './replay-verify.js' // sandbox-backed counterfactual replay + ver
 export * from './replay-corpus.js' // corpus enumeration: replayable cases + exclusion reasons
 export * from './replay-batch.js' // batch runner: replayability + fix-flip rates
 export * from './replay-fix.js' // counterfactual patch synthesis (one LLM call per case)
+export * from './replay-fix-loop.js' // iterative fix loop: real-output feedback, fresh sandbox per attempt
 export * from './replay-wire.js' // analyst finding → replay-verify invocation
 export * from './analyze-verify.js' // proof-carrying findings: verifyFindings() + receipts
 export * from './upload.js' // planUpload / executeUpload({ backend? })

@@ -77,6 +77,17 @@ A corpus is a gold label file plus a prepared directory (`normalized/<traj_id>/s
 
 Fix generation (`--fix generate`) runs ONE chat completion per arm-A-reproduced case against an OpenAI-compatible endpoint (default: glm-5.2 on z.ai). The prompt carries the gold step's action and observation, ±3 surrounding steps, and the task statement; the reply must be a single corrected shell command. Cases beyond `--max-fix-cases` are excluded by a seeded random sample and marked `sampled-out` in the report. Arm B replays the prefix in its own fresh sandbox and executes the corrected command; `failureVanished` = exit 0 with the failure signature absent.
 
+### Iterative fix loop (`--fix loop`)
+
+`--fix loop` (in `src/replay-fix-loop.ts`) replaces the single shot with an execution-feedback loop of up to `--fix-attempts` attempts (default 3) per case:
+
+- Attempt 1 is byte-identical to the one-shot prompt, so the report's `fixFlipAttempt1` stays directly comparable to `--fix generate`.
+- When an arm fails (nonzero exit or the failure signature persists) or the model call itself fails, the next prompt carries every prior command with its REAL executed stdout/stderr (clipped tails), never a paraphrase.
+- Retries may answer with a short script — at most 5 commands in one fenced block — executed as ONE `/bin/sh` unit; a longer script is rejected as a failed attempt and the rejection feeds the next prompt.
+- Every attempt runs in its own fresh sandbox with the same replayed prefix. A used sandbox is never mutated mid-arm, so a flip always proves the corrected step against the recorded prefix state, not against debris from an earlier attempt. Wall-time cost is one extra prefix replay per attempt.
+
+The report adds `fixFlipAttempt1` (flips at attempt 1 over cases whose attempt 1 executed), `flipsByAttempt`, the full per-attempt trail on each case row (`fix.attempts`), and one `armB-attempt<N>-result.json` per executed attempt (`armB-result.json` keeps the last executed attempt — the flipped one when the loop flips).
+
 Honest-reporting notes baked into the report:
 
 - A gold step whose recorded observation carries **no returncode** can never satisfy "arm A reproduces the recorded returncode": it counts against the replayability rate and the per-case table says why.

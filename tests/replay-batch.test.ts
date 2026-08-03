@@ -448,6 +448,128 @@ describe('runReplayBatch', () => {
     expect(report.headline.fixFlipRate!.denominator).toBe(2)
   })
 
+  it('fix=loop retries with feedback, opens a fresh sandbox per attempt, and reports @1 vs final', async () => {
+    const dir = makeRoot()
+    const corpus = writeFixtureCorpus(dir, 'loop', [
+      {
+        trajId: 'traj-flips-at-2',
+        steps: failingSteps(),
+        goldIncorrectSteps: [3],
+        raw: { baseImage: 'example/ok:1', runConfigCwd: '/repo' },
+        taskMd: 'Fix the build.',
+      },
+      {
+        trajId: 'traj-never-flips',
+        steps: failingSteps(),
+        goldIncorrectSteps: [3],
+        raw: { baseImage: 'example/ok:2', runConfigCwd: '/repo' },
+      },
+    ])
+    const out = join(dir, 'out')
+    const prompts: string[] = []
+    const callsByTraj = new Map<string, number>()
+    const caller: ChatCompletionCaller = {
+      complete: async (_system, user) => {
+        prompts.push(user)
+        // The retry prompt carries the failed command; use that to key replies.
+        const isRetry = user.includes('## Previous fix attempts')
+        return {
+          succeeded: true,
+          value: {
+            content: isRetry
+              ? '```sh\nfix file.c && make target\n```'
+              : '```sh\nfirst-guess && make target\n```',
+            usage: { promptTokens: 100, completionTokens: 20 },
+          },
+        }
+      },
+    }
+    let opens = 0
+    const report = await runReplayBatch({
+      corpora: [corpus],
+      out,
+      fix: 'loop',
+      fixAttempts: 3,
+      fixCaller: caller,
+      fixModelLabel: 'fake-model',
+      preparer: fakePreparer(),
+      backendFactory: (derivedImage) => {
+        const inner = scriptedBackend((action) => {
+          if (action === 'make target') {
+            return { exitCode: 2, stdout: 'stopped', stderr: 'file.c:9:2: error: broken build' }
+          }
+          // Only the corrected command on the ok:1 image ever flips.
+          if (action === 'fix file.c && make target' && derivedImage === 'derived-example/ok:1') {
+            return { exitCode: 0, stdout: 'built ok', stderr: '' }
+          }
+          if (action.includes('make target')) {
+            return { exitCode: 2, stdout: '', stderr: 'file.c:9:2: error: broken build' }
+          }
+          return { exitCode: 0, stdout: '', stderr: '' }
+        })
+        return {
+          async open() {
+            opens += 1
+            return inner.open()
+          },
+        }
+      },
+    })
+
+    const flips = report.cases.find((c) => c.trajId === 'traj-flips-at-2')!
+    expect(flips.fix).toMatchObject({
+      attempted: true,
+      command: 'fix file.c && make target',
+      armBExit: 0,
+      failureVanished: true,
+      flippedAtAttempt: 2,
+      llmError: null,
+      armBError: null,
+    })
+    expect(flips.fix!.attempts).toHaveLength(2)
+    expect(flips.fix!.attempts![0]).toMatchObject({
+      attempt: 1,
+      executed: true,
+      exitCode: 2,
+      failureVanished: false,
+    })
+    expect(flips.fix!.usage).toEqual({ promptTokens: 200, completionTokens: 40 })
+
+    const never = report.cases.find((c) => c.trajId === 'traj-never-flips')!
+    expect(never.fix).toMatchObject({ failureVanished: false, flippedAtAttempt: null })
+    expect(never.fix!.attempts).toHaveLength(3)
+
+    // 2 arm-A sessions + 2 attempts (flip case) + 3 attempts (exhausted case),
+    // each in its own fresh sandbox.
+    expect(opens).toBe(7)
+
+    expect(report.headline.fixFlipRate).toEqual({ numerator: 1, denominator: 2, value: 0.5 })
+    expect(report.headline.fixFlipAttempt1).toEqual({ numerator: 0, denominator: 2, value: 0 })
+    expect(report.headline.flipsByAttempt).toEqual({ '2': 1 })
+    expect(report.llm).toEqual({
+      model: 'fake-model',
+      calls: 5,
+      failures: 0,
+      promptTokens: 500,
+      completionTokens: 100,
+    })
+
+    // The retry prompt fed back the failed command and its REAL output.
+    const retryPrompt = prompts.find((p) => p.includes('## Previous fix attempts'))!
+    expect(retryPrompt).toContain('first-guess && make target')
+    expect(retryPrompt).toContain('file.c:9:2: error: broken build')
+
+    const caseDir = join(out, 'loop--traj-flips-at-2')
+    expect(existsSync(join(caseDir, 'armB-attempt1-result.json'))).toBe(true)
+    expect(existsSync(join(caseDir, 'armB-attempt2-result.json'))).toBe(true)
+    const final = JSON.parse(readFileSync(join(caseDir, 'armB-result.json'), 'utf8'))
+    expect(final).toMatchObject({ attempt: 2, exitCode: 0 })
+    const markdown = readFileSync(join(out, 'batch-report.md'), 'utf8')
+    expect(markdown).toContain('flip@2')
+    expect(markdown).toContain('exhausted(3)')
+    expect(markdown).toContain('Fix-flip@1: 0.0%')
+  })
+
   it('records an LLM failure as a row, not an abort', async () => {
     const dir = makeRoot()
     const corpus = writeFixtureCorpus(dir, 'llmfail', [
@@ -514,5 +636,20 @@ describe('parseReplayBatchArgs', () => {
       parseReplayBatchArgs(['--corpus', 'a=/l::/p', '--out', '/o', '--fix', 'wild']),
     ).toThrow(/--fix/)
     expect(parseReplayBatchArgs(['--help'])).toBe('help')
+  })
+
+  it('parses --fix loop with --fix-attempts and validates the budget', () => {
+    const args = parseReplayBatchArgs([
+      '--corpus', 'a=/l::/p',
+      '--out', '/o',
+      '--fix', 'loop',
+      '--fix-attempts', '4',
+    ])
+    expect(args).toMatchObject({ fix: 'loop', fixAttempts: 4 })
+    const defaulted = parseReplayBatchArgs(['--corpus', 'a=/l::/p', '--out', '/o', '--fix', 'loop'])
+    expect(defaulted).toMatchObject({ fix: 'loop', fixAttempts: 3 })
+    expect(() =>
+      parseReplayBatchArgs(['--corpus', 'a=/l::/p', '--out', '/o', '--fix', 'loop', '--fix-attempts', '0']),
+    ).toThrow(/--fix-attempts/)
   })
 })
