@@ -48,6 +48,14 @@ import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { cmdReplayVerifyBatch } from './replay-batch.js'
 import { cmdReplayVerify } from './replay-verify.js'
+import {
+  cmdVerifyFindings,
+  DEFAULT_SANDBOX_BASE_URL,
+  renderVerifiedFindingsSection,
+  verifyFindings,
+  type VerifyFindingsRun,
+} from './analyze-verify.js'
+import { parseCorpusFlag } from './replay-corpus.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -158,6 +166,12 @@ interface Args {
   trajectoryDir?: string
   revision?: string
   concurrency: number
+  /** analyze --verify-findings: execute analyst findings as sandbox replay proofs. */
+  verifyFindings: boolean
+  /** Repeatable `name=<labels>::<prepared>` corpora resolving finding trajectories. */
+  replayCorpora: string[]
+  /** Receipt root for --verify-findings; defaults next to --out. */
+  verifyOut?: string
 }
 
 const DEFAULT_ANALYST_MODEL = 'gpt-5-mini'
@@ -198,6 +212,8 @@ function parseArgs(argv: string[]): Args {
     noFindings: false,
     attrs: [],
     concurrency: 4,
+    verifyFindings: false,
+    replayCorpora: [],
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -240,6 +256,9 @@ function parseArgs(argv: string[]): Args {
       case '--no-spans': a.noSpans = true; break
       case '--no-findings': a.noFindings = true; break
       case '--analyzer': { const v = next(); if (v) a.analyzers.push(v); break }
+      case '--verify-findings': a.verifyFindings = true; break
+      case '--replay-corpus': { const v = next(); if (v) a.replayCorpora.push(v); break }
+      case '--verify-out': a.verifyOut = next(); break
       case '--analyzer-prompt': a.analyzerPrompt = next(); break
       case '--redactor': a.redactorCmd = next(); break
       case '--format': a.format = next(); break
@@ -922,16 +941,53 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 async function cmdAnalyze(args: Args): Promise<void> {
   if (args.supervisorRunDir) return cmdAnalyzeSupervisorRun(args.supervisorRunDir, args)
   const result = await investigate(args, { loadDefaultConfig: false })
+  let report = result.report
+  let verifySummary = ''
+  if (args.verifyFindings) {
+    const run = await verifyAnalyzeFindings(args, result)
+    report = `${report}\n${renderVerifiedFindingsSection(run)}`
+    verifySummary =
+      `, verified: ${run.counts.reproduced} reproduced / ${run.counts['fix-flipped']} fix-flipped / ` +
+      `${run.counts.divergent} divergent / ${run.counts['not-replayable']} not-replayable → ${run.out}`
+  }
   if (args.out) {
-    await saveReport(args.out, result.report)
+    await saveReport(args.out, report)
     console.log(
       `report → ${args.out}  (${result.findings.length} findings, ` +
-        `${result.pipelines.stuckLoops.findings.length} loops, OTLP: ${result.otlpPath})`,
+        `${result.pipelines.stuckLoops.findings.length} loops, OTLP: ${result.otlpPath}${verifySummary})`,
     )
   } else {
-    console.log(result.report)
+    console.log(report)
   }
   assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
+}
+
+/**
+ * Executes the analyze run's findings as sandbox replay proofs. Findings name
+ * their trajectory through trace:// evidence; the executable steps and docker
+ * image come from --replay-corpus, because harness session stores carry no
+ * docker_config to replay — requiring the corpus up front fails louder than
+ * annotating every finding as not-replayable for the same missing reason.
+ */
+async function verifyAnalyzeFindings(args: Args, result: TraceInvestigationResult): Promise<VerifyFindingsRun> {
+  if (args.replayCorpora.length === 0) {
+    throw new Error(
+      'analyze --verify-findings needs the executable trajectory source: pass ' +
+        '--replay-corpus name=<labels.json>::<preparedDir> (repeatable). Harness sessions ' +
+        'carry no docker_config, so findings cannot be replayed from the session store alone.',
+    )
+  }
+  if (result.findings.length === 0) {
+    throw new Error('analyze --verify-findings: the analysis produced no findings to verify')
+  }
+  const out = args.verifyOut ?? (args.out ? `${args.out}.verify` : 'traces-verify-findings')
+  return verifyFindings(result.findings, {
+    source: { kind: 'corpus', corpora: args.replayCorpora.map(parseCorpusFlag) },
+    out,
+    apiKey: process.env.SANDBOX_API_KEY,
+    baseUrl: process.env.SANDBOX_API_URL ?? DEFAULT_SANDBOX_BASE_URL,
+    onProgress: (message) => process.stderr.write(`${message}\n`),
+  })
 }
 
 /**
@@ -1515,6 +1571,10 @@ Commands:
   replay-verify-batch
             Measure replayability + fix-flip rates across gold-labeled corpora:
             arm A per replayable case, LLM-generated arm-B fixes (--help for flags)
+  verify-findings
+            Execute recorded analyst findings as sandbox replay proofs: each
+            finding → reproduced | fix-flipped | divergent | not-replayable,
+            with a receipt directory per finding (--help for flags)
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
@@ -1569,6 +1629,12 @@ Options:
   --budget <usd>   USD cap for agentic analysts
   --analyzer <id>  analyze: also run halo, hodoscope, or an installed command (repeatable)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
+  --verify-findings analyze: execute the findings as sandbox replay proofs and mark
+                   each VERIFIED (receipt path) or UNVERIFIABLE (reason). Needs
+                   --replay-corpus + a running sandbox (SANDBOX_API_KEY/_URL)
+  --replay-corpus name=<labels.json>::<preparedDir>
+                   trajectory source for --verify-findings (repeatable)
+  --verify-out <dir> receipt root for --verify-findings (default: <--out>.verify)
   --interval <s>   watch/stream: poll interval seconds (sessions 5, run tree 2)
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
@@ -1603,6 +1669,10 @@ async function main(): Promise<void> {
   }
   if (rawArgs[0] === 'replay-verify-batch') {
     await cmdReplayVerifyBatch(rawArgs.slice(1))
+    return
+  }
+  if (rawArgs[0] === 'verify-findings') {
+    await cmdVerifyFindings(rawArgs.slice(1))
     return
   }
   const parsedArgs = parseArgs(rawArgs)
