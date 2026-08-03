@@ -3067,6 +3067,99 @@ describe('codex cwd recovery — continuation sessions', () => {
   })
 })
 
+describe('pi cwd recovery', () => {
+  it('reads a native custom session directory without requiring encoded-cwd folders', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'tt-pi-custom-sessions-'))
+    const path = join(sessions, '2026-08-02T00-00-00_custom.jsonl')
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        type: 'session',
+        id: 'pi-custom-session-dir',
+        timestamp: '2026-08-02T00:00:00Z',
+        cwd: '/tmp/custom-pi-workspace',
+      })}\n`,
+    )
+
+    const refs = await new PiAdapter({ sessionsRoot: sessions }).locate({
+      cwd: '/tmp/custom-pi-workspace',
+    })
+
+    expect(refs).toHaveLength(1)
+    expect(refs[0]).toMatchObject({
+      sessionId: 'pi-custom-session-dir',
+      path,
+      cwd: '/tmp/custom-pi-workspace',
+    })
+  })
+
+  it('uses the recorded cwd instead of Pi\'s lossy hyphenated directory name', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'tt-pi-home-'))
+    const sessions = join(home, '.pi', 'agent', 'sessions', '--home-u-code-tangle-router--')
+    mkdirSync(sessions, { recursive: true })
+    const path = join(sessions, '2026-08-02T00-00-00_session.jsonl')
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        type: 'session',
+        id: 'pi-hyphenated-cwd',
+        timestamp: '2026-08-02T00:00:00Z',
+        cwd: '/home/u/code/tangle-router',
+      })}\n`,
+    )
+
+    const refs = await withEnv('HOME', home, () =>
+      new PiAdapter().locate({ cwd: '/home/u/code/tangle-router' }),
+    )
+
+    expect(refs).toHaveLength(1)
+    expect(refs[0]).toMatchObject({
+      sessionId: 'pi-hyphenated-cwd',
+      path,
+      cwd: '/home/u/code/tangle-router',
+    })
+  })
+
+  it('does not match the ambiguous directory-name decoding', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'tt-pi-home-'))
+    const sessions = join(home, '.pi', 'agent', 'sessions', '--home-u-code-tangle-router--')
+    mkdirSync(sessions, { recursive: true })
+    writeFileSync(
+      join(sessions, '2026-08-02T00-00-00_session.jsonl'),
+      `${JSON.stringify({
+        type: 'session',
+        id: 'pi-no-false-cwd',
+        timestamp: '2026-08-02T00:00:00Z',
+        cwd: '/home/u/code/tangle-router',
+      })}\n`,
+    )
+
+    const refs = await withEnv('HOME', home, () =>
+      new PiAdapter().locate({ cwd: '/home/u/code/tangle/router' }),
+    )
+
+    expect(refs).toHaveLength(0)
+  })
+
+  it('does not admit a session with no recorded cwd when a cwd filter is requested', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'tt-pi-custom-sessions-'))
+    writeFileSync(
+      join(sessions, '2026-08-02T00-00-00_session.jsonl'),
+      `${JSON.stringify({
+        type: 'session',
+        id: 'pi-missing-cwd',
+        timestamp: '2026-08-02T00:00:00Z',
+      })}\n`,
+    )
+
+    const refs = await new PiAdapter({ sessionsRoot: sessions }).locate({
+      cwd: '/tmp/requested-pi-workspace',
+    })
+
+    expect(refs).toHaveLength(0)
+  })
+})
+
 // Gemini/Qwen-family sessions live at tmp/<projectHash>/chats/; for a *registered*
 // project the hash IS the project name, reversible via <home>/projects.json →
 // recover cwd. (Unregistered/digest dirs stay null — unavoidable.)

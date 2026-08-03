@@ -645,6 +645,7 @@ The CLI is a thin consumer of these exports.
 | `redactSpans` | `(spans, rules?) → { spans, report }` | PII/secret redaction (`TRACES_REDACTION_RULES`) |
 | `planUpload` / `executeUpload` | `(…, { backend? }) → …` | redact + dedup + send to any sink |
 | `selectAdapters` / `listAdapters` / `resolveAdapter` | adapter selection + the harness registry |
+| `PiAdapter` | `new PiAdapter({ sessionsRoot? })` | parse Pi's default session tree or an exact `PI_CODING_AGENT_SESSION_DIR` |
 | `HarnessTraceAdapter` | interface (`locate` + `parse`) | implement to add a harness |
 | `ExternalAnalyzer` / `Redactor` | `haloAnalyzer` / `hodoscopeAnalyzer` / `commandAnalyzer` / `commandRedactor` | drive engines/models you install |
 
