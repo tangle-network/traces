@@ -45,6 +45,7 @@ import {
   generateFixCommand,
   zaiChatCaller,
 } from './replay-fix.js'
+import { type FixLoopAttemptRecord, runFixLoop } from './replay-fix-loop.js'
 import {
   deriveFailureSignature,
   ingestCodeTraceBenchSteps,
@@ -164,8 +165,12 @@ export interface ReplayBatchOptions {
   readonly out: string
   readonly baseUrl?: string
   readonly apiKey?: string
-  /** 'generate' runs one LLM call per arm-A-reproduced case, then arm B. */
-  readonly fix: 'none' | 'generate'
+  /** 'generate' = one LLM call per arm-A-reproduced case, then arm B.
+   *  'loop' = iterative: failed arms feed their real output into up to
+   *  --fix-attempts prompts, each executed in its own fresh sandbox. */
+  readonly fix: 'none' | 'generate' | 'loop'
+  /** Attempt budget per case in loop mode (default 3). */
+  readonly fixAttempts?: number
   readonly fixCaller?: ChatCompletionCaller
   readonly fixModelLabel?: string
   /** Cap on LLM fix calls; eligible cases beyond it are seeded-sampled out. */
@@ -191,12 +196,19 @@ export interface ReplayBatchFixResult {
   readonly sampledOut: boolean
   readonly command: string | null
   readonly llmError: string | null
+  /** Loop mode: token totals summed across every attempt (null when the
+   *  provider reported no usage). */
   readonly usage: ChatUsage | null
   readonly armBExit: number | null
   readonly armBPrefixExecuted: number | null
   readonly armBPrefixDivergences: number | null
   readonly failureVanished: boolean | null
   readonly armBError: string | null
+  /** Loop mode only: the full per-attempt trail. Null in generate mode. */
+  readonly attempts: readonly FixLoopAttemptRecord[] | null
+  /** 1-based attempt that flipped the failure; null when none did.
+   *  Generate mode: 1 when the single attempt flipped. */
+  readonly flippedAtAttempt: number | null
 }
 
 export interface ReplayBatchCaseRow {
@@ -255,6 +267,15 @@ export interface ReplayBatchReport {
       denominator: number
       value: number | null
     } | null
+    /** Loop mode only: flips at attempt 1 over cases whose attempt 1 executed —
+     *  the number directly comparable to the one-shot fixFlipRate. */
+    readonly fixFlipAttempt1: {
+      numerator: number
+      denominator: number
+      value: number | null
+    } | null
+    /** Loop mode only: flip count keyed by the attempt number that flipped. */
+    readonly flipsByAttempt: Record<string, number> | null
   }
   readonly llm: {
     readonly model: string
@@ -509,9 +530,10 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
 
   // Phase 2 — counterfactual fixes for cases where arm A reproduced.
   let llm: ReplayBatchReport['llm'] = null
-  if (options.fix === 'generate') {
+  if (options.fix !== 'none') {
     const caller = options.fixCaller
-    if (!caller) throw new Error('replay-verify-batch: fix=generate requires a fixCaller')
+    if (!caller) throw new Error(`replay-verify-batch: fix=${options.fix} requires a fixCaller`)
+    const fixAttempts = options.fixAttempts ?? 3
     const maxFixCases = options.maxFixCases ?? 30
     const seed = options.seed ?? 17
     const eligible = rows.filter((r) => r.status === 'ok' && r.replayed)
@@ -544,19 +566,128 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
             armBPrefixDivergences: null,
             failureVanished: null,
             armBError: null,
+            attempts: null,
+            flippedAtAttempt: null,
           },
         }
         continue
       }
       const replayCase = selected.find((c) => c.trajId === row.trajId && c.corpus === row.corpus)!
       const label = `fix ${row.corpus}/${row.trajId}`
-      onProgress(`${label}: generating corrected command`)
-      calls += 1
-      const generated = await generateFixCommand(caller, {
+      const signature = verdictByTraj.get(row.trajId)?.signature ?? null
+      const stepTimeoutMs = options.stepTimeoutMs ?? replayCase.recordedStepTimeoutMs ?? 120_000
+      const promptInput = {
         taskStatement: replayCase.taskStatement,
         steps: replayCase.steps,
         k: replayCase.k,
-      })
+      }
+      const caseOut = join(options.out, caseOutDirName(row))
+
+      if (options.fix === 'loop') {
+        onProgress(`${label}: fix loop (budget ${fixAttempts} attempts)`)
+        const result = await runFixLoop(
+          caller,
+          promptInput,
+          async (command, attempt) => {
+            onProgress(
+              `${label}: attempt ${attempt} arm B — ${command.split('\n')[0]!.slice(0, 120)}`,
+            )
+            const armB = await executeArmB(
+              replayCase,
+              command,
+              backendFactory(row.derivedImage!),
+              signature,
+              stepTimeoutMs,
+              options.prefixLimit,
+              (message) => onProgress(`${label}: attempt ${attempt}: ${message}`),
+            )
+            mkdirSync(caseOut, { recursive: true })
+            writeFileSync(
+              join(caseOut, `armB-attempt${attempt}-result.json`),
+              `${JSON.stringify({ command, ...armB }, null, 2)}\n`,
+            )
+            // armB-result.json always holds the LAST executed attempt — the
+            // flipped one when the loop flips (it stops there).
+            writeFileSync(
+              join(caseOut, 'armB-result.json'),
+              `${JSON.stringify({ command, attempt, ...armB }, null, 2)}\n`,
+            )
+            return armB
+          },
+          { maxAttempts: fixAttempts, onProgress: (message) => onProgress(`${label}: ${message}`) },
+        )
+        calls += result.llmCalls
+        failures += result.llmFailures
+        promptTokens += result.promptTokens
+        completionTokens += result.completionTokens
+        const usage =
+          result.promptTokens + result.completionTokens > 0
+            ? { promptTokens: result.promptTokens, completionTokens: result.completionTokens }
+            : null
+        const flippedRecord =
+          result.flippedAtAttempt !== null
+            ? result.attempts.find((a) => a.attempt === result.flippedAtAttempt)!
+            : null
+        const summary = flippedRecord ?? [...result.attempts].reverse().find((a) => a.executed) ?? null
+        const lastRecord = result.attempts.at(-1) ?? null
+        rows[index] = {
+          ...row,
+          fix: summary
+            ? {
+                attempted: true,
+                sampledOut: false,
+                command: summary.command,
+                llmError: null,
+                usage,
+                armBExit: summary.exitCode,
+                armBPrefixExecuted: summary.prefixExecuted,
+                armBPrefixDivergences: summary.prefixDivergences,
+                failureVanished: summary.failureVanished,
+                armBError: null,
+                attempts: result.attempts,
+                flippedAtAttempt: result.flippedAtAttempt,
+              }
+            : result.aborted
+              ? {
+                  attempted: true,
+                  sampledOut: false,
+                  command: lastRecord?.command ?? null,
+                  llmError: null,
+                  usage,
+                  armBExit: null,
+                  armBPrefixExecuted: null,
+                  armBPrefixDivergences: null,
+                  failureVanished: null,
+                  armBError: lastRecord?.armBError ?? 'sandbox error',
+                  attempts: result.attempts,
+                  flippedAtAttempt: null,
+                }
+              : {
+                  attempted: true,
+                  sampledOut: false,
+                  command: null,
+                  llmError: lastRecord?.llmError ?? 'no attempt produced a runnable fix',
+                  usage,
+                  armBExit: null,
+                  armBPrefixExecuted: null,
+                  armBPrefixDivergences: null,
+                  failureVanished: null,
+                  armBError: null,
+                  attempts: result.attempts,
+                  flippedAtAttempt: null,
+                },
+        }
+        onProgress(
+          `${label}: loop done — flipped=${result.flipped}` +
+            (result.flippedAtAttempt !== null ? ` at attempt ${result.flippedAtAttempt}` : '') +
+            ` (${result.llmCalls} calls, ${result.attempts.filter((a) => a.executed).length} arms)`,
+        )
+        continue
+      }
+
+      onProgress(`${label}: generating corrected command`)
+      calls += 1
+      const generated = await generateFixCommand(caller, promptInput)
       if (!generated.succeeded) {
         failures += 1
         rows[index] = {
@@ -572,6 +703,8 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
             armBPrefixDivergences: null,
             failureVanished: null,
             armBError: null,
+            attempts: null,
+            flippedAtAttempt: null,
           },
         }
         onProgress(`${label}: LLM failed — ${generated.error.slice(0, 200)}`)
@@ -579,8 +712,6 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
       }
       promptTokens += generated.value.usage?.promptTokens ?? 0
       completionTokens += generated.value.usage?.completionTokens ?? 0
-      const signature = verdictByTraj.get(row.trajId)?.signature ?? null
-      const stepTimeoutMs = options.stepTimeoutMs ?? replayCase.recordedStepTimeoutMs ?? 120_000
       onProgress(`${label}: arm B — ${generated.value.command.split('\n')[0]!.slice(0, 120)}`)
       try {
         const armB = await executeArmB(
@@ -605,9 +736,10 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
             armBPrefixDivergences: armB.prefixDivergences,
             failureVanished: armB.failureVanished,
             armBError: null,
+            attempts: null,
+            flippedAtAttempt: armB.failureVanished ? 1 : null,
           },
         }
-        const caseOut = join(options.out, caseOutDirName(row))
         mkdirSync(caseOut, { recursive: true })
         writeFileSync(
           join(caseOut, 'armB-result.json'),
@@ -629,6 +761,8 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
             armBPrefixDivergences: null,
             failureVanished: null,
             armBError: message.slice(0, 500),
+            attempts: null,
+            flippedAtAttempt: null,
           },
         }
         onProgress(`${label}: arm B error — ${message.slice(0, 200)}`)
@@ -654,6 +788,15 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
     (r) => r.recordedReturncodeAtK !== null && r.recordedReturncodeAtK !== 0,
   )
   const flippedNonzeroRc = armBNonzeroRc.filter((r) => r.fix!.failureVanished === true)
+  const attempt1Executed = rows.filter(
+    (r) => r.fix?.attempts?.find((a) => a.attempt === 1)?.executed === true,
+  )
+  const flippedAt1 = rows.filter((r) => r.fix?.flippedAtAttempt === 1)
+  const flipsByAttempt: Record<string, number> = {}
+  for (const row of rows) {
+    const at = row.fix?.flippedAtAttempt
+    if (typeof at === 'number') flipsByAttempt[String(at)] = (flipsByAttempt[String(at)] ?? 0) + 1
+  }
   const excludedByReason: Record<string, number> = {}
   for (const excluded of enumeration.excluded) {
     excludedByReason[excluded.reason] = (excludedByReason[excluded.reason] ?? 0) + 1
@@ -699,7 +842,7 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
         value: rate(signatureStrict.length, selected.length),
       },
       fixFlipRate:
-        options.fix === 'generate'
+        options.fix !== 'none'
           ? {
               numerator: flipped.length,
               denominator: armBExecuted.length,
@@ -707,13 +850,22 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
             }
           : null,
       fixFlipRateNonzeroRc:
-        options.fix === 'generate'
+        options.fix !== 'none'
           ? {
               numerator: flippedNonzeroRc.length,
               denominator: armBNonzeroRc.length,
               value: rate(flippedNonzeroRc.length, armBNonzeroRc.length),
             }
           : null,
+      fixFlipAttempt1:
+        options.fix === 'loop'
+          ? {
+              numerator: flippedAt1.length,
+              denominator: attempt1Executed.length,
+              value: rate(flippedAt1.length, attempt1Executed.length),
+            }
+          : null,
+      flipsByAttempt: options.fix === 'loop' ? flipsByAttempt : null,
     },
     llm,
     excluded: enumeration.excluded,
@@ -765,6 +917,18 @@ export function renderBatchReport(report: ReplayBatchReport): string {
       `- Fix-flip rate on recorded-rc≠0 cases: ${pct(headline.fixFlipRateNonzeroRc.value)} ` +
         `(${headline.fixFlipRateNonzeroRc.numerator}/${headline.fixFlipRateNonzeroRc.denominator}; real recorded failures — a gold step recorded with rc 0 flips vacuously).`,
     )
+  }
+  if (headline.fixFlipAttempt1) {
+    lines.push(
+      `- Fix-flip@1: ${pct(headline.fixFlipAttempt1.value)} ` +
+        `(${headline.fixFlipAttempt1.numerator}/${headline.fixFlipAttempt1.denominator} cases whose attempt 1 executed — the one-shot-comparable number).`,
+    )
+  }
+  if (headline.flipsByAttempt && Object.keys(headline.flipsByAttempt).length > 0) {
+    const parts = Object.entries(headline.flipsByAttempt)
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([attempt, count]) => `attempt ${attempt}: ${count}`)
+    lines.push(`- Flips by attempt: ${parts.join(', ')}.`)
   }
   lines.push('')
   lines.push('## Enumeration')
@@ -824,7 +988,11 @@ export function renderBatchReport(report: ReplayBatchReport): string {
           ? 'llm-failed'
           : fix.armBError
             ? 'armB-error'
-            : 'generated'
+            : fix.attempts
+              ? fix.flippedAtAttempt !== null
+                ? `flip@${fix.flippedAtAttempt}`
+                : `exhausted(${fix.attempts.length})`
+              : 'generated'
     lines.push(
       [
         row.corpus,
@@ -863,7 +1031,8 @@ export function renderBatchReport(report: ReplayBatchReport): string {
 export interface ReplayBatchCliArgs {
   readonly corpora: CorpusSpec[]
   readonly out: string
-  readonly fix: 'none' | 'generate'
+  readonly fix: 'none' | 'generate' | 'loop'
+  readonly fixAttempts: number
   readonly fixModel: string
   readonly fixBaseUrl: string
   readonly fixApiKeyEnv: string
@@ -909,13 +1078,20 @@ export function parseReplayBatchArgs(argv: readonly string[]): ReplayBatchCliArg
     return n
   }
   const fix = values.get('--fix') ?? 'none'
-  if (fix !== 'none' && fix !== 'generate') {
-    throw new Error(`replay-verify-batch: --fix must be none or generate, got ${fix}`)
+  if (fix !== 'none' && fix !== 'generate' && fix !== 'loop') {
+    throw new Error(`replay-verify-batch: --fix must be none, generate, or loop, got ${fix}`)
+  }
+  const fixAttempts = optionalNumber('--fix-attempts') ?? 3
+  if (!Number.isInteger(fixAttempts) || fixAttempts < 1) {
+    throw new Error(
+      `replay-verify-batch: --fix-attempts must be a positive integer, got ${values.get('--fix-attempts')}`,
+    )
   }
   return {
     corpora,
     out: out ?? '.',
     fix,
+    fixAttempts,
     fixModel: values.get('--fix-model') ?? 'glm-5.2',
     fixBaseUrl: values.get('--fix-base-url') ?? 'https://api.z.ai/api/coding/paas/v4',
     fixApiKeyEnv: values.get('--fix-api-key-env') ?? 'ZAI_GLM_API_KEY',
@@ -938,7 +1114,7 @@ export function replayBatchUsage(): string {
 Usage:
   traces replay-verify-batch \\
       --corpus NAME=<labels.json>::<prepared-dir> [--corpus ...] \\
-      --out DIR [--fix none|generate] [--enumerate-only] \\
+      --out DIR [--fix none|generate|loop] [--fix-attempts 3] [--enumerate-only] \\
       [--fix-model glm-5.2] [--fix-base-url URL] [--fix-api-key-env ZAI_GLM_API_KEY] \\
       [--max-fix-cases 30] [--seed 17] [--step-timeout MS] [--prefix-limit N] \\
       [--case-filter SUBSTRING] [--case-limit N] \\
@@ -956,6 +1132,13 @@ Usage:
   --fix generate runs ONE LLM call per arm-A-reproduced case (cap
   --max-fix-cases, seeded sample beyond it) and executes the corrected command
   as arm B in a fresh sandbox.
+
+  --fix loop iterates: attempt 1 is the one-shot prompt; when an arm fails
+  (nonzero exit or the failure signature persists) or the model call fails,
+  the next prompt carries every prior command with its REAL executed
+  stdout/stderr, up to --fix-attempts attempts (default 3). Retries may
+  answer with a short script (<=5 commands) executed as one /bin/sh unit.
+  Every attempt runs in its own fresh sandbox with the same replayed prefix.
 
 Outputs batch-report.json, batch-report.md, cases.jsonl (incremental), and one
 directory per case with the full replay-verify artifacts.
@@ -1001,7 +1184,7 @@ export async function cmdReplayVerifyBatch(argv: readonly string[]): Promise<voi
     )
   }
   let fixCaller: ChatCompletionCaller | undefined
-  if (parsed.fix === 'generate') {
+  if (parsed.fix !== 'none') {
     const fixApiKey = process.env[parsed.fixApiKeyEnv]
     if (!fixApiKey) {
       throw new Error(
@@ -1020,6 +1203,7 @@ export async function cmdReplayVerifyBatch(argv: readonly string[]): Promise<voi
     baseUrl: parsed.baseUrl,
     apiKey,
     fix: parsed.fix,
+    fixAttempts: parsed.fixAttempts,
     fixCaller,
     fixModelLabel: parsed.fixModel,
     maxFixCases: parsed.maxFixCases,
