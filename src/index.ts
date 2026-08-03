@@ -122,6 +122,7 @@ export * from './replay-corpus.js' // corpus enumeration: replayable cases + exc
 export * from './replay-batch.js' // batch runner: replayability + fix-flip rates
 export * from './replay-fix.js' // counterfactual patch synthesis (one LLM call per case)
 export * from './replay-wire.js' // analyst finding → replay-verify invocation
+export * from './analyze-verify.js' // proof-carrying findings: verifyFindings() + receipts
 export * from './upload.js' // planUpload / executeUpload({ backend? })
 export * from './upload-state.js' // dedup state
 

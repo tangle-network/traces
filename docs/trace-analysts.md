@@ -210,6 +210,34 @@ console.log(renderAnalystBenchmarkMarkdown(result))
 Public labels test the measurement code, not the quality of every built-in analyst automatically.
 A real quality claim requires running the analyst over the corresponding trajectories, retaining all rows, and comparing it with named alternatives at equal model and request limits.
 
+## Verified findings (executed replay)
+
+An analyst finding is a cited claim until something executes it.
+`traces analyze --verify-findings` (and the standalone `traces verify-findings`) replays each finding's trajectory prefix in a real sandbox, re-runs the accused step, and annotates every finding with an executed verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `reproduced` | the recorded failure signature (returncode + stable output substring) reproduced when the accused step re-ran |
+| `fix-flipped` | reproduced, and a supplied corrected command made the failure vanish in a fresh replay |
+| `divergent` | the step executed but the recorded failure did not reproduce — evidence against the finding, or against replay fidelity (the receipt carries prefix divergences so you can tell which) |
+| `not-replayable` | the finding could not be executed; the receipt names the precise reason (no step subject, unknown trajectory, no docker image, submit step, …) |
+
+```bash
+# Verify the findings an analyze run produced (marks each finding in the report):
+traces analyze --last 1 --llm --verify-findings \
+  --replay-corpus holdout=labels.json::prepared/ --verify-out ./receipts
+
+# Verify findings recorded earlier (e.g. extracted from an eval result.json):
+traces verify-findings --findings findings.json --out ./receipts \
+  --steps normalized/<traj>/steps.json --image <replay-ready-image> --cwd /app
+```
+
+Findings are matched by the shape analysts emit: subject `incorrect-step-<n>` (or the wire form `incorrect-steps-<f>-<l>-…`), `metadata.block_first_step`, and `trace://<trajectory>/…` evidence refs.
+Findings accusing the same step share one executed proof; each finding still gets its own receipt directory (`receipt.json` plus, when executed, `replay-verdict.json` and `report.md` with real stdout/stderr).
+Verification is execution, not generation: no LLM is involved unless you pass `--fix-command`.
+A missing sandbox is an error when any finding is replayable — verification never silently skips.
+Sandbox setup, execution semantics, and honest limits are in [Replay verification](./replay-verify.md).
+
 ## Turn findings into improvement
 
 Do not train or rewrite policy from an analyst's own prose alone.

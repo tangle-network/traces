@@ -260,9 +260,13 @@ traces upload   --since 1h --dry-run               # redact + dedup + preview, n
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
 traces replay-verify --steps steps.json --image <docker-image> --at 37 --cwd /home --out ./replay-out \
   --fix-command "<corrected step>"                 # executed proof: replay prefix, reproduce failure, show fix
+traces verify-findings --findings findings.json --out ./receipts \
+  --steps steps.json --image <replay-ready-image> --cwd /app   # execute recorded analyst findings as proofs
+traces analyze --last 1 --llm --verify-findings --replay-corpus h=labels.json::prepared/  # proof-carrying analyze
 ```
 
 `replay-verify` replays a CodeTraceBench-style trajectory prefix in a real sandbox and executes step k twice — recorded (does the failure reproduce?) and corrected (does it vanish?).
+`verify-findings` runs that proof per analyst finding and annotates each with `reproduced | fix-flipped | divergent | not-replayable` plus a receipt directory; see [Verified findings](./docs/trace-analysts.md#verified-findings-executed-replay).
 See [Replay verification](./docs/replay-verify.md) for setup, semantics, and honest limits (SWE-style trajectories with a docker image only; commands run as the non-root sandbox user).
 
 | Flag | Meaning |
@@ -288,6 +292,9 @@ See [Replay verification](./docs/replay-verify.md) for setup, semantics, and hon
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
 | `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |
 | `--supervisor-run-dir <dir>` | `analyze`: report one run tree; `watch`: tail it live |
+| `--verify-findings` | `analyze`: execute the findings as sandbox replay proofs; each is marked VERIFIED (receipt path) or UNVERIFIABLE (reason). Needs `--replay-corpus` and a running sandbox (`SANDBOX_API_KEY` / `SANDBOX_API_URL`) |
+| `--replay-corpus name=<labels>::<prepared>` | Trajectory source for `--verify-findings` (repeatable) |
+| `--verify-out <dir>` | Receipt root for `--verify-findings` (default: `<--out>.verify`) |
 | `--replay` | `stream`: scan once, then exit |
 | `--once` | `stream`: scan once; `watch <target>`: print ONE snapshot and exit |
 | `--no-spans` / `--no-findings` | `stream`: suppress raw span rows / finding rows |

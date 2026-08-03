@@ -99,6 +99,12 @@ const { invocation, fixCommand, verdict } = await replayVerifyFinding(
 
 The subject grammar is the analyst benchmark's `incorrect-steps-<first>-<last>-<escaped|unescaped>-consequence-<step>`; `--at` is the finding's **first** incorrect step (the finding's claim, which may differ from the gold label). The wire resolves the trajectory across the given corpora, generates the arm-B fix through the same one-call generator (or accepts a pre-supplied `fixCommand`), and returns the full `ReplayVerdict`. It throws with a precise reason when the finding cannot be replayed (malformed subject, unknown trajectory, non-SWE case, step out of range) — the product surfaces that reason instead of a proof.
 
+## Product surface — verified findings
+
+`traces verify-findings` (and `traces analyze --verify-findings`) runs this proof per recorded analyst finding and annotates each with `reproduced | fix-flipped | divergent | not-replayable` plus a receipt directory.
+Unlike the wire above it accepts the shapes analysts actually emit (`incorrect-step-<n>` subjects, `metadata.block_first_step`, `trace://` evidence refs) and never throws on a finding-shaped dead end — the dead end becomes the finding's honest `not-replayable` receipt.
+See [Verified findings](./trace-analysts.md#verified-findings-executed-replay).
+
 ## Orchestrator prerequisites
 
 replay-verify talks to a sandbox API (`--base-url`); in local development that is the sandbox SDK adapter in front of an orchestrator running the docker driver.
