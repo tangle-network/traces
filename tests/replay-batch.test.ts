@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -9,7 +9,7 @@ import {
   runReplayBatch,
   seededSample,
 } from '../src/replay-batch.js'
-import { enumerateReplayableCases, parseCorpusFlag } from '../src/replay-corpus.js'
+import { enumerateReplayableCases, parseCorpusFlag, readImageMap } from '../src/replay-corpus.js'
 import {
   buildFixPrompt,
   type ChatCompletionCaller,
@@ -187,6 +187,87 @@ describe('enumerateReplayableCases', () => {
         detail: '1 gold step(s), all submit commands',
       },
     ])
+  })
+
+  it('resolves SWE-agent .traj cases through the image map with source labels', () => {
+    const dir = makeRoot()
+    const sweSteps = [
+      fixtureStep(1, 'open src/main.rs\n', 0, 'shown'),
+      fixtureStep(2, 'cargo build\n', 101, 'error[E0308]: mismatched types'),
+      fixtureStep(3, 'submit\n', 0),
+    ]
+    const corpus = writeFixtureCorpus(dir, 'swe', [
+      {
+        trajId: 'swe-mapped',
+        steps: sweSteps,
+        goldIncorrectSteps: [2],
+        sweagentRaw: { instance: 'org__repo-1' },
+      },
+      {
+        trajId: 'swe-submit-only',
+        steps: sweSteps,
+        goldIncorrectSteps: [3],
+        sweagentRaw: { instance: 'org__repo-2' },
+      },
+      {
+        trajId: 'swe-unmapped',
+        steps: sweSteps,
+        goldIncorrectSteps: [2],
+        sweagentRaw: { instance: 'org__repo-3' },
+      },
+      {
+        trajId: 'recorded-wins',
+        steps: failingSteps(),
+        goldIncorrectSteps: [3],
+        raw: { baseImage: 'recorded/img:1', runConfigCwd: '/r' },
+      },
+    ])
+    const imageMap = {
+      'swe-mapped': { image: 'ghcr.io/x/repo-1:latest', cwd: '/testbed', imageSource: 'ghcr-polybench' },
+      'swe-submit-only': { image: 'ghcr.io/x/repo-2:latest', cwd: '/testbed' },
+      'recorded-wins': { image: 'wrong/img:9', cwd: '/wrong', imageSource: 'mswebench-hub' },
+    }
+    const { replayable, excluded } = enumerateReplayableCases([corpus], imageMap)
+    expect(replayable.find((c) => c.trajId === 'swe-mapped')).toMatchObject({
+      image: 'ghcr.io/x/repo-1:latest',
+      imageSource: 'ghcr-polybench',
+      cwd: '/testbed',
+      cwdSource: 'image-map',
+      k: 2,
+      recordedReturncodeAtK: 101,
+    })
+    expect(replayable.find((c) => c.trajId === 'recorded-wins')).toMatchObject({
+      image: 'recorded/img:1',
+      imageSource: 'docker-config',
+      cwd: '/r',
+      cwdSource: 'run-config',
+    })
+    const reasons = Object.fromEntries(excluded.map((e) => [e.trajId, e.reason]))
+    expect(reasons).toEqual({
+      'swe-submit-only': 'gold-only-submit-step',
+      'swe-unmapped': 'no-docker-image',
+    })
+  })
+})
+
+describe('readImageMap', () => {
+  it('loads a valid map and rejects malformed entries loudly', () => {
+    const dir = makeRoot()
+    const good = join(dir, 'map.json')
+    writeFileSync(
+      good,
+      JSON.stringify({ t1: { image: 'a/b:1', cwd: '/w', imageSource: 'recorded-crossref' } }),
+    )
+    expect(readImageMap(good).t1!.image).toBe('a/b:1')
+    const noImage = join(dir, 'no-image.json')
+    writeFileSync(noImage, JSON.stringify({ t1: { cwd: '/w' } }))
+    expect(() => readImageMap(noImage)).toThrow(/no non-empty string image/)
+    const relCwd = join(dir, 'rel-cwd.json')
+    writeFileSync(relCwd, JSON.stringify({ t1: { image: 'a/b:1', cwd: 'w' } }))
+    expect(() => readImageMap(relCwd)).toThrow(/non-absolute cwd/)
+    const notObject = join(dir, 'arr.json')
+    writeFileSync(notObject, JSON.stringify([]))
+    expect(() => readImageMap(notObject)).toThrow(/JSON object/)
   })
 })
 

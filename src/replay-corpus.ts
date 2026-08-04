@@ -8,9 +8,12 @@
  *   <prepared>/extracted/<traj_id>/swe_raw/**    raw mini-SWE trajectory
  *
  * Only SWE-style trajectories are replayable: the raw trajectory must carry
- * `info.docker_config.base_image`. Every excluded case is returned with a
- * machine-readable reason — the batch report surfaces the full exclusion
- * table, never a silently shrunk denominator.
+ * `info.docker_config.base_image`, or the caller must supply an image map
+ * entry for the trajectory (families like SWE-agent record no docker config;
+ * their environment identity is resolved externally and passed in, with the
+ * resolution source carried on every case). Every excluded case is returned
+ * with a machine-readable reason — the batch report surfaces the full
+ * exclusion table, never a silently shrunk denominator.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
@@ -55,8 +58,11 @@ export type ReplayExclusionReason =
  *  here, which is why a constant accuse-the-submit rule scores well there). */
 export const SUBMIT_ACTION_SIGNATURE = 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'
 
+/** SWE-agent's end-of-run submit is the bare ACI command `submit`. A bare
+ *  `submit` cannot be a meaningful shell action (it would only ever exit 127),
+ *  so treating the exact match as a submit decision is safe for every family. */
 export function isSubmitAction(action: string): boolean {
-  return action.includes(SUBMIT_ACTION_SIGNATURE)
+  return action.includes(SUBMIT_ACTION_SIGNATURE) || action.trim() === 'submit'
 }
 
 export interface ExcludedCase {
@@ -66,7 +72,7 @@ export interface ExcludedCase {
   readonly detail?: string
 }
 
-export type CwdSource = 'run-config' | 'docker-config' | 'pwd-observation'
+export type CwdSource = 'run-config' | 'docker-config' | 'pwd-observation' | 'image-map'
 
 /** Everything needed to invoke replay-verify for one trajectory. */
 export interface CaseResources {
@@ -78,8 +84,42 @@ export interface CaseResources {
   readonly image: string
   readonly cwd: string
   readonly cwdSource: CwdSource
+  /** Where the docker image came from: 'docker-config' when the raw trajectory
+   *  recorded it, otherwise the image-map entry's own source label (e.g.
+   *  'recorded-crossref', 'mswebench-hub') so verdicts stay auditable. */
+  readonly imageSource: string
   /** Per-step timeout the recorded run used, when the raw config carries one. */
   readonly recordedStepTimeoutMs: number | null
+}
+
+/** External environment-identity resolution for one trajectory. */
+export interface ImageMapEntry {
+  readonly image: string
+  readonly cwd?: string
+  readonly imageSource?: string
+}
+
+export type ImageMap = Readonly<Record<string, ImageMapEntry>>
+
+/** Loads and strictly validates a trajId → image-map JSON file. */
+export function readImageMap(path: string): ImageMap {
+  const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${path} must be a JSON object of trajId → {image, cwd?, imageSource?}`)
+  }
+  for (const [trajId, entry] of Object.entries(parsed as Record<string, unknown>)) {
+    const e = entry as ImageMapEntry
+    if (typeof e?.image !== 'string' || e.image.length === 0) {
+      throw new Error(`${path}: entry ${trajId} has no non-empty string image`)
+    }
+    if (e.cwd !== undefined && (typeof e.cwd !== 'string' || !e.cwd.startsWith('/'))) {
+      throw new Error(`${path}: entry ${trajId} has a non-absolute cwd`)
+    }
+    if (e.imageSource !== undefined && typeof e.imageSource !== 'string') {
+      throw new Error(`${path}: entry ${trajId} has a non-string imageSource`)
+    }
+  }
+  return parsed as ImageMap
 }
 
 export interface ReplayableCase extends CaseResources {
@@ -131,8 +171,9 @@ interface RawTrajFile {
 function findRawTrajFiles(sweRawDir: string): string[] {
   if (!existsSync(sweRawDir)) return []
   const entries = readdirSync(sweRawDir, { recursive: true, encoding: 'utf8' })
+  // mini-SWE archives raw trajectories as *.traj.json; SWE-agent as *.traj.
   return entries
-    .filter((relative) => relative.endsWith('.traj.json'))
+    .filter((relative) => relative.endsWith('.traj.json') || relative.endsWith('.traj'))
     .map((relative) => join(sweRawDir, relative))
     .sort()
 }
@@ -170,8 +211,15 @@ export type ResourceResolution =
 /**
  * Resolves the replay resources for one trajectory, independent of gold
  * labels — the analyst wire uses this with a finding-supplied step instead.
+ * `imageMap` supplies environment identity for trajectories whose raw file
+ * records no docker_config; the recorded docker_config always wins when both
+ * are present.
  */
-export function resolveCaseResources(corpus: CorpusSpec, trajId: string): ResourceResolution {
+export function resolveCaseResources(
+  corpus: CorpusSpec,
+  trajId: string,
+  imageMap?: ImageMap,
+): ResourceResolution {
   const sweRawDir = join(corpus.preparedDir, 'extracted', trajId, 'swe_raw')
   const rawFiles = findRawTrajFiles(sweRawDir)
   if (rawFiles.length === 0) {
@@ -191,8 +239,17 @@ export function resolveCaseResources(corpus: CorpusSpec, trajId: string): Resour
     }
   }
   const dockerConfig = raw.info?.docker_config
-  const image = dockerConfig?.base_image
-  if (typeof image !== 'string' || image.length === 0) {
+  const recordedImage = dockerConfig?.base_image
+  const mapEntry = imageMap?.[trajId]
+  let image: string
+  let imageSource: string
+  if (typeof recordedImage === 'string' && recordedImage.length > 0) {
+    image = recordedImage
+    imageSource = 'docker-config'
+  } else if (mapEntry) {
+    image = mapEntry.image
+    imageSource = mapEntry.imageSource ?? 'image-map'
+  } else {
     return { resolved: false, reason: 'no-docker-image', detail: rawFiles[0] }
   }
   const stepsPath = join(corpus.preparedDir, 'normalized', trajId, 'steps.json')
@@ -203,6 +260,7 @@ export function resolveCaseResources(corpus: CorpusSpec, trajId: string): Resour
 
   const runConfigCwd = raw.info?.config?.environment?.cwd
   const dockerCwd = dockerConfig?.cwd
+  const mapCwd = imageSource !== 'docker-config' ? mapEntry?.cwd : undefined
   let cwd: string
   let cwdSource: CwdSource
   if (typeof runConfigCwd === 'string' && runConfigCwd.length > 0) {
@@ -211,6 +269,9 @@ export function resolveCaseResources(corpus: CorpusSpec, trajId: string): Resour
   } else if (typeof dockerCwd === 'string' && dockerCwd.length > 0) {
     cwd = dockerCwd
     cwdSource = 'docker-config'
+  } else if (typeof mapCwd === 'string' && mapCwd.length > 0) {
+    cwd = mapCwd
+    cwdSource = 'image-map'
   } else {
     const observed = cwdFromPwdObservation(steps)
     if (!observed) return { resolved: false, reason: 'cwd-underivable' }
@@ -230,6 +291,7 @@ export function resolveCaseResources(corpus: CorpusSpec, trajId: string): Resour
       image,
       cwd,
       cwdSource,
+      imageSource,
       recordedStepTimeoutMs:
         typeof recordedTimeout === 'number' && recordedTimeout > 0 ? recordedTimeout * 1000 : null,
     },
@@ -250,7 +312,10 @@ export interface EnumerationResult {
  * Exclusion reasons are reported in resolution order:
  * raw trajectory → docker image → gold labels → steps.json → k range → cwd.
  */
-export function enumerateReplayableCases(corpora: readonly CorpusSpec[]): EnumerationResult {
+export function enumerateReplayableCases(
+  corpora: readonly CorpusSpec[],
+  imageMap?: ImageMap,
+): EnumerationResult {
   const replayable: ReplayableCase[] = []
   const excluded: ExcludedCase[] = []
   let labelEntryCount = 0
@@ -258,7 +323,7 @@ export function enumerateReplayableCases(corpora: readonly CorpusSpec[]): Enumer
     for (const entry of readLabelEntries(corpus.labelsPath)) {
       labelEntryCount += 1
       const trajId = entry.traj_id
-      const resolution = resolveCaseResources(corpus, trajId)
+      const resolution = resolveCaseResources(corpus, trajId, imageMap)
       if (!resolution.resolved) {
         excluded.push({ corpus: corpus.name, trajId, reason: resolution.reason, detail: resolution.detail })
         continue

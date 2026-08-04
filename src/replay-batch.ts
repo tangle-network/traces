@@ -36,7 +36,9 @@ import {
   type CorpusSpec,
   type EnumerationResult,
   enumerateReplayableCases,
+  type ImageMap,
   parseCorpusFlag,
+  readImageMap,
   type ReplayableCase,
 } from './replay-corpus.js'
 import {
@@ -162,6 +164,9 @@ export function dockerImagePreparer(options: DockerImagePreparerOptions = {}): I
 
 export interface ReplayBatchOptions {
   readonly corpora: readonly CorpusSpec[]
+  /** trajId → externally resolved environment identity, for families whose
+   *  raw trajectory records no docker_config (recorded config always wins). */
+  readonly imageMap?: ImageMap
   readonly out: string
   readonly baseUrl?: string
   readonly apiKey?: string
@@ -215,6 +220,9 @@ export interface ReplayBatchCaseRow {
   readonly corpus: string
   readonly trajId: string
   readonly image: string
+  /** 'docker-config' when the raw trajectory recorded the image, otherwise the
+   *  image-map entry's source label. */
+  readonly imageSource: string
   readonly derivedImage: string | null
   readonly cwd: string
   readonly cwdSource: string
@@ -378,7 +386,7 @@ function rate(numerator: number, denominator: number): number | null {
 
 export async function runReplayBatch(options: ReplayBatchOptions): Promise<ReplayBatchReport> {
   const onProgress = options.onProgress ?? (() => {})
-  const enumeration: EnumerationResult = enumerateReplayableCases(options.corpora)
+  const enumeration: EnumerationResult = enumerateReplayableCases(options.corpora, options.imageMap)
   let selected = enumeration.replayable
   if (options.caseFilter) {
     selected = selected.filter((c) => c.trajId.includes(options.caseFilter!))
@@ -416,6 +424,7 @@ export async function runReplayBatch(options: ReplayBatchOptions): Promise<Repla
       corpus: replayCase.corpus,
       trajId: replayCase.trajId,
       image: replayCase.image,
+      imageSource: replayCase.imageSource,
       cwd: replayCase.cwd,
       cwdSource: replayCase.cwdSource,
       k: replayCase.k,
@@ -1046,6 +1055,7 @@ export interface ReplayBatchCliArgs {
   readonly apiKeyEnv: string
   readonly maxLifetimeSeconds?: number
   readonly enumerateOnly: boolean
+  readonly imageMapPath?: string
 }
 
 export function parseReplayBatchArgs(argv: readonly string[]): ReplayBatchCliArgs | 'help' {
@@ -1065,6 +1075,7 @@ export function parseReplayBatchArgs(argv: readonly string[]): ReplayBatchCliArg
     if (arg === '--corpus') corpora.push(parseCorpusFlag(value))
     else values.set(arg, value)
   }
+  const imageMapPath = values.get('--image-map')
   if (corpora.length === 0) {
     throw new Error('replay-verify-batch: at least one --corpus name=<labels>::<prepared> is required')
   }
@@ -1089,6 +1100,7 @@ export function parseReplayBatchArgs(argv: readonly string[]): ReplayBatchCliArg
   }
   return {
     corpora,
+    imageMapPath,
     out: out ?? '.',
     fix,
     fixAttempts,
@@ -1115,12 +1127,18 @@ Usage:
   traces replay-verify-batch \\
       --corpus NAME=<labels.json>::<prepared-dir> [--corpus ...] \\
       --out DIR [--fix none|generate|loop] [--fix-attempts 3] [--enumerate-only] \\
+    [--image-map PATH] \\
       [--fix-model glm-5.2] [--fix-base-url URL] [--fix-api-key-env ZAI_GLM_API_KEY] \\
       [--max-fix-cases 30] [--seed 17] [--step-timeout MS] [--prefix-limit N] \\
       [--case-filter SUBSTRING] [--case-limit N] \\
       [--base-url URL] [--api-key-env SANDBOX_API_KEY] [--max-lifetime SECONDS]
 
-  Replayable = the raw trajectory carries info.docker_config.base_image AND the
+  --image-map supplies trajId → {image, cwd?, imageSource?} for families whose
+raw trajectory records no docker_config (e.g. SWE-agent); the recorded
+docker_config always wins, and every case row carries its imageSource.
+
+Replayable = the raw trajectory carries info.docker_config.base_image (or an
+image-map entry supplies one) AND the
   labels mark at least one gold incorrect step that is a real mid-trajectory
   action. k = the first such gold step; golds whose action is the agent's
   submit command (COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT) are skipped and
@@ -1152,8 +1170,9 @@ export async function cmdReplayVerifyBatch(argv: readonly string[]): Promise<voi
     process.stdout.write(replayBatchUsage())
     return
   }
+  const imageMap = parsed.imageMapPath ? readImageMap(parsed.imageMapPath) : undefined
   if (parsed.enumerateOnly) {
-    const enumeration = enumerateReplayableCases(parsed.corpora)
+    const enumeration = enumerateReplayableCases(parsed.corpora, imageMap)
     process.stdout.write(
       `${JSON.stringify(
         {
@@ -1162,6 +1181,7 @@ export async function cmdReplayVerifyBatch(argv: readonly string[]): Promise<voi
             corpus: c.corpus,
             trajId: c.trajId,
             image: c.image,
+            imageSource: c.imageSource,
             cwd: c.cwd,
             cwdSource: c.cwdSource,
             k: c.k,
@@ -1199,6 +1219,7 @@ export async function cmdReplayVerifyBatch(argv: readonly string[]): Promise<voi
   }
   const report = await runReplayBatch({
     corpora: parsed.corpora,
+    imageMap,
     out: parsed.out,
     baseUrl: parsed.baseUrl,
     apiKey,

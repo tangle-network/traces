@@ -33,6 +33,9 @@ export interface FixtureTrajectory {
     readonly timeoutSeconds?: number
     readonly taskMessage?: string
   }
+  /** SWE-agent layout: swe_raw/swe_agent__multi/<instance>/<instance>.traj
+   *  whose info carries no docker_config. */
+  readonly sweagentRaw?: { readonly instance: string }
   readonly taskMd?: string
 }
 
@@ -79,6 +82,25 @@ export function writeFixtureCorpus(
                 { role: 'user', content: traj.raw.taskMessage },
               ]
             : [],
+        }),
+      )
+    } else if (traj.sweagentRaw) {
+      const rawDir = join(
+        preparedDir,
+        'extracted',
+        traj.trajId,
+        'swe_raw',
+        'swe_agent__multi',
+        traj.sweagentRaw.instance,
+      )
+      mkdirSync(rawDir, { recursive: true })
+      writeFileSync(
+        join(rawDir, `${traj.sweagentRaw.instance}.traj`),
+        JSON.stringify({
+          environment: 'swe_main',
+          trajectory: (traj.steps ?? []).map((s) => ({ action: s.action })),
+          history: [],
+          info: { exit_status: 'submitted', submission: '' },
         }),
       )
     } else {
