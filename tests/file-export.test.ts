@@ -238,6 +238,29 @@ describe('trace evidence export', () => {
     }
   })
 
+  it('carries LLM event model and token usage onto the span, and never invents zeros', () => {
+    const result = exportTraceEvidenceRows([
+      {
+        type: 'llm.completion',
+        data: {
+          timestamp: '2026-08-04T00:00:00.000Z',
+          model: 'glm-5.2',
+          usage: { prompt_tokens: 1200, completion_tokens: 340 },
+        },
+      },
+      { type: 'llm.completion', data: { timestamp: '2026-08-04T00:00:01.000Z' } },
+    ], { format: 'sandbox-events' })
+    const llmSpans = result.spans.filter((item) => item.attributes['openinference.span.kind'] === 'LLM')
+    expect(llmSpans).toHaveLength(2)
+    expect(llmSpans[0]!.attributes).toEqual(expect.objectContaining({
+      'llm.model_name': 'glm-5.2',
+      'llm.token_count.prompt': 1200,
+      'llm.token_count.completion': 340,
+    }))
+    expect(llmSpans[1]!.attributes['llm.token_count.prompt']).toBeUndefined()
+    expect(llmSpans[1]!.attributes['llm.token_count.completion']).toBeUndefined()
+  })
+
   it('falls back to the runtime.ready event for environment identity and omits it when absent', () => {
     const fromReady = exportTraceEvidenceRows([
       {

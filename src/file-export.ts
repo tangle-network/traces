@@ -433,6 +433,50 @@ function sandboxEventsEnvironment(
   }
 }
 
+/**
+ * Model identity and token usage recorded on one LLM event row, across the
+ * key spellings sandbox recorders use (`usage.prompt_tokens` OpenAI-style,
+ * `tokenUsage.inputTokens` opencode-style, bare snake_case). Absent values
+ * stay absent — a zero here would claim a measured count that never was.
+ */
+function llmEventUsage(row: JsonObject): {
+  model?: string
+  inputTokens?: number
+  outputTokens?: number
+  costUsd?: number
+} {
+  const num = (keys: readonly string[]): number | undefined => {
+    for (const key of keys) {
+      const direct = numberValue(row[key])
+      if (direct !== undefined) return direct
+      for (const nest of ['data', 'usage', 'tokenUsage']) {
+        const container = row[nest]
+        if (!isObject(container)) continue
+        const value = numberValue(container[key])
+        if (value !== undefined) return value
+        for (const inner of ['usage', 'tokenUsage']) {
+          const deep = container[inner]
+          if (isObject(deep)) {
+            const deepValue = numberValue(deep[key])
+            if (deepValue !== undefined) return deepValue
+          }
+        }
+      }
+    }
+    return undefined
+  }
+  const model = findStringKey(row, ['model'], 3)
+  const inputTokens = num(['prompt_tokens', 'input_tokens', 'inputTokens'])
+  const outputTokens = num(['completion_tokens', 'output_tokens', 'outputTokens'])
+  const costUsd = num(['totalCostUsd', 'total_cost_usd', 'costUsd', 'cost_usd'])
+  return {
+    ...(model ? { model } : {}),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  }
+}
+
 function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject): OtlpSpan[] {
   const context = wrapper ?? {}
   const sessionId =
@@ -517,6 +561,7 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
       step: index,
       content: capText(stableJson(row)),
       extra,
+      ...(kind === 'LLM' ? llmEventUsage(row) : {}),
     }))
   })
 
