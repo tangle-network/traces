@@ -206,6 +206,71 @@ describe('trace evidence export', () => {
     expect(traceOnly.spans.every((item) => item.attributes['tangle.sessionId'] === undefined)).toBe(true)
   })
 
+  it('stamps wrapper environment identity onto every span and lifts it into the OTLP resource', () => {
+    const result = exportTraceEvidenceText(JSON.stringify({
+      session_id: 'session-env-1',
+      image: 'ghcr.io/tangle-network/sandbox:base',
+      imageDigest: 'sha256:' + 'c'.repeat(64),
+      sandboxId: 'sbx-env-1',
+      cwd: '/workspace/repo',
+      events: [
+        { type: 'start', timestamp: '2026-08-04T00:00:00.000Z' },
+        { type: 'tool-invocation', toolName: 'bash', input: 'ls', timestamp: '2026-08-04T00:00:01.000Z' },
+      ],
+    }), { format: 'sandbox-events' })
+    for (const item of result.spans) {
+      expect(item.attributes).toEqual(expect.objectContaining({
+        'container.image.name': 'ghcr.io/tangle-network/sandbox:base',
+        'container.image.digest': 'sha256:' + 'c'.repeat(64),
+        'tangle.sandbox.id': 'sbx-env-1',
+        'tangle.environment.cwd': '/workspace/repo',
+      }))
+    }
+    const rows = parseRows(serializeSpans(result.spans))
+    for (const row of rows) {
+      const resource = row.resource as { attributes: Record<string, unknown> }
+      expect(resource.attributes).toEqual(expect.objectContaining({
+        'container.image.name': 'ghcr.io/tangle-network/sandbox:base',
+        'container.image.digest': 'sha256:' + 'c'.repeat(64),
+        'tangle.sandbox.id': 'sbx-env-1',
+        'tangle.environment.cwd': '/workspace/repo',
+      }))
+    }
+  })
+
+  it('falls back to the runtime.ready event for environment identity and omits it when absent', () => {
+    const fromReady = exportTraceEvidenceRows([
+      {
+        type: 'runtime.ready',
+        data: {
+          timestamp: '2026-08-04T00:00:00.000Z',
+          image: 'ghcr.io/tangle-network/sandbox:ready',
+          sandboxId: 'sbx-ready-1',
+          workspaceRoot: '/workspace/from-ready',
+        },
+      },
+      { type: 'done', data: { timestamp: '2026-08-04T00:00:01.000Z' } },
+    ], { format: 'sandbox-events' })
+    for (const item of fromReady.spans) {
+      expect(item.attributes).toEqual(expect.objectContaining({
+        'container.image.name': 'ghcr.io/tangle-network/sandbox:ready',
+        'tangle.sandbox.id': 'sbx-ready-1',
+        'tangle.environment.cwd': '/workspace/from-ready',
+      }))
+      expect(item.attributes['container.image.digest']).toBeUndefined()
+    }
+
+    const uncaptured = exportTraceEvidenceRows([
+      { type: 'start', data: { timestamp: '2026-08-04T00:00:00.000Z' } },
+    ], { format: 'sandbox-events' })
+    for (const item of uncaptured.spans) {
+      expect(item.attributes['container.image.name']).toBeUndefined()
+      expect(item.attributes['container.image.digest']).toBeUndefined()
+      expect(item.attributes['tangle.sandbox.id']).toBeUndefined()
+      expect(item.attributes['tangle.environment.cwd']).toBeUndefined()
+    }
+  })
+
   it('writes an exported file from JSONL input', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-export-test-'))
     const input = join(dir, 'policy.jsonl')

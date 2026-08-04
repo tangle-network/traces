@@ -44,6 +44,26 @@ export interface SessionIntegrity {
   corruptions: SessionCorruptionReceipt[]
 }
 
+/**
+ * Execution-environment identity for a session — what replay verification
+ * needs to reconstruct where the session's commands actually ran. Populated
+ * by adapters/importers where known: sandbox sessions know their image
+ * (`runtime.ready` carries it); host-harness sessions usually do not.
+ * Absent fields mean "not recorded", never "none".
+ */
+export interface SessionEnvironment {
+  /** Container image reference (repo:tag or repo@digest) the session executed in. */
+  image?: string
+  /** Immutable image digest (`sha256:…`) — the replay-grade pin when known. */
+  imageDigest?: string
+  /** Sandbox/container instance id that executed the session. */
+  sandboxId?: string
+  /** Working directory commands executed from; null when unrecorded. */
+  cwd: string | null
+  /** Commit hash the workspace was at when the session ran, when recorded. */
+  gitCommit?: string
+}
+
 /** A single discovered session, before parsing. */
 export interface SessionRef {
   /** Harness id (matches the nix profile / backend name). */
@@ -58,6 +78,8 @@ export interface SessionRef {
   mtimeMs: number
   /** Present when parsing recovered valid records around corrupt source records. */
   integrity?: SessionIntegrity
+  /** Execution-environment identity, when the source records it (sandbox sessions). */
+  environment?: SessionEnvironment
 }
 
 export interface LocateOptions {
