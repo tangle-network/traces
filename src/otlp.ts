@@ -266,6 +266,13 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
   for (const k of ['tangle.subject.key', 'git.repository', 'git.branch', 'git.commit', 'tangle.cwd', 'traces.repo_resolution_source']) {
     if (a[k] != null) resourceAttrs[k] = a[k]
   }
+  // Execution-environment identity (see `SessionEnvironment` in types.ts).
+  // Carried at the resource level because replay verification consumes it per
+  // session, not per span — without it an eligible sandbox session loses its
+  // replay eligibility at export time.
+  for (const k of ['container.image.name', 'container.image.digest', 'tangle.sandbox.id', 'tangle.environment.cwd']) {
+    if (a[k] != null) resourceAttrs[k] = a[k]
+  }
   // How much of the ORIGINAL source is missing from this file. Carried at the
   // resource level so it survives every further round trip: `readOtlpInput`
   // merges resource attributes back onto the span, and adds this hop's own

@@ -17,7 +17,8 @@ import {
   LLM_REASONING_TOKEN_ATTR_KEYS,
   LLM_REASONING_TOKENS,
 } from '@tangle-network/agent-eval/trace-attributes'
-import { ATTR, sessionIdFromAttributes } from './attributes.js'
+import { ATTR, sessionIdFromAttributes, stampEnvironmentAttrs } from './attributes.js'
+import type { SessionEnvironment } from './types.js'
 import { capText } from './adapters/conversation.js'
 import { toolIoAttributes } from './adapters/tool-io.js'
 import { appendAll } from './arrays.js'
@@ -403,6 +404,79 @@ function eventKind(row: JsonObject, type: string): { kind: OtlpSpanKind; tool?: 
   return { kind: 'CHAIN' }
 }
 
+/**
+ * Environment identity for a recorded sandbox session. Two sources, wrapper
+ * context winning: explicit `image`/`imageDigest`/`sandboxId`/`cwd` keys on
+ * the wrapper object, else the stream's own `runtime.ready` event — the
+ * session-gateway event that names the sandbox and the image it booted.
+ * Null when the recording carries neither: "environment not captured" must
+ * stay distinguishable from a captured environment downstream.
+ */
+function sandboxEventsEnvironment(
+  context: JsonObject,
+  rows: readonly JsonObject[],
+): SessionEnvironment | null {
+  const ready = rows.find((row) => eventType(row) === 'runtime.ready')
+  const readyData = ready && isObject(ready.data) ? ready.data : undefined
+  const pick = (keys: readonly string[]): string | undefined =>
+    findStringKey(context, keys, 2) ?? (readyData ? findStringKey(readyData, keys, 2) : undefined)
+  const image = pick(['image'])
+  const imageDigest = pick(['imageDigest', 'image_digest'])
+  const sandboxId = pick(['sandboxId', 'sandbox_id'])
+  const cwd = pick(['cwd', 'workspaceRoot', 'workspace_root'])
+  if (!image && !imageDigest && !sandboxId && !cwd) return null
+  return {
+    ...(image ? { image } : {}),
+    ...(imageDigest ? { imageDigest } : {}),
+    ...(sandboxId ? { sandboxId } : {}),
+    cwd: cwd ?? null,
+  }
+}
+
+/**
+ * Model identity and token usage recorded on one LLM event row, across the
+ * key spellings sandbox recorders use (`usage.prompt_tokens` OpenAI-style,
+ * `tokenUsage.inputTokens` opencode-style, bare snake_case). Absent values
+ * stay absent — a zero here would claim a measured count that never was.
+ */
+function llmEventUsage(row: JsonObject): {
+  model?: string
+  inputTokens?: number
+  outputTokens?: number
+  costUsd?: number
+} {
+  const num = (keys: readonly string[]): number | undefined => {
+    for (const key of keys) {
+      const direct = numberValue(row[key])
+      if (direct !== undefined) return direct
+      for (const nest of ['data', 'usage', 'tokenUsage']) {
+        const container = row[nest]
+        if (!isObject(container)) continue
+        const value = numberValue(container[key])
+        if (value !== undefined) return value
+        for (const inner of ['usage', 'tokenUsage']) {
+          const deep = container[inner]
+          if (isObject(deep)) {
+            const deepValue = numberValue(deep[key])
+            if (deepValue !== undefined) return deepValue
+          }
+        }
+      }
+    }
+    return undefined
+  }
+  const model = findStringKey(row, ['model'], 3)
+  const inputTokens = num(['prompt_tokens', 'input_tokens', 'inputTokens'])
+  const outputTokens = num(['completion_tokens', 'output_tokens', 'outputTokens'])
+  const costUsd = num(['totalCostUsd', 'total_cost_usd', 'costUsd', 'cost_usd'])
+  return {
+    ...(model ? { model } : {}),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  }
+}
+
 function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject): OtlpSpan[] {
   const context = wrapper ?? {}
   const sessionId =
@@ -487,8 +561,14 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
       step: index,
       content: capText(stableJson(row)),
       extra,
+      ...(kind === 'LLM' ? llmEventUsage(row) : {}),
     }))
   })
+
+  // Environment identity rides every span so `toOpenInferenceSpan` lifts it
+  // into the OTLP resource block — the sandbox class is replay-eligible only
+  // if the image recorded at runtime survives export.
+  stampEnvironmentAttrs(spans, sandboxEventsEnvironment(context, rows) ?? undefined)
 
   if (!sessionId) return spans
   return spans.map((item) => ({

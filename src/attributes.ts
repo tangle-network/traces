@@ -53,10 +53,88 @@ export const ATTR = {
   CORRUPTION_BYTE_LENGTH: 'traces.session.corruption.byte_length',
   CORRUPTION_SHA256: 'traces.session.corruption.sha256',
   RAW_SOURCE_RETENTION: 'traces.session.raw_source_retention',
+  /** Container image reference the session executed in (OTel semconv key). */
+  CONTAINER_IMAGE: 'container.image.name',
+  /** Immutable image digest (`sha256:…`) — the replay-grade environment pin. */
+  CONTAINER_IMAGE_DIGEST: 'container.image.digest',
+  /** Sandbox/container instance id that executed the session. */
+  SANDBOX_ID: 'tangle.sandbox.id',
+  /** Recorded execution cwd, verbatim. Unlike `tangle.cwd` it is never
+   *  repaired against the host filesystem — replay verification needs the
+   *  in-container path even when no such path exists on this host. */
+  ENVIRONMENT_CWD: 'tangle.environment.cwd',
 } as const
 
 /** `tangle.ingest_source` value for CLI-uploaded traces. Wire contract. */
 export const INGEST_SOURCE_CLI = 'cli'
+
+/**
+ * Project a `SessionEnvironment` onto span-attribute keys. Only recorded
+ * fields are emitted — an absent image stays absent, so "environment not
+ * captured" and "environment captured without an image" remain different
+ * artifacts downstream.
+ */
+export function environmentAttributes(
+  environment: import('./types.js').SessionEnvironment | undefined,
+): Record<string, string> {
+  if (!environment) return {}
+  const attrs: Record<string, string> = {}
+  if (environment.image) attrs[ATTR.CONTAINER_IMAGE] = environment.image
+  if (environment.imageDigest) attrs[ATTR.CONTAINER_IMAGE_DIGEST] = environment.imageDigest
+  if (environment.sandboxId) attrs[ATTR.SANDBOX_ID] = environment.sandboxId
+  if (environment.cwd) attrs[ATTR.ENVIRONMENT_CWD] = environment.cwd
+  if (environment.gitCommit) attrs[ATTR.GIT_COMMIT] = environment.gitCommit
+  return attrs
+}
+
+/**
+ * Stamp environment identity onto every span so it survives into the OTLP
+ * resource block (see `toOpenInferenceSpan`). Additive — a value an adapter
+ * already set deliberately is never clobbered.
+ */
+export function stampEnvironmentAttrs(
+  spans: readonly { attributes: Record<string, unknown> }[],
+  environment: import('./types.js').SessionEnvironment | undefined,
+): void {
+  const attrs = environmentAttributes(environment)
+  const keys = Object.keys(attrs)
+  if (keys.length === 0) return
+  for (const span of spans) {
+    for (const key of keys) {
+      if (span.attributes[key] === undefined) span.attributes[key] = attrs[key]
+    }
+  }
+}
+
+/**
+ * Recover a `SessionEnvironment` from stamped span attributes — the read
+ * counterpart of `stampEnvironmentAttrs`, for consumers that hold only the
+ * OTLP artifact (replay-environment resolution reads the exported spans, not
+ * the source session). Returns null when no environment identity was
+ * recorded — "not captured" stays distinguishable from any captured value.
+ */
+export function environmentFromSpanAttributes(
+  spans: readonly { attributes: Readonly<Record<string, unknown>> }[],
+): import('./types.js').SessionEnvironment | null {
+  const first = (key: string): string | undefined => {
+    for (const span of spans) {
+      const value = span.attributes[key]
+      if (typeof value === 'string' && value.length > 0) return value
+    }
+    return undefined
+  }
+  const image = first(ATTR.CONTAINER_IMAGE)
+  const imageDigest = first(ATTR.CONTAINER_IMAGE_DIGEST)
+  const sandboxId = first(ATTR.SANDBOX_ID)
+  const cwd = first(ATTR.ENVIRONMENT_CWD)
+  if (!image && !imageDigest && !sandboxId && !cwd) return null
+  return {
+    ...(image ? { image } : {}),
+    ...(imageDigest ? { imageDigest } : {}),
+    ...(sandboxId ? { sandboxId } : {}),
+    cwd: cwd ?? null,
+  }
+}
 
 /** Harness used when none is specified on a single-harness command. */
 export const DEFAULT_HARNESS = 'claude-code'

@@ -7,7 +7,7 @@
  */
 
 import type { OtlpSpan } from './otlp.js'
-import { stampSessionIdentity } from './attributes.js'
+import { stampEnvironmentAttrs, stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
 import { cwdMatchesSelection, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
@@ -58,6 +58,10 @@ export async function parseSession(
   if (spans.length === 0) throw new EmptySessionError(ref.path)
   stampSessionIntegrity(ref, spans)
   stampSessionIdentity(spans, ref.sessionId)
+  // Environment identity stamps before repo resolution: recorded ground truth
+  // (the image/cwd the session actually ran in) outranks host-side inference.
+  stampEnvironmentAttrs(spans, ref.environment)
+  if (ref.cwd === null && ref.environment?.cwd) ref.cwd = ref.environment.cwd
   const repo = await resolveSessionRepoAttrs(ref.cwd, spans)
   if (repo.cwd) ref.cwd = repo.cwd
   stampRepoAttrs(spans, repo.attrs)
