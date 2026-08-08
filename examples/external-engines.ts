@@ -10,6 +10,7 @@ import {
   commandRedactor,
   haloAnalyzer,
   hodoscopeAnalyzer,
+  primeAnalyzer,
   writeOtlpFile,
 } from '@tangle-network/traces'
 
@@ -41,7 +42,19 @@ console.log(
     : `hodoscope unavailable: ${discovery.error}`,
 )
 
-// 3) External REDACTOR: scrub prose with your own PII model before upload. The
+// 3) PRIME ENGINE: one-shot RLM through an OpenAI-compatible bridge (run
+//    cli-bridge's prime backend locally, or set TRACES_PRIME_BRIDGE_URL).
+//    The full span projection travels inline; findings come back with
+//    validated trace:// span evidence.
+const prime = primeAnalyzer({ defaultPrompt: 'find unsupported completion claims' })
+const primeResult = await prime.analyze(otlp)
+console.log(
+  primeResult.ok
+    ? `${primeResult.findings?.length ?? 0} prime finding(s)\n${primeResult.output}`
+    : `prime bridge unavailable: ${primeResult.error}`,
+)
+
+// 4) External REDACTOR: scrub prose with your own PII model before upload. The
 //    command reads a JSON array of strings on stdin and writes the scrubbed array
 //    on stdout (a 3-line wrapper adapts openai/privacy-filter's `opf`).
 const redactor = commandRedactor({ command: 'my-pii-scrubber' })

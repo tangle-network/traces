@@ -68,9 +68,12 @@ traces analyze --all --last 20 --analyzer hodoscope
 
 # Run any installed command that accepts an OpenInference file path.
 traces analyze --last 1 --analyzer my-trace-tool
+
+# One-shot prime-RLM analysis through a local OpenAI-compatible bridge.
+traces analyze --last 1 --analyzer prime --analyzer-prompt "find unsupported completion claims"
 ```
 
-`--model` is forwarded to the built-in model-assisted analysts, HALO, and Hodoscope.
+`--model` is forwarded to the built-in model-assisted analysts, HALO, Hodoscope, and prime.
 HALO and Hodoscope use their own provider clients and credentials.
 The Hodoscope adapter pins version `0.2.4` and uses Python 3.11 through `uvx`.
 
@@ -86,6 +89,41 @@ type ExternalAnalysisResult =
 Raw JSON is still a `report`.
 Only an adapter that validates the full finding shape may return `findings`.
 Hodoscope always returns `discovery`, and each candidate has `status: 'needs_review'` plus its source trace and span.
+
+### Prime engine
+
+`--analyzer prime` runs a one-shot analyst over the emitted OTLP artifact through an OpenAI-compatible bridge, such as cli-bridge's prime backend.
+Unlike the `--llm` analysts, which drill into the trace with paged tools, prime has no REPL and no trace tools: the full span projection is inlined into a single prompt as JSON.
+Oversized projections are re-rendered with a per-attribute character cap; if the projection still exceeds the inline budget the engine fails loud instead of silently dropping spans.
+
+Prerequisites:
+
+- A running bridge that accepts `POST /v1/chat/completions` and routes the configured model to the prime backend.
+- No key handling here: the bridge owns provider credentials.
+
+Configuration (flags first, then environment, then defaults):
+
+| Setting | Source | Default |
+| --- | --- | --- |
+| Bridge root URL | `TRACES_PRIME_BRIDGE_URL` | `http://localhost:4181` |
+| Model | `--model`, then `TRACES_PRIME_MODEL` | `prime/zai/glm-5.2` |
+| Per-call deadline | `TRACES_PRIME_TIMEOUT_MS` | `1200000` (20 min) |
+| Question | `--analyzer-prompt` | a general diagnosis question |
+
+```bash
+traces analyze --last 1 --analyzer prime
+TRACES_PRIME_BRIDGE_URL=http://localhost:4181 traces analyze --last 1 --analyzer prime --analyzer-prompt "find unsupported completion claims"
+```
+
+Output expectations:
+
+- The reply contract is one fenced JSON block of short strings citing span ids verbatim; a structurally malformed reply gets exactly one bounded repair turn that carries the malformed reply and the contract, never the trajectory.
+- A still-malformed reply after repair is a failed result (`ok: false`) with the raw reply preserved for inspection; one failed engine never discards the other results.
+- Valid rows become full `findings` with `trace://` span evidence, validated against the artifact like every other findings-kind engine; rows citing unknown or ambiguous span ids are rejected with a recorded reason.
+- Zero findings from a well-formed reply is an honest null, not a failure.
+- Bridge-reported token usage and call counts are recorded in the result output; cost stays uncaptured because this adapter has no pricing table.
+
+The scored prime-vs-dspy comparison — same trajectories, same scoring — lives in `@tangle-network/agent-eval`'s analyst benchmark (`runAnalystBenchmark`); this engine is the capture-side entry point, not the scoreboard.
 
 ## Write one analyst
 

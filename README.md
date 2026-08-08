@@ -548,11 +548,13 @@ traces analyze --last 1
 traces analyze --last 1 --llm --budget 0.50
 traces analyze --last 1 --analyzer halo --analyzer-prompt "find token waste"
 traces analyze --all --last 20 --analyzer hodoscope
+traces analyze --last 1 --analyzer prime
 traces analyze --last 1 --analyzer my-installed-command
 ```
 
 HALO returns a diagnosis report.
 Hodoscope samples distinct behaviors and marks every sample `needs_review`.
+Prime posts the full span projection to an OpenAI-compatible bridge (`TRACES_PRIME_BRIDGE_URL`, default `http://localhost:4181`) and returns validated findings with span evidence.
 An arbitrary command returns a raw report unless its SDK adapter explicitly parses a stricter output type.
 
 Read [Trace analysts](./docs/trace-analysts.md) for the output contract, a minimal custom analyst, and labeled benchmark setup.
@@ -564,7 +566,7 @@ Read [Trace analysts](./docs/trace-analysts.md) for the output contract, a minim
 traces upload --since 24h --dry-run --redactor "my-pii-scrubber"
 ```
 
-In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnalyzer`, `hodoscopeAnalyzer`, `commandAnalyzer`, `commandRedactor`, `applyRedactor`, `runExternalAnalyzers`).
+In the SDK these are the `ExternalAnalyzer` and `Redactor` interfaces (`haloAnalyzer`, `hodoscopeAnalyzer`, `primeAnalyzer`, `commandAnalyzer`, `commandRedactor`, `applyRedactor`, `runExternalAnalyzers`).
 See [`examples/external-engines.ts`](./examples/external-engines.ts).
 
 > The built-in agentic analysts (`--llm`) run on the Tangle router by default: set `TANGLE_API_KEY`.

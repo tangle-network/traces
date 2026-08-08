@@ -96,6 +96,7 @@ export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement(
 // ── External engines (NOT bundled — shell out to tools you install) ────────
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor
 export * from './hodoscope.js' // hodoscopeAnalyzer / writeHodoscopeInput
+export * from './analyst-engine-prime.js' // primeAnalyzer — one-shot RLM over an OpenAI-compatible bridge
 
 // ── Live observation (event-driven; feed any system) ──────────────────────
 export * from './live.js' // streamSessions(), traceStreamEventsFromSpans(), semantic live findings
