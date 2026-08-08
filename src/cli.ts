@@ -13,6 +13,7 @@
  *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
  *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
+ *   traces bundle  --harness claude-code --session <id|path> --out <dir>
  *   traces inspect session-index.json [--out inspection-report.md]
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
  *   traces import-codetracebench <rows.jsonl> --trajectory-dir <dir> --out <dir> --revision <40-or-64-character-hex>
@@ -41,9 +42,8 @@
 import { readFileSync } from 'node:fs'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
-import { ACTOR_ATTR } from './adapters/conversation.js'
 import { appendAll } from './arrays.js'
-import { ATTR, indexSessionIdsByTrace, sessionIdFromAttributes } from './attributes.js'
+import { indexSessionIdsByTrace } from './attributes.js'
 import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { cmdReplayVerifyBatch } from './replay-batch.js'
@@ -103,16 +103,14 @@ import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession } from './session-source.js'
-import {
-  describeSessionRelationship,
-} from './session-relationship.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
 import {
   type SessionWorkflowIssue,
   type SessionWorkflowSummary,
 } from './session-workflow.js'
+import { assembleSessionBundle } from './bundle.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
-import { CORRUPTION_RECEIPT_DISPLAY_LIMIT } from './report.js'
+import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -324,6 +322,7 @@ const CURRENT_SESSION_COMMANDS = new Set([
   'convert',
   'index',
   'evidence',
+  'bundle',
   'stream',
 ])
 
@@ -569,54 +568,6 @@ interface CollectedSpans {
   conformanceUnreadable?: UnreadableSourceRows
 }
 
-function selectedSessionSource(
-  ref: SessionRef,
-  spans: readonly OtlpSpan[],
-  sessionIdOverride?: string,
-): SelectedSessionSource {
-  const root = spans.find((item) => item.parent_span_id === null) ?? spans[0]
-  const prompt = spans.find(
-    (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
-  ) ?? spans.find((item) => item.name === 'user.prompt') ?? spans.find(
-    (item) => item.attributes['span.type'] === 'interaction' && typeof item.attributes.content === 'string',
-  )
-  const content = typeof prompt?.attributes.content === 'string' ? prompt.attributes.content : ''
-  const firstLine = content.split(/\r?\n/, 1)[0]!.trim()
-  const subject = firstLine.length > 240
-    ? `${firstLine.slice(0, 240)}… [+${firstLine.length - 240} chars]`
-    : firstLine
-  const role = root?.attributes['traces.session.role']
-  const parentSessionId = root?.attributes['traces.parent_session_id']
-  const relationship = describeSessionRelationship(ref, spans)
-  const corruptionDigest = root?.attributes[ATTR.CORRUPTION_DIGEST]
-  const sessionId = [
-    sessionIdOverride,
-    root ? sessionIdFromAttributes(root.attributes) : undefined,
-    root?.trace_id,
-    ref.sessionId,
-  ].find((value): value is string => typeof value === 'string' && value.length > 0)!
-  return {
-    sessionId,
-    path: ref.path,
-    subject,
-    role: role === 'operator' || role === 'child' ? role : 'unknown',
-    ...(typeof parentSessionId === 'string' ? { parentSessionId } : {}),
-    childSessionIds: relationship.childSessionIds,
-    ...(relationship.depth !== undefined ? { depth: relationship.depth } : {}),
-    ...(relationship.agentNickname ? { agentNickname: relationship.agentNickname } : {}),
-    ...(relationship.agentRole ? { agentRole: relationship.agentRole } : {}),
-    ...(relationship.agentPath ? { agentPath: relationship.agentPath } : {}),
-    ...(relationship.taskScope ? { taskScope: relationship.taskScope } : {}),
-    ...(relationship.turnId ? { turnId: relationship.turnId } : {}),
-    integrity: ref.integrity?.status ?? 'complete',
-    ...(ref.integrity ? {
-      corruptionCount: ref.integrity.corruptions.length,
-      ...(typeof corruptionDigest === 'string' ? { corruptionDigest } : {}),
-      corruptions: ref.integrity.corruptions.slice(0, CORRUPTION_RECEIPT_DISPLAY_LIMIT),
-    } : {}),
-  }
-}
-
 /**
  * Read OTLP spans a foreign system emitted, skipping the adapter stage
  * entirely: the analysis engine is already OTLP-native, so conforming spans
@@ -644,7 +595,7 @@ async function collectOtlpSpans(path: string): Promise<CollectedSpans> {
     spans: [...input.spans],
     harness: 'otlp',
     cwds: [],
-    sources: [...byTrace].map(([traceId, spans]) => selectedSessionSource({
+    sources: [...byTrace].map(([traceId, spans]) => sessionReportSource({
       harness: 'otlp',
       sessionId: traceId,
       path: fileByTrace.get(traceId) ?? path,
@@ -675,7 +626,7 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
   for (const row of selection.rows) {
     harnesses.add(row.adapter.harness)
     appendAll(spans, row.spans)
-    sources.push(selectedSessionSource(row.ref, row.spans))
+    sources.push(sessionReportSource(row.ref, row.spans))
     if (row.ref.cwd) cwds.push(row.ref.cwd)
   }
   return {
@@ -817,6 +768,26 @@ async function cmdIndex(args: Args): Promise<void> {
   } else {
     process.stdout.write(serializeSessionIndex(index))
   }
+}
+
+async function cmdBundle(args: Args): Promise<void> {
+  if (!args.session) {
+    throw new Error('bundle needs --session <id|path>; run `traces list` to pick a session ID')
+  }
+  if (!args.out) throw new Error('bundle needs --out <dir> — a new or empty directory for the bundle')
+  const { adapter, ref } = await resolveSelectedSession(args)
+  const result = await assembleSessionBundle({
+    adapter,
+    ref,
+    outDir: args.out,
+    minLoopOccurrences: args.minLoop,
+    log: analystLog,
+  })
+  const { manifest } = result
+  console.log(
+    `session bundle → ${result.directory}  (${manifest.files.length} file(s), ` +
+      `${manifest.ledgerSlices.length} ledger slice(s), ${manifest.absent.length} recorded absent)`,
+  )
 }
 
 async function cmdInspect(args: Args): Promise<void> {
@@ -1089,7 +1060,7 @@ async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
     spans: result.spans,
     harness: result.format,
     cwds: [],
-    sources: [...sessions].map(([sessionId, spans]) => selectedSessionSource({
+    sources: [...sessions].map(([sessionId, spans]) => sessionReportSource({
       harness: result.format,
       sessionId,
       path: args.input!,
@@ -1564,6 +1535,10 @@ Commands:
   improve   Write findings, evidence, report, and canonical trace artifacts
   convert   Emit OTLP-JSONL only, to --otlp-out (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
+  bundle    Assemble one session's durable evidence directory: transcript +
+            subagents, derived index/report/evidence/OTLP, the repo's .evolve
+            ledger sliced to the session window, git log, and a sha256 manifest
+            (needs --session <id|path> and --out <new-dir>)
   inspect   Read a session index and print ranked improvement findings
   export    Convert evidence/events files to OpenInference JSONL for HALO
   import-codetracebench
@@ -1707,6 +1682,7 @@ async function main(): Promise<void> {
     case 'improve': await cmdImprove(args); break
     case 'convert': await cmdConvert(args); break
     case 'index': await cmdIndex(args); break
+    case 'bundle': await cmdBundle(args); break
     case 'inspect': await cmdInspect(args); break
     case 'export': await cmdExport(args); break
     case 'import-codetracebench': await cmdImportCodeTraceBench(args); break

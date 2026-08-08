@@ -31,6 +31,7 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Watch a run tree](#watch-a-run-tree)
 - [Improvement engine](#improvement-engine)
 - [Session index](#session-index)
+- [Session bundle](#session-bundle)
 - [Policy-mining evidence](#policy-mining-evidence)
 - [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
 - [Trace analysts](#trace-analysts)
@@ -243,6 +244,7 @@ traces analyze  --otlp spans.otlp.jsonl            # analyse foreign OTLP, no ad
 traces analyze  --otlp results/sessions --out report.md
 traces convert  --harness claude-code --last 1 --otlp-out spans.jsonl   # OTLP only
 traces index    --all --since 24h --out session-index.json
+traces bundle   --harness claude-code --session <id|path> --out bundle-dir   # one session's durable evidence dir
 traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces evidence --harness codex-exec --session /tmp/codex.jsonl --cwd "$PWD" --out policy-evidence.jsonl
@@ -450,10 +452,30 @@ The index contains:
 - one row per session with harness, session id, path, cwd, repo labels, and time bounds
 - behavior metrics: spans, LLM turns, tool calls, tool errors, tokens, models, and tools
 - signal summaries: stuck loops and tool error rate
-- nearby context files for joins: `AGENTS.md`, `CLAUDE.md`, and `.evolve` JSONL / reflection artifacts, with markdown heading/ToC and JSONL key summaries
+- nearby context files for joins: `AGENTS.md`, `CLAUDE.md`, and `.evolve` artifacts — the JSONL ledgers, `scorecard.json` / `current.json`, reflections, `handoffs/` plus the flat `handoff-*.md` convention, and `progress.md` — with markdown heading/ToC and JSONL key summaries
 
 `traces inspect` reads that index back and prints ranked improvement findings over the sessions and nearby context.
 It is intentionally read-only: it points to repeated-call loops, high tool-error sessions, missing repo attribution, long docs without Contents, invalid JSONL rows, and skill-run rows that cannot be joined back to a session.
+
+## Session bundle
+
+`traces bundle` assembles ONE session's durable evidence directory — the input for any downstream consumer that must cite the session after the live stores rotate.
+It composes commands this CLI already owns and never spends a model call.
+
+```bash
+traces bundle --harness claude-code --session <id|path> --out bundle-dir
+```
+
+The bundle directory:
+
+- `session/` — the transcript byte-for-byte, plus the sibling subagents directory when one exists
+- `derived/` — `session-index.json`, the deterministic `report.md`, `evidence.jsonl`, and the OTLP span artifact
+- `ledger/` — the repo's `.evolve` slices for the session window: `experiments.jsonl` and `skill-runs.jsonl` rows inside the padded span window, `current.json` / `scorecard.json` / `progress.md` copied whole, the latest flat `handoff-*.md`, and reflections dated inside the window
+- `repo/git-log.txt` — commits in the session window from the session's cwd
+- `manifest.json` — SHA-256 + byte count per file, provenance (session id, harness, cwd, transcript hash, session window), every absent artifact with its reason, per-slice row counts, and the bundle's known limits
+
+A missing transcript fails the assembly loudly.
+Every optional input that is absent (no subagents, no `.evolve`, no git repo) is recorded in `manifest.absent` with the probed path — a fact, not an error.
 
 ## Policy-mining evidence
 

@@ -122,6 +122,10 @@ describe('session index', () => {
     await writeFile(join(root, '.evolve', 'skill-runs.jsonl'), '{"skill":"/evolve","verdict":"pass"}\n{"skill":"/verify"}\nnot-json\n', 'utf8')
     await writeFile(join(root, '.evolve', 'governor.jsonl'), '{"next":"verify"}\n', 'utf8')
     await writeFile(join(root, '.evolve', 'reflections', 'r.md'), '# Reflection\n\nNext: verify.\n', 'utf8')
+    // The live convention: flat handoffs + progress.md + current.json at the .evolve root.
+    await writeFile(join(root, '.evolve', 'handoff-2026-01-01-close.md'), '# Handoff\n\nResume: tests.\n', 'utf8')
+    await writeFile(join(root, '.evolve', 'progress.md'), '# Progress\n\nDone: index.\n', 'utf8')
+    await writeFile(join(root, '.evolve', 'current.json'), '{"focus":"index"}\n', 'utf8')
 
     const adapter: HarnessTraceAdapter = {
       harness: 'synthetic',
@@ -140,15 +144,22 @@ describe('session index', () => {
 
     expect(index.context?.totals.roots).toBe(1)
     expect(index.context?.totals.instructionDocs).toBe(1)
-    expect(index.context?.totals.evolveFiles).toBe(2)
+    expect(index.context?.totals.evolveFiles).toBe(3)
     expect(index.context?.totals.jsonlRows).toBe(4)
     expect(index.context?.totals.invalidJsonlRows).toBe(1)
     expect(index.context?.roots[0]?.files.map((file) => file.kind).sort()).toEqual([
+      'evolve-json',
       'evolve-jsonl',
       'evolve-jsonl',
+      'handoff',
       'instruction-doc',
+      'other',
       'reflection',
     ])
+    const handoff = index.context?.roots[0]?.files.find((file) => file.kind === 'handoff')
+    expect(handoff?.path.endsWith('handoff-2026-01-01-close.md')).toBe(true)
+    const progress = index.context?.roots[0]?.files.find((file) => file.kind === 'other')
+    expect(progress?.path.endsWith('progress.md')).toBe(true)
     const agents = index.context?.roots[0]?.files.find((file) => file.path.endsWith('AGENTS.md'))
     expect(agents?.markdown).toEqual({ headings: 3, hasToc: true })
     const skillRuns = index.context?.roots[0]?.files.find((file) => file.path.endsWith('skill-runs.jsonl'))

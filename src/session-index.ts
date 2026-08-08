@@ -174,7 +174,14 @@ async function dirExists(path: string): Promise<boolean> {
   return Boolean((await pathStat(path))?.isDirectory())
 }
 
-async function findContextRoot(cwd: string | null | undefined): Promise<string | null> {
+/**
+ * Walk up from a session cwd to the root the session's local context lives
+ * under: the first ancestor carrying `.git`, `.evolve`, `AGENTS.md`, or
+ * `CLAUDE.md`. The context index and the session bundler both anchor their
+ * `.evolve` reads here so "which ledger belongs to this session" has exactly
+ * one answer.
+ */
+export async function findContextRoot(cwd: string | null | undefined): Promise<string | null> {
   if (!cwd) return null
   let current = cwd
   const s = await pathStat(current)
@@ -286,14 +293,34 @@ async function collectContextRoot(root: string): Promise<TraceContextRoot> {
     const summary = await summarizeFile(join(evolve, name), 'evolve-jsonl')
     if (summary) files.push(summary)
   }
-  for (const name of ['scorecard.json']) {
+  for (const name of ['scorecard.json', 'current.json']) {
     const summary = await summarizeFile(join(evolve, name), 'evolve-json')
     if (summary) files.push(summary)
   }
   files.push(...(await walkMarkdown(join(evolve, 'reflections'), 'reflection')))
   files.push(...(await walkMarkdown(join(evolve, 'handoffs'), 'handoff')))
+  // Live convention: handoffs are written FLAT as `.evolve/handoff-*.md`, with
+  // `progress.md` beside them — a handoffs/ subdirectory walk alone leaves the
+  // current decision records invisible to the index.
+  for (const name of await listEvolveRootFiles(evolve)) {
+    if (/^handoff-.*\.md$/.test(name)) {
+      const summary = await summarizeFile(join(evolve, name), 'handoff')
+      if (summary) files.push(summary)
+    }
+  }
+  const progress = await summarizeFile(join(evolve, 'progress.md'), 'other')
+  if (progress) files.push(progress)
 
   return { root, files: files.sort((a, b) => a.path.localeCompare(b.path)) }
+}
+
+async function listEvolveRootFiles(evolve: string): Promise<string[]> {
+  try {
+    const entries = await readdir(evolve, { withFileTypes: true })
+    return entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort()
+  } catch {
+    return []
+  }
 }
 
 async function collectContextIndex(records: readonly PolicyEvidenceRecord[]): Promise<TraceContextIndex> {

@@ -88,6 +88,7 @@ export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analyst
 export * from './execution.js' // shared execution accounting over normalized spans
 export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog
+export * from './bundle.js' // assembleSessionBundle() — one session's durable evidence dir
 export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
 export * from './chat-trajectory.js' // generic chat trajectory to stable step spans
