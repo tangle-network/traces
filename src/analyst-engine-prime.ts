@@ -315,9 +315,6 @@ function findingRowDefect(row: unknown, spanTraces: ReadonlyMap<string, Set<stri
   if (!Array.isArray(record.span_ids) || record.span_ids.length === 0) {
     return 'span_ids must be a non-empty array'
   }
-  if (record.span_ids.length > 2 * MAX_SPAN_IDS_PER_FINDING) {
-    return `span_ids cites ${record.span_ids.length} spans (cap ${MAX_SPAN_IDS_PER_FINDING})`
-  }
   const spanIds: string[] = []
   for (const id of record.span_ids) {
     if (typeof id !== 'string' || id.length === 0) return 'span_ids must contain non-empty strings'
@@ -325,6 +322,11 @@ function findingRowDefect(row: unknown, spanTraces: ReadonlyMap<string, Set<stri
     if (!traces) return `span_id '${id}' is not in the trajectory`
     if (traces.size > 1) return `span_id '${id}' is ambiguous across ${traces.size} traces`
     if (!spanIds.includes(id)) spanIds.push(id)
+  }
+  // The contract says 1..MAX; enforce it on the deduplicated list so repeated
+  // ids neither dodge the cap nor trip it spuriously.
+  if (spanIds.length > MAX_SPAN_IDS_PER_FINDING) {
+    return `span_ids cites ${spanIds.length} distinct spans (cap ${MAX_SPAN_IDS_PER_FINDING})`
   }
   if (typeof record.severity !== 'string' || !SEVERITIES.has(record.severity)) {
     return 'severity outside the analyst severity enum'
