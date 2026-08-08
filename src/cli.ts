@@ -58,6 +58,7 @@ import {
 import { parseCorpusFlag } from './replay-corpus.js'
 import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
+import { primeAnalyzer } from './analyst-engine-prime.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import {
@@ -1115,6 +1116,8 @@ function externalAnalyzersFromArgs(args: Args) {
       ? haloAnalyzer({ defaultPrompt: args.analyzerPrompt, model: args.model })
       : spec === 'hodoscope'
         ? hodoscopeAnalyzer({ summarizeModel: args.model })
+      : spec === 'prime'
+        ? primeAnalyzer({ defaultPrompt: args.analyzerPrompt, ...(args.model ? { model: args.model } : {}) })
       : commandAnalyzer({ name: spec, command: spec, args: (p, prompt) => (prompt ? [p, prompt] : [p]) }),
   )
 }
@@ -1627,7 +1630,10 @@ Options:
   --model <id>     Model for --llm, HALO, and Hodoscope (default for --llm: ${DEFAULT_ANALYST_MODEL})
   --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
   --budget <usd>   USD cap for agentic analysts
-  --analyzer <id>  analyze: also run halo, hodoscope, or an installed command (repeatable)
+  --analyzer <id>  analyze: also run halo, hodoscope, prime, or an installed command (repeatable)
+                   prime posts the full span projection to an OpenAI-compatible bridge
+                   (TRACES_PRIME_BRIDGE_URL, default http://localhost:4181;
+                   TRACES_PRIME_MODEL, default prime/zai/glm-5.2; TRACES_PRIME_TIMEOUT_MS)
   --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
   --verify-findings analyze: execute the findings as sandbox replay proofs and mark
                    each VERIFIED (receipt path) or UNVERIFIABLE (reason). Needs
