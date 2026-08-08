@@ -13,12 +13,16 @@ import type {
   TokenUsageInsight,
 } from '@tangle-network/agent-eval/contract'
 import type { AdoptionReport } from './adoption.js'
+import { ACTOR_ATTR } from './adapters/conversation.js'
+import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { incompleteInputsNote, type UnavailableCapabilities } from './conformance.js'
 import type { LoopConvergenceReport, SteeringChainReport } from './loop-analysis.js'
+import type { OtlpSpan } from './otlp.js'
 import type { PipelineReport } from './pipelines.js'
 import type { ReactionReport } from './reactions.js'
+import { describeSessionRelationship } from './session-relationship.js'
 import type { SessionWorkflowIssue, SessionWorkflowSummary } from './session-workflow.js'
-import type { SessionCorruptionReceipt } from './types.js'
+import type { SessionCorruptionReceipt, SessionRef } from './types.js'
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 export const CORRUPTION_RECEIPT_DISPLAY_LIMIT = 100
@@ -73,6 +77,60 @@ export interface ReportSource {
   corruptionCount?: number
   corruptionDigest?: string
   corruptions?: readonly SessionCorruptionReceipt[]
+}
+
+/**
+ * Build the report-source header row for one parsed session: subject line from
+ * the first human prompt, parent/child relationship, and any corruption
+ * receipts. Every span-consuming surface (CLI report, bundle) derives its
+ * source identity through here so the same session always reads the same.
+ */
+export function sessionReportSource(
+  ref: SessionRef,
+  spans: readonly OtlpSpan[],
+  sessionIdOverride?: string,
+): ReportSource {
+  const root = spans.find((item) => item.parent_span_id === null) ?? spans[0]
+  const prompt = spans.find(
+    (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
+  ) ?? spans.find((item) => item.name === 'user.prompt') ?? spans.find(
+    (item) => item.attributes['span.type'] === 'interaction' && typeof item.attributes.content === 'string',
+  )
+  const content = typeof prompt?.attributes.content === 'string' ? prompt.attributes.content : ''
+  const firstLine = content.split(/\r?\n/, 1)[0]!.trim()
+  const subject = firstLine.length > 240
+    ? `${firstLine.slice(0, 240)}… [+${firstLine.length - 240} chars]`
+    : firstLine
+  const role = root?.attributes['traces.session.role']
+  const parentSessionId = root?.attributes['traces.parent_session_id']
+  const relationship = describeSessionRelationship(ref, spans)
+  const corruptionDigest = root?.attributes[ATTR.CORRUPTION_DIGEST]
+  const sessionId = [
+    sessionIdOverride,
+    root ? sessionIdFromAttributes(root.attributes) : undefined,
+    root?.trace_id,
+    ref.sessionId,
+  ].find((value): value is string => typeof value === 'string' && value.length > 0)!
+  return {
+    sessionId,
+    path: ref.path,
+    subject,
+    role: role === 'operator' || role === 'child' ? role : 'unknown',
+    ...(typeof parentSessionId === 'string' ? { parentSessionId } : {}),
+    childSessionIds: relationship.childSessionIds,
+    ...(relationship.depth !== undefined ? { depth: relationship.depth } : {}),
+    ...(relationship.agentNickname ? { agentNickname: relationship.agentNickname } : {}),
+    ...(relationship.agentRole ? { agentRole: relationship.agentRole } : {}),
+    ...(relationship.agentPath ? { agentPath: relationship.agentPath } : {}),
+    ...(relationship.taskScope ? { taskScope: relationship.taskScope } : {}),
+    ...(relationship.turnId ? { turnId: relationship.turnId } : {}),
+    integrity: ref.integrity?.status ?? 'complete',
+    ...(ref.integrity ? {
+      corruptionCount: ref.integrity.corruptions.length,
+      ...(typeof corruptionDigest === 'string' ? { corruptionDigest } : {}),
+      corruptions: ref.integrity.corruptions.slice(0, CORRUPTION_RECEIPT_DISPLAY_LIMIT),
+    } : {}),
+  }
 }
 
 export interface DeterministicSummary {
