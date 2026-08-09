@@ -73,6 +73,21 @@ traces improve --harness codex --current --latest-turn --workflow \
 `improve` writes findings, evidence, a report, and spans.
 It does not edit an agent, repository, memory store, or knowledge base.
 
+Write one session's durable evidence directory when a later reader must cite the session:
+
+```bash
+traces bundle --harness claude-code --session <id-or-path> --out .traces/bundle
+```
+
+`bundle` copies the transcript, the derived report and spans, the `.evolve` ledger rows inside the session window, and a `manifest.json` with a SHA-256 per file.
+It spends no model call.
+Use it when the live stores can rotate before the reader arrives.
+A missing transcript stops the assembly.
+An absent optional input is recorded in `manifest.absent` with the probed path.
+
+The bundle holds the whole session transcript.
+Do not give a bundle to a writer that must not see an earlier conclusion, because the transcript holds the text of every file the session wrote.
+
 ## Report
 
 - State the source (`--otlp <path>` or the harness), selected task boundary, session and span counts, and integrity warnings.

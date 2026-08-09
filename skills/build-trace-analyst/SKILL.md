@@ -48,6 +48,19 @@ Use `runAnalystBenchmark` with `registryBenchmarkRunner` from `@tangle-network/a
 Use AgentRx or CodeTraceBench labels when they match the finding.
 Compare the candidate with a no-findings baseline and relevant maintained or external analysts on identical cases and limits.
 
+Two shipped engines are available as comparison arms.
+`--analyzer prime` inlines the whole span projection into one prompt and needs no REPL.
+`--analyzer halo` and `--analyzer hodoscope` drill into the trace with paged tools.
+Compare an inline arm with a paged arm to separate the prompt from the navigation.
+
+```bash
+traces analyze --last 1 --analyzer prime
+```
+
+Assert the served model, not the requested id.
+A gateway can answer one id with another model, so a panel can report families it never ran.
+Use `assertServedModel` and `assertCrossFamilyServed` from `@tangle-network/agent-eval` before you trust a per-model or cross-family number.
+
 Use at least 20 independent cases before comparative statistics.
 Retain every case row and report exact-step recall, precision, F1, root-step accuracy when labeled, citation coverage and validity, clean-case false positives, repeat agreement, failures, latency, calls, all token fields, and known or missing cost.
 
