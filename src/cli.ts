@@ -14,6 +14,7 @@
  *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces bundle  --harness claude-code --session <id|path> --out <dir>
+ *   traces bundle-view <bundle-dir> --view evidence-only --out <dir>
  *   traces inspect session-index.json [--out inspection-report.md]
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
  *   traces import-codetracebench <rows.jsonl> --trajectory-dir <dir> --out <dir> --revision <40-or-64-character-hex>
@@ -108,7 +109,8 @@ import {
   type SessionWorkflowIssue,
   type SessionWorkflowSummary,
 } from './session-workflow.js'
-import { assembleSessionBundle } from './bundle.js'
+import { assembleSessionBundle, type SessionBundleView } from './bundle.js'
+import { projectSessionBundle } from './bundle-view.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
@@ -154,6 +156,8 @@ interface Args {
   config?: string
   format?: string
   mode?: string
+  /** `bundle-view`: which projection of a bundle to write. */
+  view?: string
   replay: boolean
   /** `--once`: a single pass instead of a live tail. */
   once: boolean
@@ -241,6 +245,7 @@ function parseArgs(argv: string[]): Args {
       case '--model': a.model = next(); break
       case '--config': a.config = next(); break
       case '--mode': a.mode = next(); break
+      case '--view': a.view = next(); break
       case '--metadata': a.metadata = next(); break
       case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
       case '--interval': a.interval = Number(next()); a.intervalExplicit = true; break
@@ -352,6 +357,20 @@ function applyCurrentSessionSelection(args: Args): Args {
   const sessionId = process.env.CODEX_THREAD_ID?.trim()
   if (!sessionId) throw new Error('--current requires CODEX_THREAD_ID from the active Codex session')
   return { ...args, session: sessionId }
+}
+
+/**
+ * `--view` names a projection of an assembled bundle, so it belongs to
+ * `bundle-view` alone. Accepting it silently on `bundle` would let someone ask
+ * for the evidence-only view and receive the full one, which is the exact
+ * mistake the two views exist to make impossible.
+ */
+function validateViewSelection(args: Args): Args {
+  if (args.view === undefined || args.command === 'bundle-view') return args
+  throw new Error(
+    `--view is not supported by ${args.command}. A view is a projection of an assembled bundle: ` +
+      'run `traces bundle ... --out <dir>` first, then `traces bundle-view <dir> --view evidence-only --out <view-dir>`.',
+  )
 }
 
 function validateWorkflowSelection(args: Args): Args {
@@ -785,8 +804,34 @@ async function cmdBundle(args: Args): Promise<void> {
   })
   const { manifest } = result
   console.log(
-    `session bundle → ${result.directory}  (${manifest.files.length} file(s), ` +
+    `session bundle (${manifest.view} view) → ${result.directory}  (${manifest.files.length} file(s), ` +
       `${manifest.ledgerSlices.length} ledger slice(s), ${manifest.absent.length} recorded absent)`,
+  )
+}
+
+const PROJECTABLE_VIEWS: readonly SessionBundleView[] = ['evidence-only']
+
+async function cmdBundleView(args: Args): Promise<void> {
+  if (!args.input) {
+    throw new Error('bundle-view needs the bundle directory to project; run `traces bundle --out <dir>` first')
+  }
+  if (!args.view) {
+    throw new Error(`bundle-view needs --view <${PROJECTABLE_VIEWS.join('|')}>`)
+  }
+  if (!PROJECTABLE_VIEWS.includes(args.view as SessionBundleView)) {
+    throw new Error(`unknown view "${args.view}"; projectable views: ${PROJECTABLE_VIEWS.join(', ')}`)
+  }
+  if (!args.out) throw new Error('bundle-view needs --out <dir> — a new or empty directory for the view')
+  const result = await projectSessionBundle({
+    bundleDir: args.input,
+    outDir: args.out,
+    view: args.view as SessionBundleView,
+  })
+  const { manifest, leakCheck } = result
+  console.log(
+    `${manifest.view} view → ${result.directory}  (${manifest.files.length} file(s) carried, ` +
+      `${manifest.excluded.length} excluded, ${leakCheck.matches} session-text match(es) against ` +
+      `${leakCheck.sourceSignatures} signature(s) from ${leakCheck.comparedSources.length} excluded source(s))`,
   )
 }
 
@@ -1538,7 +1583,14 @@ Commands:
   bundle    Assemble one session's durable evidence directory: transcript +
             subagents, derived index/report/evidence/OTLP, the repo's .evolve
             ledger sliced to the session window, git log, and a sha256 manifest
-            (needs --session <id|path> and --out <new-dir>)
+            (needs --session <id|path> and --out <new-dir>). This is the FULL
+            view: it holds the session's own words, for a reader who cites them
+  bundle-view <bundle-dir>
+            Project an assembled bundle into a narrower view for a consumer that
+            must NOT read the session's own words. --view evidence-only carries
+            the counted artifacts and structured ledger rows, excludes the
+            transcript, the report, the spans and every prose file by name, and
+            refuses to write a view whose text repeats an excluded source
   inspect   Read a session index and print ranked improvement findings
   export    Convert evidence/events files to OpenInference JSONL for HALO
   import-codetracebench
@@ -1592,6 +1644,9 @@ Options:
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --mode <kind>    stream: visualizer | findings | agent (default visualizer)
+  --view <name>    bundle-view: which projection to write. evidence-only is the
+                   writer's view; the full view is the bundle itself, so there is
+                   nothing to project into it
   --replay, --once stream: scan once and exit (default for positional input / --session)
   --once           watch <target>: print ONE snapshot and exit, for scripts and agents
   --no-spans       stream: omit per-span pulse events
@@ -1667,7 +1722,9 @@ async function main(): Promise<void> {
     else usage()
     return
   }
-  const args = validateOtlpSelection(validateWorkflowSelection(applyCurrentSessionSelection(parsedArgs)))
+  const args = validateOtlpSelection(
+    validateViewSelection(validateWorkflowSelection(applyCurrentSessionSelection(parsedArgs))),
+  )
   switch (args.command) {
     case 'help':
       if (args.input === 'import-codetracebench') usageImportCodeTraceBench()
@@ -1683,6 +1740,7 @@ async function main(): Promise<void> {
     case 'convert': await cmdConvert(args); break
     case 'index': await cmdIndex(args); break
     case 'bundle': await cmdBundle(args); break
+    case 'bundle-view': await cmdBundleView(args); break
     case 'inspect': await cmdInspect(args); break
     case 'export': await cmdExport(args); break
     case 'import-codetracebench': await cmdImportCodeTraceBench(args); break

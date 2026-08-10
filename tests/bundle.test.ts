@@ -136,6 +136,12 @@ describe('assembleSessionBundle', () => {
 
     expect(directory).toBe(outDir)
     expect(manifest.kind).toBe('traces.session_bundle')
+    expect(manifest.schemaVersion).toBe(2)
+    // `traces bundle` assembles the auditor's copy, and says so: a reader
+    // never has to infer which view a directory is from its file list.
+    expect(manifest.view).toBe('full')
+    expect(manifest.excluded).toEqual([])
+    expect(manifest.projection).toBeUndefined()
     expect(manifest.createdAt).toBe('2026-01-01T01:00:00.000Z')
     expect(manifest.provenance.sessionId).toBe('bundle-fixture')
     expect(manifest.provenance.harness).toBe('claude-code')
