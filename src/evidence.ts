@@ -14,6 +14,15 @@ import { type ScanOptions, scanSessions } from './session-source.js'
 import { describeSessionRelationship, type SessionRole } from './session-relationship.js'
 import type { SessionRef } from './types.js'
 
+/**
+ * The one sentence of prose every policy-evidence record carries. It is the
+ * same for every session, so a content check that compares an evidence file
+ * against a transcript must subtract it: a session that reads or writes this
+ * package's source would otherwise look like it leaked its own text.
+ */
+export const POLICY_EVIDENCE_NOTE =
+  'This is normalized coding-agent session evidence for downstream policy mining; it is not an eval campaign cell.'
+
 export interface PolicyEvidenceToolSummary {
   readonly name: string
   readonly calls: number
@@ -220,7 +229,7 @@ export async function buildPolicyEvidenceRecord(
       ...(opts.otlpPath ? { otlpPath: opts.otlpPath } : {}),
       ...(opts.sourceSha256 ? { sourceSha256: opts.sourceSha256 } : {}),
       notCampaignCell: true,
-      note: 'This is normalized coding-agent session evidence for downstream policy mining; it is not an eval campaign cell.',
+      note: POLICY_EVIDENCE_NOTE,
     },
   }
 }

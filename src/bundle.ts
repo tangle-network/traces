@@ -15,6 +15,10 @@
  * manifest (`absent`, with the reason), never a silent gap and never an
  * error: a session without subagents or without an `.evolve` ledger is a
  * complete bundle of a smaller session.
+ *
+ * This module assembles the FULL view. `bundle-view.ts` projects that full
+ * bundle down to the evidence-only view for a consumer that must not read the
+ * session's own words; `manifest.view` names which of the two a directory is.
  */
 
 import { createHash } from 'node:crypto'
@@ -66,9 +70,83 @@ export interface SessionBundleLedgerSlice {
   readonly unparseableTsRows?: number
 }
 
+/**
+ * Which projection of a session a bundle directory holds.
+ *
+ * `full` is the auditor's copy: every source byte, so a claim can be checked
+ * against the exact text it cites. `evidence-only` is the writer's copy: the
+ * counted artifacts, with the session's own words removed, so a writer that
+ * must reach its own conclusion cannot read an earlier one instead.
+ */
+export type SessionBundleView = 'full' | 'evidence-only'
+
+export type SessionBundleExclusionRule =
+  /** The session's raw text: transcript and subagent transcripts. */
+  | 'session-source'
+  /** A derived artifact that replays session text (prompt lines, excerpts, span content). */
+  | 'session-text-derived'
+  /** A file whose body is prose someone authored: ledger notes, handoffs, commit subjects. */
+  | 'authored-prose'
+  /** An allow-listed file dropped because its own text repeats an excluded source. */
+  | 'content-signature'
+  /** Default deny: the evidence-only view carries an allow-list, and this path is not on it. */
+  | 'not-allow-listed'
+
+export interface SessionBundleExclusion {
+  /** Bundle-relative path in the FULL bundle this view was projected from. */
+  readonly path: string
+  readonly bytes: number
+  /** SHA-256 of the excluded bytes, so an auditor can prove which file was dropped. */
+  readonly sha256: string
+  readonly rule: SessionBundleExclusionRule
+  readonly reason: string
+  /**
+   * Present when `rule` is `content-signature`: how much text the file shared
+   * with which excluded sources. Counts and paths only — quoting the matched
+   * text here would carry into the view the very text the exclusion removes.
+   */
+  readonly contentMatch?: {
+    readonly signatures: number
+    readonly sources: readonly string[]
+  }
+}
+
+export interface SessionBundleCarriedSignatures {
+  readonly path: string
+  /** What the artifact is made of, which is the reason it is safe to carry. */
+  readonly carries: string
+  /** Distinct content signatures the carried file holds at all. 0 = no prose run of that length. */
+  readonly signatures: number
+}
+
+/**
+ * The projection's own proof that no excluded file's text survived into the
+ * view. `matches` is typed `0` because a match aborts the projection: a view
+ * directory carrying a leak is never written, so the artifact cannot record one.
+ */
+export interface SessionBundleLeakCheck {
+  /** Consecutive words per content signature. */
+  readonly signatureWords: number
+  /** Excluded files whose text supplied the signatures compared against. */
+  readonly comparedSources: readonly string[]
+  readonly sourceSignatures: number
+  readonly carried: readonly SessionBundleCarriedSignatures[]
+  readonly matches: 0
+}
+
+export interface SessionBundleProjection {
+  /** Absolute directory of the full bundle this view was projected from. */
+  readonly sourceDirectory: string
+  /** SHA-256 of that bundle's `manifest.json` bytes. */
+  readonly sourceManifestSha256: string
+  readonly leakCheck: SessionBundleLeakCheck
+}
+
 export interface SessionBundleManifest {
-  readonly schemaVersion: 1
+  readonly schemaVersion: 2
   readonly kind: 'traces.session_bundle'
+  /** Which projection this directory is. A reader must branch on this, never on the file list. */
+  readonly view: SessionBundleView
   readonly createdAt: string
   readonly provenance: {
     readonly sessionId: string
@@ -89,8 +167,12 @@ export interface SessionBundleManifest {
   }
   readonly files: readonly SessionBundleFile[]
   readonly absent: readonly SessionBundleAbsence[]
+  /** Files the view deliberately dropped. Empty in the `full` view: it drops nothing. */
+  readonly excluded: readonly SessionBundleExclusion[]
   readonly ledgerSlices: readonly SessionBundleLedgerSlice[]
   readonly knownLimits: readonly string[]
+  /** Present only in a projected view: where it came from, and the leak check that passed. */
+  readonly projection?: SessionBundleProjection
 }
 
 export interface SessionBundleResult {
@@ -211,15 +293,20 @@ async function runGitLog(cwd: string, sinceIso: string, untilIso: string): Promi
   }
 }
 
-async function walkBundleFiles(root: string): Promise<string[]> {
+/**
+ * Every file under a bundle directory, as sorted bundle-relative
+ * `/`-separated paths. Both the manifest writer and the view projector walk a
+ * bundle through here, so neither can see a file the other does not.
+ */
+export async function listSessionBundleFiles(root: string): Promise<string[]> {
   const out: string[] = []
-  const pending = [root]
+  const pending = [resolve(root)]
   while (pending.length > 0) {
     const dir = pending.pop()!
     for (const entry of await readdir(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) pending.push(path)
-      else if (entry.isFile()) out.push(path)
+      else if (entry.isFile()) out.push(relative(resolve(root), path).split(sep).join('/'))
     }
   }
   return out.sort()
@@ -461,18 +548,11 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
   }
 
   // manifest.json — sha256 per file, written LAST so it covers every byte.
-  const files: SessionBundleFile[] = []
-  for (const path of await walkBundleFiles(outDir)) {
-    const bytes = await readFile(path)
-    files.push({
-      path: relative(outDir, path).split(sep).join('/'),
-      bytes: bytes.length,
-      sha256: sha256Hex(bytes),
-    })
-  }
+  const files = await hashSessionBundleFiles(outDir)
   const manifest: SessionBundleManifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'traces.session_bundle',
+    view: 'full',
     createdAt: generatedAt,
     provenance: {
       sessionId: ref.sessionId,
@@ -486,12 +566,72 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
     },
     files,
     absent,
+    // The full view is the whole record: it drops nothing, and says so rather
+    // than leaving a reader to infer completeness from a missing field.
+    excluded: [],
     ledgerSlices: slices,
     knownLimits: KNOWN_LIMITS,
   }
+  const manifestPath = await writeSessionBundleManifest(outDir, manifest)
+  return { directory: outDir, manifestPath, manifest }
+}
+
+/** SHA-256 + byte count for every file under a bundle directory, manifest included when present. */
+export async function hashSessionBundleFiles(root: string): Promise<SessionBundleFile[]> {
+  const files: SessionBundleFile[] = []
+  for (const path of await listSessionBundleFiles(root)) {
+    const bytes = await readFile(join(root, path))
+    files.push({ path, bytes: bytes.length, sha256: sha256Hex(bytes) })
+  }
+  return files
+}
+
+export async function writeSessionBundleManifest(
+  outDir: string,
+  manifest: SessionBundleManifest,
+): Promise<string> {
   const manifestPath = join(outDir, 'manifest.json')
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-  return { directory: outDir, manifestPath, manifest }
+  return manifestPath
+}
+
+/**
+ * Read a bundle's manifest and prove it is one. A directory that merely looks
+ * like a bundle must not be projected: the view guarantee is only as good as
+ * the classification, and the classification only holds over paths this
+ * package wrote.
+ */
+export async function readSessionBundleManifest(bundleDir: string): Promise<SessionBundleManifest> {
+  const path = join(resolve(bundleDir), 'manifest.json')
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      throw new Error(`no manifest.json at ${path} — ${bundleDir} is not a traces session bundle`)
+    }
+    throw error
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    throw new Error(`${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const manifest = parsed as Partial<SessionBundleManifest>
+  if (manifest?.kind !== 'traces.session_bundle') {
+    throw new Error(`${path} has kind ${JSON.stringify(manifest?.kind)}, expected "traces.session_bundle"`)
+  }
+  if (manifest.schemaVersion !== 2) {
+    throw new Error(
+      `${path} is bundle schemaVersion ${JSON.stringify(manifest.schemaVersion)}; this traces reads 2. ` +
+        'Re-run `traces bundle` to assemble it with the view-aware manifest.',
+    )
+  }
+  if (manifest.view !== 'full' && manifest.view !== 'evidence-only') {
+    throw new Error(`${path} has view ${JSON.stringify(manifest.view)}, expected "full" or "evidence-only"`)
+  }
+  return manifest as SessionBundleManifest
 }
 
 let cachedVersion: string | undefined

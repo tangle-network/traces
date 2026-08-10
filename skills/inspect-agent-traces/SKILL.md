@@ -22,10 +22,9 @@ traces analyze --otlp results/sessions --out .traces/all.md   # a directory of e
 Use `--harness` only for coding agents whose on-disk format we do not control.
 Those adapters are the legacy edge, not the way to integrate a system you own.
 
-A directory is a run directory: it holds the span export beside raw event, stream and
-SDK logs that are also `*.jsonl`. Only the OTLP files are read, and the rest are listed
-with what they actually hold. An `otlp/` subdirectory, when the producer made one, is
-read on its own.
+A run directory holds the span export beside raw event, stream and SDK logs that are
+also `*.jsonl`. Only the OTLP files are read; the rest are listed with what they hold.
+An `otlp/` subdirectory, when present, is read on its own.
 
 Any section headed `inputs incomplete`, or carrying an `Inputs incomplete` line above
 its table, is computed from a field the trace does not carry everywhere. Report those
@@ -73,7 +72,7 @@ traces improve --harness codex --current --latest-turn --workflow \
 `improve` writes findings, evidence, a report, and spans.
 It does not edit an agent, repository, memory store, or knowledge base.
 
-Write one session's durable evidence directory when a later reader must cite the session:
+Write one session's durable evidence directory for a later reader:
 
 ```bash
 traces bundle --harness claude-code --session <id-or-path> --out .traces/bundle
@@ -81,12 +80,24 @@ traces bundle --harness claude-code --session <id-or-path> --out .traces/bundle
 
 `bundle` copies the transcript, the derived report and spans, the `.evolve` ledger rows inside the session window, and a `manifest.json` with a SHA-256 per file.
 It spends no model call.
-Use it when the live stores can rotate before the reader arrives.
 A missing transcript stops the assembly.
 An absent optional input is recorded in `manifest.absent` with the probed path.
 
-The bundle holds the whole session transcript.
-Do not give a bundle to a writer that must not see an earlier conclusion, because the transcript holds the text of every file the session wrote.
+## Pick the view for the reader
+
+That bundle is the FULL view (`manifest.view: "full"`), and it holds the whole session transcript.
+Never give it to a writer that must not see an earlier conclusion: the transcript holds the text of every file the session wrote, so a check for the earlier report FILE passes while its CONTENT is still readable.
+
+Project the writer's copy instead:
+
+```bash
+traces bundle-view .traces/bundle --view evidence-only --out .traces/writer
+```
+
+That view carries `derived/session-index.json`, `derived/evidence.jsonl`, and the structured `ledger/` records.
+It excludes the transcripts, the report, the spans, and every prose ledger file by name, with rules and hashes in `manifest.excluded`.
+Before writing, it compares each carried file against each excluded file for shared 8-word runs of prose, and drops any file that repeats one.
+`manifest.view` names which copy you hold.
 
 ## Report
 

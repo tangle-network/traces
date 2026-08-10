@@ -939,3 +939,68 @@ describe('traces analyze --llm failure surfacing', () => {
     expect(reportText).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
   }, 60_000)
 })
+
+describe('traces bundle + bundle-view', () => {
+  it('assembles the full view, then projects the writer view over the same session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traces-cli-bundle-'))
+    const leaked = 'The retry budget was the wrong lever and the queue depth decides tail latency here.'
+    const transcript = join(root, 'session.jsonl')
+    await writeFile(
+      transcript,
+      [
+        {
+          type: 'user',
+          uuid: 'u1',
+          sessionId: 'cli-bundle',
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'user', content: leaked },
+        },
+        {
+          type: 'assistant',
+          uuid: 'a1',
+          sessionId: 'cli-bundle',
+          timestamp: '2026-01-01T00:00:01Z',
+          message: { id: 'm1', role: 'assistant', content: 'understood' },
+        },
+      ].map((row) => JSON.stringify(row)).join('\n'),
+      'utf8',
+    )
+
+    const run = (args: string[]) =>
+      execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+        cwd: process.cwd(),
+        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 120_000,
+      })
+
+    const bundleDir = join(root, 'bundle')
+    const bundled = await run([
+      'bundle', '--harness', 'claude-code', '--session', transcript, '--out', bundleDir,
+    ])
+    expect(bundled.stdout).toContain('session bundle (full view) →')
+
+    const viewDir = join(root, 'view')
+    const projected = await run([
+      'bundle-view', bundleDir, '--view', 'evidence-only', '--out', viewDir,
+    ])
+    expect(projected.stdout).toContain('evidence-only view →')
+    expect(projected.stdout).toContain('0 session-text match(es)')
+
+    const manifest = JSON.parse(await readFile(join(viewDir, 'manifest.json'), 'utf8')) as {
+      view: string
+      excluded: { path: string; rule: string }[]
+    }
+    expect(manifest.view).toBe('evidence-only')
+    expect(manifest.excluded.map((entry) => entry.path)).toContain('session/transcript.jsonl')
+    await expect(readFile(join(viewDir, 'session', 'transcript.jsonl'), 'utf8')).rejects.toThrow()
+    await expect(readFile(join(viewDir, 'derived', 'report.md'), 'utf8')).rejects.toThrow()
+    expect(await readFile(join(bundleDir, 'derived', 'report.md'), 'utf8')).toContain(leaked)
+    expect(await readFile(join(viewDir, 'derived', 'evidence.jsonl'), 'utf8')).not.toContain(leaked)
+
+    // --view belongs to bundle-view alone, so nobody can ask `bundle` for a
+    // projection and silently receive the full record.
+    await expect(run(['bundle', '--session', transcript, '--view', 'evidence-only', '--out', join(root, 'x')]))
+      .rejects.toThrow(/--view is not supported by bundle/)
+  }, 180_000)
+})
