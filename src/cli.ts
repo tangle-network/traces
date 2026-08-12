@@ -506,10 +506,18 @@ function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEn
     // owns the execution path and returns a typed result plus a cost receipt
     // for every admitted call. This CLI's path is one OpenAI-compatible HTTP
     // call through agent-eval's own `callLlm`.
-    call: async ({ request, signal }) => {
-      const req = structuredClone(request) as LlmCallRequest
+    call: async ({ request, callId, signal }) => {
       try {
-        const response = await callLlm(req, { apiKey, baseUrl, signal })
+        const req = structuredClone(request) as LlmCallRequest
+        // callId is the ledger's stable identity for this one paid call, so it
+        // is the provider idempotency key: callLlm retries transient failures,
+        // and without it a lost-but-billed response is charged twice.
+        const response = await callLlm(req, {
+          apiKey,
+          baseUrl,
+          signal,
+          idempotencyKey: callId,
+        })
         return {
           succeeded: true,
           response,
@@ -531,13 +539,17 @@ function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEn
           // response completed but violated the contract; otherwise usage
           // and cost stay explicitly unknown.
           receipt: costReceiptFromLlmError(err) ?? {
-            model: req.model,
+            model: request.model,
             inputTokens: 0,
             outputTokens: 0,
             costUnknown: true,
             usageUnknown: true,
           },
-          execution: { baseUrl, requestedModel: req.model, error: err.message },
+          execution: {
+            baseUrl,
+            requestedModel: request.model,
+            error: err.message,
+          },
         }
       }
     },
