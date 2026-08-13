@@ -89,7 +89,7 @@ import {
 import { fileRunContextSupervisorRunReader, isFileRunContextDir } from './supervisor-run-context.js'
 import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
 import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import { callLlm, costReceiptFromLlm, costReceiptFromLlmError, type LlmCallRequest } from '@tangle-network/agent-eval'
+import { createAnalystModelCall } from './analyst-model-call.js'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import type {
@@ -502,57 +502,7 @@ function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEn
     (tangleKey ? TANGLE_ROUTER_BASE_URL : 'https://api.openai.com/v1')
   const python = process.env.TRACES_PYTHON
   return createDspyRlmTraceEngine({
-    // agent-eval 0.144.0 stopped accepting provider credentials: the caller
-    // owns the execution path and returns a typed result plus a cost receipt
-    // for every admitted call. This CLI's path is one OpenAI-compatible HTTP
-    // call through agent-eval's own `callLlm`.
-    call: async ({ request, callId, signal }) => {
-      try {
-        const req = structuredClone(request) as LlmCallRequest
-        // callId is the ledger's stable identity for this one paid call, so it
-        // is the provider idempotency key: callLlm retries transient failures,
-        // and without it a lost-but-billed response is charged twice.
-        const response = await callLlm(req, {
-          apiKey,
-          baseUrl,
-          signal,
-          idempotencyKey: callId,
-        })
-        return {
-          succeeded: true,
-          response,
-          receipt: costReceiptFromLlm(response),
-          execution: {
-            baseUrl,
-            requestedModel: req.model,
-            servedModel: response.servedModel ?? null,
-            finishReason: response.finishReason ?? null,
-            durationMs: response.durationMs,
-          },
-        }
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error))
-        return {
-          succeeded: false,
-          error: err.message,
-          // costReceiptFromLlmError recovers the provider receipt when the
-          // response completed but violated the contract; otherwise usage
-          // and cost stay explicitly unknown.
-          receipt: costReceiptFromLlmError(err) ?? {
-            model: request.model,
-            inputTokens: 0,
-            outputTokens: 0,
-            costUnknown: true,
-            usageUnknown: true,
-          },
-          execution: {
-            baseUrl,
-            requestedModel: request.model,
-            error: err.message,
-          },
-        }
-      }
-    },
+    call: createAnalystModelCall({ apiKey, baseUrl }),
     callRef: `traces-cli:${baseUrl}#${model}`,
     recordExecution: (observation) => {
       analystLog(
