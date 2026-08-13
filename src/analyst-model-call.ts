@@ -68,7 +68,13 @@ export function createAnalystModelCall(opts: {
       // thrown AbortError and can never take its 504 branch. Naming the class
       // in the failure text is what lets the bridge tell a cancelled call apart
       // from a transient one it should retry.
-      const aborted = signal.aborted || err.name === 'AbortError'
+      //
+      // Only the caller's signal proves a cancellation. `callLlm` aborts an
+      // internal controller to enforce its own per-attempt timeout, so a plain
+      // provider timeout also surfaces as an `AbortError` while this signal
+      // stays clear. Reading the error name here would mark that timeout
+      // uncancellable and stop the bridge retrying a call it should retry.
+      const aborted = signal.aborted
       const message = aborted ? `AbortError: ${err.message}` : err.message
       // LlmCallError carries the provider's own reason (bad key, context
       // length, unknown model). Without it the operator sees only the HTTP

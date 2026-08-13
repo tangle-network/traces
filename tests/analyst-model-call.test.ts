@@ -90,6 +90,25 @@ describe('analyst model call', () => {
     expect(result.receipt.usageUnknown).toBe(true)
   })
 
+  it('does not mark a provider timeout as a cancellation', async () => {
+    const baseUrl = await startGateway(() => {
+      // Never responds, so callLlm's own per-attempt timeout fires.
+      })
+
+    const call = createAnalystModelCall({ apiKey: 'test-key', baseUrl })
+    // callLlm aborts an internal controller to enforce this timeout, so the
+    // error arrives as an AbortError even though nobody cancelled the call.
+    const request = { ...chatRequest(), timeoutMs: 250 }
+    const result = await call(callArgs(request, new AbortController().signal))
+
+    expect(result.succeeded).toBe(false)
+    if (result.succeeded) return
+    // The bridge retries a transient failure and gives up on a cancelled one,
+    // so a timeout must not carry the cancellation marker.
+    expect(result.error.startsWith('AbortError:')).toBe(false)
+    expect((result.execution as Record<string, unknown>).aborted).toBe(false)
+  })
+
   it('marks an aborted call so it is distinguishable from a transient failure', async () => {
     const controller = new AbortController()
     const baseUrl = await startGateway(() => {
