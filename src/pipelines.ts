@@ -6,6 +6,10 @@
  *   - stuckLoopView         — same tool + same args ≥ N times in a short interval
  *   - computeToolUseMetrics — duplicate-call / retry / error rates per run
  *
+ * One local view runs beside them: `classifyFailureFollowUps` splits each
+ * failed call's same-tool follow-up into blind (identical args) vs adapted
+ * (changed args), which the aggregate retry rate cannot express.
+ *
  * `toolWasteView` is intentionally NOT used: its default heuristic needs
  * verbatim tool *results* + per-turn LLM `messages`, which traces
  * doesn't capture from harness logs (we store tool args + error status). Its
@@ -26,6 +30,7 @@ import {
   type FailureClusterReport,
   type StuckLoopReport,
 } from '@tangle-network/agent-eval/pipelines'
+import { classifyFailureFollowUps, type FailureFollowUpReport } from './failure-followup.js'
 import type { OtlpSpan } from './otlp.js'
 import { toRuntimeStore } from './runtime-store.js'
 
@@ -33,6 +38,8 @@ export interface PipelineReport {
   stuckLoops: StuckLoopReport
   failureClusters: FailureClusterReport
   toolUse: ToolUseMetrics[]
+  /** Absent only on hand-built reports; runPipelines always computes it. */
+  failureFollowUps?: FailureFollowUpReport
 }
 
 export interface PipelineOptions {
@@ -49,5 +56,5 @@ export async function runPipelines(spans: readonly OtlpSpan[], opts: PipelineOpt
     failureClusterView(store),
     Promise.all(runIds.map((runId) => computeToolUseMetrics(store, runId))),
   ])
-  return { stuckLoops, failureClusters, toolUse }
+  return { stuckLoops, failureClusters, toolUse, failureFollowUps: classifyFailureFollowUps(spans) }
 }
