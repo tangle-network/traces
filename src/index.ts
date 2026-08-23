@@ -79,6 +79,7 @@ export {
 export type { Reaction } from './adapters/actor.js'
 
 // ── Detection / analysis (built-in, or bring your own analysts) ───────────
+export * from './failure-followup.js' // classifyFailureFollowUps() — blind vs adapted retry split
 export * from './pipelines.js' // runPipelines() — repeated-call + tool-use
 export * from './reactions.js' // analyzeReactions() — human-reaction analyst
 export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics

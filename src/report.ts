@@ -678,11 +678,27 @@ export function renderPipelines(pr: PipelineReport, unavailable?: UnavailableCap
         byTool.set(name, aggregate)
       }
     }
-    const failureFollowUp = errorCalls > 0
-      ? `; ${followedFailures}/${errorCalls} failed calls followed by another same-tool call (${(
+    // Exact per-failure classification (from spans) outranks the derived
+    // retryRate estimate; the derived clause remains for hand-built reports.
+    const followUps = pr.failureFollowUps
+    let failureFollowUp = ''
+    if (followUps && followUps.failures > 0) {
+      const split = [
+        `${followUps.blind} blind (identical args)`,
+        `${followUps.adapted} adapted (changed args)`,
+      ]
+      if (followUps.argsUnknown > 0) split.push(`${followUps.argsUnknown} not comparable`)
+      const succeeded = followUps.followed > 0
+        ? `; ${followUps.followUpSucceeded}/${followUps.followed} follow-ups succeeded`
+        : ''
+      failureFollowUp = `; ${followUps.followed}/${followUps.failures} failed calls followed by another same-tool call (${(
+        (followUps.followed / followUps.failures) * 100
+      ).toFixed(0)}%) — ${split.join(', ')}${succeeded}`
+    } else if (errorCalls > 0) {
+      failureFollowUp = `; ${followedFailures}/${errorCalls} failed calls followed by another same-tool call (${(
         (followedFailures / errorCalls) * 100
       ).toFixed(0)}%)`
-      : ''
+    }
     const duplicateSummary = callsWithCapturedArgs > 0
       ? `${duplicateCalls}/${callsWithCapturedArgs} captured calls repeated exactly`
       : 'exact repeats unavailable'
@@ -691,6 +707,12 @@ export function renderPipelines(pr: PipelineReport, unavailable?: UnavailableCap
         `${callsWithCapturedArgs}/${totalCalls} arguments captured; ${duplicateSummary}; ` +
         `${errorCalls}/${totalCalls} failed${failureFollowUp}`,
     )
+    if (followUps && followUps.blind > 0) {
+      const byTool = Object.entries(followUps.blindByTool)
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+        .map(([name, count]) => `\`${tableCell(name)}\` ×${count}`)
+      lines.push(`  - 🔁 Blind retries (same args re-sent after a failure): ${byTool.join(', ')}`)
+    }
     if (byTool.size > 0) {
       lines.push('')
       lines.push('| Tool | Calls | Args captured | Exact repeats | Errors | Mean latency |')
