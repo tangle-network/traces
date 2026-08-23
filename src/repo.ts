@@ -21,7 +21,7 @@
  * Never throws. A missing cwd yields `{}` so the session keeps today's behavior.
  */
 
-import { stat } from 'node:fs/promises'
+import { realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, normalize, parse as parsePath } from 'node:path'
 import { ATTR } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
@@ -150,7 +150,21 @@ function parseWorktreePorcelain(output: string): string[] {
     .filter(Boolean)
 }
 
-/** Expand a selected cwd to every checked-out worktree for the same git repo. */
+async function realpathOrNull(path: string): Promise<string | null> {
+  try {
+    return await realpath(path)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Expand a selected cwd to every checked-out worktree for the same git repo.
+ * Each candidate is emitted in both its selected and its resolved form: git
+ * prints symlink-resolved paths (macOS `/var` → `/private/var`), while a
+ * recorded session cwd usually keeps the unresolved spelling, and a match
+ * must not depend on which spelling either side used.
+ */
 export async function equivalentGitCwds(cwd: string | null | undefined): Promise<string[]> {
   if (!cwd) return []
   const selected = normalize(cwd)
@@ -160,7 +174,28 @@ export async function equivalentGitCwds(cwd: string | null | undefined): Promise
   if (!top) return [selected]
 
   const worktrees = await gitOutput(top, ['worktree', 'list', '--porcelain'])
-  return uniqNormalized([selected, top, ...(worktrees ? parseWorktreePorcelain(worktrees) : [])])
+  const candidates = [selected, top, ...(worktrees ? parseWorktreePorcelain(worktrees) : [])]
+  const expanded: string[] = []
+  for (const candidate of candidates) {
+    expanded.push(candidate)
+    const resolved = await realpathOrNull(candidate)
+    if (resolved) expanded.push(resolved)
+  }
+  return uniqNormalized(expanded)
+}
+
+/**
+ * `cwdMatchesSelection`, then a second attempt with the cwd's resolved
+ * (symlink-free) form. A deleted cwd cannot resolve and keeps the raw verdict.
+ */
+export async function cwdMatchesSelectionResolved(
+  cwd: string | null | undefined,
+  selections: readonly string[],
+): Promise<boolean> {
+  if (cwdMatchesSelection(cwd, selections)) return true
+  if (!cwd || !isAbsolute(cwd)) return false
+  const resolved = await realpathOrNull(normalize(cwd))
+  return resolved !== null && resolved !== normalize(cwd) && cwdMatchesSelection(resolved, selections)
 }
 
 /** Boundary-aware cwd matching; `/repo` matches `/repo/src`, not `/repo-old`. */
