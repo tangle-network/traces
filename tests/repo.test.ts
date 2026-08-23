@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -151,7 +151,9 @@ describe('cwd selection', () => {
     await run('git', ['-C', repo, 'worktree', 'add', '-q', '--detach', sibling, 'HEAD'])
 
     const aliases = await equivalentGitCwds(sibling)
-    expect(aliases).toContain(repo)
+    // Git prints symlink-resolved worktree paths (macOS TMPDIR lives under
+    // /var → /private/var), so the main worktree appears in resolved form.
+    expect(aliases).toContain(await realpath(repo))
     expect(aliases).toContain(sibling)
   })
 

@@ -10,7 +10,7 @@ import type { OtlpSpan } from './otlp.js'
 import { stampEnvironmentAttrs, stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
-import { cwdMatchesSelection, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
+import { cwdMatchesSelection, cwdMatchesSelectionResolved, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
 import { validateOtlpSpans } from './span-validation.js'
 import type { HarnessTraceAdapter, ParseOptions, SessionRef } from './types.js'
 
@@ -94,8 +94,17 @@ export async function locateSessions(
   const cwdSelections = await equivalentGitCwds(opts.cwd)
   const refs = await adapter.locate({ sinceMs: opts.sinceMs })
   const byKey = new Map<string, SessionRef>()
+  // Symlink-resolved matching is per distinct cwd, cached: locate can return
+  // thousands of refs, and most share a handful of working directories.
+  const resolvedMatch = new Map<string, boolean>()
   for (const ref of refs) {
-    if (!cwdMatchesSelection(ref.cwd, cwdSelections) && !(ref.cwd === null && ref.integrity)) continue
+    let matched = cwdMatchesSelection(ref.cwd, cwdSelections)
+    if (!matched && ref.cwd !== null) {
+      const cached = resolvedMatch.get(ref.cwd)
+      matched = cached ?? (await cwdMatchesSelectionResolved(ref.cwd, cwdSelections))
+      if (cached === undefined) resolvedMatch.set(ref.cwd, matched)
+    }
+    if (!matched && !(ref.cwd === null && ref.integrity)) continue
     byKey.set(refKey(ref), ref)
   }
   return [...byKey.values()].sort((a, b) => b.mtimeMs - a.mtimeMs)
