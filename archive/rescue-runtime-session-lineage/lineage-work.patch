@@ -1,0 +1,1727 @@
+diff --git a/src/adapters/codex.ts b/src/adapters/codex.ts
+index a185f59..48d7e24 100644
+--- a/src/adapters/codex.ts
++++ b/src/adapters/codex.ts
+@@ -790,7 +790,8 @@ export class CodexAdapter implements HarnessTraceAdapter {
+       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
+         // The human's prompt text. Codex drops the user turn from token events,
+         // so capture it here as its own CHAIN span (no text → no span).
+-        const prompt = textOf(l.payload.content)
++        const rawPrompt = contentToString(l.payload.content)
++        const prompt = capText(rawPrompt)
+         if (prompt) {
+           const actor = sessionRole === 'child'
+             ? 'agent'
+@@ -803,6 +804,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
+               parentSpanId: rootId,
+               startTime: ts,
+               content: prompt,
++              sourceContent: rawPrompt,
+               service: SERVICE,
+               agent: SERVICE,
+               step,
+diff --git a/src/adapters/conversation.ts b/src/adapters/conversation.ts
+index d872456..7d09759 100644
+--- a/src/adapters/conversation.ts
++++ b/src/adapters/conversation.ts
+@@ -6,6 +6,7 @@
+  * capture identical across harnesses: one text cap, one `user.prompt` span shape.
+  */
+ 
++import { createHash } from 'node:crypto'
+ import type { OtlpSpan } from '../otlp.js'
+ import { span } from '../otlp.js'
+ 
+@@ -46,6 +47,8 @@ export interface UserPromptInput {
+   startTime: string
+   /** The human's prompt text (extracted by the adapter; cap with capText). */
+   content: string
++  /** Exact source bytes before trimming or capping, when the adapter retains them. */
++  sourceContent?: string
+   service?: string | null
+   agent?: string | null
+   step?: number
+@@ -59,6 +62,10 @@ export interface UserPromptInput {
+  *  attribute lets analysts separate real human turns from agent-to-agent or
+  *  injected prompts. */
+ export function userPromptSpan(o: UserPromptInput): OtlpSpan {
++  const promptSha256 =
++    o.sourceContent === undefined
++      ? undefined
++      : `sha256:${createHash('sha256').update(o.sourceContent, 'utf8').digest('hex')}`
+   return span({
+     traceId: o.traceId,
+     spanId: o.spanId,
+@@ -70,6 +77,9 @@ export function userPromptSpan(o: UserPromptInput): OtlpSpan {
+     agent: o.agent ?? null,
+     step: o.step,
+     content: o.content,
+-    extra: { [ACTOR_ATTR]: o.actor ?? 'human' },
++    extra: {
++      [ACTOR_ATTR]: o.actor ?? 'human',
++      ...(promptSha256 === undefined ? {} : { 'traces.prompt_sha256': promptSha256 }),
++    },
+   })
+ }
+diff --git a/src/adapters/pi.ts b/src/adapters/pi.ts
+index 53ee298..0582721 100644
+--- a/src/adapters/pi.ts
++++ b/src/adapters/pi.ts
+@@ -14,7 +14,7 @@ import { homedir } from 'node:os'
+ import { basename, join } from 'node:path'
+ import { sessionJsonlOptions } from '../integrity.js'
+ import { isMissingPathError } from '../json.js'
+-import { readJsonl } from '../jsonl.js'
++import { readJsonl, takeJsonl } from '../jsonl.js'
+ import type { OtlpSpan } from '../otlp.js'
+ import { span } from '../otlp.js'
+ import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
+@@ -119,14 +119,28 @@ function isToolResultBlock(b: PiContentBlock): boolean {
+   return typeof b.type === 'string' && /tool[_-]?result|tool[_-]?output/i.test(b.type)
+ }
+ 
+-function textOf(content: PiContentBlock[] | undefined): string {
++function rawTextOf(content: PiContentBlock[] | undefined): string {
+   if (!content) return ''
+-  return capText(
+-    content
+-      .filter((b) => b.type === 'text' && typeof b.text === 'string')
+-      .map((b) => b.text)
+-      .join(''),
+-  )
++  return content
++    .filter((b) => b.type === 'text' && typeof b.text === 'string')
++    .map((b) => b.text)
++    .join('')
++}
++
++function textOf(content: PiContentBlock[] | undefined): string {
++  return capText(rawTextOf(content))
++}
++
++function isAgentRuntimeDownMessage(content: string): boolean {
++  let parsed: unknown
++  try {
++    parsed = JSON.parse(content) as unknown
++  } catch {
++    return false
++  }
++  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false
++  const envelope = parsed as Record<string, unknown>
++  return envelope.type === 'agent-runtime.down-messages' && Array.isArray(envelope.messages)
+ }
+ 
+ function toolResultOutput(content: PiContentBlock[] | undefined): unknown {
+@@ -151,6 +165,39 @@ export class PiAdapter implements HarnessTraceAdapter {
+     return join(homedir(), '.pi', 'agent', 'sessions')
+   }
+ 
++  private async refFromPath(
++    path: string,
++    encodedCwd: string,
++    opts: LocateOptions,
++  ): Promise<SessionRef | undefined> {
++    let st: Awaited<ReturnType<typeof stat>>
++    try {
++      st = await stat(path)
++    } catch (error) {
++      if (isMissingPathError(error)) return undefined
++      throw error
++    }
++    if (opts.sinceMs && st.mtimeMs < opts.sinceMs) return undefined
++    let id = basename(path, '.jsonl').replace(/^[\dTZ.-]+_/, '')
++    let cwd: string | null = encodedCwd
++    const ref: SessionRef = { harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs }
++    const [head] = await takeJsonl<PiLine>(path, 1, sessionJsonlOptions(ref))
++    if (head?.type === 'session') {
++      if (typeof head.id === 'string' && head.id.length > 0) id = head.id
++      if (typeof head.cwd === 'string' && head.cwd.length > 0) cwd = head.cwd
++    }
++    ref.sessionId = id
++    ref.cwd = cwd
++    if (ref.integrity) {
++      ref.integrity.corruptions = ref.integrity.corruptions.map((receipt) => ({
++        ...receipt,
++        sessionId: id,
++      }))
++    }
++    if (opts.cwd && !cwd.startsWith(opts.cwd)) return undefined
++    return ref
++  }
++
+   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
+     const root = this.root()
+     let dirs: string[]
+@@ -171,21 +218,41 @@ export class PiAdapter implements HarnessTraceAdapter {
+         throw error
+       }
+       // Encoded cwd: leading/trailing `--`, separators as `-`.
+-      const cwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
+-      if (opts.cwd && !cwd.startsWith(opts.cwd)) continue
++      const encodedCwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
+       for (const f of files) {
+         if (!f.endsWith('.jsonl')) continue
+         const path = join(dp, f)
+-        let st: Awaited<ReturnType<typeof stat>>
+-        try {
+-          st = await stat(path)
+-        } catch (error) {
+-          if (isMissingPathError(error)) continue
+-          throw error
+-        }
+-        if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
+-        const id = basename(f, '.jsonl').replace(/^[\dTZ.-]+_/, '')
+-        refs.push({ harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs })
++        const ref = await this.refFromPath(path, encodedCwd, opts)
++        if (ref) refs.push(ref)
++      }
++    }
++    return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
++  }
++
++  async locateBySessionId(sessionId: string, opts: LocateOptions = {}): Promise<SessionRef[]> {
++    const root = this.root()
++    let dirs: string[]
++    try {
++      dirs = await readdir(root)
++    } catch (error) {
++      if (isMissingPathError(error)) return []
++      throw error
++    }
++    const refs: SessionRef[] = []
++    for (const dir of dirs) {
++      const dp = join(root, dir)
++      let files: string[]
++      try {
++        files = await readdir(dp)
++      } catch (error) {
++        if (isMissingPathError(error)) continue
++        throw error
++      }
++      const encodedCwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
++      for (const file of files) {
++        if (!file.endsWith('.jsonl') || !file.includes(sessionId)) continue
++        const ref = await this.refFromPath(join(dp, file), encodedCwd, opts)
++        if (ref?.sessionId === sessionId) refs.push(ref)
+       }
+     }
+     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+@@ -246,7 +313,8 @@ export class PiAdapter implements HarnessTraceAdapter {
+       } else if (msg.role === 'user') {
+         // The human's prompt text. (A tool-result-only user turn yields no
+         // text → no user.prompt span.)
+-        const prompt = textOf(msg.content)
++        const rawPrompt = rawTextOf(msg.content)
++        const prompt = capText(rawPrompt)
+         if (prompt) {
+           spans.push(
+             userPromptSpan({
+@@ -258,6 +326,8 @@ export class PiAdapter implements HarnessTraceAdapter {
+               agent: SERVICE,
+               step,
+               content: prompt,
++              sourceContent: rawPrompt,
++              actor: isAgentRuntimeDownMessage(rawPrompt) ? 'agent' : 'human',
+             }),
+           )
+           step += 1
+diff --git a/src/adoption.ts b/src/adoption.ts
+index abe5758..a5137d2 100644
+--- a/src/adoption.ts
++++ b/src/adoption.ts
+@@ -99,12 +99,17 @@ function skillNameOf(input: Record<string, unknown>): string {
+ 
+ /** Subagent type from a Task/Agent or provider-specific spawn tool input. */
+ function subagentTypeOf(input: Record<string, unknown>): string {
+-  const v = input.subagent_type ?? input.agent_type ?? input.type ?? input.name
++  const v =
++    input.subagent_type
++    ?? input.agent_type
++    ?? input.label
++    ?? input.type
++    ?? input.name
+   return typeof v === 'string' && v.length > 0 ? v : '?'
+ }
+ 
+ function isSpawnAgentTool(name: string): boolean {
+-  return name === 'spawn_agent' || name.endsWith('__spawn_agent')
++  return name === 'spawn_agent' || name.endsWith('_spawn_agent')
+ }
+ 
+ type SkillTelemetryCapability = 'supported' | 'unsupported' | 'unknown'
+@@ -309,7 +314,7 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
+       subagentSpawns[type] = (subagentSpawns[type] ?? 0) + 1
+       sessionsWithSubagent.add(group)
+       canonicalSubagentSessions.add(group)
+-    } else if (tn && isSpawnAgentTool(tn)) {
++    } else if (tn && isSpawnAgentTool(tn) && s.status.code === 'OK') {
+       const types = fallbackSubagents.get(group) ?? []
+       types.push(subagentTypeOf(parseInput(s)))
+       fallbackSubagents.set(group, types)
+diff --git a/src/cli.ts b/src/cli.ts
+index bdf1f17..6886c60 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -52,18 +52,26 @@ import {
+   type TraceLiveFinding,
+ } from './live.js'
+ import {
++  analyzeSupervisorRunSources,
+   analyzeSupervisorRun,
+   findSupervisorRunDirs,
+   isUnavailable,
++  isRuntimeSupervisorRunDir,
++  readRuntimeSupervisorRun,
+   renderSupervisorRollupMarkdown,
+   renderSupervisorRunMarkdown,
+   rollupSupervisorRuns,
++  type SupervisorRunSessionLineage,
+ } from '@tangle-network/agent-eval/supervisor-run'
+ import { createAnalystAi } from '@tangle-network/agent-eval/analyst'
+ import type { OtlpSpan } from './otlp.js'
+ import { serializeSpans, writeOtlpFile } from './otlp.js'
+ import { watchSessions } from './observer.js'
+ import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
++import {
++  parseCliBridgeSessionMap,
++  stampRuntimeSessionLineage,
++} from './runtime-session-lineage.js'
+ import { locateSessions, parseSession } from './session-source.js'
+ import {
+   describeSessionRelationship,
+@@ -119,6 +127,7 @@ interface Args {
+   metadata?: string
+   attrs: string[]
+   supervisorRunDir?: string
++  sessionMap?: string
+   trajectoryDir?: string
+   revision?: string
+   concurrency: number
+@@ -172,6 +181,7 @@ function parseArgs(argv: string[]): Args {
+       case '--session': a.session = next(); break
+       case '--cwd': a.cwd = next(); break
+       case '--supervisor-run-dir': a.supervisorRunDir = next(); break
++      case '--session-map': a.sessionMap = next(); break
+       case '--trajectory-dir': a.trajectoryDir = next(); break
+       case '--revision': a.revision = next(); break
+       case '--concurrency': a.concurrency = Number(next()); break
+@@ -251,6 +261,9 @@ function applyCurrentSessionSelection(args: Args): Args {
+ }
+ 
+ function validateWorkflowSelection(args: Args): Args {
++  if (args.sessionMap && (args.command !== 'analyze' || !args.supervisorRunDir)) {
++    throw new Error('--session-map requires analyze --supervisor-run-dir')
++  }
+   if (!args.workflow && !args.latestTurn) return args
+   if (!WORKFLOW_COMMANDS.has(args.command)) {
+     throw new Error(`${args.workflow ? '--workflow' : '--latest-turn'} is not supported by ${args.command}`)
+@@ -302,6 +315,10 @@ function missingPath(error: unknown): boolean {
+   return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT'
+ }
+ 
++function shellArgument(value: string): string {
++  return `'${value.replaceAll("'", "'\\''")}'`
++}
++
+ /** Resolve `--session` as either a concrete harness file or an ID printed by
+  * `traces list`. An ID is only accepted when it identifies one session under
+  * the selected harnesses, keeping reports reproducible as live files change. */
+@@ -699,14 +716,39 @@ async function cmdAnalyze(args: Args): Promise<void> {
+  */
+ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
+   const nested = await findSupervisorRunDirs(runDir)
++  if (args.sessionMap && nested.length > 1) {
++    throw new Error(
++      '--session-map requires one direct supervisor run, not a directory containing multiple runs',
++    )
++  }
++  const directRunDir = nested.length === 1 ? nested[0]! : runDir
++  const runtimeRun = nested.length <= 1 && await isRuntimeSupervisorRunDir(directRunDir)
+   let markdown: string
+-  if (nested.length > 0) {
++  if (nested.length > 0 && !args.sessionMap && !runtimeRun) {
+     markdown = renderSupervisorRollupMarkdown(
+       rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
+       `Supervisor rollup — ${runDir}`,
+     )
+   } else {
+-    const report = await analyzeSupervisorRun(runDir)
++    const sessionBindings = args.sessionMap
++      ? parseCliBridgeSessionMap(await readFile(args.sessionMap, 'utf8'))
++      : undefined
++    const sources = runtimeRun
++      ? await readRuntimeSupervisorRun(directRunDir, { sessionBindings })
++      : undefined
++    if (sessionBindings && sources === undefined) {
++      throw new Error('--session-map requires an agent-runtime FileRunContext directory')
++    }
++    const report = sources
++      ? analyzeSupervisorRunSources({
++          ...sources,
++          traceCommand:
++            `traces analyze --supervisor-run-dir ${shellArgument(runDir)}` +
++            (args.sessionMap
++              ? ` --session-map ${shellArgument(args.sessionMap)}`
++              : ''),
++        })
++      : await analyzeSupervisorRun(directRunDir)
+     // A path with no supervision journal analyzes cleanly into a report whose
+     // every metric is unavailable. Printing that reads as "the supervisor did
+     // nothing" rather than "you pointed me at the wrong directory".
+@@ -717,6 +759,19 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
+       )
+     }
+     markdown = renderSupervisorRunMarkdown(report)
++    if (
++      report.sessionLineage !== undefined &&
++      !isUnavailable(report.sessionLineage) &&
++      report.sessionLineage.some(
++        (row) => (row.providerSession?.controllerTurns.length ?? 0) > 0,
++      )
++    ) {
++      const collected = await collectRuntimeSessionSpans(report.sessionLineage)
++      const traceResult = await investigateCollected(args, collected, {
++        loadDefaultConfig: false,
++      })
++      markdown = `${markdown}\n\n---\n\n${traceResult.report}`
++    }
+   }
+   if (args.out) {
+     await saveReport(args.out, markdown)
+@@ -728,6 +783,64 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
+   }
+ }
+ 
++async function locateRuntimeSession(
++  lineage: SupervisorRunSessionLineage,
++): Promise<{ adapter: HarnessTraceAdapter; ref: SessionRef; spans: OtlpSpan[] }> {
++  const providerSession = lineage.providerSession
++  if (providerSession === undefined) {
++    throw new Error(
++      `Runtime node ${JSON.stringify(lineage.nodeId)} has no measured provider session`,
++    )
++  }
++  if (providerSession.controllerTurns.length === 0) {
++    throw new Error(
++      `Runtime node ${JSON.stringify(lineage.nodeId)} has no exact controller turns`,
++    )
++  }
++  const adapter = resolveAdapter(providerSession.backend)
++  if (!adapter) {
++    throw new Error(
++      `no trace adapter is registered for Runtime session backend ${JSON.stringify(providerSession.backend)}`,
++    )
++  }
++  const candidates = adapter.locateBySessionId
++    ? await adapter.locateBySessionId(providerSession.nativeSessionId)
++    : (await locateSessions(adapter)).filter(
++        (ref) => ref.sessionId === providerSession.nativeSessionId,
++      )
++  const matches = candidates.filter((ref) => ref.cwd === providerSession.cwd)
++  if (matches.length !== 1) {
++    throw new Error(
++      `Runtime node ${JSON.stringify(lineage.nodeId)} maps to ${matches.length} local ` +
++        `${adapter.harness} sessions with id ${JSON.stringify(providerSession.nativeSessionId)}; expected exactly one`,
++    )
++  }
++  const ref: SessionRef = {
++    ...matches[0]!,
++    cwd: providerSession.cwd,
++  }
++  const spans = stampRuntimeSessionLineage(
++    await parseSession(adapter, ref),
++    lineage,
++  )
++  return { adapter, ref, spans }
++}
++
++async function collectRuntimeSessionSpans(
++  lineage: readonly SupervisorRunSessionLineage[],
++): Promise<CollectedSpans> {
++  const exactLineage = lineage.filter(
++    (row) => (row.providerSession?.controllerTurns.length ?? 0) > 0,
++  )
++  const rows = await Promise.all(exactLineage.map(locateRuntimeSession))
++  return {
++    spans: rows.flatMap((row) => row.spans),
++    harness: [...new Set(rows.map((row) => row.adapter.harness))].join('+'),
++    cwds: rows.flatMap((row) => (row.ref.cwd ? [row.ref.cwd] : [])),
++    sources: rows.map((row) => selectedSessionSource(row.ref, row.spans)),
++  }
++}
++
+ async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
+   if (!args.input) throw new Error('input file missing')
+   const attributes = await loadExportAttributes(args)
+@@ -779,7 +892,15 @@ async function cmdInvestigate(args: Args): Promise<void> {
+ }
+ 
+ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
+-  const { spans, harness, cwds, sources, workflow } = await collectSpans(args)
++  return investigateCollected(args, await collectSpans(args), options)
++}
++
++async function investigateCollected(
++  args: Args,
++  collected: CollectedSpans,
++  options: { loadDefaultConfig?: boolean } = {},
++) {
++  const { spans, harness, cwds, sources, workflow } = collected
+   if (spans.length === 0) throw new Error('no spans found for the given selection')
+   const config = args.config !== undefined || options.loadDefaultConfig !== false
+     ? await loadTracesConfig(args.config)
+@@ -1127,6 +1248,10 @@ Options:
+                    analyze: report a SUPERVISION TREE instead of harness sessions —
+                    steers, spawn waves, concurrency, idle wall, cost by role,
+                    accepted vs rejected. Rolls up when the dir holds many runs.
++  --session-map <json>
++                   Historical fallback for one direct --supervisor-run-dir
++                   whose journal predates provider-session receipts.
++                   Only exact per-turn receipts authorize actor attribution.
+   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
+   --out <path>     Write report to a file
+   --dir <path>     improve: write artifacts to this directory
+diff --git a/src/runtime-session-lineage.ts b/src/runtime-session-lineage.ts
+new file mode 100644
+index 0000000..156354e
+--- /dev/null
++++ b/src/runtime-session-lineage.ts
+@@ -0,0 +1,359 @@
++import { createHash } from 'node:crypto'
++import type {
++  RuntimeControllerTurnReceipt,
++  RuntimeTraceSessionBinding,
++  SupervisorRunSessionLineage,
++} from '@tangle-network/agent-eval/supervisor-run'
++import { ACTOR_ATTR } from './adapters/conversation.js'
++import { ATTR } from './attributes.js'
++import type { OtlpSpan } from './otlp.js'
++
++const SHA256 = /^sha256:[a-f0-9]{64}$/
++
++function record(value: unknown): Record<string, unknown> | null {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++    ? (value as Record<string, unknown>)
++    : null
++}
++
++function requiredString(value: unknown, field: string, index: number): string {
++  if (typeof value !== 'string' || value.length === 0) {
++    throw new Error(`session map row ${index}.${field} must be a non-empty string`)
++  }
++  return value
++}
++
++function parseControllerTurns(
++  row: Record<string, unknown>,
++  rowIndex: number,
++  nativePromptCount: number,
++): readonly RuntimeControllerTurnReceipt[] {
++  const value = row.controllerTurns
++  if (value === undefined) return Object.freeze([])
++  if (!Array.isArray(value)) {
++    throw new Error(`session map row ${rowIndex}.controllerTurns must be an array`)
++  }
++  if (value.length === 0) return Object.freeze([])
++  const receipts: RuntimeControllerTurnReceipt[] = []
++  const runIds = new Set<string>()
++  let previousOrdinal = 0
++  let previousEndedAt = Number.NEGATIVE_INFINITY
++  for (const [turnIndex, item] of value.entries()) {
++    const receipt = record(item)
++    if (receipt === null) {
++      throw new Error(
++        `session map row ${rowIndex}.controllerTurns[${turnIndex}] must be an object`,
++      )
++    }
++    const ordinal = receipt.ordinal
++    if (
++      !Number.isSafeInteger(ordinal) ||
++      (ordinal as number) < 1 ||
++      (ordinal as number) > nativePromptCount
++    ) {
++      throw new Error(
++        `session map row ${rowIndex}.controllerTurns[${turnIndex}].ordinal must be within the saved session turn count`,
++      )
++    }
++    if ((ordinal as number) <= previousOrdinal) {
++      throw new Error(
++        `session map row ${rowIndex}.controllerTurns ordinals must be unique and strictly increasing`,
++      )
++    }
++    const runId = requiredString(
++      receipt.runId,
++      `controllerTurns[${turnIndex}].runId`,
++      rowIndex,
++    )
++    if (runIds.has(runId)) {
++      throw new Error(
++        `session map row ${rowIndex}.controllerTurns repeats runId ${JSON.stringify(runId)}`,
++      )
++    }
++    const bridgeRequestDigest = requiredString(
++      receipt.bridgeRequestDigest,
++      `controllerTurns[${turnIndex}].bridgeRequestDigest`,
++      rowIndex,
++    )
++    const promptSha256 = requiredString(
++      receipt.promptSha256,
++      `controllerTurns[${turnIndex}].promptSha256`,
++      rowIndex,
++    )
++    if (!SHA256.test(bridgeRequestDigest) || !SHA256.test(promptSha256)) {
++      throw new Error(
++        `session map row ${rowIndex}.controllerTurns[${turnIndex}] digests must be canonical SHA-256 values`,
++      )
++    }
++    const startedAt = receipt.startedAt
++    const endedAt = receipt.endedAt
++    if (
++      !Number.isSafeInteger(startedAt) ||
++      (startedAt as number) < 0 ||
++      !Number.isSafeInteger(endedAt) ||
++      (endedAt as number) < (startedAt as number)
++    ) {
++      throw new Error(
++        `session map row ${rowIndex}.controllerTurns[${turnIndex}] must have an ordered Unix-millisecond interval`,
++      )
++    }
++    if ((startedAt as number) < previousEndedAt) {
++      throw new Error(
++        `session map row ${rowIndex}.controllerTurns contains overlapping intervals`,
++      )
++    }
++    receipts.push(
++      Object.freeze({
++        ordinal: ordinal as number,
++        runId,
++        bridgeRequestDigest,
++        promptSha256: promptSha256 as `sha256:${string}`,
++        startedAt: startedAt as number,
++        endedAt: endedAt as number,
++      }),
++    )
++    runIds.add(runId)
++    previousOrdinal = ordinal as number
++    previousEndedAt = endedAt as number
++  }
++  return Object.freeze(receipts)
++}
++
++function parseNativePromptCount(row: Record<string, unknown>, rowIndex: number): number {
++  const value = row.nativePromptCount ?? row.turns
++  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
++    throw new Error(
++      `session map row ${rowIndex}.nativePromptCount must be a positive safe integer`,
++    )
++  }
++  return value as number
++}
++
++/**
++ * Normalize a saved, read-only cli-bridge `GET /v1/sessions` response into the
++ * provider-neutral binding consumed by agent-eval's Runtime reader.
++ */
++export function parseCliBridgeSessionMap(
++  raw: string,
++): readonly RuntimeTraceSessionBinding[] {
++  let parsed: unknown
++  try {
++    parsed = JSON.parse(raw) as unknown
++  } catch (error) {
++    throw new Error(
++      `session map must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
++    )
++  }
++  const response = record(parsed)
++  const rows = Array.isArray(parsed) ? parsed : response?.data
++  if (!Array.isArray(rows)) {
++    throw new Error('session map must be a cli-bridge response object with a data array')
++  }
++
++  const bindings: RuntimeTraceSessionBinding[] = []
++  const externalOwners = new Map<string, number>()
++  for (const [index, value] of rows.entries()) {
++    const row = record(value)
++    if (row === null) throw new Error(`session map row ${index} must be an object`)
++    const externalId = requiredString(row.externalId, 'externalId', index)
++    const backend = requiredString(row.backend, 'backend', index)
++    const internalId = requiredString(row.internalId, 'internalId', index)
++    const cwdValue = row.cwd
++    const nativePromptCount = parseNativePromptCount(row, index)
++    const controllerTurns = parseControllerTurns(row, index, nativePromptCount)
++    if (typeof cwdValue !== 'string' || cwdValue.length === 0) {
++      throw new Error(`session map row ${index}.cwd must be a non-empty string`)
++    }
++
++    const externalKey = `${backend}\u0000${externalId}`
++    const duplicateExternal = externalOwners.get(externalKey)
++    if (duplicateExternal !== undefined) {
++      throw new Error(
++        `session map rows ${duplicateExternal} and ${index} repeat one external id for the same backend`,
++      )
++    }
++    externalOwners.set(externalKey, index)
++    bindings.push(
++      Object.freeze({
++        provider: 'cli-bridge',
++        backend,
++        externalId,
++        nativeSessionId: internalId,
++        cwd: cwdValue,
++        nativePromptCount,
++        controllerTurns,
++      }),
++    )
++  }
++  return Object.freeze(bindings)
++}
++
++/**
++ * Stamp Runtime's exact tree relationship onto normalized native spans.
++ * Only prompt ordinals carrying a verified controller-turn receipt are
++ * re-attributed; an unbounded or stale native session never becomes agent input.
++ */
++export function stampRuntimeSessionLineage(
++  spans: readonly OtlpSpan[],
++  lineage: SupervisorRunSessionLineage,
++): OtlpSpan[] {
++  const providerSession = lineage.providerSession
++  if (providerSession === undefined) {
++    throw new Error(
++      `Runtime node ${JSON.stringify(lineage.nodeId)} has no measured provider session`,
++    )
++  }
++  const roots = spans.filter((item) => item.parent_span_id === null)
++  if (roots.length !== 1) {
++    throw new Error(
++      `trace session ${JSON.stringify(providerSession.nativeSessionId)} has ${roots.length} root spans; expected exactly one`,
++    )
++  }
++  const nativeRoot = roots[0] as OtlpSpan
++  const prompts = spans.filter((item) => item.name === 'user.prompt')
++  const controllerInputs = new Set<OtlpSpan>()
++  const promptOwners = new Map<OtlpSpan, string>()
++  const turnWindows: Array<{
++    readonly startedAt: number
++    readonly endedAt: number
++    readonly nextPromptAt: number | null
++  }> = []
++  for (const receipt of providerSession.controllerTurns) {
++    const matches = prompts.filter((prompt) => {
++      const promptMs = Date.parse(prompt.start_time)
++      if (
++        !Number.isFinite(promptMs) ||
++        promptMs < receipt.startedAt ||
++        promptMs > receipt.endedAt
++      ) {
++        return false
++      }
++      const exactDigest = prompt.attributes['traces.prompt_sha256']
++      if (typeof exactDigest === 'string' && SHA256.test(exactDigest)) {
++        return exactDigest === receipt.promptSha256
++      }
++      const content = prompt.attributes.content
++      if (typeof content !== 'string') return false
++      return (
++        `sha256:${createHash('sha256').update(content, 'utf8').digest('hex')}` ===
++        receipt.promptSha256
++      )
++    })
++    if (matches.length !== 1) {
++      throw new Error(
++        `Runtime node ${JSON.stringify(lineage.nodeId)} controller turn ${receipt.ordinal} maps to ${matches.length} exact native provider prompts; expected one`,
++      )
++    }
++    const prompt = matches[0] as OtlpSpan
++    const owner = promptOwners.get(prompt)
++    if (owner !== undefined) {
++      throw new Error(
++        `Runtime controller runs ${JSON.stringify(owner)} and ${JSON.stringify(receipt.runId)} map to one native provider prompt`,
++      )
++    }
++    promptOwners.set(prompt, receipt.runId)
++    controllerInputs.add(prompt)
++    const promptStartedAt = Date.parse(prompt.start_time)
++    const nextPromptAt =
++      prompts
++        .map((candidate) => Date.parse(candidate.start_time))
++        .filter(
++          (candidateStartedAt) =>
++            Number.isFinite(candidateStartedAt) && candidateStartedAt > promptStartedAt,
++        )
++        .sort((left, right) => left - right)[0] ?? null
++    turnWindows.push({
++      startedAt: promptStartedAt,
++      endedAt: receipt.endedAt,
++      nextPromptAt,
++    })
++  }
++
++  const exactSpans = spans.filter((item) => {
++    if (item === nativeRoot) return false
++    const startedAt = Date.parse(item.start_time)
++    const endedAt = Date.parse(item.end_time)
++    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) {
++      throw new Error(
++        `trace session ${JSON.stringify(providerSession.nativeSessionId)} span ${JSON.stringify(item.span_id)} has an invalid time interval`,
++      )
++    }
++    return turnWindows.some(
++      (window) =>
++        startedAt >= window.startedAt &&
++        endedAt <= window.endedAt &&
++        (window.nextPromptAt === null ||
++          (startedAt < window.nextPromptAt && endedAt <= window.nextPromptAt)),
++    )
++  })
++  const selectedIds = new Set([nativeRoot.span_id, ...exactSpans.map((item) => item.span_id)])
++  const knownOrdinals = new Set(
++    providerSession.controllerTurns.map((receipt) => receipt.ordinal),
++  )
++  const missingOrdinals = Array.from(
++    { length: providerSession.nativePromptCount },
++    (_, index) => index + 1,
++  ).filter((ordinal) => !knownOrdinals.has(ordinal))
++  const selected = [nativeRoot, ...exactSpans]
++  return selected.map((item) => {
++    const isRuntimeInput = controllerInputs.has(item)
++    const attributes: Record<string, unknown> = {
++      ...item.attributes,
++      [ATTR.SESSION_ID]: lineage.nodeId,
++    }
++    if ('session.id' in attributes) attributes['session.id'] = lineage.nodeId
++    if ('traces.session.id' in attributes) attributes['traces.session.id'] = lineage.nodeId
++    if (isRuntimeInput) {
++      attributes[ACTOR_ATTR] = 'agent'
++    }
++    if (item.parent_span_id === null) {
++      attributes['traces.session.role'] = lineage.parentNodeId === null ? 'operator' : 'child'
++      attributes['traces.session.depth'] = lineage.depth
++      attributes['traces.child_session_ids'] = JSON.stringify(lineage.childNodeIds)
++      attributes['traces.runtime.node_id'] = lineage.nodeId
++      attributes['traces.provider.provider'] = providerSession.provider
++      attributes['traces.provider.backend'] = providerSession.backend
++      attributes['traces.provider.external_id'] = providerSession.externalId
++      attributes['traces.provider.native_session_id'] = providerSession.nativeSessionId
++      attributes['traces.provider.trace_id'] = item.trace_id
++      attributes['traces.runtime.exact_prompt_count'] = providerSession.controllerTurns.length
++      attributes['traces.provider.native_prompt_count'] = providerSession.nativePromptCount
++      attributes['traces.runtime.missing_prompt_ordinals'] = JSON.stringify(missingOrdinals)
++      if (lineage.parentNodeId === null) {
++        delete attributes['traces.parent_session_id']
++        delete attributes['traces.runtime.parent_node_id']
++      } else {
++        attributes['traces.parent_session_id'] = lineage.parentNodeId
++        attributes['traces.runtime.parent_node_id'] = lineage.parentNodeId
++      }
++    }
++    const parentSpanId =
++      item.parent_span_id !== null && !selectedIds.has(item.parent_span_id)
++        ? nativeRoot.span_id
++        : item.parent_span_id
++    const interval =
++      item === nativeRoot && providerSession.controllerTurns.length > 0
++        ? {
++            start_time: new Date(
++              Math.min(...turnWindows.map((window) => window.startedAt)),
++            ).toISOString(),
++            end_time: new Date(
++              Math.max(
++                ...turnWindows.map((window) =>
++                  window.nextPromptAt === null
++                    ? window.endedAt
++                    : Math.min(window.endedAt, window.nextPromptAt),
++                ),
++              ),
++            ).toISOString(),
++          }
++        : {}
++    return {
++      ...item,
++      ...interval,
++      trace_id: lineage.nodeId,
++      parent_span_id: parentSpanId,
++      attributes,
++    }
++  })
++}
+diff --git a/src/session-relationship.ts b/src/session-relationship.ts
+index 8a97e30..a274953 100644
+--- a/src/session-relationship.ts
++++ b/src/session-relationship.ts
+@@ -113,7 +113,9 @@ export function describeSessionRelationship(
+ 
+   const role = stringAttribute(root, 'traces.session.role')
+   const parentSessionId = stringAttribute(root, 'traces.parent_session_id')
+-  const depth = numberAttribute(root, 'traces.codex.agent_depth')
++  const depth =
++    numberAttribute(root, 'traces.session.depth')
++    ?? numberAttribute(root, 'traces.codex.agent_depth')
+   const agentNickname = stringAttribute(root, 'traces.codex.agent_nickname')
+   const agentRole = stringAttribute(root, 'traces.codex.agent_role')
+   const agentPath = stringAttribute(root, 'traces.codex.agent_path')
+diff --git a/tests/cli.test.ts b/tests/cli.test.ts
+index 6280408..884c9e8 100644
+--- a/tests/cli.test.ts
++++ b/tests/cli.test.ts
+@@ -13,6 +13,250 @@ function parseRows(jsonl: string): Record<string, unknown>[] {
+ }
+ 
+ describe('traces CLI', () => {
++  it('joins one Runtime tree to its exact native Pi sessions', async () => {
++    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-runtime-lineage-'))
++    const home = join(dir, 'home')
++    const runRoot = join(dir, 'run')
++    const runtime = join(runRoot, 'runtime')
++    const rootSessions = join(home, '.pi', 'agent', 'sessions', '--workspaces-root--')
++    const childSessions = join(home, '.pi', 'agent', 'sessions', '--workspaces-child--')
++    const rootId = '00000000-0000-4000-8000-000000000001'
++    const childId = '00000000-0000-4000-8000-000000000002'
++    const rootNode = 'recursive-steering-smoke'
++    const childNode = `${rootNode}:s0`
++    const report = join(dir, 'report.md')
++    const otlp = join(dir, 'spans.openinference.jsonl')
++    await mkdir(runtime, { recursive: true })
++    await mkdir(rootSessions, { recursive: true })
++    await mkdir(childSessions, { recursive: true })
++    await writeFile(
++      join(rootSessions, `2026-07-30T18-00-00-000Z_${rootId}.jsonl`),
++      await readFile(
++        new URL('./fixtures/pi/recursive-steering-observability.jsonl', import.meta.url),
++        'utf8',
++      ),
++      'utf8',
++    )
++    await writeFile(
++      join(childSessions, `2026-07-30T18-00-10-000Z_${childId}.jsonl`),
++      [
++        {
++          type: 'session',
++          id: childId,
++          timestamp: '2026-07-30T18:00:10.000Z',
++          cwd: '/workspaces/recursive-steering-smoke%3As0',
++        },
++        {
++          type: 'message',
++          id: 'child-user',
++          timestamp: '2026-07-30T18:00:11.000Z',
++          message: {
++            role: 'user',
++            content: [{ type: 'text', text: 'Apply the steering message.' }],
++          },
++        },
++        {
++          type: 'message',
++          id: 'child-assistant',
++          timestamp: '2026-07-30T18:00:12.000Z',
++          message: {
++            role: 'assistant',
++            model: 'glm-5.2',
++            stopReason: 'stop',
++            content: [{ type: 'text', text: 'Steering applied.' }],
++          },
++        },
++      ]
++        .map((row) => JSON.stringify(row))
++        .join('\n'),
++      'utf8',
++    )
++    await writeFile(
++      join(runtime, 'spawn-journal.jsonl'),
++      [
++        { kind: 'begin', root: rootNode, at: '2026-07-30T18:00:00.000Z' },
++        {
++          kind: 'event',
++          root: rootNode,
++          event: {
++            kind: 'spawned',
++            id: rootNode,
++            label: 'root-profile',
++            profileDigest: 'root-profile',
++            budget: { maxIterations: 3, maxTokens: 10_000 },
++            seq: 0,
++            at: '2026-07-30T18:00:00.000Z',
++          },
++        },
++        {
++          kind: 'event',
++          root: rootNode,
++          event: {
++            kind: 'spawned',
++            id: childNode,
++            parent: rootNode,
++            label: 'steering-child',
++            profileDigest: 'child-profile',
++            runtime: 'driver',
++            budget: { maxIterations: 2, maxTokens: 5_000 },
++            seq: 0,
++            at: '2026-07-30T18:00:10.000Z',
++          },
++        },
++        { kind: 'begin', root: childNode, at: '2026-07-30T18:00:10.000Z' },
++        {
++          kind: 'event',
++          root: childNode,
++          event: {
++            kind: 'spawned',
++            id: childNode,
++            label: 'steering-child',
++            profileDigest: 'child-profile',
++            budget: { maxIterations: 2, maxTokens: 5_000 },
++            seq: 0,
++            at: '2026-07-30T18:00:10.000Z',
++          },
++        },
++        {
++          kind: 'event',
++          root: rootNode,
++          event: {
++            kind: 'settled',
++            id: childNode,
++            status: 'done',
++            spent: {
++              iterations: 1,
++              tokens: { input: 100, output: 20 },
++              usd: 0,
++              usdKnown: false,
++              ms: 2_000,
++            },
++            providerSession: {
++              provider: 'cli-bridge',
++              backend: 'pi',
++              externalId: childNode,
++              nativeSessionId: childId,
++              cwd: '/workspaces/recursive-steering-smoke%3As0',
++              nativePromptCount: 1,
++              controllerTurns: [
++                {
++                  ordinal: 1,
++                  runId: `${childNode}:turn:1`,
++                  bridgeRequestDigest: `sha256:${'b'.repeat(64)}`,
++                  promptSha256:
++                    'sha256:1b72d6f85ebccfdb38366cee929ae64847c88d7ea95aaa0fa15da96c3a3b73ec',
++                  startedAt: 1_785_434_410_500,
++                  endedAt: 1_785_434_413_000,
++                },
++              ],
++            },
++            seq: 0,
++            at: '2026-07-30T18:00:12.000Z',
++          },
++        },
++        {
++          kind: 'event',
++          root: rootNode,
++          event: {
++            kind: 'settled',
++            id: rootNode,
++            status: 'done',
++            spent: {
++              iterations: 1,
++              tokens: { input: 200, output: 40 },
++              usd: 0,
++              usdKnown: false,
++              ms: 13_000,
++            },
++            providerSession: {
++              provider: 'cli-bridge',
++              backend: 'pi',
++              externalId: rootNode,
++              nativeSessionId: rootId,
++              cwd: '/workspaces/recursive-steering-smoke',
++              nativePromptCount: 1,
++              controllerTurns: [
++                {
++                  ordinal: 1,
++                  runId: `${rootNode}:turn:1`,
++                  bridgeRequestDigest: `sha256:${'a'.repeat(64)}`,
++                  promptSha256:
++                    'sha256:6ad905561d745a11be6d1a2511e9f2da2011c4c6191d34d58aaa0a1a9a2f5ee7',
++                  startedAt: 1_785_434_400_500,
++                  endedAt: 1_785_434_409_000,
++                },
++              ],
++            },
++            seq: 1,
++            at: '2026-07-30T18:00:13.000Z',
++          },
++        },
++      ]
++        .map((row) => JSON.stringify(row))
++        .join('\n'),
++      'utf8',
++    )
++    await execFileAsync(
++      process.execPath,
++      [
++        '--import',
++        'tsx',
++        'src/cli.ts',
++        'analyze',
++        '--supervisor-run-dir',
++        runRoot,
++        '--out',
++        report,
++        '--otlp',
++        otlp,
++      ],
++      {
++        cwd: process.cwd(),
++        env: { ...process.env, HOME: home, NO_COLOR: '1', FORCE_COLOR: '' },
++        maxBuffer: 10 * 1024 * 1024,
++        timeout: 30_000,
++      },
++    )
++
++    const text = await readFile(report, 'utf8')
++    expect(text).toContain(
++      `| <code>${rootNode}</code> | — | 0 | 1 | <code>cli-bridge</code> | <code>pi</code> | <code>${rootId}</code> | 1/1 | none |`,
++    )
++    expect(text).toContain(
++      `| <code>${childNode}</code> | <code>${rootNode}</code> | 1 | 0 | <code>cli-bridge</code> | <code>pi</code> | <code>${childId}</code> | 1/1 | none |`,
++    )
++    expect(text).toContain(`| operator | 0 | - | - | \`${rootNode}\` | — | 1 |`)
++    expect(text).toContain(`| child | 1 | - | - | \`${childNode}\` | \`${rootNode}\` | 0 |`)
++    expect(text).toContain('No human turns followed an assistant turn')
++    expect(text).toContain('**Subagent spawns observed:** 1')
++    expect(text).toContain('| `steering-child` | 1 |')
++    expect(text).toContain(
++      `traces analyze --supervisor-run-dir '${runRoot}'`,
++    )
++    const rows = parseRows(await readFile(otlp, 'utf8'))
++    expect(rows).toHaveLength(10)
++    expect(
++      rows
++        .filter((row) => row.name === 'user.prompt')
++        .every(
++          (row) =>
++            (row.attributes as Record<string, unknown> | undefined)?.['tangle.actor']
++            === 'agent',
++        ),
++    ).toBe(true)
++    expect(
++      rows.find((row) => row.trace_id === childNode && row.parent_span_id === '')?.attributes,
++    ).toEqual(
++      expect.objectContaining({
++        'traces.session.role': 'child',
++        'traces.session.depth': 1,
++        'traces.parent_session_id': rootNode,
++        'traces.runtime.node_id': childNode,
++        'traces.provider.native_session_id': childId,
++      }),
++    )
++  })
++
+   it('routes an Intelligence span file through analyze, investigate, and improve', async () => {
+     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-test-'))
+     const input = join(dir, 'intelligence-spans.jsonl')
+diff --git a/tests/fixtures/pi/recursive-steering-observability.jsonl b/tests/fixtures/pi/recursive-steering-observability.jsonl
+new file mode 100644
+index 0000000..7a4ac77
+--- /dev/null
++++ b/tests/fixtures/pi/recursive-steering-observability.jsonl
+@@ -0,0 +1,8 @@
++{"type":"session","id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-07-30T18:00:00.000Z","cwd":"/workspaces/recursive-steering-smoke"}
++{"type":"message","id":"m0","timestamp":"2026-07-30T18:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Run one recursive steering smoke test."}]}}
++{"type":"message","id":"m1","timestamp":"2026-07-30T18:00:02.000Z","message":{"role":"assistant","model":"glm-5.2","stopReason":"toolUse","content":[{"type":"text","text":"I will spawn the steering child."},{"type":"toolCall","id":"spawn-failed","name":"coordination_spawn_agent","arguments":{"label":"invalid-child","profile":{"extension":{"unknown":true}}}}]}}
++{"type":"message","id":"m2","timestamp":"2026-07-30T18:00:03.000Z","message":{"role":"toolResult","toolCallId":"spawn-failed","toolName":"coordination_spawn_agent","isError":true,"content":[{"type":"text","text":"invalid profile extension key"}]}}
++{"type":"message","id":"m3","timestamp":"2026-07-30T18:00:04.000Z","message":{"role":"assistant","model":"glm-5.2","stopReason":"toolUse","content":[{"type":"toolCall","id":"spawn-ok","name":"coordination_spawn_agent","arguments":{"label":"steering-child","profile":{"systemPrompt":"Steer the worker."}}}]}}
++{"type":"message","id":"m4","timestamp":"2026-07-30T18:00:05.000Z","message":{"role":"toolResult","toolCallId":"spawn-ok","toolName":"coordination_spawn_agent","isError":false,"content":[{"type":"text","text":"{\"agentId\":\"recursive-steering-smoke:s0\"}"}]}}
++{"type":"message","id":"m5","timestamp":"2026-07-30T18:00:06.000Z","message":{"role":"assistant","model":"glm-5.2","stopReason":"stop","content":[{"type":"text","text":"The child is ready for a precise correction."}]}}
++{"type":"message","id":"m6","timestamp":"2026-07-30T18:00:07.000Z","message":{"role":"user","content":[{"type":"text","text":"{\"type\":\"agent-runtime.down-messages\",\"messages\":[{\"messageId\":\"append-steer-v1\",\"body\":\"Exactly inspect the requested artifact.\"}]}"}]}}
+diff --git a/tests/fixtures/runtime-session-map/recursive-steering-smoke.json b/tests/fixtures/runtime-session-map/recursive-steering-smoke.json
+new file mode 100644
+index 0000000..3d1f473
+--- /dev/null
++++ b/tests/fixtures/runtime-session-map/recursive-steering-smoke.json
+@@ -0,0 +1,50 @@
++{
++  "data": [
++    {
++      "externalId": "recursive-steering-smoke",
++      "backend": "pi",
++      "internalId": "00000000-0000-4000-8000-000000000001",
++      "cwd": "/workspaces/recursive-steering-smoke",
++      "turns": 1,
++      "nativePromptCount": 1,
++      "controllerTurns": [
++        {
++          "ordinal": 1,
++          "runId": "recursive-steering-smoke:turn:1",
++          "bridgeRequestDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++          "promptSha256": "sha256:6ad905561d745a11be6d1a2511e9f2da2011c4c6191d34d58aaa0a1a9a2f5ee7",
++          "startedAt": 1785434400500,
++          "endedAt": 1785434409000
++        }
++      ],
++      "createdAt": 1785438000000,
++      "lastUsedAt": 1785438001000,
++      "metadata": {
++        "requestDigest": "sanitized-root-request"
++      }
++    },
++    {
++      "externalId": "recursive-steering-smoke:s0",
++      "backend": "pi",
++      "internalId": "00000000-0000-4000-8000-000000000002",
++      "cwd": "/workspaces/recursive-steering-smoke%3As0",
++      "turns": 2,
++      "nativePromptCount": 2,
++      "controllerTurns": [
++        {
++          "ordinal": 1,
++          "runId": "recursive-steering-smoke:s0:turn:1",
++          "bridgeRequestDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++          "promptSha256": "sha256:1b72d6f85ebccfdb38366cee929ae64847c88d7ea95aaa0fa15da96c3a3b73ec",
++          "startedAt": 1785434410500,
++          "endedAt": 1785434413000
++        }
++      ],
++      "createdAt": 1785438002000,
++      "lastUsedAt": 1785438003000,
++      "metadata": {
++        "requestDigest": "sanitized-child-request"
++      }
++    }
++  ]
++}
+diff --git a/tests/runtime-session-lineage.test.ts b/tests/runtime-session-lineage.test.ts
+new file mode 100644
+index 0000000..02338f5
+--- /dev/null
++++ b/tests/runtime-session-lineage.test.ts
+@@ -0,0 +1,533 @@
++import { readFile } from 'node:fs/promises'
++import { describe, expect, it } from 'vitest'
++import type {
++  RuntimeControllerTurnReceipt,
++  SupervisorRunSessionLineage,
++} from '@tangle-network/agent-eval/supervisor-run'
++import { analyzeAdoption } from '../src/adoption.js'
++import { PiAdapter } from '../src/adapters/pi.js'
++import { span } from '../src/otlp.js'
++import { analyzeReactions } from '../src/reactions.js'
++import {
++  parseCliBridgeSessionMap,
++  stampRuntimeSessionLineage,
++} from '../src/runtime-session-lineage.js'
++import { describeSessionRelationship } from '../src/session-relationship.js'
++
++const FIXTURE = new URL(
++  './fixtures/runtime-session-map/recursive-steering-smoke.json',
++  import.meta.url,
++)
++const PI_FIXTURE = new URL(
++  './fixtures/pi/recursive-steering-observability.jsonl',
++  import.meta.url,
++)
++
++function runtimeLineage(input: {
++  nodeId: string
++  backend: string
++  nativeSessionId: string
++  cwd?: string
++  parentNodeId: string | null
++  depth: number
++  childNodeIds: readonly string[]
++  controllerTurns?: readonly RuntimeControllerTurnReceipt[]
++}): SupervisorRunSessionLineage {
++  return {
++    nodeId: input.nodeId,
++    parentNodeId: input.parentNodeId,
++    depth: input.depth,
++    childNodeIds: input.childNodeIds,
++    providerSession: {
++      provider: 'cli-bridge',
++      backend: input.backend,
++      externalId: input.nodeId,
++      nativeSessionId: input.nativeSessionId,
++      cwd: input.cwd ?? `/workspaces/${encodeURIComponent(input.nodeId)}`,
++      nativePromptCount: Math.max(
++        1,
++        ...(input.controllerTurns ?? []).map((receipt) => receipt.ordinal),
++      ),
++      controllerTurns: input.controllerTurns ?? [],
++    },
++  }
++}
++
++describe('Runtime native-session lineage', () => {
++  it('normalizes the sanitized successful cli-bridge session map without metadata', async () => {
++    const bindings = parseCliBridgeSessionMap(await readFile(FIXTURE, 'utf8'))
++
++    expect(bindings).toEqual([
++      {
++        provider: 'cli-bridge',
++        backend: 'pi',
++        externalId: 'recursive-steering-smoke',
++        nativeSessionId: '00000000-0000-4000-8000-000000000001',
++        cwd: '/workspaces/recursive-steering-smoke',
++        nativePromptCount: 1,
++        controllerTurns: [
++          {
++            ordinal: 1,
++            runId: 'recursive-steering-smoke:turn:1',
++            bridgeRequestDigest: `sha256:${'a'.repeat(64)}`,
++            promptSha256:
++              'sha256:6ad905561d745a11be6d1a2511e9f2da2011c4c6191d34d58aaa0a1a9a2f5ee7',
++            startedAt: 1_785_434_400_500,
++            endedAt: 1_785_434_409_000,
++          },
++        ],
++      },
++      {
++        provider: 'cli-bridge',
++        backend: 'pi',
++        externalId: 'recursive-steering-smoke:s0',
++        nativeSessionId: '00000000-0000-4000-8000-000000000002',
++        cwd: '/workspaces/recursive-steering-smoke%3As0',
++        nativePromptCount: 2,
++        controllerTurns: [
++          {
++            ordinal: 1,
++            runId: 'recursive-steering-smoke:s0:turn:1',
++            bridgeRequestDigest: `sha256:${'b'.repeat(64)}`,
++            promptSha256:
++              'sha256:1b72d6f85ebccfdb38366cee929ae64847c88d7ea95aaa0fa15da96c3a3b73ec',
++            startedAt: 1_785_434_410_500,
++            endedAt: 1_785_434_413_000,
++          },
++        ],
++      },
++    ])
++    expect(Object.isFrozen(bindings)).toBe(true)
++    expect(Object.isFrozen(bindings[0])).toBe(true)
++    expect(Object.isFrozen(bindings[0]?.controllerTurns)).toBe(true)
++    expect(Object.isFrozen(bindings[0]?.controllerTurns?.[0])).toBe(true)
++    expect(bindings[0]).not.toHaveProperty('metadata')
++  })
++
++  it('refuses malformed or ambiguous bridge rows', () => {
++    expect(() => parseCliBridgeSessionMap('{')).toThrow(/valid JSON/)
++    expect(() => parseCliBridgeSessionMap('{}')).toThrow(/data array/)
++    expect(() =>
++      parseCliBridgeSessionMap(
++        JSON.stringify({ data: [{ externalId: 'root', backend: 'pi' }] }),
++      ),
++    ).toThrow(/internalId/)
++    expect(() =>
++      parseCliBridgeSessionMap(
++        JSON.stringify({
++          data: [
++            {
++              externalId: 'root',
++              backend: 'pi',
++              internalId: 'native-1',
++              cwd: '/workspace',
++              turns: 1,
++            },
++            {
++              externalId: 'root',
++              backend: 'pi',
++              internalId: 'native-2',
++              cwd: '/workspace',
++              turns: 1,
++            },
++          ],
++        }),
++      ),
++    ).toThrow(/repeat one external id/)
++    expect(
++      parseCliBridgeSessionMap(
++        JSON.stringify({
++          data: [
++            {
++              externalId: 'historical-root',
++              backend: 'pi',
++              internalId: 'native-1',
++              cwd: '/workspace',
++              turns: 1,
++            },
++            {
++              externalId: 'current-root',
++              backend: 'pi',
++              internalId: 'native-1',
++              cwd: '/workspace',
++              turns: 1,
++            },
++          ],
++        }),
++      ),
++    ).toHaveLength(2)
++    expect(() =>
++      parseCliBridgeSessionMap(
++        JSON.stringify({
++          data: [
++            {
++              externalId: 'root',
++              backend: 'pi',
++              internalId: 'native-1',
++              cwd: '/workspace',
++              turns: 1,
++              controllerTurns: [
++                {
++                  ordinal: 2,
++                  runId: 'root:turn:2',
++                  bridgeRequestDigest: `sha256:${'a'.repeat(64)}`,
++                  promptSha256: `sha256:${'b'.repeat(64)}`,
++                  startedAt: '2026-07-30T00:00:00.000Z',
++                  endedAt: '2026-07-30T00:00:01.000Z',
++                },
++              ],
++            },
++          ],
++        }),
++      ),
++    ).toThrow(/ordinal must be within/)
++    expect(() =>
++      parseCliBridgeSessionMap(
++        JSON.stringify({
++          data: [
++            {
++              externalId: 'root',
++              backend: 'pi',
++              internalId: 'native-1',
++              cwd: '/workspace',
++              nativePromptCount: 0,
++            },
++          ],
++        }),
++      ),
++    ).toThrow(/nativePromptCount must be a positive/)
++  })
++
++  it('stamps exact parent, depth, and child identity without mutating native spans', () => {
++    const native = [
++      span({
++        traceId: 'native-child',
++        spanId: 'root',
++        name: 'session',
++        kind: 'AGENT',
++        startTime: '2026-07-30T00:00:00.000Z',
++        service: 'pi',
++      }),
++      span({
++        traceId: 'native-child',
++        spanId: 'assistant',
++        parentSpanId: 'root',
++        name: 'message.assistant',
++        kind: 'LLM',
++        startTime: '2026-07-30T00:00:01.000Z',
++        service: 'pi',
++        content: 'Now I must continue.',
++      }),
++      span({
++        traceId: 'native-child',
++        spanId: 'resumed-runtime-input',
++        parentSpanId: 'root',
++        name: 'user.prompt',
++        kind: 'CHAIN',
++        startTime: '2026-07-30T00:00:02.000Z',
++        content: 'Build this exactly once. Do not hardcode the result.',
++        extra: { 'tangle.actor': 'human' },
++      }),
++    ]
++    const stamped = stampRuntimeSessionLineage(native, runtimeLineage({
++      nodeId: 'run:s0',
++      backend: 'pi',
++      nativeSessionId: 'native-child',
++      cwd: '/workspaces/run%3As0',
++      parentNodeId: 'run',
++      depth: 1,
++      childNodeIds: ['run:s0:s0'],
++      controllerTurns: [
++        {
++          ordinal: 1,
++          runId: 'run:s0:turn:1',
++          bridgeRequestDigest: `sha256:${'a'.repeat(64)}`,
++          promptSha256:
++            'sha256:fa8eca1d5caa48e71cafec9ad1fb93c6611ec261c17a8b10748ed0c8abbc0a57',
++          startedAt: 1_785_369_601_500,
++          endedAt: 1_785_369_602_500,
++        },
++      ],
++    }))
++
++    expect(stamped[0]?.attributes).toMatchObject({
++      'traces.session.role': 'child',
++      'traces.session.depth': 1,
++      'traces.parent_session_id': 'run',
++      'traces.child_session_ids': '["run:s0:s0"]',
++      'traces.runtime.node_id': 'run:s0',
++      'traces.runtime.parent_node_id': 'run',
++      'traces.provider.provider': 'cli-bridge',
++      'traces.provider.backend': 'pi',
++      'traces.provider.external_id': 'run:s0',
++      'traces.provider.native_session_id': 'native-child',
++      'traces.provider.trace_id': 'native-child',
++      'traces.runtime.exact_prompt_count': 1,
++      'traces.provider.native_prompt_count': 1,
++      'traces.runtime.missing_prompt_ordinals': '[]',
++      'tangle.sessionId': 'run:s0',
++    })
++    expect(stamped.every((item) => item.trace_id === 'run:s0')).toBe(true)
++    expect(stamped.map((item) => item.span_id)).toEqual(['root', 'resumed-runtime-input'])
++    expect(stamped[1]).not.toBe(native[2])
++    expect(native[0]?.attributes).not.toHaveProperty('traces.session.role')
++    expect(native[2]?.attributes['tangle.actor']).toBe('human')
++    expect(stamped[1]?.attributes['tangle.actor']).toBe('agent')
++    expect(analyzeReactions(native).humanReactionTurns).toBe(1)
++    expect(analyzeReactions(stamped).humanReactionTurns).toBe(0)
++    expect(
++      describeSessionRelationship(
++        {
++          harness: 'pi',
++          sessionId: 'native-child',
++          path: '/sessions/native-child.jsonl',
++          cwd: null,
++          mtimeMs: 0,
++        },
++        stamped,
++      ),
++    ).toMatchObject({
++      sessionId: 'run:s0',
++      role: 'child',
++      parentSessionId: 'run',
++      childSessionIds: ['run:s0:s0'],
++      depth: 1,
++    })
++  })
++
++  it('keeps mixed Pi/Codex native ids as provenance behind canonical Runtime ids', () => {
++    const nativeSessionId = 'same-native-id'
++    const nativeSpan = (service: string) => [
++      span({
++        traceId: nativeSessionId,
++        spanId: `root:${service}`,
++        name: 'session',
++        kind: 'AGENT',
++        startTime: '2026-07-30T00:00:00.000Z',
++        service,
++      }),
++    ]
++    const root = stampRuntimeSessionLineage(nativeSpan('pi'), runtimeLineage({
++      nodeId: 'run',
++      backend: 'pi',
++      nativeSessionId,
++      parentNodeId: null,
++      depth: 0,
++      childNodeIds: ['run:s0'],
++    }))
++    const child = stampRuntimeSessionLineage(nativeSpan('codex'), runtimeLineage({
++      nodeId: 'run:s0',
++      backend: 'codex',
++      nativeSessionId,
++      parentNodeId: 'run',
++      depth: 1,
++      childNodeIds: [],
++    }))
++
++    expect(root[0]?.trace_id).toBe('run')
++    expect(child[0]?.trace_id).toBe('run:s0')
++    expect(root[0]?.attributes['traces.provider.native_session_id']).toBe(nativeSessionId)
++    expect(child[0]?.attributes['traces.provider.native_session_id']).toBe(nativeSessionId)
++    expect(child[0]?.attributes['traces.parent_session_id']).toBe('run')
++    expect(root[0]?.attributes['traces.child_session_ids']).toBe('["run:s0"]')
++  })
++
++  it('never rewrites an unreceipted or mismatched native prompt as agent input', () => {
++    const native = [
++      span({
++        traceId: 'native',
++        spanId: 'root',
++        name: 'session',
++        kind: 'AGENT',
++        startTime: '2026-07-30T00:00:00.000Z',
++      }),
++      span({
++        traceId: 'native',
++        spanId: 'prompt',
++        parentSpanId: 'root',
++        name: 'user.prompt',
++        kind: 'CHAIN',
++        startTime: '2026-07-30T00:00:01.000Z',
++        content: 'human follow-up',
++        extra: { 'tangle.actor': 'human' },
++      }),
++    ]
++    const lineage = runtimeLineage({
++      nodeId: 'run',
++      backend: 'pi',
++      nativeSessionId: 'native',
++      parentNodeId: null,
++      depth: 0,
++      childNodeIds: [],
++    })
++    const unreceipted = stampRuntimeSessionLineage(native, lineage)
++    expect(unreceipted).toHaveLength(1)
++    expect(unreceipted[0]?.attributes).toMatchObject({
++      'traces.runtime.exact_prompt_count': 0,
++      'traces.provider.native_prompt_count': 1,
++      'traces.runtime.missing_prompt_ordinals': '[1]',
++    })
++    expect(() =>
++      stampRuntimeSessionLineage(native, {
++        ...lineage,
++        providerSession: {
++          ...lineage.providerSession!,
++          controllerTurns: [
++            {
++              ordinal: 1,
++              runId: 'run:turn:1',
++              bridgeRequestDigest: `sha256:${'a'.repeat(64)}`,
++              promptSha256: `sha256:${'b'.repeat(64)}`,
++              startedAt: 1_785_369_600_500,
++              endedAt: 1_785_369_601_500,
++            },
++          ],
++        },
++      }),
++    ).toThrow(/maps to 0 exact native provider prompts/)
++  })
++
++  it('attributes only the exact resumed turn and stops before the next native prompt', () => {
++    const native = [
++      span({
++        traceId: 'native-resumed',
++        spanId: 'root',
++        name: 'session',
++        kind: 'AGENT',
++        startTime: '2026-07-30T00:00:00.000Z',
++        endTime: '2026-07-30T00:00:30.000Z',
++      }),
++      span({
++        traceId: 'native-resumed',
++        spanId: 'stale-prompt',
++        parentSpanId: 'root',
++        name: 'user.prompt',
++        kind: 'CHAIN',
++        startTime: '2026-07-30T00:00:01.000Z',
++        content: 'stale human prompt',
++        extra: { 'tangle.actor': 'human' },
++      }),
++      span({
++        traceId: 'native-resumed',
++        spanId: 'stale-response',
++        parentSpanId: 'root',
++        name: 'message.assistant',
++        kind: 'LLM',
++        startTime: '2026-07-30T00:00:02.000Z',
++      }),
++      span({
++        traceId: 'native-resumed',
++        spanId: 'controller-prompt',
++        parentSpanId: 'root',
++        name: 'user.prompt',
++        kind: 'CHAIN',
++        startTime: '2026-07-30T00:00:10.000Z',
++        content: 'exact controller prompt',
++        extra: { 'tangle.actor': 'human' },
++      }),
++      span({
++        traceId: 'native-resumed',
++        spanId: 'controller-response',
++        parentSpanId: 'root',
++        name: 'message.assistant',
++        kind: 'LLM',
++        startTime: '2026-07-30T00:00:11.000Z',
++      }),
++      span({
++        traceId: 'native-resumed',
++        spanId: 'next-native-prompt',
++        parentSpanId: 'root',
++        name: 'user.prompt',
++        kind: 'CHAIN',
++        startTime: '2026-07-30T00:00:12.000Z',
++        content: 'unreceipted native prompt',
++        extra: { 'tangle.actor': 'human' },
++      }),
++      span({
++        traceId: 'native-resumed',
++        spanId: 'next-native-response',
++        parentSpanId: 'root',
++        name: 'message.assistant',
++        kind: 'LLM',
++        startTime: '2026-07-30T00:00:13.000Z',
++      }),
++    ]
++    const receipt: RuntimeControllerTurnReceipt = {
++      ordinal: 2,
++      runId: 'run:turn:2',
++      bridgeRequestDigest: `sha256:${'a'.repeat(64)}`,
++      promptSha256:
++        'sha256:e25fc876a91b3376119248cbb2fefe9be8878b60b63f0a8ba32f3609aca87418',
++      startedAt: Date.parse('2026-07-30T00:00:09.000Z'),
++      endedAt: Date.parse('2026-07-30T00:00:20.000Z'),
++    }
++    const stamped = stampRuntimeSessionLineage(native, {
++      ...runtimeLineage({
++        nodeId: 'run',
++        backend: 'pi',
++        nativeSessionId: 'native-resumed',
++        parentNodeId: null,
++        depth: 0,
++        childNodeIds: [],
++        controllerTurns: [receipt],
++      }),
++      providerSession: {
++        ...runtimeLineage({
++          nodeId: 'run',
++          backend: 'pi',
++          nativeSessionId: 'native-resumed',
++          parentNodeId: null,
++          depth: 0,
++          childNodeIds: [],
++        }).providerSession!,
++        nativePromptCount: 3,
++        controllerTurns: [receipt],
++      },
++    })
++
++    expect(stamped.map((item) => item.span_id)).toEqual([
++      'root',
++      'controller-prompt',
++      'controller-response',
++    ])
++    expect(stamped[0]?.start_time).toBe('2026-07-30T00:00:10.000Z')
++    expect(stamped[0]?.end_time).toBe('2026-07-30T00:00:12.000Z')
++    expect(stamped[0]?.attributes).toMatchObject({
++      'traces.runtime.exact_prompt_count': 1,
++      'traces.provider.native_prompt_count': 3,
++      'traces.runtime.missing_prompt_ordinals': '[1,3]',
++    })
++    expect(stamped[1]?.attributes['tangle.actor']).toBe('agent')
++    expect(stamped.some((item) => item.span_id === 'next-native-prompt')).toBe(false)
++  })
++
++  it('keeps Runtime steering out of human praise and counts only the successful Pi spawn', async () => {
++    const path = decodeURIComponent(PI_FIXTURE.pathname)
++    const spans = await new PiAdapter().parse({
++      harness: 'pi',
++      sessionId: '00000000-0000-4000-8000-000000000001',
++      path,
++      cwd: '/workspaces/recursive-steering-smoke',
++      mtimeMs: 0,
++    })
++    const downMessage = spans.find(
++      (item) =>
++        item.name === 'user.prompt'
++        && String(item.attributes.content).includes('agent-runtime.down-messages'),
++    )
++    const initialPrompt = spans.find(
++      (item) =>
++        item.name === 'user.prompt'
++        && item.attributes.content === 'Run one recursive steering smoke test.',
++    )
++    const adoption = await analyzeAdoption(spans)
++
++    expect(initialPrompt?.attributes['traces.prompt_sha256']).toBe(
++      'sha256:6ad905561d745a11be6d1a2511e9f2da2011c4c6191d34d58aaa0a1a9a2f5ee7',
++    )
++    expect(downMessage?.attributes['tangle.actor']).toBe('agent')
++    expect(analyzeReactions(spans).signals.praise).toBe(0)
++    expect(adoption.totalSubagentSpawns).toBe(1)
++    expect(adoption.subagentSpawns).toEqual({ 'steering-child': 1 })
++  })
++})
