@@ -14,7 +14,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingPathError } from '../json.js'
-import { readJsonl } from '../jsonl.js'
+import { readJsonl, takeJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
@@ -119,14 +119,28 @@ function isToolResultBlock(b: PiContentBlock): boolean {
   return typeof b.type === 'string' && /tool[_-]?result|tool[_-]?output/i.test(b.type)
 }
 
-function textOf(content: PiContentBlock[] | undefined): string {
+function rawTextOf(content: PiContentBlock[] | undefined): string {
   if (!content) return ''
-  return capText(
-    content
-      .filter((b) => b.type === 'text' && typeof b.text === 'string')
-      .map((b) => b.text)
-      .join(''),
-  )
+  return content
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('')
+}
+
+function textOf(content: PiContentBlock[] | undefined): string {
+  return capText(rawTextOf(content))
+}
+
+function isAgentRuntimeDownMessage(content: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content) as unknown
+  } catch {
+    return false
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false
+  const envelope = parsed as Record<string, unknown>
+  return envelope.type === 'agent-runtime.down-messages' && Array.isArray(envelope.messages)
 }
 
 function toolResultOutput(content: PiContentBlock[] | undefined): unknown {
@@ -151,6 +165,39 @@ export class PiAdapter implements HarnessTraceAdapter {
     return join(homedir(), '.pi', 'agent', 'sessions')
   }
 
+  private async refFromPath(
+    path: string,
+    encodedCwd: string,
+    opts: LocateOptions,
+  ): Promise<SessionRef | undefined> {
+    let st: Awaited<ReturnType<typeof stat>>
+    try {
+      st = await stat(path)
+    } catch (error) {
+      if (isMissingPathError(error)) return undefined
+      throw error
+    }
+    if (opts.sinceMs && st.mtimeMs < opts.sinceMs) return undefined
+    let id = basename(path, '.jsonl').replace(/^[\dTZ.-]+_/, '')
+    let cwd: string | null = encodedCwd
+    const ref: SessionRef = { harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs }
+    const [head] = await takeJsonl<PiLine>(path, 1, sessionJsonlOptions(ref))
+    if (head?.type === 'session') {
+      if (typeof head.id === 'string' && head.id.length > 0) id = head.id
+      if (typeof head.cwd === 'string' && head.cwd.length > 0) cwd = head.cwd
+    }
+    ref.sessionId = id
+    ref.cwd = cwd
+    if (ref.integrity) {
+      ref.integrity.corruptions = ref.integrity.corruptions.map((receipt) => ({
+        ...receipt,
+        sessionId: id,
+      }))
+    }
+    if (opts.cwd && !cwd.startsWith(opts.cwd)) return undefined
+    return ref
+  }
+
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
     const root = this.root()
     let dirs: string[]
@@ -171,21 +218,41 @@ export class PiAdapter implements HarnessTraceAdapter {
         throw error
       }
       // Encoded cwd: leading/trailing `--`, separators as `-`.
-      const cwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
-      if (opts.cwd && !cwd.startsWith(opts.cwd)) continue
+      const encodedCwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue
         const path = join(dp, f)
-        let st: Awaited<ReturnType<typeof stat>>
-        try {
-          st = await stat(path)
-        } catch (error) {
-          if (isMissingPathError(error)) continue
-          throw error
-        }
-        if (opts.sinceMs && st.mtimeMs < opts.sinceMs) continue
-        const id = basename(f, '.jsonl').replace(/^[\dTZ.-]+_/, '')
-        refs.push({ harness: this.harness, sessionId: id, path, cwd, mtimeMs: st.mtimeMs })
+        const ref = await this.refFromPath(path, encodedCwd, opts)
+        if (ref) refs.push(ref)
+      }
+    }
+    return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  }
+
+  async locateBySessionId(sessionId: string, opts: LocateOptions = {}): Promise<SessionRef[]> {
+    const root = this.root()
+    let dirs: string[]
+    try {
+      dirs = await readdir(root)
+    } catch (error) {
+      if (isMissingPathError(error)) return []
+      throw error
+    }
+    const refs: SessionRef[] = []
+    for (const dir of dirs) {
+      const dp = join(root, dir)
+      let files: string[]
+      try {
+        files = await readdir(dp)
+      } catch (error) {
+        if (isMissingPathError(error)) continue
+        throw error
+      }
+      const encodedCwd = `/${dir.replace(/^-+/, '').replace(/-+$/, '').replace(/-/g, '/')}`
+      for (const file of files) {
+        if (!file.endsWith('.jsonl') || !file.includes(sessionId)) continue
+        const ref = await this.refFromPath(join(dp, file), encodedCwd, opts)
+        if (ref?.sessionId === sessionId) refs.push(ref)
       }
     }
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -246,7 +313,8 @@ export class PiAdapter implements HarnessTraceAdapter {
       } else if (msg.role === 'user') {
         // The human's prompt text. (A tool-result-only user turn yields no
         // text → no user.prompt span.)
-        const prompt = textOf(msg.content)
+        const rawPrompt = rawTextOf(msg.content)
+        const prompt = capText(rawPrompt)
         if (prompt) {
           spans.push(
             userPromptSpan({
@@ -258,6 +326,8 @@ export class PiAdapter implements HarnessTraceAdapter {
               agent: SERVICE,
               step,
               content: prompt,
+              sourceContent: rawPrompt,
+              actor: isAgentRuntimeDownMessage(rawPrompt) ? 'agent' : 'human',
             }),
           )
           step += 1

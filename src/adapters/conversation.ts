@@ -6,6 +6,7 @@
  * capture identical across harnesses: one text cap, one `user.prompt` span shape.
  */
 
+import { createHash } from 'node:crypto'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 
@@ -46,6 +47,8 @@ export interface UserPromptInput {
   startTime: string
   /** The human's prompt text (extracted by the adapter; cap with capText). */
   content: string
+  /** Exact source bytes before trimming or capping, when the adapter retains them. */
+  sourceContent?: string
   service?: string | null
   agent?: string | null
   step?: number
@@ -59,6 +62,10 @@ export interface UserPromptInput {
  *  attribute lets analysts separate real human turns from agent-to-agent or
  *  injected prompts. */
 export function userPromptSpan(o: UserPromptInput): OtlpSpan {
+  const promptSha256 =
+    o.sourceContent === undefined
+      ? undefined
+      : `sha256:${createHash('sha256').update(o.sourceContent, 'utf8').digest('hex')}`
   return span({
     traceId: o.traceId,
     spanId: o.spanId,
@@ -70,6 +77,9 @@ export function userPromptSpan(o: UserPromptInput): OtlpSpan {
     agent: o.agent ?? null,
     step: o.step,
     content: o.content,
-    extra: { [ACTOR_ATTR]: o.actor ?? 'human' },
+    extra: {
+      [ACTOR_ATTR]: o.actor ?? 'human',
+      ...(promptSha256 === undefined ? {} : { 'traces.prompt_sha256': promptSha256 }),
+    },
   })
 }

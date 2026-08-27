@@ -13,6 +13,250 @@ function parseRows(jsonl: string): Record<string, unknown>[] {
 }
 
 describe('traces CLI', () => {
+  it('joins one Runtime tree to its exact native Pi sessions', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-runtime-lineage-'))
+    const home = join(dir, 'home')
+    const runRoot = join(dir, 'run')
+    const runtime = join(runRoot, 'runtime')
+    const rootSessions = join(home, '.pi', 'agent', 'sessions', '--workspaces-root--')
+    const childSessions = join(home, '.pi', 'agent', 'sessions', '--workspaces-child--')
+    const rootId = '00000000-0000-4000-8000-000000000001'
+    const childId = '00000000-0000-4000-8000-000000000002'
+    const rootNode = 'recursive-steering-smoke'
+    const childNode = `${rootNode}:s0`
+    const report = join(dir, 'report.md')
+    const otlp = join(dir, 'spans.openinference.jsonl')
+    await mkdir(runtime, { recursive: true })
+    await mkdir(rootSessions, { recursive: true })
+    await mkdir(childSessions, { recursive: true })
+    await writeFile(
+      join(rootSessions, `2026-07-30T18-00-00-000Z_${rootId}.jsonl`),
+      await readFile(
+        new URL('./fixtures/pi/recursive-steering-observability.jsonl', import.meta.url),
+        'utf8',
+      ),
+      'utf8',
+    )
+    await writeFile(
+      join(childSessions, `2026-07-30T18-00-10-000Z_${childId}.jsonl`),
+      [
+        {
+          type: 'session',
+          id: childId,
+          timestamp: '2026-07-30T18:00:10.000Z',
+          cwd: '/workspaces/recursive-steering-smoke%3As0',
+        },
+        {
+          type: 'message',
+          id: 'child-user',
+          timestamp: '2026-07-30T18:00:11.000Z',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: 'Apply the steering message.' }],
+          },
+        },
+        {
+          type: 'message',
+          id: 'child-assistant',
+          timestamp: '2026-07-30T18:00:12.000Z',
+          message: {
+            role: 'assistant',
+            model: 'glm-5.2',
+            stopReason: 'stop',
+            content: [{ type: 'text', text: 'Steering applied.' }],
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join('\n'),
+      'utf8',
+    )
+    await writeFile(
+      join(runtime, 'spawn-journal.jsonl'),
+      [
+        { kind: 'begin', root: rootNode, at: '2026-07-30T18:00:00.000Z' },
+        {
+          kind: 'event',
+          root: rootNode,
+          event: {
+            kind: 'spawned',
+            id: rootNode,
+            label: 'root-profile',
+            profileDigest: 'root-profile',
+            budget: { maxIterations: 3, maxTokens: 10_000 },
+            seq: 0,
+            at: '2026-07-30T18:00:00.000Z',
+          },
+        },
+        {
+          kind: 'event',
+          root: rootNode,
+          event: {
+            kind: 'spawned',
+            id: childNode,
+            parent: rootNode,
+            label: 'steering-child',
+            profileDigest: 'child-profile',
+            runtime: 'driver',
+            budget: { maxIterations: 2, maxTokens: 5_000 },
+            seq: 0,
+            at: '2026-07-30T18:00:10.000Z',
+          },
+        },
+        { kind: 'begin', root: childNode, at: '2026-07-30T18:00:10.000Z' },
+        {
+          kind: 'event',
+          root: childNode,
+          event: {
+            kind: 'spawned',
+            id: childNode,
+            label: 'steering-child',
+            profileDigest: 'child-profile',
+            budget: { maxIterations: 2, maxTokens: 5_000 },
+            seq: 0,
+            at: '2026-07-30T18:00:10.000Z',
+          },
+        },
+        {
+          kind: 'event',
+          root: rootNode,
+          event: {
+            kind: 'settled',
+            id: childNode,
+            status: 'done',
+            spent: {
+              iterations: 1,
+              tokens: { input: 100, output: 20 },
+              usd: 0,
+              usdKnown: false,
+              ms: 2_000,
+            },
+            providerSession: {
+              provider: 'cli-bridge',
+              backend: 'pi',
+              externalId: childNode,
+              nativeSessionId: childId,
+              cwd: '/workspaces/recursive-steering-smoke%3As0',
+              nativePromptCount: 1,
+              controllerTurns: [
+                {
+                  ordinal: 1,
+                  runId: `${childNode}:turn:1`,
+                  bridgeRequestDigest: `sha256:${'b'.repeat(64)}`,
+                  promptSha256:
+                    'sha256:1b72d6f85ebccfdb38366cee929ae64847c88d7ea95aaa0fa15da96c3a3b73ec',
+                  startedAt: 1_785_434_410_500,
+                  endedAt: 1_785_434_413_000,
+                },
+              ],
+            },
+            seq: 0,
+            at: '2026-07-30T18:00:12.000Z',
+          },
+        },
+        {
+          kind: 'event',
+          root: rootNode,
+          event: {
+            kind: 'settled',
+            id: rootNode,
+            status: 'done',
+            spent: {
+              iterations: 1,
+              tokens: { input: 200, output: 40 },
+              usd: 0,
+              usdKnown: false,
+              ms: 13_000,
+            },
+            providerSession: {
+              provider: 'cli-bridge',
+              backend: 'pi',
+              externalId: rootNode,
+              nativeSessionId: rootId,
+              cwd: '/workspaces/recursive-steering-smoke',
+              nativePromptCount: 1,
+              controllerTurns: [
+                {
+                  ordinal: 1,
+                  runId: `${rootNode}:turn:1`,
+                  bridgeRequestDigest: `sha256:${'a'.repeat(64)}`,
+                  promptSha256:
+                    'sha256:6ad905561d745a11be6d1a2511e9f2da2011c4c6191d34d58aaa0a1a9a2f5ee7',
+                  startedAt: 1_785_434_400_500,
+                  endedAt: 1_785_434_409_000,
+                },
+              ],
+            },
+            seq: 1,
+            at: '2026-07-30T18:00:13.000Z',
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join('\n'),
+      'utf8',
+    )
+    await execFileAsync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        'src/cli.ts',
+        'analyze',
+        '--supervisor-run-dir',
+        runRoot,
+        '--out',
+        report,
+        '--otlp',
+        otlp,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home, NO_COLOR: '1', FORCE_COLOR: '' },
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 30_000,
+      },
+    )
+
+    const text = await readFile(report, 'utf8')
+    expect(text).toContain(
+      `| <code>${rootNode}</code> | — | 0 | 1 | <code>cli-bridge</code> | <code>pi</code> | <code>${rootId}</code> | 1/1 | none |`,
+    )
+    expect(text).toContain(
+      `| <code>${childNode}</code> | <code>${rootNode}</code> | 1 | 0 | <code>cli-bridge</code> | <code>pi</code> | <code>${childId}</code> | 1/1 | none |`,
+    )
+    expect(text).toContain(`| operator | 0 | - | - | \`${rootNode}\` | — | 1 |`)
+    expect(text).toContain(`| child | 1 | - | - | \`${childNode}\` | \`${rootNode}\` | 0 |`)
+    expect(text).toContain('No human turns followed an assistant turn')
+    expect(text).toContain('**Subagent spawns observed:** 1')
+    expect(text).toContain('| `steering-child` | 1 |')
+    expect(text).toContain(
+      `traces analyze --supervisor-run-dir '${runRoot}'`,
+    )
+    const rows = parseRows(await readFile(otlp, 'utf8'))
+    expect(rows).toHaveLength(10)
+    expect(
+      rows
+        .filter((row) => row.name === 'user.prompt')
+        .every(
+          (row) =>
+            (row.attributes as Record<string, unknown> | undefined)?.['tangle.actor']
+            === 'agent',
+        ),
+    ).toBe(true)
+    expect(
+      rows.find((row) => row.trace_id === childNode && row.parent_span_id === '')?.attributes,
+    ).toEqual(
+      expect.objectContaining({
+        'traces.session.role': 'child',
+        'traces.session.depth': 1,
+        'traces.parent_session_id': rootNode,
+        'traces.runtime.node_id': childNode,
+        'traces.provider.native_session_id': childId,
+      }),
+    )
+  })
+
   it('routes an Intelligence span file through analyze, investigate, and improve', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-test-'))
     const input = join(dir, 'intelligence-spans.jsonl')

@@ -113,7 +113,9 @@ export function describeSessionRelationship(
 
   const role = stringAttribute(root, 'traces.session.role')
   const parentSessionId = stringAttribute(root, 'traces.parent_session_id')
-  const depth = numberAttribute(root, 'traces.codex.agent_depth')
+  const depth =
+    numberAttribute(root, 'traces.session.depth')
+    ?? numberAttribute(root, 'traces.codex.agent_depth')
   const agentNickname = stringAttribute(root, 'traces.codex.agent_nickname')
   const agentRole = stringAttribute(root, 'traces.codex.agent_role')
   const agentPath = stringAttribute(root, 'traces.codex.agent_path')

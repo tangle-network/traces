@@ -52,18 +52,26 @@ import {
   type TraceLiveFinding,
 } from './live.js'
 import {
+  analyzeSupervisorRunSources,
   analyzeSupervisorRun,
   findSupervisorRunDirs,
   isUnavailable,
+  isRuntimeSupervisorRunDir,
+  readRuntimeSupervisorRun,
   renderSupervisorRollupMarkdown,
   renderSupervisorRunMarkdown,
   rollupSupervisorRuns,
+  type SupervisorRunSessionLineage,
 } from '@tangle-network/agent-eval/supervisor-run'
 import { createAnalystAi } from '@tangle-network/agent-eval/analyst'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import { watchSessions } from './observer.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
+import {
+  parseCliBridgeSessionMap,
+  stampRuntimeSessionLineage,
+} from './runtime-session-lineage.js'
 import { locateSessions, parseSession } from './session-source.js'
 import {
   describeSessionRelationship,
@@ -119,6 +127,7 @@ interface Args {
   metadata?: string
   attrs: string[]
   supervisorRunDir?: string
+  sessionMap?: string
   trajectoryDir?: string
   revision?: string
   concurrency: number
@@ -172,6 +181,7 @@ function parseArgs(argv: string[]): Args {
       case '--session': a.session = next(); break
       case '--cwd': a.cwd = next(); break
       case '--supervisor-run-dir': a.supervisorRunDir = next(); break
+      case '--session-map': a.sessionMap = next(); break
       case '--trajectory-dir': a.trajectoryDir = next(); break
       case '--revision': a.revision = next(); break
       case '--concurrency': a.concurrency = Number(next()); break
@@ -251,6 +261,9 @@ function applyCurrentSessionSelection(args: Args): Args {
 }
 
 function validateWorkflowSelection(args: Args): Args {
+  if (args.sessionMap && (args.command !== 'analyze' || !args.supervisorRunDir)) {
+    throw new Error('--session-map requires analyze --supervisor-run-dir')
+  }
   if (!args.workflow && !args.latestTurn) return args
   if (!WORKFLOW_COMMANDS.has(args.command)) {
     throw new Error(`${args.workflow ? '--workflow' : '--latest-turn'} is not supported by ${args.command}`)
@@ -300,6 +313,10 @@ async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref
 
 function missingPath(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
 }
 
 /** Resolve `--session` as either a concrete harness file or an ID printed by
@@ -699,14 +716,39 @@ async function cmdAnalyze(args: Args): Promise<void> {
  */
 async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
   const nested = await findSupervisorRunDirs(runDir)
+  if (args.sessionMap && nested.length > 1) {
+    throw new Error(
+      '--session-map requires one direct supervisor run, not a directory containing multiple runs',
+    )
+  }
+  const directRunDir = nested.length === 1 ? nested[0]! : runDir
+  const runtimeRun = nested.length <= 1 && await isRuntimeSupervisorRunDir(directRunDir)
   let markdown: string
-  if (nested.length > 0) {
+  if (nested.length > 0 && !args.sessionMap && !runtimeRun) {
     markdown = renderSupervisorRollupMarkdown(
       rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
       `Supervisor rollup — ${runDir}`,
     )
   } else {
-    const report = await analyzeSupervisorRun(runDir)
+    const sessionBindings = args.sessionMap
+      ? parseCliBridgeSessionMap(await readFile(args.sessionMap, 'utf8'))
+      : undefined
+    const sources = runtimeRun
+      ? await readRuntimeSupervisorRun(directRunDir, { sessionBindings })
+      : undefined
+    if (sessionBindings && sources === undefined) {
+      throw new Error('--session-map requires an agent-runtime FileRunContext directory')
+    }
+    const report = sources
+      ? analyzeSupervisorRunSources({
+          ...sources,
+          traceCommand:
+            `traces analyze --supervisor-run-dir ${shellArgument(runDir)}` +
+            (args.sessionMap
+              ? ` --session-map ${shellArgument(args.sessionMap)}`
+              : ''),
+        })
+      : await analyzeSupervisorRun(directRunDir)
     // A path with no supervision journal analyzes cleanly into a report whose
     // every metric is unavailable. Printing that reads as "the supervisor did
     // nothing" rather than "you pointed me at the wrong directory".
@@ -717,6 +759,19 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
       )
     }
     markdown = renderSupervisorRunMarkdown(report)
+    if (
+      report.sessionLineage !== undefined &&
+      !isUnavailable(report.sessionLineage) &&
+      report.sessionLineage.some(
+        (row) => (row.providerSession?.controllerTurns.length ?? 0) > 0,
+      )
+    ) {
+      const collected = await collectRuntimeSessionSpans(report.sessionLineage)
+      const traceResult = await investigateCollected(args, collected, {
+        loadDefaultConfig: false,
+      })
+      markdown = `${markdown}\n\n---\n\n${traceResult.report}`
+    }
   }
   if (args.out) {
     await saveReport(args.out, markdown)
@@ -725,6 +780,64 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
     )
   } else {
     console.log(markdown)
+  }
+}
+
+async function locateRuntimeSession(
+  lineage: SupervisorRunSessionLineage,
+): Promise<{ adapter: HarnessTraceAdapter; ref: SessionRef; spans: OtlpSpan[] }> {
+  const providerSession = lineage.providerSession
+  if (providerSession === undefined) {
+    throw new Error(
+      `Runtime node ${JSON.stringify(lineage.nodeId)} has no measured provider session`,
+    )
+  }
+  if (providerSession.controllerTurns.length === 0) {
+    throw new Error(
+      `Runtime node ${JSON.stringify(lineage.nodeId)} has no exact controller turns`,
+    )
+  }
+  const adapter = resolveAdapter(providerSession.backend)
+  if (!adapter) {
+    throw new Error(
+      `no trace adapter is registered for Runtime session backend ${JSON.stringify(providerSession.backend)}`,
+    )
+  }
+  const candidates = adapter.locateBySessionId
+    ? await adapter.locateBySessionId(providerSession.nativeSessionId)
+    : (await locateSessions(adapter)).filter(
+        (ref) => ref.sessionId === providerSession.nativeSessionId,
+      )
+  const matches = candidates.filter((ref) => ref.cwd === providerSession.cwd)
+  if (matches.length !== 1) {
+    throw new Error(
+      `Runtime node ${JSON.stringify(lineage.nodeId)} maps to ${matches.length} local ` +
+        `${adapter.harness} sessions with id ${JSON.stringify(providerSession.nativeSessionId)}; expected exactly one`,
+    )
+  }
+  const ref: SessionRef = {
+    ...matches[0]!,
+    cwd: providerSession.cwd,
+  }
+  const spans = stampRuntimeSessionLineage(
+    await parseSession(adapter, ref),
+    lineage,
+  )
+  return { adapter, ref, spans }
+}
+
+async function collectRuntimeSessionSpans(
+  lineage: readonly SupervisorRunSessionLineage[],
+): Promise<CollectedSpans> {
+  const exactLineage = lineage.filter(
+    (row) => (row.providerSession?.controllerTurns.length ?? 0) > 0,
+  )
+  const rows = await Promise.all(exactLineage.map(locateRuntimeSession))
+  return {
+    spans: rows.flatMap((row) => row.spans),
+    harness: [...new Set(rows.map((row) => row.adapter.harness))].join('+'),
+    cwds: rows.flatMap((row) => (row.ref.cwd ? [row.ref.cwd] : [])),
+    sources: rows.map((row) => selectedSessionSource(row.ref, row.spans)),
   }
 }
 
@@ -779,7 +892,15 @@ async function cmdInvestigate(args: Args): Promise<void> {
 }
 
 async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
-  const { spans, harness, cwds, sources, workflow } = await collectSpans(args)
+  return investigateCollected(args, await collectSpans(args), options)
+}
+
+async function investigateCollected(
+  args: Args,
+  collected: CollectedSpans,
+  options: { loadDefaultConfig?: boolean } = {},
+) {
+  const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = args.config !== undefined || options.loadDefaultConfig !== false
     ? await loadTracesConfig(args.config)
@@ -1127,6 +1248,10 @@ Options:
                    analyze: report a SUPERVISION TREE instead of harness sessions —
                    steers, spawn waves, concurrency, idle wall, cost by role,
                    accepted vs rejected. Rolls up when the dir holds many runs.
+  --session-map <json>
+                   Historical fallback for one direct --supervisor-run-dir
+                   whose journal predates provider-session receipts.
+                   Only exact per-turn receipts authorize actor attribution.
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --dir <path>     improve: write artifacts to this directory

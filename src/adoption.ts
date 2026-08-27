@@ -99,12 +99,17 @@ function skillNameOf(input: Record<string, unknown>): string {
 
 /** Subagent type from a Task/Agent or provider-specific spawn tool input. */
 function subagentTypeOf(input: Record<string, unknown>): string {
-  const v = input.subagent_type ?? input.agent_type ?? input.type ?? input.name
+  const v =
+    input.subagent_type
+    ?? input.agent_type
+    ?? input.label
+    ?? input.type
+    ?? input.name
   return typeof v === 'string' && v.length > 0 ? v : '?'
 }
 
 function isSpawnAgentTool(name: string): boolean {
-  return name === 'spawn_agent' || name.endsWith('__spawn_agent')
+  return name === 'spawn_agent' || name.endsWith('_spawn_agent')
 }
 
 type SkillTelemetryCapability = 'supported' | 'unsupported' | 'unknown'
@@ -309,7 +314,7 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
       subagentSpawns[type] = (subagentSpawns[type] ?? 0) + 1
       sessionsWithSubagent.add(group)
       canonicalSubagentSessions.add(group)
-    } else if (tn && isSpawnAgentTool(tn)) {
+    } else if (tn && isSpawnAgentTool(tn) && s.status.code === 'OK') {
       const types = fallbackSubagents.get(group) ?? []
       types.push(subagentTypeOf(parseInput(s)))
       fallbackSubagents.set(group, types)

@@ -790,7 +790,8 @@ export class CodexAdapter implements HarnessTraceAdapter {
       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
         // The human's prompt text. Codex drops the user turn from token events,
         // so capture it here as its own CHAIN span (no text → no span).
-        const prompt = textOf(l.payload.content)
+        const rawPrompt = contentToString(l.payload.content)
+        const prompt = capText(rawPrompt)
         if (prompt) {
           const actor = sessionRole === 'child'
             ? 'agent'
@@ -803,6 +804,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
               parentSpanId: rootId,
               startTime: ts,
               content: prompt,
+              sourceContent: rawPrompt,
               service: SERVICE,
               agent: SERVICE,
               step,

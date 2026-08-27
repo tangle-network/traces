@@ -1,0 +1,50 @@
+{
+  "data": [
+    {
+      "externalId": "recursive-steering-smoke",
+      "backend": "pi",
+      "internalId": "00000000-0000-4000-8000-000000000001",
+      "cwd": "/workspaces/recursive-steering-smoke",
+      "turns": 1,
+      "nativePromptCount": 1,
+      "controllerTurns": [
+        {
+          "ordinal": 1,
+          "runId": "recursive-steering-smoke:turn:1",
+          "bridgeRequestDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "promptSha256": "sha256:6ad905561d745a11be6d1a2511e9f2da2011c4c6191d34d58aaa0a1a9a2f5ee7",
+          "startedAt": 1785434400500,
+          "endedAt": 1785434409000
+        }
+      ],
+      "createdAt": 1785438000000,
+      "lastUsedAt": 1785438001000,
+      "metadata": {
+        "requestDigest": "sanitized-root-request"
+      }
+    },
+    {
+      "externalId": "recursive-steering-smoke:s0",
+      "backend": "pi",
+      "internalId": "00000000-0000-4000-8000-000000000002",
+      "cwd": "/workspaces/recursive-steering-smoke%3As0",
+      "turns": 2,
+      "nativePromptCount": 2,
+      "controllerTurns": [
+        {
+          "ordinal": 1,
+          "runId": "recursive-steering-smoke:s0:turn:1",
+          "bridgeRequestDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "promptSha256": "sha256:1b72d6f85ebccfdb38366cee929ae64847c88d7ea95aaa0fa15da96c3a3b73ec",
+          "startedAt": 1785434410500,
+          "endedAt": 1785434413000
+        }
+      ],
+      "createdAt": 1785438002000,
+      "lastUsedAt": 1785438003000,
+      "metadata": {
+        "requestDigest": "sanitized-child-request"
+      }
+    }
+  ]
+}
