@@ -17,6 +17,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingPathError } from '../json.js'
 import { readJsonl, takeJsonl } from '../jsonl.js'
@@ -33,6 +34,7 @@ import { codexActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
 import {
   type CodexLine,
+  codexSubagentActivity,
   type CodexTokenUsage,
   contentToString,
   latestTimestamp,
@@ -58,6 +60,29 @@ export { CodexTaskScopeError } from './codex-task-scope.js'
 
 const SERVICE = 'codex'
 const SESSION_HEAD_LINES = 40
+
+const CODEX_SOURCE_TRACE_ID = 'traces.codex.source_trace_id'
+const CODEX_SOURCE_SPAN_ID = 'traces.codex.source_span_id'
+const CODEX_SOURCE_PARENT_SPAN_ID = 'traces.codex.source_parent_span_id'
+
+/** Convert Codex's readable span identities to fixed-width OTLP wire IDs. */
+function normalizeCodexIds(spans: OtlpSpan[]): void {
+  for (const item of spans) {
+    const sourceTraceId = item.trace_id
+    const sourceSpanId = item.span_id
+    const sourceParentSpanId = item.parent_span_id
+    item.attributes[CODEX_SOURCE_TRACE_ID] = sourceTraceId
+    item.attributes[CODEX_SOURCE_SPAN_ID] = sourceSpanId
+    if (sourceParentSpanId !== null) {
+      item.attributes[CODEX_SOURCE_PARENT_SPAN_ID] = sourceParentSpanId
+    }
+    item.trace_id = deriveHexId(sourceTraceId, 16)
+    item.span_id = deriveHexId(`${sourceTraceId}:${sourceSpanId}`, 8)
+    item.parent_span_id = sourceParentSpanId === null
+      ? null
+      : deriveHexId(`${sourceTraceId}:${sourceParentSpanId}`, 8)
+  }
+}
 
 function tokenUsageSignature(usage: CodexTokenUsage): string {
   return JSON.stringify([
@@ -487,6 +512,8 @@ export class CodexAdapter implements HarnessTraceAdapter {
       model,
       status: 'UNSET',
       extra: {
+        // Keep the source session identity searchable after the wire id is normalized.
+        'tangle.sessionId': traceId,
         'traces.session.role': sessionRole,
         'traces.codex.task_scope': options.taskScope === 'latest'
           ? 'latest'
@@ -703,32 +730,33 @@ export class CodexAdapter implements HarnessTraceAdapter {
             if (requestId) t.attributes['traces.codex.agent_request_id'] = requestId
           }
         }
-      } else if (l.type === 'event_msg' && l.payload?.type === 'sub_agent_activity') {
-        const threadId = l.payload.agent_thread_id
-        const occurredAtMs = l.payload.occurred_at_ms
-        const eventTime = timestampFromEpochMs(occurredAtMs) ?? ts
-        const eventCallSpan = toolByCallId.get(l.payload.event_id ?? '')
+      } else if (l.type === 'event_msg') {
+        const activity = codexSubagentActivity(l)
+        if (!activity) continue
+        const threadId = activity.agentThreadId
+        const eventTime = timestampFromEpochMs(activity.occurredAtMs) ?? ts
+        const eventCallSpan = toolByCallId.get(activity.eventId ?? '')
         if (eventCallSpan && threadId) setAgentSessionIds(eventCallSpan, [threadId])
-        const agentPath = l.payload.agent_path ?? 'subagent'
-        if (l.payload.kind === 'started' && threadId) {
+        const agentPath = activity.agentPath ?? 'subagent'
+        if (activity.kind === 'started' && threadId) {
           const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, true)
-          recordSubagentLifecycle(toolSpan, 'started', eventTime, l.payload.event_id)
-        } else if (l.payload.kind === 'completed' && threadId) {
+          recordSubagentLifecycle(toolSpan, 'started', eventTime, activity.eventId)
+        } else if (activity.kind === 'completed' && threadId) {
           const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, false)
-          recordSubagentLifecycle(toolSpan, 'completed', eventTime, l.payload.event_id)
+          recordSubagentLifecycle(toolSpan, 'completed', eventTime, activity.eventId)
           closeSpanAt(toolSpan, eventTime)
           toolSpan.status = { code: 'OK' }
         } else if (
-          ['interrupted', 'failed', 'timed_out'].includes(l.payload.kind ?? '') &&
+          ['interrupted', 'failed', 'timed_out'].includes(activity.kind ?? '') &&
           threadId
         ) {
           const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, false)
-          recordSubagentLifecycle(toolSpan, l.payload.kind!, eventTime, l.payload.event_id)
+          recordSubagentLifecycle(toolSpan, activity.kind!, eventTime, activity.eventId)
           closeSpanAt(toolSpan, eventTime)
-          toolSpan.status = { code: 'ERROR', message: `subagent ${l.payload.kind}` }
-        } else if (l.payload.kind === 'interacted' && threadId) {
+          toolSpan.status = { code: 'ERROR', message: `subagent ${activity.kind}` }
+        } else if (activity.kind === 'interacted' && threadId) {
           const toolSpan = ensureSubagentSpan(threadId, agentPath, eventTime, eventCallSpan, false)
-          recordSubagentLifecycle(toolSpan, 'interacted', eventTime, l.payload.event_id)
+          recordSubagentLifecycle(toolSpan, 'interacted', eventTime, activity.eventId)
           const operation = eventCallSpan?.attributes['traces.codex.agent_operation']
           if (operation === 'followup_task' || operation === 'send_input') {
             closeSpanAt(toolSpan, eventTime)
@@ -842,6 +870,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       for (const item of spans) item.attributes['traces.codex.turn_id'] ??= selectedBoundary.turnId
     }
     closeSpanAt(root, lastTimestamp ?? root.start_time)
+    normalizeCodexIds(spans)
     return spans
   }
 }

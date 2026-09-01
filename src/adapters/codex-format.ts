@@ -29,6 +29,8 @@ export interface CodexLine {
     turn_id?: string
     occurred_at_ms?: number
     started_at?: number
+    started_at_ms?: number
+    completed_at_ms?: number
     agent_thread_id?: string
     agent_path?: string
     kind?: string
@@ -39,6 +41,16 @@ export interface CodexLine {
     author?: string
     recipient?: string
     namespace?: string
+    item?: {
+      type?: string
+      id?: string
+      kind?: string
+      agent_thread_id?: string
+      agent_path?: string
+      occurred_at_ms?: number
+      started_at_ms?: number
+      completed_at_ms?: number
+    }
     internal_chat_message_metadata_passthrough?: {
       turn_id?: string
     }
@@ -58,6 +70,51 @@ export interface CodexLine {
       total_token_usage?: CodexTokenUsage
       model_context_window?: number
     }
+  }
+}
+
+/** Stable fields shared by the legacy and current nested subagent events. */
+export interface CodexSubagentActivity {
+  readonly eventId?: string
+  readonly kind?: string
+  readonly agentThreadId?: string
+  readonly agentPath?: string
+  readonly occurredAtMs?: number
+  readonly turnId?: string
+}
+
+/** Normalize Codex's legacy flat and current item-wrapped subagent events. */
+export function codexSubagentActivity(line: CodexLine): CodexSubagentActivity | undefined {
+  if (line.type !== 'event_msg' || !line.payload) return undefined
+  const payload = line.payload
+  const turnId = payload.turn_id
+    ?? payload.internal_chat_message_metadata_passthrough?.turn_id
+  if (payload.type === 'sub_agent_activity') {
+    return {
+      eventId: payload.event_id,
+      kind: payload.kind,
+      agentThreadId: payload.agent_thread_id,
+      agentPath: payload.agent_path,
+      occurredAtMs: payload.occurred_at_ms,
+      turnId,
+    }
+  }
+  if (payload.type !== 'item_completed' || payload.item?.type !== 'SubAgentActivity') {
+    return undefined
+  }
+  const item = payload.item
+  return {
+    eventId: item.id,
+    kind: item.kind,
+    agentThreadId: item.agent_thread_id,
+    agentPath: item.agent_path,
+    occurredAtMs: item.completed_at_ms
+      ?? item.occurred_at_ms
+      ?? item.started_at_ms
+      ?? payload.completed_at_ms
+      ?? payload.started_at_ms
+      ?? payload.occurred_at_ms,
+    turnId,
   }
 }
 

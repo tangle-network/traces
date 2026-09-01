@@ -366,6 +366,89 @@ describe('traces CLI', () => {
     expect(text).toContain('Own direct-streaming conversion')
   })
 
+  it('exports Codex readable IDs as conforming OTLP IDs through analyze', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-otlp-codex-'))
+    const session = join(dir, 'rollout-readable-codex.jsonl')
+    const report = join(dir, 'report.md')
+    const otlp = join(dir, 'spans.openinference.jsonl')
+    const sessionId = 'codex/readable cli session'
+    const callId = 'call/readable cli tool'
+    await writeFile(session, [
+      {
+        timestamp: '2026-07-13T09:59:27.000Z',
+        type: 'session_meta',
+        payload: { id: sessionId, cwd: dir },
+      },
+      {
+        timestamp: '2026-07-13T09:59:28.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          call_id: callId,
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+      },
+      {
+        timestamp: '2026-07-13T09:59:29.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: 'README contents',
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'analyze',
+      '--harness',
+      'codex',
+      '--session',
+      session,
+      '--out',
+      report,
+      '--otlp-out',
+      otlp,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const rows = parseRows(await readFile(otlp, 'utf8'))
+    const spanIds = new Set(rows.map((row) => row.span_id as string))
+    expect(rows.every((row) => /^[0-9a-f]{32}$/.test(row.trace_id as string))).toBe(true)
+    expect(rows.every((row) => /^[0-9a-f]{16}$/.test(row.span_id as string))).toBe(true)
+    expect(rows.every((row) => {
+      const parent = row.parent_span_id as string
+      return parent === '' || (/^[0-9a-f]{16}$/.test(parent) && spanIds.has(parent))
+    })).toBe(true)
+    expect(rows.some((row) => {
+      const attributes = row.attributes as Record<string, unknown>
+      return attributes['traces.codex.source_trace_id'] === sessionId
+        && attributes['traces.codex.source_span_id'] === `tool:${callId}`
+    })).toBe(true)
+
+    const validation = await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'validate',
+      otlp,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+    expect(validation.stdout).not.toContain('non-hex-id')
+  })
+
   it('resolves a listed Codex session ID instead of treating it as a file path', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-session-id-'))
     const codexHome = join(dir, 'codex')
@@ -662,6 +745,126 @@ describe('traces CLI', () => {
       childSessionIds: [],
       depth: 2,
       agentNickname: 'worker',
+    })
+  })
+
+  it('resolves the parent turn from Codex nested SubAgentActivity events', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-nested-activity-'))
+    const codexHome = join(dir, 'codex')
+    const sessions = join(codexHome, 'sessions', '2026', '07', '29')
+    const parentId = '019fabd3-6738-7491-a8c0-957ca2bc9876'
+    const childId = '019fae74-a099-7b13-befd-003a6ba7f09a'
+    const parent = join(sessions, `rollout-2026-07-29T00-00-00-${parentId}.jsonl`)
+    const child = join(sessions, `rollout-2026-07-29T00-01-00-${childId}.jsonl`)
+    const index = join(dir, 'nested-workflow-index.json')
+    await mkdir(sessions, { recursive: true })
+    await writeFile(parent, [
+      {
+        timestamp: '2026-07-29T00:00:00.000Z',
+        type: 'session_meta',
+        payload: { id: parentId, cwd: dir },
+      },
+      {
+        timestamp: '2026-07-29T00:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'old-parent-turn' },
+      },
+      {
+        timestamp: '2026-07-29T00:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'current-parent-turn' },
+      },
+      {
+        timestamp: '2026-07-29T00:00:03.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          turn_id: 'current-parent-turn',
+          internal_chat_message_metadata_passthrough: { turn_id: 'stale-parent-turn' },
+          item: {
+            type: 'SubAgentActivity',
+            id: 'activity-child',
+            kind: 'interacted',
+            agent_thread_id: childId,
+            agent_path: '/root/worker',
+            started_at_ms: Date.parse('2026-07-29T00:00:02.500Z'),
+            completed_at_ms: Date.parse('2026-07-29T00:00:03.000Z'),
+          },
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+    await writeFile(child, [
+      {
+        timestamp: '2026-07-29T00:00:02.500Z',
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          cwd: dir,
+          parent_thread_id: parentId,
+          thread_source: 'subagent',
+          source: { subagent: { thread_spawn: { parent_thread_id: parentId, depth: 1 } } },
+        },
+      },
+      {
+        timestamp: '2026-07-29T00:00:02.600Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'child-turn' },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'index',
+      '--harness',
+      'codex',
+      '--current',
+      '--latest-turn',
+      '--workflow',
+      '--max-workflow-sessions',
+      '10',
+      '--out',
+      index,
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        CODEX_THREAD_ID: childId,
+        NO_COLOR: '1',
+        FORCE_COLOR: '',
+      },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const output = JSON.parse(await readFile(index, 'utf8')) as {
+      selection: { workflow: SessionWorkflowSummary }
+      sessions: Array<{
+        session: {
+          sessionId: string
+          taskScope?: string
+          turnId?: string
+          parentSessionId?: string
+          childSessionIds: string[]
+        }
+      }>
+    }
+    expect(output.selection.workflow).toEqual({
+      seedSessionIds: [childId],
+      complete: true,
+      issues: [],
+    })
+    expect(output.sessions.map((row) => row.session.sessionId)).toEqual([parentId, childId])
+    expect(output.sessions[0]!.session).toMatchObject({
+      taskScope: 'turn',
+      turnId: 'current-parent-turn',
+      childSessionIds: [childId],
+    })
+    expect(output.sessions[1]!.session).toMatchObject({
+      taskScope: 'latest',
+      parentSessionId: parentId,
     })
   })
 
