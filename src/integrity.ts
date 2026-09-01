@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { ATTR } from './attributes.js'
+import { deriveHexId } from '@tangle-network/agent-trace-contract'
+import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import type { JsonlCorruptionReceipt, JsonlReadOptions } from './jsonl.js'
 import { span, type OtlpSpan } from './otlp.js'
 import type { ParseOptions, SessionRef } from './types.js'
@@ -87,14 +88,14 @@ function receiptSpanId(parentSpanId: string, receipt: JsonlCorruptionReceipt): s
   const digest = createHash('sha256')
     .update(JSON.stringify(receiptIdentity(receipt)))
     .digest('hex')
-  return `${parentSpanId}:corruption:${digest}`
+  return deriveHexId(`${parentSpanId}:corruption:${digest}`, 8)
 }
 
 export function stampSessionIntegrity(ref: SessionRef, spans: OtlpSpan[]): void {
   if (!ref.integrity) return
   const parent = spans.find((item) => item.parent_span_id === null) ?? spans[0]
   if (!parent) return
-  const sessionId = parent.trace_id
+  const sessionId = sessionIdFromAttributes(parent.attributes) ?? parent.trace_id
   for (const receipt of ref.integrity.corruptions) {
     receipt.harness = ref.harness
     receipt.sessionId = sessionId

@@ -25,6 +25,9 @@ interface DescendantFixture {
   parentScript: string
 }
 
+const TIMEOUT_TREE_STARTUP_MS = 5_000
+const TIMEOUT_TREE_SENTINEL_MS = 6_000
+
 /**
  * `sentinelDelayMs` is how long the terminator gets before the escaped
  * descendant proves it survived. It is a budget for the KILL, not part of the
@@ -32,7 +35,8 @@ interface DescendantFixture {
  * uses the same 1.5s, because the two that used 500ms failed on a loaded
  * machine — walking /proc and signalling a process tree takes longer than half
  * a second when 32 cores are saturated, and a budget that tight tests the
- * machine rather than the code.
+ * machine rather than the code. Timeout tests reserve a larger startup window
+ * because their clock starts before the descendant exists.
  */
 function descendantFixture(onReady: string, sentinelDelayMs: number): DescendantFixture {
   const directory = mkdtempSync(join(tmpdir(), 'traces-process-tree-'))
@@ -132,10 +136,10 @@ describe('runCommand', () => {
   })
 
   it('terminates the detached descendant tree before rejecting a timeout', async () => {
-    const fixture = descendantFixture(`process.stdout.write('ready')`, 1_500)
+    const fixture = descendantFixture(`process.stdout.write('ready')`, TIMEOUT_TREE_SENTINEL_MS)
     try {
       await expect(
-        runCommand(process.execPath, ['-e', fixture.parentScript], { timeoutMs: 800 }),
+        runCommand(process.execPath, ['-e', fixture.parentScript], { timeoutMs: TIMEOUT_TREE_STARTUP_MS }),
       ).rejects.toThrow(/timed out/)
       await expectDescendantTerminated(fixture)
     } finally {
@@ -145,12 +149,12 @@ describe('runCommand', () => {
 
   it('uses /proc to terminate detached descendants when ps is unavailable on Linux', async () => {
     if (process.platform !== 'linux') return
-    const fixture = descendantFixture(`process.stdout.write('ready')`, 1_500)
+    const fixture = descendantFixture(`process.stdout.write('ready')`, TIMEOUT_TREE_SENTINEL_MS)
     const originalPath = process.env.PATH
     process.env.PATH = '/path-without-ps'
     try {
       await expect(
-        runCommand(process.execPath, ['-e', fixture.parentScript], { timeoutMs: 800 }),
+        runCommand(process.execPath, ['-e', fixture.parentScript], { timeoutMs: TIMEOUT_TREE_STARTUP_MS }),
       ).rejects.toThrow(/timed out/)
       await expectDescendantTerminated(fixture)
     } finally {

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createAnalystModelCall, PROVIDER_ERROR_BODY_LIMIT } from '../src/analyst-model-call.js'
+import { ANALYST_MAX_OUTPUT_TOKENS, createAnalystModelOwner } from '../src/analyst-model-call.js'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void
 
@@ -21,109 +21,101 @@ afterEach(async () => {
   if (running) await new Promise<void>((resolve) => running.close(() => resolve()))
 })
 
-function chatRequest(model = 'test-model') {
-  return {
-    model,
-    messages: [{ role: 'user' as const, content: 'why did this run fail?' }],
-  }
+function owner(baseUrl: string) {
+  return createAnalystModelOwner({
+    apiKey: 'test-key',
+    baseUrl,
+    model: 'test-model',
+    provider: 'test-provider',
+  })
 }
 
-function callArgs(request: ReturnType<typeof chatRequest>, signal: AbortSignal) {
-  // Shape of one admitted call the loopback proxy hands to the execution owner.
-  return { request, callId: 'call-abc123', signal } as unknown as Parameters<
-    ReturnType<typeof createAnalystModelCall>
-  >[0]
-}
-
-describe('analyst model call', () => {
-  it('returns a receipt and execution evidence, and sends callId as the idempotency key', async () => {
-    let seenIdempotencyKey: string | undefined
+describe('analyst model owner', () => {
+  it('uses Runtime to translate the analyst profile into one exact provider request', async () => {
+    let body: Record<string, unknown> | undefined
+    let idempotencyKey: string | undefined
     const baseUrl = await startGateway((req, res) => {
-      seenIdempotencyKey = req.headers['idempotency-key'] as string | undefined
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(
-        JSON.stringify({
-          id: 'chatcmpl-1',
-          object: 'chat.completion',
-          model: 'test-model',
-          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
-        }),
-      )
+      idempotencyKey = req.headers['idempotency-key'] as string | undefined
+      const chunks: Buffer[] = []
+      req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+      req.on('end', () => {
+        body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            model: 'test-model',
+            choices: [
+              { index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
+            ],
+            usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18, cost: 0.002 },
+          }),
+        )
+      })
     })
-
-    const call = createAnalystModelCall({ apiKey: 'test-key', baseUrl })
-    const result = await call(callArgs(chatRequest(), new AbortController().signal))
+    const configured = owner(baseUrl)
+    const result = await configured.call({
+      callId: 'call-abc123',
+      request: {
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'why did this run fail?' }],
+        maxTokens: ANALYST_MAX_OUTPUT_TOKENS,
+        thinking: 'disabled',
+      },
+      endpointFormat: 'chat-completions',
+      signal: new AbortController().signal,
+    })
 
     expect(result.succeeded).toBe(true)
+    expect(body).toMatchObject({
+      model: 'test-model',
+      max_tokens: ANALYST_MAX_OUTPUT_TOKENS,
+      reasoning_effort: 'none',
+    })
+    expect(body).not.toHaveProperty('thinking')
+    expect(idempotencyKey).toBe('call-abc123')
+    expect(configured.profile.model.reasoningEffort).toBe('none')
+    expect(configured.callRef).toMatch(/^sha256:[a-f0-9]{64}$/u)
     if (!result.succeeded) return
     expect(result.response.content).toBe('ok')
-    expect(result.receipt.inputTokens).toBe(11)
-    expect(result.receipt.outputTokens).toBe(7)
-    // callId must reach the provider so a retried-but-already-billed call is
-    // not charged twice.
-    expect(seenIdempotencyKey).toBe('call-abc123')
-    const execution = result.execution as Record<string, unknown>
-    expect(execution.callId).toBe('call-abc123')
-    expect(execution.servedModel).toBe('test-model')
-    expect(execution.finishReason).toBe('stop')
+    expect(result.receipt).toMatchObject({
+      model: 'test-model',
+      inputTokens: 11,
+      outputTokens: 7,
+      actualCostUsd: 0.002,
+    })
+    expect(result.execution).toMatchObject({
+      kind: 'agent-runtime-profile-model-call',
+      callId: 'call-abc123',
+      executed: true,
+      succeeded: true,
+      model: 'test-model',
+    })
   })
 
-  it('keeps the provider reason in execution evidence on a non-2xx response', async () => {
+  it('returns explicit unknown usage and cost when transport fails before a receipt', async () => {
     const baseUrl = await startGateway((_req, res) => {
       res.writeHead(400, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ error: { message: 'model not found: test-model', type: 'invalid_request_error' } }))
+      res.end(JSON.stringify({ error: { message: 'model not found: test-model' } }))
+    })
+    const result = await owner(baseUrl).call({
+      callId: 'call-failed',
+      request: {
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        maxTokens: ANALYST_MAX_OUTPUT_TOKENS,
+        thinking: 'disabled',
+      },
+      endpointFormat: 'chat-completions',
+      signal: new AbortController().signal,
     })
 
-    const call = createAnalystModelCall({ apiKey: 'test-key', baseUrl })
-    const result = await call(callArgs(chatRequest(), new AbortController().signal))
-
     expect(result.succeeded).toBe(false)
     if (result.succeeded) return
-    const execution = result.execution as Record<string, unknown>
-    expect(execution.status).toBe(400)
-    expect(String(execution.body)).toContain('model not found: test-model')
-    expect(String(execution.body).length).toBeLessThanOrEqual(PROVIDER_ERROR_BODY_LIMIT)
-    expect(execution.aborted).toBe(false)
-    // A failed call must never read as a free, measured call.
-    expect(result.receipt.costUnknown).toBe(true)
-    expect(result.receipt.usageUnknown).toBe(true)
-  })
-
-  it('does not mark a provider timeout as a cancellation', async () => {
-    const baseUrl = await startGateway(() => {
-      // Never responds, so callLlm's own per-attempt timeout fires.
-      })
-
-    const call = createAnalystModelCall({ apiKey: 'test-key', baseUrl })
-    // callLlm aborts an internal controller to enforce this timeout, so the
-    // error arrives as an AbortError even though nobody cancelled the call.
-    const request = { ...chatRequest(), timeoutMs: 250 }
-    const result = await call(callArgs(request, new AbortController().signal))
-
-    expect(result.succeeded).toBe(false)
-    if (result.succeeded) return
-    // The bridge retries a transient failure and gives up on a cancelled one,
-    // so a timeout must not carry the cancellation marker.
-    expect(result.error.startsWith('AbortError:')).toBe(false)
-    expect((result.execution as Record<string, unknown>).aborted).toBe(false)
-  })
-
-  it('marks an aborted call so it is distinguishable from a transient failure', async () => {
-    const controller = new AbortController()
-    const baseUrl = await startGateway(() => {
-      // Never responds: the abort is the only way this call ends.
-      controller.abort()
+    expect(result.receipt).toMatchObject({ usageUnknown: true, costUnknown: true })
+    expect(result.execution).toMatchObject({
+      kind: 'agent-runtime-profile-model-call',
+      executed: true,
+      succeeded: false,
     })
-
-    const call = createAnalystModelCall({ apiKey: 'test-key', baseUrl })
-    const result = await call(callArgs(chatRequest(), controller.signal))
-
-    expect(result.succeeded).toBe(false)
-    if (result.succeeded) return
-    expect(result.error.startsWith('AbortError:')).toBe(true)
-    const execution = result.execution as Record<string, unknown>
-    expect(execution.aborted).toBe(true)
-    expect(execution.callId).toBe('call-abc123')
   })
 })

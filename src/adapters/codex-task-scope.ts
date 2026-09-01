@@ -7,6 +7,7 @@ import type {
 } from '../types.js'
 import {
   type CodexLine,
+  codexSubagentActivity,
   multiAgentOperation,
   spawnedSessionIds,
   targetedSessionIds,
@@ -217,7 +218,8 @@ export async function resolveCodexParentTask(
       activeTurnId = undefined
       continue
     }
-    const explicitTurnId = line.payload?.internal_chat_message_metadata_passthrough?.turn_id
+    const explicitTurnId = line.payload?.turn_id
+      ?? line.payload?.internal_chat_message_metadata_passthrough?.turn_id
     if (
       line.type === 'response_item'
       && (line.payload?.type === 'function_call' || line.payload?.type === 'custom_tool_call')
@@ -254,12 +256,9 @@ export async function resolveCodexParentTask(
       }
       continue
     }
-    if (
-      line.type === 'event_msg'
-      && line.payload?.type === 'sub_agent_activity'
-      && line.payload.agent_thread_id === childSessionId
-    ) {
-      record(explicitTurnId ?? callTurns.get(line.payload.event_id ?? '') ?? activeTurnId)
+    const activity = codexSubagentActivity(line)
+    if (activity?.agentThreadId === childSessionId) {
+      record(activity.turnId ?? callTurns.get(activity.eventId ?? '') ?? activeTurnId)
     }
   }
 

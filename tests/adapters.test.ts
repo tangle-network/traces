@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
+import { deriveHexId, validateTraceSpans } from '@tangle-network/agent-trace-contract'
 import { afterAll, describe, expect, it } from 'vitest'
 import { analyzeAdoption } from '../src/adoption.js'
 import { AmpAdapter } from '../src/adapters/amp.js'
@@ -36,6 +37,8 @@ function refFor(path: string, harness: string): SessionRef {
 const llm = (s: OtlpSpan[]) => s.find((x) => x.attributes['openinference.span.kind'] === 'LLM')
 const tool = (s: OtlpSpan[]) => s.find((x) => x.attributes['openinference.span.kind'] === 'TOOL')
 const userPrompt = (s: OtlpSpan[]) => s.find((x) => x.name === 'user.prompt')
+const codexTraceId = (id: string) => deriveHexId(id, 16)
+const codexSpanId = (traceId: string, id: string) => deriveHexId(`${traceId}:${id}`, 8)
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize)
@@ -419,7 +422,7 @@ describe('JSONL adapter streaming', () => {
     let byteOffset = Buffer.byteLength(`${lines[0]}\n${lines[1]}\n`)
     for (const [index, receiptSpan] of receiptSpans.entries()) {
       expect(receiptSpan).toMatchObject({
-        trace_id: 'noisy-codex',
+        trace_id: codexTraceId('noisy-codex'),
         parent_span_id: root.span_id,
         attributes: {
           'traces.session.integrity': 'degraded_not_lossless',
@@ -1476,6 +1479,114 @@ describe('pi tool results', () => {
 })
 
 describe('codex current tool and subagent events', () => {
+  it('derives OTLP IDs while retaining readable Codex identities and parent links', async () => {
+    const path = join(dir, 'rollout-codex-otlp-identities.jsonl')
+    const sessionId = 'codex/session readable id'
+    const childId = 'child/session readable id'
+    const callId = 'call/readable child'
+    writeFileSync(path, [
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-29T03:00:00.000Z',
+        payload: { id: sessionId, cwd: '/repo' },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-29T03:00:01.000Z',
+        payload: {
+          type: 'function_call',
+          call_id: callId,
+          name: 'spawn_agent',
+          arguments: '{"message":"work"}',
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T03:00:02.000Z',
+        payload: {
+          type: 'item_completed',
+          turn_id: 'parent-turn',
+          internal_chat_message_metadata_passthrough: { turn_id: 'wrong-turn' },
+          item: {
+            type: 'SubAgentActivity',
+            id: callId,
+            kind: 'started',
+            agent_thread_id: childId,
+            agent_path: '/root/child',
+            started_at_ms: Date.parse('2026-07-29T03:00:02.000Z'),
+            completed_at_ms: Date.parse('2026-07-29T03:00:02.000Z'),
+          },
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-29T03:00:03.000Z',
+        payload: {
+          type: 'item_completed',
+          turn_id: 'parent-turn',
+          item: {
+            type: 'SubAgentActivity',
+            id: callId,
+            kind: 'completed',
+            agent_thread_id: childId,
+            agent_path: '/root/child',
+            started_at_ms: Date.parse('2026-07-29T03:00:02.000Z'),
+            completed_at_ms: Date.parse('2026-07-29T03:00:03.000Z'),
+          },
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'))
+
+    const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const wireTraceId = codexTraceId(sessionId)
+    const wireSpanIds = new Set(spans.map((item) => item.span_id))
+    const validation = validateTraceSpans(spans as never)
+
+    expect(spans.every((item) => /^[0-9a-f]{32}$/.test(item.trace_id))).toBe(true)
+    expect(spans.every((item) => /^[0-9a-f]{16}$/.test(item.span_id))).toBe(true)
+    expect(spans.every((item) => item.parent_span_id === null || /^[0-9a-f]{16}$/.test(item.parent_span_id))).toBe(true)
+    expect(spans.every((item) => item.trace_id === wireTraceId)).toBe(true)
+    expect(spans.every((item) => item.parent_span_id === null || wireSpanIds.has(item.parent_span_id))).toBe(true)
+    expect(spans[0]?.attributes).toMatchObject({
+      'tangle.sessionId': sessionId,
+      'traces.codex.source_trace_id': sessionId,
+      'traces.codex.source_span_id': 'root:codex/session readable id',
+    })
+    const agent = spans.find((item) => item.attributes['traces.codex.subagent_thread_id'] === childId)
+    expect(agent?.attributes['traces.codex.source_span_id']).toBe(`subagent:${childId}`)
+    expect(agent?.parent_span_id).toBe(codexSpanId(sessionId, `tool:${callId}`))
+    expect(validation.findings.some((finding) => finding.code === 'non-hex-id')).toBe(false)
+  })
+
+  it('keeps repeated local span names unique across Codex sessions', async () => {
+    const parse = async (sessionId: string): Promise<OtlpSpan[]> => {
+      const path = join(dir, `rollout-${sessionId}.jsonl`)
+      writeFileSync(path, [
+        {
+          type: 'session_meta',
+          timestamp: '2026-07-29T03:00:00.000Z',
+          payload: { id: sessionId, cwd: '/repo' },
+        },
+        {
+          type: 'response_item',
+          timestamp: '2026-07-29T03:00:01.000Z',
+          payload: { type: 'message', role: 'assistant', content: 'same local position' },
+        },
+      ].map((row) => JSON.stringify(row)).join('\n'))
+      return new CodexAdapter().parse(refFor(path, 'codex'))
+    }
+
+    const first = await parse('codex-session-a')
+    const second = await parse('codex-session-b')
+    const firstIds = new Set(first.map((item) => item.span_id))
+    const combined = [...first, ...second]
+    const validation = validateTraceSpans(combined as never)
+
+    expect(second.every((item) => !firstIds.has(item.span_id))).toBe(true)
+    expect(validation.findings.some((finding) =>
+      finding.code === 'duplicate-span-id' || finding.code === 'cross-trace-parent')).toBe(false)
+  })
+
   it('does not count a repeated cumulative token snapshot as another model call', async () => {
     const path = join(dir, 'rollout-codex-repeated-token-snapshot.jsonl')
     const usage = {
@@ -1967,24 +2078,24 @@ describe('codex current tool and subagent events', () => {
     const tools = (await new CodexAdapter().parse(refFor(path, 'codex')))
       .filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
     expect(tools).toHaveLength(9)
-    expect(tools.find((item) => item.span_id === 'tool:read-source')?.status).toEqual({ code: 'OK' })
-    expect(tools.find((item) => item.span_id === 'tool:failed-command')?.status.code).toBe('ERROR')
-    expect(tools.find((item) => item.span_id === 'tool:domain-result')?.status).toEqual({ code: 'OK' })
-    expect(tools.find((item) => item.span_id === 'tool:captured-log')?.status).toEqual({ code: 'OK' })
-    expect(tools.find((item) => item.span_id === 'tool:captured-exit')?.status).toEqual({ code: 'OK' })
-    expect(tools.find((item) => item.span_id === 'tool:timed-out')?.status.code).toBe('ERROR')
-    expect(tools.find((item) => item.span_id === 'tool:poll-timed-out')).toMatchObject({
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:read-source'))?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:failed-command'))?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:domain-result'))?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:captured-log'))?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:captured-exit'))?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:timed-out'))?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:poll-timed-out'))).toMatchObject({
       status: { code: 'OK' },
       attributes: {
         'traces.expected_blocking': true,
         'traces.poll.outcome': 'timeout',
       },
     })
-    expect(tools.find((item) => item.span_id === 'tool:process-timed-out')?.status.code).toBe('ERROR')
-    expect(tools.find((item) => item.span_id === 'tool:poll-failed')).toMatchObject({
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:process-timed-out'))?.status.code).toBe('ERROR')
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:poll-failed'))).toMatchObject({
       status: { code: 'ERROR' },
     })
-    expect(tools.find((item) => item.span_id === 'tool:poll-failed')?.attributes['traces.poll.outcome']).toBeUndefined()
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:poll-failed'))?.attributes['traces.poll.outcome']).toBeUndefined()
   })
 
   it('captures custom tool calls, joins their outputs, and tracks subagent lifecycles', async () => {
@@ -2372,7 +2483,7 @@ describe('codex current tool and subagent events', () => {
     expect((await analyzeAdoption(parentSpans)).totalSubagentSpawns).toBe(1)
 
     const childRoot = childSpans[0]!
-    expect(childRoot.trace_id).toBe(childId)
+    expect(childRoot.trace_id).toBe(codexTraceId(childId))
     expect(childRoot.attributes).toMatchObject({
       'traces.session.role': 'child',
       'traces.parent_session_id': parentId,
@@ -2552,7 +2663,7 @@ describe('codex current tool and subagent events', () => {
       'wait_agent',
     ])
     for (const callId of ['call-spawn', 'call-send', 'call-interrupt', 'call-followup']) {
-      expect(collaboration.find((item) => item.span_id === `tool:${callId}`)?.attributes['traces.codex.agent_session_ids'])
+      expect(collaboration.find((item) => item.span_id === codexSpanId('direct-parent', `tool:${callId}`))?.attributes['traces.codex.agent_session_ids'])
         .toBe(JSON.stringify([childId]))
     }
     expect(collaboration[0]?.attributes['traces.child_session_ids']).toBe(JSON.stringify([childId]))
@@ -2561,9 +2672,9 @@ describe('codex current tool and subagent events', () => {
       attributes: { 'traces.expected_blocking': true, 'traces.poll.outcome': 'timeout' },
     })
 
-    const agent = spans.find((item) => item.span_id === `subagent:${childId}`)
+    const agent = spans.find((item) => item.span_id === codexSpanId('direct-parent', `subagent:${childId}`))
     expect(agent).toMatchObject({
-      parent_span_id: 'tool:call-spawn',
+      parent_span_id: codexSpanId('direct-parent', 'tool:call-spawn'),
       start_time: '2026-07-29T03:05:37.395Z',
       end_time: '2026-07-29T03:50:29.388Z',
       status: { code: 'OK' },
@@ -2579,7 +2690,7 @@ describe('codex current tool and subagent events', () => {
     const messages = spans.filter((item) => item.name.startsWith('message.agent.'))
     expect(messages).toHaveLength(2)
     expect(messages.map((item) => item.name)).toEqual(['message.agent.progress', 'message.agent.final'])
-    expect(messages.every((item) => item.parent_span_id === `subagent:${childId}`)).toBe(true)
+    expect(messages.every((item) => item.parent_span_id === codexSpanId('direct-parent', `subagent:${childId}`))).toBe(true)
     expect(messages.every((item) => item.attributes['traces.codex.agent_session_ids'] === JSON.stringify([childId]))).toBe(true)
   })
 
@@ -2612,7 +2723,7 @@ describe('codex current tool and subagent events', () => {
     ].map((event) => JSON.stringify(event)).join('\n'))
 
     const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
-    expect(spans.find((item) => item.span_id === `subagent:${childId}`)).toMatchObject({
+    expect(spans.find((item) => item.span_id === codexSpanId('resumed-parent', `subagent:${childId}`))).toMatchObject({
       end_time: '2026-07-29T03:00:04.000Z',
       status: { code: 'UNSET' },
       attributes: { 'traces.codex.subagent_interruption_count': 1 },
@@ -2650,7 +2761,7 @@ describe('codex current tool and subagent events', () => {
     ].map((event) => JSON.stringify(event)).join('\n'))
 
     const agent = (await new CodexAdapter().parse(refFor(path, 'codex')))
-      .find((item) => item.span_id === `subagent:${childId}`)
+      .find((item) => item.span_id === codexSpanId('clock-skew-parent', `subagent:${childId}`))
 
     expect(agent).toMatchObject({
       start_time: '2026-07-29T03:00:02.000Z',
@@ -2683,7 +2794,7 @@ describe('codex current tool and subagent events', () => {
     ].map((event) => JSON.stringify(event)).join('\n'))
 
     const parsed = await new CodexAdapter().parse(refFor(path, 'codex'))
-    const agent = parsed.find((item) => item.span_id === `subagent:${childId}`)
+    const agent = parsed.find((item) => item.span_id === codexSpanId('partial-parent', `subagent:${childId}`))
 
     expect(agent).toMatchObject({
       start_time: '2026-07-29T03:00:03.000Z',
@@ -2720,7 +2831,7 @@ describe('codex current tool and subagent events', () => {
     await expect(new CodexAdapter().parse(refFor(path, 'codex'))).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          span_id: `subagent:${childId}`,
+          span_id: codexSpanId('invalid-epoch-parent', `subagent:${childId}`),
           start_time: '2026-07-29T03:00:02.000Z',
           end_time: '2026-07-29T03:00:02.000Z',
         }),
@@ -2777,7 +2888,7 @@ describe('codex current tool and subagent events', () => {
     ].map((row) => JSON.stringify(row)).join('\n'))
 
     const agent = (await new CodexAdapter().parse(refFor(path, 'codex')))
-      .find((item) => item.span_id === `subagent:${childId}`)
+      .find((item) => item.span_id === codexSpanId('restarted-parent', `subagent:${childId}`))
 
     expect(agent).toMatchObject({
       start_time: '2026-07-29T03:00:01.000Z',

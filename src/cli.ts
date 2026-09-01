@@ -89,7 +89,7 @@ import {
 import { fileRunContextSupervisorRunReader, isFileRunContextDir } from './supervisor-run-context.js'
 import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
 import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import { createAnalystModelCall } from './analyst-model-call.js'
+import { ANALYST_MAX_OUTPUT_TOKENS, createAnalystModelOwner } from './analyst-model-call.js'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import type {
@@ -178,7 +178,7 @@ interface Args {
   verifyOut?: string
 }
 
-const DEFAULT_ANALYST_MODEL = 'gpt-5-mini'
+const DEFAULT_ANALYST_MODEL = 'gpt-5.6-luna'
 
 /** Default `--llm` endpoint: the Tangle router, reached with TANGLE_API_KEY. */
 const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
@@ -501,9 +501,20 @@ function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEn
     process.env.OPENAI_BASE_URL ||
     (tangleKey ? TANGLE_ROUTER_BASE_URL : 'https://api.openai.com/v1')
   const python = process.env.TRACES_PYTHON
+  const owner = createAnalystModelOwner({
+    apiKey,
+    baseUrl,
+    model,
+    provider:
+      baseUrl === TANGLE_ROUTER_BASE_URL
+        ? 'tangle-router'
+        : baseUrl.startsWith('https://api.openai.com/')
+          ? 'openai'
+          : 'openai-compatible',
+  })
   return createDspyRlmTraceEngine({
-    call: createAnalystModelCall({ apiKey, baseUrl }),
-    callRef: `traces-cli:${baseUrl}#${model}`,
+    call: owner.call,
+    callRef: owner.callRef,
     recordExecution: (observation) => {
       analystLog(
         `[analyst] model call ${observation.sequence} ${observation.succeeded ? 'ok' : 'FAIL'} ${observation.model}`,
@@ -515,7 +526,7 @@ function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEn
     // needs this cap, and glm-5.2 counts reasoning tokens in
     // completion_tokens — a smaller cap breaches its cost reservation and the
     // fail-closed ledger then refuses every later call in the run.
-    maxOutputTokens: 16_384,
+    maxOutputTokens: ANALYST_MAX_OUTPUT_TOKENS,
     // maxCostUsd defaults to $1 per analyst — a proxy-side ceiling separate
     // from --budget. With the larger token cap the per-call reservation grows
     // ~4x, so that default binds before the registry's --budget allocation
