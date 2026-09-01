@@ -29,6 +29,7 @@ import type {
   ParentTaskResolution,
   ParseOptions,
   SessionRef,
+  SpawnedChildResolution,
 } from '../types.js'
 import { codexActor } from './actor.js'
 import { capText, userPromptSpan } from './conversation.js'
@@ -245,6 +246,42 @@ function agentRequestId(output: unknown, depth = 3): string | undefined {
   return undefined
 }
 
+/**
+ * The agent path a `spawn_agent` call names, from either side of the call.
+ *
+ * Codex spells it `task_name` in the arguments and the result, and `agent_path` in the child's
+ * own `session_meta`; the value is identical (`/root/c1_b_grid`). A leading slash is kept, so the
+ * comparison is exact and never a prefix match.
+ */
+export function spawnAgentPath(value: unknown, depth = 4): string | undefined {
+  if (depth < 0 || value == null) return undefined
+  if (typeof value === 'string') {
+    try {
+      return spawnAgentPath(JSON.parse(value) as unknown, depth - 1)
+    } catch {
+      return undefined
+    }
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = spawnAgentPath(item, depth - 1)
+      if (found) return found
+    }
+    return undefined
+  }
+  if (typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  for (const key of ['task_name', 'agent_path', 'taskName', 'agentPath']) {
+    const found = record[key]
+    if (typeof found === 'string' && found.length > 0) return found
+  }
+  for (const nested of Object.values(record)) {
+    const found = spawnAgentPath(nested, depth - 1)
+    if (found) return found
+  }
+  return undefined
+}
+
 function setAgentSessionIds(toolSpan: OtlpSpan, ids: readonly string[]): void {
   if (ids.length === 0) return
   const unique = [...new Set(ids)]
@@ -449,6 +486,61 @@ export class CodexAdapter implements HarnessTraceAdapter {
     options: Pick<ParseOptions, 'corruptionMode'> = {},
   ): Promise<ParentTaskResolution> {
     return resolveCodexParentTask(ref, childSessionId, options)
+  }
+
+  /**
+   * Join a parent's `spawn_agent` calls to the child rollouts they produced, by the exact pair
+   * (parent thread ID, agent path). Only the head of each candidate file is read.
+   */
+  async locateSpawnedChildren(
+    parentSessionId: string,
+    agentPaths: readonly string[],
+    opts: LocateOptions & Pick<ParseOptions, 'corruptionMode' | 'signal'> = {},
+  ): Promise<readonly SpawnedChildResolution[]> {
+    const wanted = [...new Set(agentPaths)].filter((path) => path.length > 0)
+    if (wanted.length === 0 || parentSessionId.length === 0) return []
+    const matches = new Map<string, SessionRef[]>()
+    for await (const path of walkRollouts(this.root())) {
+      opts.signal?.throwIfAborted()
+      const spawn = await this.readSpawnIdentity(path)
+      if (!spawn || spawn.parentSessionId !== parentSessionId) continue
+      if (!wanted.includes(spawn.agentPath)) continue
+      const ref = await this.refFromPath(path, { ...opts, cwd: undefined })
+      if (!ref) continue
+      matches.set(spawn.agentPath, [...(matches.get(spawn.agentPath) ?? []), ref])
+    }
+    return wanted.map((agentPath) => {
+      const found = matches.get(agentPath) ?? []
+      if (found.length === 1) return { agentPath, ref: found[0]! }
+      if (found.length === 0) return { agentPath, reason: 'not-found' as const }
+      return {
+        agentPath,
+        reason: 'ambiguous' as const,
+        candidates: found.map((ref) => ref.sessionId).sort(),
+      }
+    })
+  }
+
+  /** The parent thread ID and agent path a child rollout stamps in its own session metadata. */
+  private async readSpawnIdentity(
+    path: string,
+  ): Promise<{ parentSessionId: string; agentPath: string } | undefined> {
+    let head: CodexLine[]
+    try {
+      // A candidate file is read only to test the pair; a corrupt head disqualifies it and is
+      // never a reason to fail the whole expansion.
+      head = await takeJsonl<CodexLine>(path, SESSION_HEAD_LINES, { mode: 'recover', onCorruption: () => {} })
+    } catch (error) {
+      if (isMissingPathError(error)) return undefined
+      throw error
+    }
+    const meta = head.find((line) => line.type === 'session_meta')
+    const spawn = meta?.payload?.source?.subagent?.thread_spawn
+    const parentSessionId = meta?.payload?.parent_thread_id ?? spawn?.parent_thread_id
+    const agentPath = meta?.payload?.agent_path ?? spawn?.agent_path
+    if (typeof parentSessionId !== 'string' || typeof agentPath !== 'string') return undefined
+    if (parentSessionId.length === 0 || agentPath.length === 0) return undefined
+    return { parentSessionId, agentPath }
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
@@ -706,6 +798,16 @@ export class CodexAdapter implements HarnessTraceAdapter {
         if (agentOperation && agentOperation !== 'spawn_agent') {
           setAgentSessionIds(toolSpan, targetedSessionIds(agentOperation, input))
         }
+        // The join key of last resort. `spawn_agent` returns `{"task_name": "/root/c1_b_grid"}`
+        // with no agent id, and codex `exec` builds (0.148–0.152) emit no `sub_agent_activity`
+        // stream, so both id-bearing keys are absent and the child is invisible from the parent.
+        // The same string IS on both sides: `task_name` here, `session_meta.agent_path` in the
+        // child. Recording it lets the workflow expansion join by path instead of reporting a
+        // parent with no children as clean.
+        if (agentOperation === 'spawn_agent') {
+          const path = spawnAgentPath(input)
+          if (path) toolSpan.attributes['traces.codex.spawn_agent_path'] = path
+        }
         spans.push(toolSpan)
         toolByCallId.set(callId, toolSpan)
         step += 1
@@ -724,6 +826,10 @@ export class CodexAdapter implements HarnessTraceAdapter {
           const operation = t.attributes['traces.codex.agent_operation']
           if (operation === 'spawn_agent') {
             setAgentSessionIds(t, spawnedSessionIds(l.payload.output))
+            if (!t.attributes['traces.codex.spawn_agent_path']) {
+              const path = spawnAgentPath(l.payload.output)
+              if (path) t.attributes['traces.codex.spawn_agent_path'] = path
+            }
           }
           if (typeof operation === 'string') {
             const requestId = agentRequestId(l.payload.output)

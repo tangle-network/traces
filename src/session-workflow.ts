@@ -5,7 +5,7 @@ import {
   SessionWorkflowError,
 } from './session-relationship.js'
 import { locateSessions, parseSession } from './session-source.js'
-import type { HarnessTraceAdapter, ParseOptions, SessionRef } from './types.js'
+import type { HarnessTraceAdapter, ParseOptions, SessionRef, SpawnedChildResolution } from './types.js'
 
 export type SessionWorkflowIssue =
   | {
@@ -30,6 +30,21 @@ export type SessionWorkflowIssue =
   | {
       readonly kind: 'cycle'
       readonly sessionIds: readonly string[]
+    }
+  | {
+      /**
+       * A child the parent demonstrably spawned that no session file could be joined to.
+       *
+       * This exists so a silent miss can never read as clean. `--workflow` used to report
+       * `0 relationship issues` for a codex parent with three `spawn_agent` calls and three child
+       * rollouts in the same directory, because the harness recorded no child session ID and the
+       * expansion therefore had nothing to look for. An unjoinable child is now a stated issue.
+       */
+      readonly kind: 'unjoined-child'
+      readonly parentSessionId: string
+      readonly agentPath: string
+      readonly reason: 'not-found' | 'ambiguous' | 'unsupported'
+      readonly candidates?: readonly string[]
     }
   | {
       readonly kind: 'unresolved-parent-task'
@@ -340,19 +355,69 @@ export async function collectSessionWorkflow(
     }
     if (previous) continue
 
+    // JOIN BY AGENT PATH. When the harness recorded no child session ID, the parent still names
+    // every child by the task path it asked for, and each child stamps that same path beside its
+    // parent's ID. Resolving the pair turns three invisible children into three joined sessions;
+    // a pair that resolves to nothing, or to more than one file, becomes an issue rather than a
+    // clean report.
+    const joinedChildIds: string[] = []
+    if (relationship.unjoinedSpawnPaths.length > 0) {
+      // An adapter with no path-join is still a miss the reader must see, not a clean report.
+      const resolutions: readonly SpawnedChildResolution[] = adapter.locateSpawnedChildren
+        ? await adapter.locateSpawnedChildren(relationship.sessionId, relationship.unjoinedSpawnPaths, {
+            corruptionMode: options.corruptionMode,
+            signal: options.signal,
+          })
+        : []
+      options.signal?.throwIfAborted()
+      if (!adapter.locateSpawnedChildren) {
+        for (const agentPath of relationship.unjoinedSpawnPaths) {
+          issues.push({
+            kind: 'unjoined-child',
+            parentSessionId: relationship.sessionId,
+            agentPath,
+            reason: 'unsupported',
+          })
+        }
+      }
+      for (const resolution of resolutions) {
+        if (resolution.ref) {
+          addRef(resolution.ref)
+          joinedChildIds.push(resolution.ref.sessionId)
+          continue
+        }
+        issues.push({
+          kind: 'unjoined-child',
+          parentSessionId: relationship.sessionId,
+          agentPath: resolution.agentPath,
+          reason: resolution.reason ?? 'not-found',
+          ...(resolution.candidates ? { candidates: resolution.candidates } : {}),
+        })
+      }
+    }
+    // The join is folded into the parent's own relationship, so the child reaches the queue
+    // through the one reference path and the reverse-link check sees a parent that claims it.
+    const joined: SessionRelationship = joinedChildIds.length === 0
+      ? relationship
+      : {
+          ...relationship,
+          childSessionIds: [...new Set([...relationship.childSessionIds, ...joinedChildIds])].sort(),
+          spawnedChildSessionIds: [...new Set([...relationship.spawnedChildSessionIds, ...joinedChildIds])].sort(),
+        }
+
     const session = {
       adapter,
       ref,
       spans,
-      relationship,
+      relationship: joined,
       taskScope,
       ...(taskTurnId ? { taskTurnId } : {}),
     }
     sessions.push(session)
-    parsedById.set(relationship.sessionId, session)
-    if (seedPaths.has(refPathKey(ref))) seedSessionIds.push(relationship.sessionId)
+    parsedById.set(joined.sessionId, session)
+    if (seedPaths.has(refPathKey(ref))) seedSessionIds.push(joined.sessionId)
 
-    const discovered = referencesFor(relationship)
+    const discovered = referencesFor(joined)
     references.push(...discovered)
     for (const reference of discovered) {
       if (parsedById.has(reference.sessionId)) continue
@@ -364,7 +429,7 @@ export async function collectSessionWorkflow(
       }
 
       const resolution = adapter.resolveParentTask
-        ? await adapter.resolveParentTask(candidates[0]!, relationship.sessionId, {
+        ? await adapter.resolveParentTask(candidates[0]!, joined.sessionId, {
             corruptionMode: options.corruptionMode,
             signal: options.signal,
           })
@@ -378,7 +443,7 @@ export async function collectSessionWorkflow(
       issues.push({
         kind: 'unresolved-parent-task',
         parentSessionId: reference.sessionId,
-        childSessionId: relationship.sessionId,
+        childSessionId: joined.sessionId,
         reason: resolution.reason,
         ...('turnIds' in resolution && resolution.turnIds
           ? { turnIds: resolution.turnIds }
