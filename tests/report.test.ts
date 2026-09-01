@@ -170,6 +170,47 @@ describe('renderReport', () => {
     expect(report).not.toContain('Counts below describe only the selected files')
   })
 
+  it('names unjoined children on the headline instead of a clean-looking issue count', () => {
+    // Measured 2026-09-01: this exact case printed "1 seed session, 1 resolved session,
+    // 0 relationship issues" with three spawned children sitting in the same directory.
+    const report = renderReport(emptyResult(), {
+      harness: 'codex',
+      sessionCount: 1,
+      spanCount: 20,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      execution: EMPTY_EXECUTION,
+      workflow: {
+        seedSessionIds: ['root'],
+        complete: false,
+        issues: [
+          { kind: 'unjoined-child', parentSessionId: 'root', agentPath: '/root/c1_b_grid', reason: 'not-found' },
+          { kind: 'unjoined-child', parentSessionId: 'root', agentPath: '/root/c2_s_constb', reason: 'not-found' },
+          {
+            kind: 'unjoined-child',
+            parentSessionId: 'root',
+            agentPath: '/root/c3_mitigation',
+            reason: 'ambiguous',
+            candidates: ['a', 'b'],
+          },
+        ],
+      },
+      sources: [{
+        sessionId: 'root',
+        role: 'operator',
+        childSessionIds: [],
+        path: '/sessions/root.jsonl',
+        subject: 'Coordinate the work.',
+      }],
+    })
+
+    expect(report).toContain(
+      'Session workflow: 1 seed session, 1 resolved session, 3 relationship issues, 3 unjoined child sessions.',
+    )
+    expect(report).not.toContain('0 relationship issues')
+    expect(report).toContain('Unjoined child `/root/c1_b_grid` spawned by `root`: not-found')
+    expect(report).toContain('Unjoined child `/root/c3_mitigation` spawned by `root`: ambiguous; candidates: `a`, `b`')
+  })
+
   it('shows degraded source provenance without exposing malformed content', () => {
     const rawSecret = 'secret-malformed-record'
     const sha256 = createHash('sha256').update(rawSecret).digest('hex')

@@ -716,6 +716,10 @@ function workflowIssueText(issue: SessionWorkflowIssue): string {
     return `parent conflict for ${issue.sessionId}: declared ${issue.declaredParentSessionId ?? 'none'}, ` +
       `referenced by ${issue.referencedParentSessionIds.join(', ') || 'none'}`
   }
+  if (issue.kind === 'unjoined-child') {
+    return `unjoined child ${issue.agentPath} spawned by ${issue.parentSessionId}: ${issue.reason}` +
+      (issue.candidates ? ` (${issue.candidates.join(', ')})` : '')
+  }
   return `${issue.kind} ${issue.sessionId}, referenced as ${issue.relation} by ${issue.referencedBySessionId}`
 }
 

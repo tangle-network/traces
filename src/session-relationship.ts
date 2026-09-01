@@ -13,6 +13,15 @@ export interface SessionRelationship {
   readonly spawnedChildSessionIds: readonly string[]
   /** Existing child sessions resumed or steered in this task. */
   readonly resumedChildSessionIds: readonly string[]
+  /**
+   * Agent paths this session spawned that carry NO child session ID.
+   *
+   * A codex `exec` build returns `{"task_name": "/root/c1_b_grid"}` from `spawn_agent` and emits
+   * no `sub_agent_activity` stream, so both id-bearing keys are absent. The child exists, ran,
+   * and spent tokens; only the ID is missing. These paths are the join key of last resort, and
+   * a path still on this list after expansion is a child that was NOT joined.
+   */
+  readonly unjoinedSpawnPaths: readonly string[]
   readonly depth?: number
   readonly agentNickname?: string
   readonly agentRole?: string
@@ -89,6 +98,7 @@ export function describeSessionRelationship(
   const childSessionIds = new Set<string>()
   const spawnedChildSessionIds = new Set<string>()
   const resumedChildSessionIds = new Set<string>()
+  const unjoinedSpawnPaths = new Set<string>()
   for (const span of spans) {
     const direct = parseSessionIds(span.attributes['traces.child_session_ids'], 'traces.child_session_ids')
     for (const id of direct) childSessionIds.add(id)
@@ -109,6 +119,10 @@ export function describeSessionRelationship(
     }
     const lifecycleChild = stringAttribute(span, 'traces.codex.subagent_thread_id')
     if (lifecycleChild) childSessionIds.add(lifecycleChild)
+    const spawnPath = stringAttribute(span, 'traces.codex.spawn_agent_path')
+    if (operationName === 'spawn_agent' && spawnPath && agentSessionIds.length === 0 && direct.length === 0) {
+      unjoinedSpawnPaths.add(spawnPath)
+    }
   }
 
   const role = stringAttribute(root, 'traces.session.role')
@@ -134,6 +148,7 @@ export function describeSessionRelationship(
     resumedChildSessionIds: [...resumedChildSessionIds]
       .filter((sessionId) => !spawnedChildSessionIds.has(sessionId))
       .sort(),
+    unjoinedSpawnPaths: [...unjoinedSpawnPaths].sort(),
     ...(depth !== undefined ? { depth } : {}),
     ...(agentNickname ? { agentNickname } : {}),
     ...(agentRole ? { agentRole } : {}),

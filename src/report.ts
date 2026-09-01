@@ -167,6 +167,11 @@ function workflowIssueText(issue: SessionWorkflowIssue): string {
         ? issue.referencedParentSessionIds.map((id) => `\`${tableCell(id)}\``).join(', ')
         : 'none'}`
   }
+  if (issue.kind === 'unjoined-child') {
+    return `Unjoined child \`${tableCell(issue.agentPath)}\` spawned by ` +
+      `\`${tableCell(issue.parentSessionId)}\`: ${issue.reason}` +
+      (issue.candidates ? `; candidates: ${issue.candidates.map((id) => `\`${tableCell(id)}\``).join(', ')}` : '')
+  }
   const paths = issue.kind === 'ambiguous-session'
     ? `; candidates: ${issue.paths.map((path) => `\`${tableCell(path)}\``).join(', ')}`
     : ''
@@ -445,11 +450,16 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   }
 
   if (meta.workflow) {
+    const unjoined = meta.workflow.issues.filter((issue) => issue.kind === 'unjoined-child').length
     lines.push(
       `> Session workflow: ${meta.workflow.seedSessionIds.length} seed ` +
         `${plural(meta.workflow.seedSessionIds.length, 'session')}, ${meta.sessionCount} resolved ` +
         `${plural(meta.sessionCount, 'session')}, ${meta.workflow.issues.length} relationship ` +
-        `${plural(meta.workflow.issues.length, 'issue')}.`,
+        `${plural(meta.workflow.issues.length, 'issue')}` +
+        // A child that could not be joined is named on the headline, never folded into a total a
+        // reader can skim past. "0 relationship issues" once stood beside three unjoined children.
+        (unjoined > 0 ? `, ${unjoined} unjoined child ${plural(unjoined, 'session')}` : '') +
+        '.',
     )
     lines.push('')
     if (!meta.workflow.complete) {

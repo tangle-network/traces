@@ -114,4 +114,27 @@ export interface HarnessTraceAdapter {
     childSessionId: string,
     options?: Pick<ParseOptions, 'corruptionMode' | 'signal'>,
   ): Promise<ParentTaskResolution>
+  /**
+   * Resolve the child sessions a parent spawned when the harness recorded no child session ID.
+   *
+   * Some harness builds name a spawned child only by the task path the parent asked for
+   * (codex `exec` 0.148-0.152 returns `{"task_name": "/root/c1_b_grid"}` and emits no
+   * `sub_agent_activity` stream). The same path is stamped in the child's own session metadata
+   * alongside its parent's ID, so the pair (parent session ID, agent path) is an exact key.
+   * Adapters must match that pair exactly and must not infer a child from names or timestamps.
+   */
+  locateSpawnedChildren?(
+    parentSessionId: string,
+    agentPaths: readonly string[],
+    options?: LocateOptions & Pick<ParseOptions, 'corruptionMode' | 'signal'>,
+  ): Promise<readonly SpawnedChildResolution[]>
+}
+
+/** One `agent path -> child session` answer. `ref` is absent when the pair matched no file. */
+export interface SpawnedChildResolution {
+  readonly agentPath: string
+  readonly ref?: SessionRef
+  readonly reason?: 'not-found' | 'ambiguous'
+  /** Session IDs that matched the pair when more than one did. */
+  readonly candidates?: readonly string[]
 }
