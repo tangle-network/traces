@@ -26,6 +26,7 @@ import {
   LLM_INPUT_TOKENS,
   LLM_OUTPUT_TOKENS,
 } from '@tangle-network/agent-eval/trace-attributes'
+import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { sessionJsonlOptions } from '../integrity.js'
 import { appendAll } from '../arrays.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
@@ -54,6 +55,29 @@ import { toolIoAttributes } from './tool-io.js'
 
 const SERVICE = 'claude-code'
 const EPOCH = new Date(0).toISOString()
+
+const CLAUDE_SOURCE_TRACE_ID = 'traces.claude.source_trace_id'
+const CLAUDE_SOURCE_SPAN_ID = 'traces.claude.source_span_id'
+const CLAUDE_SOURCE_PARENT_SPAN_ID = 'traces.claude.source_parent_span_id'
+
+/** Convert Claude's readable transcript identities to fixed-width OTLP IDs. */
+function normalizeClaudeIds(spans: OtlpSpan[]): void {
+  for (const item of spans) {
+    const sourceTraceId = item.trace_id
+    const sourceSpanId = item.span_id
+    const sourceParentSpanId = item.parent_span_id
+    item.attributes[CLAUDE_SOURCE_TRACE_ID] = sourceTraceId
+    item.attributes[CLAUDE_SOURCE_SPAN_ID] = sourceSpanId
+    if (sourceParentSpanId !== null) {
+      item.attributes[CLAUDE_SOURCE_PARENT_SPAN_ID] = sourceParentSpanId
+    }
+    item.trace_id = deriveHexId(sourceTraceId, 16)
+    item.span_id = deriveHexId(`${sourceTraceId}:${sourceSpanId}`, 8)
+    item.parent_span_id = sourceParentSpanId === null
+      ? null
+      : deriveHexId(`${sourceTraceId}:${sourceParentSpanId}`, 8)
+  }
+}
 
 interface ClaudeEvent {
   type?: string
@@ -860,6 +884,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     options.signal?.throwIfAborted()
     const ordered = orderClaudeSpans(root, spans)
     setRootTimeBounds(root, ordered)
+    normalizeClaudeIds(ordered)
     return ordered
   }
 

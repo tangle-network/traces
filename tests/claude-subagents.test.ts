@@ -154,7 +154,9 @@ describe('Claude subagent folding', () => {
     )
 
     expect(stale).toHaveLength(2)
-    expect(stale.every((item) => item.parent_span_id === 'root:stale-child')).toBe(true)
+    expect(stale.every(
+      (item) => item.attributes['traces.claude.source_parent_span_id'] === 'root:stale-child',
+    )).toBe(true)
     expect(stale.every(
       (item) => item.attributes['traces.claude.parent_tool_missing'] === true,
     )).toBe(true)

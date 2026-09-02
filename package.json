@@ -59,9 +59,9 @@
     "prepublishOnly": "pnpm check:source && pnpm build && pnpm check:package"
   },
   "dependencies": {
-    "@tangle-network/agent-eval": "0.172.1",
-    "@tangle-network/agent-interface": "2.2.0",
-    "@tangle-network/agent-runtime": "0.189.0",
+    "@tangle-network/agent-eval": "0.173.0",
+    "@tangle-network/agent-interface": "2.3.0",
+    "@tangle-network/agent-runtime": "0.190.0",
     "@tangle-network/agent-trace-contract": "1.0.2",
     "@tangle-network/sandbox": "0.36.4"
   },
