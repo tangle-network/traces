@@ -1,7 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ANALYST_MAX_OUTPUT_TOKENS, createAnalystModelOwner } from '../src/analyst-model-call.js'
+import {
+  ANALYST_MAX_OUTPUT_TOKENS,
+  GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS,
+  analystMaxOutputTokens,
+  createAnalystModelOwner,
+} from '../src/analyst-model-call.js'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void
 
@@ -31,6 +36,21 @@ function owner(baseUrl: string) {
 }
 
 describe('analyst model owner', () => {
+  it('uses a smaller GPT-5.6 reservation without narrowing other model families', () => {
+    expect(analystMaxOutputTokens('gpt-5.6-luna')).toBe(GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS)
+    expect(analystMaxOutputTokens('openai/gpt-5.6-sol')).toBe(GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS)
+    expect(analystMaxOutputTokens('glm-5.2')).toBe(ANALYST_MAX_OUTPUT_TOKENS)
+
+    const configured = createAnalystModelOwner({
+      apiKey: 'test-key',
+      baseUrl: 'https://router.example/v1',
+      model: 'gpt-5.6-luna',
+      provider: 'test-provider',
+    })
+    expect(configured.profile.model.maxVisibleOutputTokens)
+      .toBe(GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS)
+  })
+
   it('uses Runtime to translate the analyst profile into one exact provider request', async () => {
     let body: Record<string, unknown> | undefined
     let idempotencyKey: string | undefined

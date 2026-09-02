@@ -89,7 +89,7 @@ import {
 import { fileRunContextSupervisorRunReader, isFileRunContextDir } from './supervisor-run-context.js'
 import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
 import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import { ANALYST_MAX_OUTPUT_TOKENS, createAnalystModelOwner } from './analyst-model-call.js'
+import { analystMaxOutputTokens, createAnalystModelOwner } from './analyst-model-call.js'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import type {
@@ -512,6 +512,7 @@ function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEn
           ? 'openai'
           : 'openai-compatible',
   })
+  const maxOutputTokens = analystMaxOutputTokens(model)
   return createDspyRlmTraceEngine({
     call: owner.call,
     callRef: owner.callRef,
@@ -522,11 +523,11 @@ function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEn
       )
     },
     model,
-    // Pinned, not defaulted: one findings array from a current coding model
-    // needs this cap, and glm-5.2 counts reasoning tokens in
-    // completion_tokens — a smaller cap breaches its cost reservation and the
-    // fail-closed ledger then refuses every later call in the run.
-    maxOutputTokens: ANALYST_MAX_OUTPUT_TOKENS,
+    // Model-aware, not defaulted: GPT-5.6 needs less output room than models
+    // such as GLM, and every recursive call reserves this full amount before
+    // execution. An oversized reservation can reject useful later calls even
+    // when the run's measured spend remains well below its limit.
+    maxOutputTokens,
     // maxCostUsd defaults to $1 per analyst — a proxy-side ceiling separate
     // from --budget. With the larger token cap the per-call reservation grows
     // ~4x, so that default binds before the registry's --budget allocation
