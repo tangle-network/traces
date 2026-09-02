@@ -221,6 +221,8 @@ not the way to integrate a system you own — for that, [emit the contract](#int
 
 Every adapter captures the conversation stored in one session file: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage.
 Claude Code's nested subagent files are folded into the parent trace.
+Claude source UUIDs remain searchable in `traces.claude.source_*` attributes, while exported OTLP IDs use deterministic `deriveHexId` values.
+The Claude transcript proves turns and tool calls, but does not prove loop iterations or causal links, so those fields remain absent.
 Codex stores each worker in a separate session file; add `--workflow` to resolve the connected coordinator and worker files.
 `github-copilot` is the one exception: its log format carries no user prompt.
 Factory stores token totals in `.settings.json`, not per turn.

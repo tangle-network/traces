@@ -132,7 +132,8 @@ describe('Claude Workflow subagents', () => {
     expect(workflowSpans).toHaveLength(2)
     expect(workflowSpans.every((item) => item.parent_span_id === workflowCall?.span_id)).toBe(true)
     expect(workflowSpans.every(
-      (item) => item.span_id.startsWith('workflows:wf-linked:agent-linked:'),
+      (item) => String(item.attributes['traces.claude.source_span_id'])
+        .startsWith('workflows:wf-linked:agent-linked:'),
     )).toBe(true)
     expect(spans[0]?.end_time).toBe('2026-01-01T00:00:04Z')
   })

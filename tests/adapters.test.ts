@@ -862,7 +862,9 @@ describe('claude adapter (conversation capture)', () => {
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
 
     expect(spans).toHaveLength(2)
-    expect(new Set(spans.map((span) => span.trace_id))).toEqual(new Set(['canonical-session']))
+    expect(new Set(spans.map((span) => span.trace_id))).toEqual(
+      new Set([deriveHexId('canonical-session', 16)]),
+    )
   })
 
   it('reports the source file for conflicting Claude events', async () => {
@@ -923,6 +925,71 @@ describe('claude adapter (conversation capture)', () => {
       start_time: '2026-01-01T00:00:02Z',
       end_time: '2026-01-01T00:00:05Z',
     })
+  })
+
+  it('derives conforming Claude IDs while retaining source identity and proven semantics', async () => {
+    const path = join(dir, 'claude-otlp-identities.jsonl')
+    const sessionId = 'claude/readable session'
+    const callId = 'call/readable tool'
+    writeFileSync(
+      path,
+      [
+        {
+          type: 'user',
+          uuid: 'user-readable',
+          sessionId,
+          timestamp: '2026-01-01T00:00:00Z',
+          message: { role: 'user', content: [{ type: 'text', text: 'inspect it' }] },
+        },
+        {
+          type: 'assistant',
+          uuid: 'assistant-readable',
+          sessionId,
+          timestamp: '2026-01-01T00:00:01Z',
+          message: {
+            role: 'assistant',
+            model: 'claude-opus-4-8',
+            content: [{ type: 'tool_use', id: callId, name: 'Bash', input: { command: 'pwd' } }],
+          },
+        },
+        {
+          type: 'user',
+          uuid: 'result-readable',
+          sessionId,
+          timestamp: '2026-01-01T00:00:02Z',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: callId, content: 'workspace' }],
+          },
+        },
+      ].map((event) => JSON.stringify(event)).join('\n'),
+    )
+
+    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
+    const wireTraceId = deriveHexId(sessionId, 16)
+    const wireSpanIds = new Set(spans.map((item) => item.span_id))
+    const validation = validateTraceSpans(spans as never)
+
+    expect(spans.every((item) => item.trace_id === wireTraceId)).toBe(true)
+    expect(spans.every((item) => /^[0-9a-f]{16}$/.test(item.span_id))).toBe(true)
+    expect(spans.every((item) => item.parent_span_id === null || /^[0-9a-f]{16}$/.test(item.parent_span_id))).toBe(true)
+    expect(spans.every((item) => item.parent_span_id === null || wireSpanIds.has(item.parent_span_id))).toBe(true)
+    expect(spans[0]?.attributes).toMatchObject({
+      'traces.claude.source_trace_id': sessionId,
+      'traces.claude.source_span_id': `root:${sessionId}`,
+    })
+    const toolSpan = spans.find((item) => item.attributes['tool.name'] === 'Bash')
+    expect(toolSpan).toMatchObject({
+      attributes: {
+        'traces.claude.source_trace_id': sessionId,
+        'traces.claude.source_span_id': `assistant-readable:tool:0`,
+      },
+      status: { code: 'OK' },
+    })
+    expect(spans.some((item) => item.attributes['openinference.span.kind'] === 'TOOL')).toBe(true)
+    expect(spans.every((item) => item.attributes['agent.loop.iteration'] === undefined)).toBe(true)
+    expect(spans.every((item) => item.links === undefined)).toBe(true)
+    expect(validation.findings.some((finding) => finding.code === 'non-hex-id')).toBe(false)
   })
 
   it('declares every nested Claude worker and present metadata file as parse input', async () => {
@@ -1071,9 +1138,9 @@ describe('claude adapter (conversation capture)', () => {
     writeFileSync(join(subDir, 'agent-a.meta.json'), JSON.stringify({ agentType: 'Explore', toolUseId: 'agent-call' }))
 
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    expect(traceShapeDigest(spans)).toBe('2c4db02efac123b97015db82dd79a91df220abbcb700773735bb0ec660272694')
+    expect(traceShapeDigest(spans)).toBe('58ad7bae59004e9d6d36de7c5be70ab161cb0c6cad780c2f52b60868d8a4a18c')
     expect(spans.map((item) => item.name)).toEqual(['session', 'user.prompt', 'llm.turn', 'tool.Agent', 'user.prompt', 'llm.turn'])
-    expect(spans.every((item) => item.trace_id === 'claude-trace')).toBe(true)
+    expect(spans.every((item) => item.trace_id === deriveHexId('claude-trace', 16))).toBe(true)
     expect(spans[0]).toMatchObject({ start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:00:02Z' })
     const mainTurn = llm(spans)
     expect(mainTurn?.attributes['llm.token_count.prompt']).toBe(10)

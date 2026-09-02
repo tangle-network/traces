@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { describe, expect, it } from 'vitest'
 import { serializeSpans, span, type SessionWorkflowSummary } from '../src/index.js'
 
@@ -432,6 +433,93 @@ describe('traces CLI', () => {
       const attributes = row.attributes as Record<string, unknown>
       return attributes['traces.codex.source_trace_id'] === sessionId
         && attributes['traces.codex.source_span_id'] === `tool:${callId}`
+    })).toBe(true)
+
+    const validation = await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'validate',
+      otlp,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+    expect(validation.stdout).not.toContain('non-hex-id')
+  })
+
+  it('exports Claude readable IDs as conforming OTLP IDs through analyze', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-otlp-claude-'))
+    const session = join(dir, 'claude-readable.jsonl')
+    const report = join(dir, 'report.md')
+    const otlp = join(dir, 'spans.openinference.jsonl')
+    const sessionId = 'claude/readable cli session'
+    const callId = 'call/readable cli tool'
+    await writeFile(session, [
+      {
+        timestamp: '2026-07-13T09:59:27.000Z',
+        type: 'user',
+        uuid: 'user-readable',
+        sessionId,
+        message: { role: 'user', content: [{ type: 'text', text: 'Inspect this session.' }] },
+      },
+      {
+        timestamp: '2026-07-13T09:59:28.000Z',
+        type: 'assistant',
+        uuid: 'assistant-readable',
+        sessionId,
+        message: {
+          role: 'assistant',
+          model: 'claude-opus-4-8',
+          content: [{ type: 'tool_use', id: callId, name: 'Bash', input: { command: 'pwd' } }],
+        },
+      },
+      {
+        timestamp: '2026-07-13T09:59:29.000Z',
+        type: 'user',
+        uuid: 'result-readable',
+        sessionId,
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: callId, content: 'workspace' }],
+        },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
+
+    await execFileAsync(process.execPath, [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      'analyze',
+      '--harness',
+      'claude-code',
+      '--session',
+      session,
+      '--out',
+      report,
+      '--otlp-out',
+      otlp,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    })
+
+    const rows = parseRows(await readFile(otlp, 'utf8'))
+    const spanIds = new Set(rows.map((row) => row.span_id as string))
+    expect(rows.every((row) => row.trace_id === deriveHexId(sessionId, 16))).toBe(true)
+    expect(rows.every((row) => /^[0-9a-f]{16}$/.test(row.span_id as string))).toBe(true)
+    expect(rows.every((row) => {
+      const parent = row.parent_span_id as string
+      return parent === '' || (/^[0-9a-f]{16}$/.test(parent) && spanIds.has(parent))
+    })).toBe(true)
+    expect(rows.some((row) => {
+      const attributes = row.attributes as Record<string, unknown>
+      return attributes['traces.claude.source_trace_id'] === sessionId
+        && attributes['traces.claude.source_span_id'] === `assistant-readable:tool:0`
     })).toBe(true)
 
     const validation = await execFileAsync(process.execPath, [

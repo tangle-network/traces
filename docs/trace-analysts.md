@@ -34,6 +34,8 @@ Without those fields, the result is explicitly incomplete; names, nicknames, and
 It reports missing files, duplicate IDs, contradictory parents, and cycles instead of guessing.
 Use `--max-workflow-sessions <n>` to set a different bound.
 Claude Code already folds nested subagent files into its parent trace.
+The adapter preserves Claude source UUIDs in `traces.claude.source_*` attributes and derives valid OTLP IDs for the exported graph.
+It emits tool spans from recorded tool calls, but does not invent loop iterations or causal links absent from the transcript.
 Ordinary Claude subagents use their parent tool call ID.
 Claude Workflow subagents use the run ID and transcript directory returned by the parent `Workflow` call.
 If the same Workflow run is resumed, each child attaches to the latest matching call that started before it.
