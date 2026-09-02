@@ -6,7 +6,7 @@ settings:
 
 overrides:
   esbuild: ^0.28.1
-  vite: ^8.1.2
+  vite: ^8.2.2
   ws: ^8.21.0
 
 importers:
@@ -726,7 +726,7 @@ packages:
     resolution: {integrity: sha512-2XJVD55d1o5AZous5CCGKS74g/riOj9odEt2bQpCVZeblHyHdnMeFl4jl0XjU21stf4mbjUkew2eXQZt65g5CQ==}
     peerDependencies:
       msw: ^2.4.9
-      vite: ^8.1.2
+      vite: ^8.2.2
     peerDependenciesMeta:
       msw:
         optional: true
@@ -1294,7 +1294,7 @@ packages:
       '@vitest/ui': 4.1.11
       happy-dom: '*'
       jsdom: '*'
-      vite: ^8.1.2
+      vite: ^8.2.2
     peerDependenciesMeta:
       '@edge-runtime/vm':
         optional: true
