@@ -102,6 +102,9 @@ jobs:
       - name: Publish to npm
         if: steps.npm-version.outputs.exists != 'true'
         run: npm publish --access public --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

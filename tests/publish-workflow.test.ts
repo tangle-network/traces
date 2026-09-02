@@ -10,13 +10,14 @@ describe('release runtime contract', () => {
     expect(ci).toContain('node-version: [24.18.0, 22.13.0]')
   })
 
-  it('publishes through npm trusted publishing without a write token', () => {
+  it('publishes with the repository token and provenance', () => {
     expect(publish).toContain('id-token: write')
     expect(publish).toContain('node-version: 24.18.0')
     expect(publish).toContain('registry-url: https://registry.npmjs.org')
     expect(publish).toContain('package-manager-cache: false')
     expect(publish).toContain('npm publish --access public --ignore-scripts')
-    expect(publish).not.toContain('NODE_AUTH_TOKEN')
+    expect(publish).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}')
+    expect(publish).toContain("NPM_CONFIG_PROVENANCE: 'true'")
     expect(publish).not.toContain('pnpm publish')
   })
 })
