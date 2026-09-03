@@ -6,7 +6,7 @@ settings:
 
 overrides:
   esbuild: ^0.28.1
-  postcss: '>=8.5.18'
+  postcss: '>=8.5.26'
   vite: ^8.2.2
   ws: ^8.21.0
 
@@ -34,7 +34,7 @@ importers:
         specifier: ^22.0.0
         version: 22.20.1
       postcss:
-        specifier: '>=8.5.18'
+        specifier: '>=8.5.26'
         version: 8.5.26
       tsup:
         specifier: ^8.0.0
@@ -1077,7 +1077,7 @@ packages:
     engines: {node: '>= 18'}
     peerDependencies:
       jiti: '>=1.21.0'
-      postcss: '>=8.5.18'
+      postcss: '>=8.5.26'
       tsx: ^4.8.1
       yaml: ^2.4.2
     peerDependenciesMeta:
@@ -1208,7 +1208,7 @@ packages:
     peerDependencies:
       '@microsoft/api-extractor': ^7.36.0
       '@swc/core': ^1
-      postcss: '>=8.5.18'
+      postcss: '>=8.5.26'
       typescript: '>=4.5.0'
     peerDependenciesMeta:
       '@microsoft/api-extractor':
