@@ -2,7 +2,9 @@ allowBuilds:
   '@ax-llm/ax': false
   esbuild: true
 overrides:
+  '@hono/node-server': '>=2.0.10'
   esbuild: ^0.28.1
+  hono: '>=4.12.34'
   postcss: '>=8.5.26'
   vite: ^8.2.2
   ws: ^8.21.0
