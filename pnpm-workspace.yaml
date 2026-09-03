@@ -3,6 +3,6 @@ allowBuilds:
   esbuild: true
 overrides:
   esbuild: ^0.28.1
-  postcss: '>=8.5.18'
+  postcss: '>=8.5.26'
   vite: ^8.2.2
   ws: ^8.21.0
