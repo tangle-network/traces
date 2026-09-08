@@ -69,11 +69,13 @@ export interface LoopConvergenceReport {
 /** One causal edge: a graded span, and the work it caused. */
 export interface SteeringEdge {
   /** The span that CAUSED the work — a verdict, an earlier attempt. */
+  readonly causeTraceId: string
   readonly causeSpanId: string
   readonly causeName: string | null
   readonly causeOutcome: Outcome | null
   readonly causeScore: number | null
   /** The span the link was recorded on: the work that was caused. */
+  readonly effectTraceId: string
   readonly effectSpanId: string
   readonly effectName: string
   readonly effectIteration: number | null
@@ -88,6 +90,10 @@ export interface SteeringChainReport {
   readonly links: number
   readonly dangling: number
   readonly byKind: Readonly<Record<string, number>>
+}
+
+function spanKey(traceId: string, spanId: string): string {
+  return JSON.stringify([traceId, spanId])
 }
 
 function attributes(span: OtlpSpan): Record<string, unknown> {
@@ -131,18 +137,18 @@ function verdictFor(
   const ownScore = scoreOf(span)
   if (own !== null || ownScore !== null) return { outcome: own, score: ownScore, spanId: span.span_id }
 
-  const queue: OtlpSpan[] = [...(childrenOf.get(span.span_id) ?? [])]
-  const seen = new Set<string>([span.span_id])
+  const queue: OtlpSpan[] = [...(childrenOf.get(spanKey(span.trace_id, span.span_id)) ?? [])]
+  const seen = new Set<string>([spanKey(span.trace_id, span.span_id)])
   while (queue.length > 0) {
     const current = queue.shift()!
-    if (seen.has(current.span_id)) continue
-    seen.add(current.span_id)
+    if (seen.has(spanKey(current.trace_id, current.span_id))) continue
+    seen.add(spanKey(current.trace_id, current.span_id))
     const outcome = outcomeOf(current)
     const score = scoreOf(current)
     if (outcome !== null || score !== null) return { outcome, score, spanId: current.span_id }
     // Do not descend past a round: a nested loop grades itself.
     if (iterationOf(current) !== null) continue
-    queue.push(...(childrenOf.get(current.span_id) ?? []))
+    queue.push(...(childrenOf.get(spanKey(current.trace_id, current.span_id)) ?? []))
   }
   return { outcome: null, score: null, spanId: null }
 }
@@ -151,9 +157,10 @@ function childIndex(spans: readonly OtlpSpan[]): Map<string, OtlpSpan[]> {
   const children = new Map<string, OtlpSpan[]>()
   for (const span of spans) {
     if (span.parent_span_id === null) continue
-    const bucket = children.get(span.parent_span_id) ?? []
+    const key = spanKey(span.trace_id, span.parent_span_id)
+    const bucket = children.get(key) ?? []
     bucket.push(span)
-    children.set(span.parent_span_id, bucket)
+    children.set(key, bucket)
   }
   return children
 }
@@ -273,7 +280,10 @@ export function analyzeLoopConvergence(spans: readonly OtlpSpan[]): LoopConverge
  */
 export function analyzeSteeringChain(spans: readonly OtlpSpan[]): SteeringChainReport {
   const byId = new Map<string, OtlpSpan>()
-  for (const span of spans) if (!byId.has(span.span_id)) byId.set(span.span_id, span)
+  for (const span of spans) {
+    const key = spanKey(span.trace_id, span.span_id)
+    if (!byId.has(key)) byId.set(key, span)
+  }
 
   const edges: SteeringEdge[] = []
   const byKind: Record<string, number> = {}
@@ -286,13 +296,15 @@ export function analyzeSteeringChain(spans: readonly OtlpSpan[]): SteeringChainR
       const kindValue = link.attributes?.[LINK_KIND_ATTR]
       const linkKind = typeof kindValue === 'string' && kindValue.length > 0 ? kindValue : 'unspecified'
       byKind[linkKind] = (byKind[linkKind] ?? 0) + 1
-      const cause = byId.get(link.span_id)
+      const cause = byId.get(spanKey(link.trace_id, link.span_id))
       if (cause === undefined) dangling += 1
       edges.push({
+        causeTraceId: link.trace_id,
         causeSpanId: link.span_id,
         causeName: cause?.name ?? null,
         causeOutcome: cause ? outcomeOf(cause) : null,
         causeScore: cause ? scoreOf(cause) : null,
+        effectTraceId: span.trace_id,
         effectSpanId: span.span_id,
         effectName: span.name,
         effectIteration: iterationOf(span),

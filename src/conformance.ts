@@ -153,7 +153,7 @@ export interface SpanStructure {
  * correct one-root trace narrate itself as broken.
  */
 export function summarizeSpanStructure(spans: readonly OtlpSpan[]): SpanStructure {
-  const ids = new Set(spans.map((span) => span.span_id))
+  const ids = new Set(spans.map((span) => JSON.stringify([span.trace_id, span.span_id])))
   const rootsByTrace = new Map<string, number>()
   let rootless = 0
   let orphans = 0
@@ -164,7 +164,7 @@ export function summarizeSpanStructure(spans: readonly OtlpSpan[]): SpanStructur
     if (span.parent_span_id === null) {
       rootless += 1
       rootsByTrace.set(span.trace_id, (rootsByTrace.get(span.trace_id) ?? 0) + 1)
-    } else if (!ids.has(span.parent_span_id)) orphans += 1
+    } else if (!ids.has(JSON.stringify([span.trace_id, span.parent_span_id]))) orphans += 1
   }
   let extraRoots = 0
   let tracesWithoutRoot = 0

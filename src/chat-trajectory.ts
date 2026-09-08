@@ -67,6 +67,8 @@ export function chatTrajectoryToSpans(
     spanId: 'root',
     name: 'trajectory',
     kind: 'AGENT',
+    // A transcript does not record whether the task or execution completed.
+    status: 'UNSET',
     startTime: times[0]!,
     endTime: times.at(-1)!,
     service,
@@ -106,6 +108,7 @@ export function chatTrajectoryToSpans(
         parentSpanId: 'root',
         name: messageName(kind, message),
         kind,
+        status: 'UNSET',
         startTime: times[index]!,
         service,
         agent: messageAgent(message.role),

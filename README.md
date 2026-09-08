@@ -179,6 +179,10 @@ Two of those analyses are why the loop shape exists at all:
   caused which subsequent round. A link whose target is missing is kept and marked,
   because a shorter chain than the producer recorded is the opposite of the truth.
 
+Parent and verdict lookups use both trace and span IDs.
+Steering edges retain `causeTraceId` and `effectTraceId`, including unresolved targets.
+Generic chat transcripts report unknown execution status because message text does not establish completion.
+
 Nothing is repaired on the way in. A span with an unreadable timestamp is
 reported and excluded, because a synthesized value would put invented work into a
 total.
