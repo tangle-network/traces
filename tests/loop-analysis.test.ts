@@ -47,6 +47,17 @@ function loop(scores: readonly (number | null)[], outcomes?: readonly string[]):
 }
 
 describe('analyzeLoopConvergence', () => {
+  it('keeps reused round and verdict IDs scoped to their trace', () => {
+    const otherTrace = deriveHexId('other-loop', 16)
+    const first = loop([0.2, 0.9])
+    const second = loop([0.8, 0.1]).map((item) => ({ ...item, trace_id: otherTrace }))
+    const report = analyzeLoopConvergence([...first, ...second])
+    expect(report.loops.find((item) => item.traceId === TRACE)?.trend).toBe('improved')
+    const other = report.loops.find((item) => item.traceId === otherTrace)
+    expect(other?.trend).toBe('regressed')
+    expect(other?.iterations.map((item) => item.score)).toEqual([0.8, 0.1])
+  })
+
   it('reads the verdict from the round\'s evaluator child and calls a rising score improved', () => {
     const report = analyzeLoopConvergence(loop([0.2, 0.5, 0.9], ['fail', 'fail', 'pass']))
 
@@ -117,6 +128,21 @@ describe('analyzeLoopConvergence', () => {
 })
 
 describe('analyzeSteeringChain', () => {
+  it('resolves cross-trace links by both IDs and retains missing targets', () => {
+    const otherTrace = deriveHexId('other-loop', 16)
+    const absentTrace = deriveHexId('absent-loop', 16)
+    const wrongCause = span({ id: 'verdict', name: 'wrong', attributes: { [ATTR.score]: 0.2 } })
+    const cause = { ...span({ id: 'verdict', name: 'actual', attributes: { [ATTR.score]: 0.9 } }), trace_id: otherTrace }
+    const effect = span({ id: 'retry', links: [
+      { trace_id: otherTrace, span_id: cause.span_id },
+      { trace_id: absentTrace, span_id: cause.span_id },
+    ] })
+    const report = analyzeSteeringChain([wrongCause, cause, effect])
+    expect(report.dangling).toBe(1)
+    expect(report.edges[0]).toMatchObject({ causeTraceId: otherTrace, effectTraceId: TRACE, causeName: 'actual', causeScore: 0.9, resolved: true })
+    expect(report.edges[1]).toMatchObject({ causeTraceId: absentTrace, effectTraceId: TRACE, causeName: null, causeScore: null, resolved: false })
+  })
+
   it('reads the edge backwards from the caused round to the verdict that caused it', () => {
     const spans = [
       ...loop([0.2, 0.8], ['fail', 'pass']),
@@ -135,10 +161,12 @@ describe('analyzeSteeringChain', () => {
     expect(report.dangling).toBe(0)
     expect(report.byKind).toEqual({ steered_by: 1 })
     expect(report.edges[0]).toEqual({
+      causeTraceId: TRACE,
       causeSpanId: deriveHexId('verdict-0', 8),
       causeName: 'verification',
       causeOutcome: 'fail',
       causeScore: 0.2,
+      effectTraceId: TRACE,
       effectSpanId: deriveHexId('round-1', 8),
       effectName: 'round 2',
       effectIteration: 2,

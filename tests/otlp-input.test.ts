@@ -477,6 +477,13 @@ describe('detection of contract-shaped OTLP', () => {
 })
 
 describe('summarizeSpanStructure', () => {
+  it('does not resolve a missing parent from another trace', () => {
+    const source = contractTrace()
+    const parent = otlpRowToSpan(source[0], TRACE).span!
+    const child = { ...parent, trace_id: 'other-trace', span_id: 'child', parent_span_id: parent.span_id }
+    expect(summarizeSpanStructure([parent, child]).orphans).toBe(1)
+  })
+
   it('measures the degree of flatness the per-trace finding cannot express', async () => {
     const rows = [
       ...contractTrace(),

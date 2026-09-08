@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { summarizeSpanExecution } from '../src/execution.js'
 import { chatTrajectoryToSpans } from '../src/chat-trajectory.js'
 import { exportTraceEvidenceRows } from '../src/file-export.js'
 
@@ -31,6 +32,17 @@ const trajectory = {
 }
 
 describe('chatTrajectoryToSpans', () => {
+  it('does not treat an assistant completion claim as observed execution success', () => {
+    const spans = chatTrajectoryToSpans([
+      { role: 'user', content: 'Implement and verify the requested change.' },
+      { role: 'assistant', content: 'Everything is done.' },
+    ])
+    expect(spans.every((item) => item.status.code === 'UNSET')).toBe(true)
+    const report = summarizeSpanExecution(spans)
+    expect(report.execution.terminalOutcomes.succeeded).toBe(0)
+    expect(report.execution.terminalOutcomes.unknown).toBe(1)
+  })
+
   it('preserves assistant action ordinals and captured model usage', () => {
     const spans = chatTrajectoryToSpans(trajectory)
 
