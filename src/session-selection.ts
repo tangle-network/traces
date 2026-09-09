@@ -12,6 +12,7 @@ import {
   type SessionWorkflowSummary,
 } from './session-workflow.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
+import { SOURCE_ATTRIBUTE_PREFIX, sourceFileId, type SourceRecordReference } from './source-location.js'
 
 export interface SessionSeedGroup {
   readonly adapter: HarnessTraceAdapter
@@ -53,7 +54,7 @@ interface SessionSourceSnapshot {
   readonly files: readonly SessionSourceFile[]
 }
 
-async function fileSha256(path: string, signal?: AbortSignal): Promise<string> {
+export async function fileSha256(path: string, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted()
   const hash = createHash('sha256')
   try {
@@ -116,11 +117,23 @@ async function boundSessionRow(
   signal?: AbortSignal,
 ): Promise<SessionSelectionRow> {
   const before = await sourceSnapshot(adapter, ref, signal)
-  const spans = await parseSession(adapter, ref, { taskScope, taskTurnId, signal })
+  const spans = await parseSession(adapter, ref, { taskScope, taskTurnId, signal, captureSources: true })
   signal?.throwIfAborted()
   const after = await sourceSnapshot(adapter, ref, signal)
   if (JSON.stringify(before) !== JSON.stringify(after)) {
     throw new Error(`session source changed while parsing; refusing unbound evidence: ${ref.path}`)
+  }
+  const digests = new Map(after.files.map((file) => [sourceFileId(file.path), file.sha256]))
+  for (const span of spans) {
+    for (const [key, value] of Object.entries(span.attributes)) {
+      if (!key.startsWith(SOURCE_ATTRIBUTE_PREFIX) || typeof value !== 'string') continue
+      const refs = JSON.parse(value) as SourceRecordReference[]
+      span.attributes[key] = JSON.stringify(refs.map((record) => {
+        const sourceSha256 = digests.get(record.sourceId)
+        if (!sourceSha256) throw new Error('adapter source reference is outside its declared source files')
+        return { ...record, sourceSha256 }
+      }))
+    }
   }
   if (
     expectedRelationship

@@ -1,6 +1,7 @@
 import { isUtf8 } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
+import { locateSourceObjects } from './source-location.js'
 
 export interface JsonlCorruptionReceipt {
   receiptVersion: 1
@@ -19,13 +20,13 @@ export interface JsonlCorruptionReceipt {
   rawBytes: 'local_source_only'
 }
 
-export type JsonlReadOptions =
+export type JsonlReadOptions = { captureSources?: boolean } & (
   | { mode?: 'strict'; signal?: AbortSignal }
   | {
       mode: 'recover'
       onCorruption: (receipt: JsonlCorruptionReceipt) => void
       signal?: AbortSignal
-    }
+    })
 
 export class JsonlParseError extends SyntaxError {
   readonly sourcePath: string
@@ -79,7 +80,9 @@ function parseLine<T>(
   const json = jsonBytes.toString('utf8')
   if (json.trim().length === 0) return undefined
   try {
-    return JSON.parse(json) as T
+    const value = JSON.parse(json) as T
+    if (options.captureSources) locateSourceObjects(value, path, rawLine, byteOffset)
+    return value
   } catch {
     return handleCorruption(rawLine, path, lineNumber, byteOffset, options)
   }

@@ -13,6 +13,8 @@
  * parse unverified against local data.
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -123,6 +125,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
             outputTokens: d.outputTokens ?? null,
             step,
             content: typeof d.content === 'string' ? d.content.slice(0, 8000) : null,
+            contentSource: textSources(d, 'content'),
           }),
         )
         lastLlm = llmId
@@ -141,7 +144,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
           agent: SERVICE,
           tool: name,
           step,
-          extra: toolIoAttributes({ input: d.arguments }),
+          extra: toolIoAttributes({ input: d.arguments, inputSource: sourceOf(d, 'arguments') }),
         })
         spans.push(t)
         toolByCallId.set(d.toolCallId, t)
@@ -152,7 +155,7 @@ export class CopilotAdapter implements HarnessTraceAdapter {
           t.end_time = ts
           const err = d.success === false
           t.status = err ? { code: 'ERROR', message: (d.error?.message ?? '').slice(0, 500) } : { code: 'OK' }
-          recordToolOutput(t, d.output ?? d.result ?? d.error?.message)
+          recordToolOutput(t, d.output ?? d.result ?? d.error?.message, d.output != null ? sourceOf(d, 'output') : d.result != null ? sourceOf(d, 'result') : sourceOf(d.error, 'message'))
         }
       }
     }

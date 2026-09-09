@@ -11,6 +11,8 @@
  * final privacy options, deduplicates, and sends or writes a dry-run preview.
  */
 
+import { stripSourceAttributes } from './source-location.js'
+
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { hostname } from 'node:os'
@@ -190,7 +192,7 @@ export interface ExecuteOptions {
 /** Drop captured conversation and tool values from metadata-only uploads. */
 function stripSpanContent(spans: readonly OtlpSpan[]): OtlpSpan[] {
   return spans.map((s) => {
-    const attributes = { ...s.attributes }
+    const attributes = stripSourceAttributes(s.attributes)
     delete attributes.content
     for (const key of TOOL_IO_VALUE_KEYS) delete attributes[key]
     normalizeToolIoAttributes(attributes)

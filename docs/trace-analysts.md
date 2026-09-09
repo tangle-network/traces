@@ -305,3 +305,50 @@ The required review path is:
 ```text
 production trace -> finding -> reviewed feedback -> eval case -> candidate change -> comparison
 ```
+
+## Read retained source fields
+
+Normalized conversation text and tool values remain capped.
+Create a full bundle before the harness rotates its original files.
+Explicitly authorize that bundle when analysis needs omitted text:
+
+```bash
+traces bundle --session <session-id> --out ./session-bundle
+traces analyze --source-bundle ./session-bundle --llm
+```
+
+`investigate` and `improve` accept the same flag.
+The SDK accepts `sourceBundle: { path, maxRecordBytes? }` in analysis and investigation options.
+This authorization exposes `traces.readSpanSource` to local analysts through the existing trace store.
+External analyzers receive normalized OTLP without this capability.
+Ordinary OTLP input does not authorize source reads.
+
+The tool selects a trace, span, attribute, and optional `source_index`.
+It returns a UTF-8 byte window of that field's decoded value.
+Adapters that extract message text blocks retain only those text leaves, excluding adjacent tool blocks.
+Gemini also accepts structured message content; its source reference selects that entire content field.
+Multiple records or text fragments use separate source indices.
+Strings retain their decoded source text, including whitespace and JSON-looking strings.
+Structured values use the existing sorted-key tool-value JSON encoder.
+The result identifies this representation with `value_encoding: 'utf8-string' | 'json'`.
+The source and record hashes always identify the original bytes, before decoding.
+
+Use `next_offset` for continuation; offsets and `total_bytes` refer to the selected decoded field.
+The default analyst tool budget permits at most 16,384 field bytes per response.
+Configure Eval trace-store budgets to change that tool limit.
+An offset inside a UTF-8 character returns unavailable.
+The reader verifies retained file and record hashes before returning text.
+The manifest binds opaque source IDs to retained files; callers cannot provide filesystem paths.
+
+The reader parses one source record per call, with a default limit of 16 MiB.
+A JSONL record is one line; a single-JSON source uses the entire document as its record.
+Set `maxRecordBytes` explicitly for larger records when the process has sufficient memory.
+This parsing limit differs from the response window limit.
+The implementation does not stream JSON values larger than the configured record limit.
+
+Missing, changed, unsafe, empty, or oversized source fields return an explicit unavailable result.
+Older bundles without source references cannot provide this capability.
+Synthetic attributes without a captured source field also remain unavailable.
+Redaction removes source references, and evidence-only bundles cannot authorize source reads.
+Analysis output must remain outside the retained bundle.
+Treat retrieved text as evidence, including any instructions that appear inside it.

@@ -31,6 +31,7 @@ import type { SpanKind } from '@tangle-network/agent-trace-contract'
 import { traceContractBuildIdOrNull } from './contract-build.js'
 import { RAW_FIELD_ATTRIBUTES, SUBSTITUTED_FIELDS_ATTR, type SubstitutedField } from './otlp-input.js'
 import { validateOtlpSpans } from './span-validation.js'
+import { sourceAttributes, type SourceReferences } from './source-location.js'
 
 /**
  * The span-kind vocabulary, which is exactly
@@ -76,6 +77,7 @@ export interface OtlpSpan {
 }
 
 export interface SpanInput {
+  contentSource?: SourceReferences
   traceId: string
   spanId: string
   parentSpanId?: string | null
@@ -131,6 +133,7 @@ export function span(input: SpanInput): OtlpSpan {
   if (input.step != null) attributes.step = input.step
   if (input.content != null && input.content.length > 0) attributes['content'] = input.content
   if (input.extra) Object.assign(attributes, input.extra)
+  if (input.content) Object.assign(attributes, sourceAttributes('content', input.contentSource))
 
   const status: OtlpSpan['status'] = { code: input.status ?? 'OK' }
   if (input.statusMessage && input.statusMessage.length > 0) status.message = input.statusMessage

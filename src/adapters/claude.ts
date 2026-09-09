@@ -52,6 +52,7 @@ import {
 } from './claude-workflow.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { toolIoAttributes } from './tool-io.js'
+import { appendSourceAttributes, sourceOf, textSources, SOURCE_ATTRIBUTE_PREFIX, type SourceReferences } from '../source-location.js'
 
 const SERVICE = 'claude-code'
 const EPOCH = new Date(0).toISOString()
@@ -222,12 +223,14 @@ type ClaudeEventProjection =
       cachedInputTokens: number | null
       cacheWriteInputTokens: number | null
       content: string | null
+      contentSource?: SourceReferences
       tools: Array<{ id: string | null; name: string; attributes: Record<string, unknown> }>
     }
   | {
       kind: 'user'
       timestamp: string
       prompt: string | null
+      contentSource?: SourceReferences
       isSidechain?: boolean
       isMeta?: boolean
       userType?: string | null
@@ -241,6 +244,7 @@ function projectToolResult(
   isError: boolean,
   output: unknown,
   structuredWorkflowRun?: WorkflowRunReference,
+  outputSource?: SourceReferences,
 ): ToolResultProjection {
   const outputText = stringifyToolResult(output)
   const workflowRun = resolveWorkflowRunReference(
@@ -251,7 +255,7 @@ function projectToolResult(
   return {
     toolUseId,
     isError,
-    attributes: toolIoAttributes({ output }),
+    attributes: toolIoAttributes({ output, outputSource }),
     message: outputText.slice(0, 500),
     ...(workflowRun ? { workflowRun } : {}),
   }
@@ -263,7 +267,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
     const tools: Array<{ id: string | null; name: string; attributes: Record<string, unknown> }> = []
     for (const block of asBlocks(event.message.content)) {
       if (block.type !== 'tool_use' || !block.name) continue
-      tools.push({ id: block.id || null, name: block.name, attributes: toolIoAttributes({ input: block.input }) })
+      tools.push({ id: block.id || null, name: block.name, attributes: toolIoAttributes({ input: block.input, inputSource: sourceOf(block, 'input') }) })
     }
     return {
       kind: 'assistant',
@@ -275,6 +279,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       cachedInputTokens: event.message.usage?.cache_read_input_tokens ?? null,
       cacheWriteInputTokens: event.message.usage?.cache_creation_input_tokens ?? null,
       content: textOf(event.message.content) || null,
+      contentSource: textSources(event.message, 'content'),
       tools,
     }
   }
@@ -296,6 +301,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
         block.is_error === true,
         block.content,
         structuredWorkflowRun,
+        sourceOf(block, 'content'),
       ))
     }
     const prompt = textOf(event.message.content)
@@ -303,6 +309,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       kind: 'user',
       timestamp,
       prompt: prompt || null,
+      contentSource: textSources(event.message, 'content'),
       ...(prompt
         ? {
             isSidechain: event.isSidechain === true,
@@ -321,6 +328,8 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
         event.attachment.toolUseID,
         typeof event.attachment.exitCode === 'number' && event.attachment.exitCode !== 0,
         event.attachment.stderr ?? '',
+        undefined,
+        sourceOf(event.attachment, 'stderr'),
       ),
     }
   }
@@ -341,7 +350,10 @@ function indexWorkflowProjection(
 }
 
 function fingerprintClaudeEvent(event: ClaudeEventProjection): string {
-  return createHash('sha256').update(JSON.stringify(event)).digest('hex')
+  // Duplicate events can occupy different byte ranges without changing their meaning.
+  return createHash('sha256').update(JSON.stringify(event, (key, value: unknown) =>
+    key === 'contentSource' || key.startsWith(SOURCE_ATTRIBUTE_PREFIX) ? undefined : value,
+  )).digest('hex')
 }
 
 function startsClaudeTask(projection: ClaudeEventProjection): boolean {
@@ -446,6 +458,7 @@ function consumeClaudeEvent(
       ),
     })
     mergeMessageContent(llmSpan, messageId, event.content, state)
+    if (event.content) appendSourceAttributes(llmSpan.attributes, 'content', event.contentSource)
 
     for (const tool of event.tools) {
       const existingTool = tool.id ? state.toolSpanByUseId.get(tool.id) : undefined
@@ -493,6 +506,7 @@ function consumeClaudeEvent(
           agent: ctx.agent,
           step: state.step,
           content: event.prompt,
+          contentSource: event.contentSource,
           actor,
         }),
       )

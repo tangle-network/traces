@@ -10,6 +10,8 @@
  * separate `role: "toolResult"` messages keyed by `message.toolCallId`.
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -69,6 +71,7 @@ interface PiLine {
 }
 
 interface PiToolResult {
+  source?: ReturnType<typeof sourceOf>
   callId: string
   toolName: string
   timestamp: string
@@ -143,7 +146,7 @@ function completeToolSpan(toolSpan: OtlpSpan, result: PiToolResult): void {
   toolSpan.status = result.isError
     ? { code: 'ERROR', message: result.errorMessage }
     : { code: 'OK' }
-  recordToolOutput(toolSpan, result.output)
+  recordToolOutput(toolSpan, result.output, result.source)
 }
 
 export interface PiAdapterOptions {
@@ -272,6 +275,9 @@ export class PiAdapter implements HarnessTraceAdapter {
           timestamp: ts,
           isError: msg.isError === true,
           output: toolResultOutput(msg.content),
+          source: msg.content?.length === 1 && msg.content[0]?.type === 'text' && typeof msg.content[0].text === 'string'
+            ? sourceOf(msg.content[0], 'text')
+            : sourceOf(msg, 'content'),
           errorMessage,
           step,
         }
@@ -297,6 +303,7 @@ export class PiAdapter implements HarnessTraceAdapter {
               agent: SERVICE,
               step,
               content: prompt,
+              contentSource: textSources(msg, 'content'),
             }),
           )
           step += 1
@@ -323,6 +330,7 @@ export class PiAdapter implements HarnessTraceAdapter {
             cacheWriteInputTokens: msg.usage?.cacheWrite ?? null,
             step,
             content: textOf(msg.content) || null,
+            contentSource: textSources(msg, 'content'),
           }),
         )
         step += 1
@@ -344,7 +352,7 @@ export class PiAdapter implements HarnessTraceAdapter {
             tool: name,
             status: 'UNSET',
             step,
-            extra: toolIoAttributes({ input: b.input ?? b.args ?? b.arguments }),
+            extra: toolIoAttributes({ input: b.input ?? b.args ?? b.arguments, inputSource: sourceOf(b, b.input != null ? 'input' : b.args != null ? 'args' : 'arguments') }),
           })
           spans.push(toolSpan)
           toolByCallId.set(callId, toolSpan)
@@ -361,7 +369,7 @@ export class PiAdapter implements HarnessTraceAdapter {
             const err = b.isError === true || b.is_error === true
             t.end_time = ts
             t.status = err ? { code: 'ERROR', message: 'tool result reported error' } : { code: 'OK' }
-            recordToolOutput(t, b.output ?? b.result ?? b.content ?? b.text)
+            recordToolOutput(t, b.output ?? b.result ?? b.content ?? b.text, sourceOf(b, b.output != null ? 'output' : b.result != null ? 'result' : b.content != null ? 'content' : 'text'))
           }
         }
       }
@@ -384,7 +392,7 @@ export class PiAdapter implements HarnessTraceAdapter {
           tool: result.toolName,
           step: result.step,
           extra: {
-            ...toolIoAttributes({ output: result.output }),
+            ...toolIoAttributes({ output: result.output, outputSource: result.source }),
             'traces.pi.tool_result_without_call': true,
           },
         }),

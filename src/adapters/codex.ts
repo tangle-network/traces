@@ -14,6 +14,8 @@
  * Shared by the codex-acp wrapper via alias (same rollout format).
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -813,7 +815,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
           tool: name,
           step,
           extra: {
-            ...toolIoAttributes({ input }),
+            ...toolIoAttributes({ input, inputSource: sourceOf(l.payload, l.payload.type === 'custom_tool_call' ? 'input' : 'arguments') }),
             'traces.codex.call_type': l.payload.type,
             ...(name !== outerName ? { 'traces.codex.outer_tool_name': outerName } : {}),
             ...(nestedName ? { 'traces.codex.nested_tool_name': nestedName } : {}),
@@ -848,7 +850,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
           closeSpanAt(t, ts)
           t.status = status
           if (pollOutcome) t.attributes['traces.poll.outcome'] = pollOutcome
-          recordToolOutput(t, l.payload.output)
+          recordToolOutput(t, l.payload.output, sourceOf(l.payload, 'output'))
           const operation = t.attributes['traces.codex.agent_operation']
           if (operation === 'spawn_agent') {
             setAgentSessionIds(t, spawnedSessionIds(l.payload.output))
@@ -926,6 +928,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
           agent: SERVICE,
           step,
           content: text,
+          contentSource: textSources(l.payload, 'content'),
           extra: {
             'traces.codex.agent_message_type': messageType,
             ...(author ? { 'traces.codex.agent_message_author': author } : {}),
@@ -963,6 +966,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
               parentSpanId: rootId,
               startTime: ts,
               content: prompt,
+              contentSource: textSources(l.payload, 'content'),
               service: SERVICE,
               agent: SERVICE,
               step,
@@ -986,6 +990,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
               agent: SERVICE,
               step,
               content: text,
+          contentSource: textSources(l.payload, 'content'),
             }),
           )
           step += 1

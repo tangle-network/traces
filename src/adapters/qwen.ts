@@ -12,6 +12,8 @@
  * sessions on this machine).
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -132,6 +134,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
             outputTokens: r.usageMetadata?.candidatesTokenCount ?? null,
             step,
             content: capText(textOf(r.message?.parts)) || null,
+            contentSource: textSources(r.message, 'parts'),
           }),
         )
         step += 1
@@ -150,7 +153,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: name,
             step,
-            extra: toolIoAttributes({ input: p.functionCall.args }),
+            extra: toolIoAttributes({ input: p.functionCall.args, inputSource: sourceOf(p.functionCall, 'args') }),
           })
           spans.push(t)
           const q = openToolsByName.get(name) ?? []
@@ -175,6 +178,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
               agent: SERVICE,
               step,
               content: prompt,
+              contentSource: textSources(r.message, 'parts'),
             }),
           )
           step += 1
@@ -188,7 +192,7 @@ export class QwenAdapter implements HarnessTraceAdapter {
           if (t) {
             t.end_time = ts
             t.status = err ? { code: 'ERROR', message: 'tool result reported error' } : { code: 'OK' }
-            recordToolOutput(t, p.functionResponse?.response ?? r.toolCallResult?.error)
+            recordToolOutput(t, p.functionResponse?.response ?? r.toolCallResult?.error, p.functionResponse ? sourceOf(p.functionResponse, 'response') : sourceOf(r.toolCallResult, 'error'))
           }
         }
       }

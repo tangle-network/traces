@@ -8,6 +8,7 @@
 
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
+import type { SourceReferences } from '../source-location.js'
 
 /** Max chars of conversation text kept per span — enough for prompt/response
  *  analysis, bounded for storage + redaction cost. */
@@ -40,6 +41,7 @@ export type Actor = 'human' | 'agent' | 'subagent-spawn' | 'injected' | 'tool-re
 export const ACTOR_ATTR = 'tangle.actor'
 
 export interface UserPromptInput {
+  contentSource?: SourceReferences
   traceId: string
   spanId: string
   parentSpanId: string | null
@@ -70,6 +72,7 @@ export function userPromptSpan(o: UserPromptInput): OtlpSpan {
     agent: o.agent ?? null,
     step: o.step,
     content: o.content,
+    contentSource: o.contentSource,
     extra: { [ACTOR_ATTR]: o.actor ?? 'human' },
   })
 }

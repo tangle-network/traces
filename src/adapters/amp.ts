@@ -11,13 +11,15 @@
  * field names medium-conf; parse unverified against local data.
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { isMissingPathError, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { CONTENT_CAP, capText, userPromptSpan } from './conversation.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
 
@@ -100,8 +102,8 @@ export class AmpAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const thread = await readJsonFile<AmpThread>(ref.path)
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    const thread = await readJsonFile<AmpThread>(ref.path, options)
     const traceId = thread.id ?? ref.sessionId
     const rootId = `root:${traceId}`
     const start = new Date(thread.created ?? 0).toISOString()
@@ -133,6 +135,7 @@ export class AmpAdapter implements HarnessTraceAdapter {
               agent: SERVICE,
               step,
               content: prompt,
+              contentSource: textSources(m, 'content'),
             }),
           )
           step += 1
@@ -156,6 +159,7 @@ export class AmpAdapter implements HarnessTraceAdapter {
             cacheWriteInputTokens: u?.cacheCreationInputTokens ?? null,
             step,
             content: textOf(m.content) || null,
+            contentSource: textSources(m, 'content'),
           }),
         )
         step += 1
@@ -174,7 +178,7 @@ export class AmpAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: b.name,
             step,
-            extra: toolIoAttributes({ input: b.input }),
+            extra: toolIoAttributes({ input: b.input, inputSource: sourceOf(b, 'input') }),
           })
           spans.push(t)
           if (b.id) toolByUseId.set(b.id, t)
@@ -183,7 +187,7 @@ export class AmpAdapter implements HarnessTraceAdapter {
           const t = toolByUseId.get(b.tool_use_id)
           if (t) {
             t.status = b.is_error === true ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
-            recordToolOutput(t, b.content ?? b.output)
+            recordToolOutput(t, b.content ?? b.output, sourceOf(b, b.content != null ? 'content' : 'output'))
           }
         }
       }
