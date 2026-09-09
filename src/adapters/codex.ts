@@ -102,8 +102,11 @@ function textOf(content: unknown): string {
 }
 
 function numericStatus(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) return Number(value)
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) {
+    const code = Number(value)
+    if (Number.isSafeInteger(code)) return code
+  }
   return undefined
 }
 
@@ -120,22 +123,29 @@ function explicitOutputError(value: unknown, timeoutIsError = true): boolean | u
 
   if (value && typeof value === 'object') {
     const row = value as Record<string, unknown>
+    let observedSuccess = false
+    for (const key of ['is_error', 'isError', 'error']) {
+      if (row[key] === true) return true
+      if (row[key] === false) observedSuccess = true
+    }
     for (const key of ['exit_code', 'exitCode']) {
       const code = numericStatus(row[key])
-      if (code !== undefined && ('output' in row || 'chunk_id' in row || 'wall_time_seconds' in row)) {
-        return code !== 0
-      }
+      if (code !== undefined && code !== 0) return true
+      if (code === 0) observedSuccess = true
     }
     for (const key of ['timed_out', 'timedOut']) {
       if (row[key] === true && timeoutIsError) return true
     }
     if (typeof row.succeeded === 'boolean' && ('value' in row || 'error' in row)) {
-      return !row.succeeded
+      if (!row.succeeded) return true
+      observedSuccess = true
     }
     if ((row.type === 'input_text' || row.type === 'text') && typeof row.text === 'string') {
-      return explicitOutputError(row.text, timeoutIsError)
+      const status = explicitOutputError(row.text, timeoutIsError)
+      if (status === true) return true
+      if (status === false) observedSuccess = true
     }
-    return undefined
+    return observedSuccess ? false : undefined
   }
 
   if (typeof value !== 'string') return undefined
@@ -151,16 +161,16 @@ function explicitOutputError(value: unknown, timeoutIsError = true): boolean | u
   }
   const outputStart = text.indexOf('\nOutput:\n')
   const header = outputStart >= 0 ? text.slice(0, outputStart) : text
-  if (/^Chunk ID:/i.test(header)) {
-    const exitCode = header.match(/^Process exited with code\s+(-?\d+)\b/im)?.[1]
-    if (exitCode !== undefined) return Number(exitCode) !== 0
+  if (/^(?:Chunk ID:|Process exited with code )/i.test(header)) {
+    const exitCode = numericStatus(header.match(/^Process exited with code[ \t]+(-?\d+)[ \t]*$/im)?.[1])
+    if (exitCode !== undefined) return exitCode !== 0
   }
   if (/^Script completed\s*\nWall time:/i.test(header)) return false
   if (/^Script failed\s*\nWall time:/i.test(header)) return true
-  const scriptExitCode = header.match(/^Script error:\s*\nExit code:\s*(-?\d+)\b/im)?.[1]
-  if (scriptExitCode !== undefined) return Number(scriptExitCode) !== 0
-  const commandExitCode = text.match(/^Command failed with exit code\s+(-?\d+)\.?$/i)?.[1]
-  if (commandExitCode !== undefined) return Number(commandExitCode) !== 0
+  const scriptExitCode = numericStatus(header.match(/^Script error:[ \t]*\r?\nExit code:[ \t]*(-?\d+)[ \t]*(?:\r?\n|$)/i)?.[1])
+  if (scriptExitCode !== undefined) return scriptExitCode !== 0
+  const commandExitCode = numericStatus(text.match(/^Command failed with exit code[ \t]+(-?\d+)\.?$/i)?.[1])
+  if (commandExitCode !== undefined) return commandExitCode !== 0
   if (/^<tool_error>[\s\S]*<\/tool_error>$/i.test(text)) return true
   return undefined
 }
@@ -192,14 +202,29 @@ function isWaitAgentOperation(name: string): boolean {
 }
 
 /** Only protocol-level status fields count; arbitrary tool output may itself contain code or logs mentioning errors. */
-function outputStatus(name: string, output: unknown): { error: boolean; message: string; pollOutcome?: 'timeout' } {
+function outputStatus(
+  name: string,
+  source: NonNullable<CodexLine['payload']>,
+): { status: OtlpSpan['status']; pollOutcome?: 'timeout' } {
+  const output = source.output
   const waitAgent = isWaitAgentOperation(name)
-  const error = explicitOutputError(output, !waitAgent) === true
-  const message = typeof output === 'string' ? output : JSON.stringify(output ?? '')
+  // Error metadata on the source envelope is authoritative. An `error` string
+  // inside arbitrary output remains domain data, not execution status.
+  const sourceError = source.is_error === true || source.isError === true
+    || (source.error !== undefined && source.error !== null && source.error !== false)
+  const outputError = explicitOutputError(output, !waitAgent)
+  const error = sourceError || outputError === true
+  const pollTimeout = !error && waitAgent && explicitTimeout(output)
+  const code = error ? 'ERROR'
+    : outputError === false || source.is_error === false || source.isError === false || pollTimeout ? 'OK'
+      : 'UNSET'
+  const message = sourceError ? source.error ?? output : output
   return {
-    error,
-    message: error ? message.slice(0, 500) : '',
-    ...(!error && waitAgent && explicitTimeout(output) ? { pollOutcome: 'timeout' as const } : {}),
+    status: {
+      code,
+      ...(error ? { message: (typeof message === 'string' ? message : JSON.stringify(message ?? '')).slice(0, 500) } : {}),
+    },
+    ...(pollTimeout ? { pollOutcome: 'timeout' as const } : {}),
   }
 }
 
@@ -782,6 +807,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
           name: `tool.${name}`,
           kind: 'TOOL',
           startTime: ts,
+          status: 'UNSET',
           service: SERVICE,
           agent: SERVICE,
           tool: name,
@@ -818,9 +844,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
         const t = toolByCallId.get(l.payload.call_id ?? '')
         if (t) {
           const name = String(t.attributes['tool.name'] ?? '')
-          const { error, message, pollOutcome } = outputStatus(name, l.payload.output)
+          const { status, pollOutcome } = outputStatus(name, l.payload)
           closeSpanAt(t, ts)
-          t.status = error ? { code: 'ERROR', message } : { code: 'OK' }
+          t.status = status
           if (pollOutcome) t.attributes['traces.poll.outcome'] = pollOutcome
           recordToolOutput(t, l.payload.output)
           const operation = t.attributes['traces.codex.agent_operation']

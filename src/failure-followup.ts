@@ -29,7 +29,7 @@ export interface FailureFollowUp {
   /** Null when the tool was never called again after the failure. */
   followUpSpanId: string | null
   kind: FollowUpKind
-  /** Whether the follow-up call ended without an error; null when kind is 'none'. */
+  /** Captured follow-up outcome; null when absent or unknown. */
   followUpSucceeded: boolean | null
 }
 
@@ -44,7 +44,7 @@ export interface FailureFollowUpReport {
   adapted: number
   /** Arguments were not captured or not comparable on one side of the pair. */
   argsUnknown: number
-  /** Follow-ups that ended without an error, out of `followed`. */
+  /** Follow-ups with explicit success, out of `followed`. */
   followUpSucceeded: number
   /** Blind-retry count per tool, largest offender first when rendered. */
   blindByTool: Record<string, number>
@@ -122,7 +122,8 @@ export function classifyFailureFollowUps(spans: readonly OtlpSpan[]): FailureFol
         failedSpanId: call.span.span_id,
         followUpSpanId: followUp?.span.span_id ?? null,
         kind,
-        followUpSucceeded: followUp ? followUp.span.status.code !== 'ERROR' : null,
+        followUpSucceeded: !followUp || followUp.span.status.code === 'UNSET'
+          ? null : followUp.span.status.code === 'OK',
       })
     }
   }

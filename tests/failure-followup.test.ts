@@ -8,7 +8,7 @@ function toolCall(
   i: number,
   name: string,
   input: unknown,
-  status: 'OK' | 'ERROR' = 'OK',
+  status: 'OK' | 'ERROR' | 'UNSET' = 'OK',
   extra?: Record<string, unknown>,
 ) {
   const startMs = 1_000 + i * 1000
@@ -40,6 +40,22 @@ const root = span({
 })
 
 describe('classifyFailureFollowUps', () => {
+  it('keeps an unknown follow-up outcome out of the success count', async () => {
+    const spans = [
+      root,
+      toolCall(1, 'bash', { cmd: 'npm test' }, 'ERROR'),
+      toolCall(2, 'bash', { cmd: 'npm test' }, 'UNSET'),
+    ]
+    const result = await runPipelines(spans)
+    expect(result.failureFollowUps).toMatchObject({
+      failures: 1,
+      followed: 1,
+      followUpSucceeded: 0,
+      items: [expect.objectContaining({ followUpSucceeded: null, kind: 'blind' })],
+    })
+    expect(renderPipelines(result)).toContain('0/1 follow-ups succeeded')
+  })
+
   it('labels an identical re-send after a failure as blind', () => {
     const r = classifyFailureFollowUps([
       root,

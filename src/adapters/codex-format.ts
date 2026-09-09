@@ -25,6 +25,9 @@ export interface CodexLine {
     input?: unknown
     call_id?: string
     output?: unknown
+    is_error?: boolean
+    isError?: boolean
+    error?: unknown
     event_id?: string
     turn_id?: string
     occurred_at_ms?: number

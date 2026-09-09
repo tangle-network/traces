@@ -23,6 +23,17 @@ function trace(traceId: string) {
 }
 
 describe('toRuntimeStore', () => {
+  it('preserves unknown source status instead of manufacturing runtime success', async () => {
+    const spans = trace('trace-a')
+    spans[1]!.status = { code: 'UNSET' }
+    const { store } = await toRuntimeStore(spans)
+    const runtimeSpans = await store.spans()
+    expect(runtimeSpans.find((item) => item.spanId === 'trace-a:root')?.status).toBe('ok')
+    const unknown = runtimeSpans.find((item) => item.spanId === 'trace-a:step-1')
+    expect(unknown).toBeDefined()
+    expect(unknown?.status).toBeUndefined()
+  })
+
   it('namespaces span and parent IDs so updates affect exactly one trace', async () => {
     const { store } = await toRuntimeStore([...trace('trace-a'), ...trace('trace-b')])
 
