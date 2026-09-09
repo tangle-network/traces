@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto'
 import type { OtlpSpan } from '../otlp.js'
+import { sourceAttributes, SOURCE_ATTRIBUTE_PREFIX, type SourceReferences } from '../source-location.js'
 
 export const TOOL_IO_VALUE_MAX_BYTES = 16 * 1024
 export const TOOL_IO_VALUE_KEYS = ['input.value', 'output.value'] as const
 
 interface ToolIoInput {
+  inputSource?: SourceReferences
+  outputSource?: SourceReferences
   input?: unknown
   output?: unknown
   argsCaptured?: boolean
@@ -22,7 +25,7 @@ const TRUNCATION_MARKER = /\n\[truncated\]$/
 
 // Sort structurally, then stringify once. Recursive string concatenation
 // exceeds the bounded-heap adapter contract for large structured values.
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   const sort = (item: unknown): unknown => {
     if (Array.isArray(item)) return item.map(sort)
     if (!item || typeof item !== 'object') return item
@@ -95,6 +98,8 @@ export function toolIoAttributes(io: ToolIoInput): Record<string, unknown> {
   return {
     ...valueAttributes('input', io.input),
     ...valueAttributes('output', io.output),
+    ...(io.input === undefined ? {} : sourceAttributes('input.value', io.inputSource)),
+    ...(io.output === undefined ? {} : sourceAttributes('output.value', io.outputSource)),
     ...(io.argsCaptured === undefined ? {} : { 'tool.args_captured': io.argsCaptured }),
   }
 }
@@ -151,7 +156,10 @@ export function normalizeToolIoAttributes(attributes: Record<string, unknown>): 
   }
 }
 
-export function recordToolOutput(toolSpan: OtlpSpan | undefined, output: unknown): void {
+export function recordToolOutput(toolSpan: OtlpSpan | undefined, output: unknown, source?: SourceReferences): void {
   if (!toolSpan) return
+  if (output === undefined) return
+  delete toolSpan.attributes[`${SOURCE_ATTRIBUTE_PREFIX}output.value`]
   Object.assign(toolSpan.attributes, valueAttributes('output', output))
+  Object.assign(toolSpan.attributes, sourceAttributes('output.value', source))
 }

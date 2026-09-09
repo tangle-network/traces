@@ -12,6 +12,8 @@
  * or `{approx:N}`. Parse unverified against local data.
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -20,7 +22,7 @@ import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { recordToolOutput, toolIoAttributes } from './tool-io.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 
 const SERVICE = 'forge'
 
@@ -103,8 +105,8 @@ export class ForgeAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const dump = await readJsonFile<ForgeDump>(ref.path)
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    const dump = await readJsonFile<ForgeDump>(ref.path, options)
     const ctx = dump.context ?? dump
     const traceId = ctx.conversation_id ?? ref.sessionId
     const rootId = `root:${traceId}`
@@ -132,6 +134,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
               parentSpanId: rootId,
               startTime: ts,
               content: prompt,
+              contentSource: textSources(entry.text, 'content'),
               service: SERVICE,
               agent: SERVICE,
               step,
@@ -156,6 +159,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
             outputTokens: tokens(raw.usage?.completion_tokens),
             step,
             content: textOf(entry.text.content) || null,
+            contentSource: textSources(entry.text, 'content'),
           }),
         )
         lastLlm = llmId
@@ -173,7 +177,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: tc.name ?? 'tool',
             step,
-            extra: toolIoAttributes({ input: tc.arguments }),
+            extra: toolIoAttributes({ input: tc.arguments, inputSource: sourceOf(tc, 'arguments') }),
           })
           spans.push(t)
           toolByCallId.set(id, t)
@@ -183,7 +187,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
         const t = toolByCallId.get(entry.tool.call_id ?? '')
         if (t) {
           t.status = entry.tool.output?.is_error ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
-          recordToolOutput(t, entry.tool.output?.values ?? entry.tool.output)
+          recordToolOutput(t, entry.tool.output?.values ?? entry.tool.output, entry.tool.output?.values != null ? sourceOf(entry.tool.output, 'values') : sourceOf(entry.tool, 'output'))
         }
       }
     }

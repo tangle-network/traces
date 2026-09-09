@@ -9,6 +9,8 @@
  * JSONL under `~/.qwen/projects/`); it has its own adapter.
  */
 
+import { sourceOf } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +19,7 @@ import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { toolIoAttributes } from './tool-io.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 
 interface GeminiToolCall {
   id?: string
@@ -145,8 +147,8 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
-    const session = await readJsonFile<GeminiSession>(ref.path)
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    const session = await readJsonFile<GeminiSession>(ref.path, options)
     const traceId = session.sessionId ?? ref.sessionId
     const messages = session.messages ?? []
     const rootId = `root:${traceId}`
@@ -182,6 +184,7 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
               parentSpanId: rootId,
               startTime: ts,
               content: prompt,
+              contentSource: sourceOf(m, 'content'),
               service: this.service,
               agent: this.service,
               step,
@@ -205,6 +208,7 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
           outputTokens: m.tokens?.output ?? null,
           step,
           content: textOf(m.content) || null,
+          contentSource: sourceOf(m, 'content'),
         }),
       )
       step += 1
@@ -225,7 +229,7 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
             agent: this.service,
             tool: tc.name ?? 'tool',
             step,
-            extra: toolIoAttributes({ input: tc.args, output: tc.result }),
+            extra: toolIoAttributes({ input: tc.args, output: tc.result, inputSource: sourceOf(tc, 'args'), outputSource: sourceOf(tc, 'result') }),
           }),
         )
         step += 1

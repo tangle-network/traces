@@ -16,6 +16,8 @@ import type { JsonlCorruptionReceipt } from './jsonl.js'
 export type CorruptionMode = 'recover' | 'strict'
 
 export interface ParseOptions {
+  /** Attach source locations for a caller that will retain the original files. */
+  captureSources?: boolean
   /** Recover valid JSONL records by default; strict rejects the first corruption. */
   corruptionMode?: CorruptionMode
   /** For resumed session formats, parse all turns, the latest turn, or one exact turn. */

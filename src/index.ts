@@ -47,6 +47,8 @@ export {
 } from './integrity.js'
 export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp
+export { createBundleSourceReader } from './bundle-source.js'
+export { SOURCE_ATTRIBUTE_PREFIX, type SourceRecordReference } from './source-location.js'
 export * from './session-relationship.js' // stable parent/child metadata decoding
 export * from './session-workflow.js' // collectSessionWorkflow() — bounded parent/child expansion
 export * from './session-selection.js' // collectSessionSelection() — parse/expand/bind selected groups

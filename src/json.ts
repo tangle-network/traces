@@ -1,4 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises'
+import { locateSourceObjects } from './source-location.js'
 
 export type JsonSourceErrorKind = 'read' | 'parse'
 
@@ -41,16 +42,22 @@ export function isMissingJsonSource(error: unknown): error is JsonSourceError {
   return error instanceof JsonSourceError && error.kind === 'read' && isMissingPathError(error)
 }
 
-export async function readJsonFile<T>(path: string): Promise<T> {
+export async function readJsonFile<T>(path: string, options: { captureSources?: boolean } = {}): Promise<T> {
   let raw: string
+  let bytes: Buffer | undefined
   try {
-    raw = await readFile(path, 'utf8')
+    if (options.captureSources) {
+      bytes = await readFile(path)
+      raw = bytes.toString('utf8')
+    } else raw = await readFile(path, 'utf8')
   } catch (error) {
     throw new JsonSourceError(path, 'read', error)
   }
 
   try {
-    return JSON.parse(raw) as T
+    const value = JSON.parse(raw) as T
+    if (bytes) locateSourceObjects(value, path, bytes)
+    return value
   } catch (error) {
     throw new JsonSourceError(path, 'parse', pathSafeParseCause(error))
   }

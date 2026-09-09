@@ -20,6 +20,7 @@ import type { RedactionReport, RedactionRule } from '@tangle-network/agent-eval/
 import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-io.js'
 import type { Redactor } from './external.js'
 import type { OtlpSpan } from './otlp.js'
+import { stripSourceAttributes } from './source-location.js'
 
 /** Secrets common in coding-agent traces that the substrate defaults don't cover. */
 export const CODING_REDACTION_RULES: RedactionRule[] = [
@@ -73,7 +74,7 @@ export function redactSpans(
 ): SpanRedaction {
   const report: RedactionReport = { redactionCount: 0, byRule: {} }
   const out = spans.map((s) => {
-    const attributes = redactValue(s.attributes, rules, report).value as Record<string, unknown>
+    const attributes = redactValue(stripSourceAttributes(s.attributes), rules, report).value as Record<string, unknown>
     normalizeToolIoAttributes(attributes)
     let status = s.status
     if (status.message) {
@@ -111,7 +112,7 @@ export async function applyRedactor(
       texts.push(s.status.message)
     }
   })
-  const out = spans.map((s) => ({ ...s, attributes: { ...s.attributes } }))
+  const out = spans.map((s) => ({ ...s, attributes: stripSourceAttributes(s.attributes) }))
   if (texts.length === 0) {
     for (const span of out) normalizeToolIoAttributes(span.attributes)
     return { spans: out, changed: 0 }

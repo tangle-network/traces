@@ -8,6 +8,8 @@
  * without inventing durations.
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import { sessionJsonlOptions } from '../integrity.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan } from '../otlp.js'
@@ -250,6 +252,12 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       const id = requireString(item.id, ref.path, `${type}.id`)
       const name = toolName(type)
       const input = toolInput(type, item, ref.path)
+      const inputSource = type === 'command_execution'
+        ? ['command', 'cwd'].flatMap((field) => {
+            const reference = sourceOf(item, field)
+            return item[field] !== undefined && reference ? [reference] : []
+          })
+        : sourceOf(item, 'changes')
       const cwd = stringValue(item.cwd)
       if (!ref.cwd && cwd) ref.cwd = cwd
       const toolSpan = span({
@@ -265,7 +273,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         tool: name,
         step: step++,
         extra: {
-          ...toolIoAttributes({ input, argsCaptured: true }),
+          ...toolIoAttributes({ input, argsCaptured: true, inputSource }),
           'traces.codex.exec_item_id': id,
           'traces.codex.exec_item_type': type,
           'traces.codex.exec_lifecycle': lifecycle,
@@ -296,7 +304,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         pending.span.attributes['traces.codex.exec_exit_code'] = result.exitCode
       }
       if (type === 'command_execution') {
-        recordToolOutput(pending.span, typeof item.aggregated_output === 'string' ? item.aggregated_output : undefined)
+        recordToolOutput(pending.span, typeof item.aggregated_output === 'string' ? item.aggregated_output : undefined, sourceOf(item, 'aggregated_output'))
       }
       turn.pendingTools.delete(id)
       turn.completedItemIds.add(id)
@@ -438,6 +446,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
               agent: SERVICE,
               step: step++,
               content: text,
+              contentSource: textSources(item, 'text'),
               extra: {
                 'traces.codex.exec_item_id': id,
                 'traces.codex.exec_item_type': completedType,
@@ -462,6 +471,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             step: step++,
             content: capText(message),
+            contentSource: textSources(item, 'message'),
             extra: {
               'traces.codex.exec_item_id': id,
               'traces.codex.exec_item_type': completedType,
@@ -503,6 +513,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         agent: SERVICE,
         step: step++,
         content: capText(message),
+        contentSource: textSources(event, 'message'),
       }))
       if (activeTurn) closeTurn('ERROR', timed.time, undefined, message)
       else {

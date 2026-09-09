@@ -40,6 +40,7 @@
  * `--otlp <file|dir>` READS OTLP; `--otlp-out <path>` WRITES the artifact.
  */
 
+import { assertOutsideSourceBundle } from './bundle-source.js'
 import { readFileSync } from 'node:fs'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
@@ -138,6 +139,8 @@ interface Args {
   dir?: string
   /** OTLP-JSONL file or directory to READ. */
   otlp?: string
+  /** Full bundle whose original records may be read by local analysts. */
+  sourceBundle?: string
   /** Where to WRITE the OTLP-JSONL artifact. */
   otlpOut?: string
   llm: boolean
@@ -240,6 +243,7 @@ function parseArgs(argv: string[]): Args {
       case '--out': a.out = next(); break
       case '--dir': a.dir = next(); break
       case '--otlp': a.otlp = next(); break
+      case '--source-bundle': a.sourceBundle = next(); break
       case '--otlp-out': a.otlpOut = next(); break
       case '--llm': a.llm = true; break
       case '--budget': a.budget = Number(next()); break
@@ -649,6 +653,16 @@ async function collectOtlpSpans(path: string): Promise<CollectedSpans> {
 }
 
 async function collectSpans(args: Args): Promise<CollectedSpans> {
+  if (args.sourceBundle) {
+    if (!['analyze', 'investigate', 'improve'].includes(args.command)) throw new Error('--source-bundle is an analysis option')
+    if (args.session || args.otlp || args.input || args.current || args.workflow || args.noContent || args.redactorCmd) {
+      throw new Error('--source-bundle cannot be combined with another input, redaction, or metadata-only selection')
+    }
+    for (const output of [args.out, args.dir, args.otlpOut]) {
+      if (output) await assertOutsideSourceBundle(args.sourceBundle, output)
+    }
+    return collectOtlpSpans(join(args.sourceBundle, 'derived', 'trace.otlp.jsonl'))
+  }
   if (args.otlp) return collectOtlpSpans(args.otlp)
   if (args.input) {
     if (args.workflow) throw new Error('--workflow reads discovered sessions and cannot be combined with an input file')
@@ -1193,6 +1207,7 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
   const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
   const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
   return runTraceInvestigation(mergeTracesConfig({
+    sourceBundle: args.sourceBundle ? { path: args.sourceBundle } : undefined,
     spans,
     harness,
     sources,
@@ -1219,6 +1234,7 @@ async function cmdImprove(args: Args): Promise<void> {
   const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
+      sourceBundle: args.sourceBundle ? { path: args.sourceBundle } : undefined,
       spans,
       harness,
       sources,
@@ -1659,6 +1675,8 @@ Options:
                    Supported by: validate, analyze, investigate, improve, stream.
                    On a WRITING command it is the deprecated spelling of
                    --otlp-out; it still works, with a warning, until 0.12.
+  --source-bundle <dir>  Analyze a retained full bundle; explicitly grant source-field reads.
+                   Available for analyze, investigate, and improve.
   --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
                    provenance / dry-run upload preview)
   --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans | chat-trajectory

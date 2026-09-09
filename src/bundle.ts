@@ -23,8 +23,8 @@
 
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { cp, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { join, relative, resolve, sep } from 'node:path'
+import { copyFile, cp, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence } from './evidence.js'
 import { runTraceInvestigation } from './improvement.js'
 import { isMissingPathError } from './json.js'
@@ -34,10 +34,13 @@ import {
   findContextRoot,
   serializeSessionIndex,
 } from './session-index.js'
-import { parseSession } from './session-source.js'
+import { collectSessionSelection, fileSha256 } from './session-selection.js'
+import { sourceFileId } from './source-location.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 
 export interface SessionBundleFile {
+  /** Opaque source identity when this file backs native span attributes. */
+  readonly sourceId?: string
   /** Bundle-relative path, `/`-separated. */
   readonly path: string
   readonly bytes: number
@@ -432,22 +435,22 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
   const { adapter, ref } = opts
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
 
-  let transcriptBytes: Buffer
   try {
-    transcriptBytes = await readFile(ref.path)
+    await stat(ref.path)
   } catch (error) {
     if (isMissingPathError(error)) {
-      throw new Error(
-        `session transcript not found at ${ref.path} — a bundle cannot be assembled without its transcript`,
-      )
+      throw new Error(`session transcript not found at ${ref.path} — a bundle cannot be assembled without its transcript`)
     }
     throw error
   }
-  const transcriptSha256 = sha256Hex(transcriptBytes)
-
-  // Parse BEFORE creating the output directory: an unparseable session must
-  // fail without leaving a half-written bundle behind.
-  const spans = await parseSession(adapter, ref, { signal: opts.signal })
+  const selection = await collectSessionSelection([{ adapter, refs: [ref] }], {
+    bindSources: true,
+    signal: opts.signal,
+  })
+  const row = selection.rows[0]!
+  const spans = row.spans
+  const transcriptSha256 = row.sourceFiles!.find((file) => resolve(file.path) === resolve(ref.path))?.sha256
+    ?? row.sourceSha256!
 
   const outDir = resolve(opts.outDir)
   await mkdir(outDir, { recursive: true })
@@ -462,12 +465,30 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
 
   // session/ — the raw sources, byte-for-byte.
   await mkdir(join(outDir, 'session'), { recursive: true })
-  await writeFile(join(outDir, 'session', 'transcript.jsonl'), transcriptBytes)
   const subagentsSource = join(ref.path.replace(/\.jsonl$/, ''), 'subagents')
   if ((await statOrNull(subagentsSource))?.isDirectory()) {
     await cp(subagentsSource, join(outDir, 'session', 'subagents'), { recursive: true })
   } else {
     absent.push({ path: bundlePath('session', 'subagents'), reason: `no subagents directory at ${subagentsSource}` })
+  }
+
+  const retainedSourceIds = new Map<string, string>()
+  for (const file of row.sourceFiles!) {
+    opts.signal?.throwIfAborted()
+    const sourceId = sourceFileId(file.path)
+    const subagentRelative = relative(subagentsSource, file.path)
+    const path = resolve(file.path) === resolve(ref.path)
+      ? bundlePath('session', 'transcript.jsonl')
+      : !subagentRelative.startsWith('..') && !subagentRelative.startsWith(sep)
+        ? bundlePath('session', 'subagents', subagentRelative)
+        : bundlePath('session', 'sources', `${sourceId}.jsonl`)
+    const target = join(outDir, path)
+    await mkdir(dirname(target), { recursive: true })
+    await copyFile(file.path, target)
+    if (await fileSha256(target, opts.signal) !== file.sha256) {
+      throw new Error(`session source changed while retaining bundle evidence: ${file.path}`)
+    }
+    retainedSourceIds.set(path, sourceId)
   }
 
   // derived/ — every derivation this CLI already owns, deterministic only:
@@ -548,7 +569,10 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
   }
 
   // manifest.json — sha256 per file, written LAST so it covers every byte.
-  const files = await hashSessionBundleFiles(outDir)
+  const files = (await hashSessionBundleFiles(outDir)).map((file) => ({
+    ...file,
+    ...(retainedSourceIds.has(file.path) ? { sourceId: retainedSourceIds.get(file.path)! } : {}),
+  }))
   const manifest: SessionBundleManifest = {
     schemaVersion: 2,
     kind: 'traces.session_bundle',
@@ -580,8 +604,9 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
 export async function hashSessionBundleFiles(root: string): Promise<SessionBundleFile[]> {
   const files: SessionBundleFile[] = []
   for (const path of await listSessionBundleFiles(root)) {
-    const bytes = await readFile(join(root, path))
-    files.push({ path, bytes: bytes.length, sha256: sha256Hex(bytes) })
+    const filePath = join(root, path)
+    const info = await stat(filePath)
+    files.push({ path, bytes: info.size, sha256: await fileSha256(filePath) })
   }
   return files
 }

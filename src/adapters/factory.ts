@@ -11,6 +11,8 @@
  * flag (`is_error`) is inferred (Anthropic convention), not source-confirmed.
  */
 
+import { sourceOf, textSources } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -106,6 +108,17 @@ export class FactoryAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
+  async sourcePaths(ref: SessionRef): Promise<readonly string[]> {
+    const sidecar = ref.path.replace(/\.jsonl$/, '.settings.json')
+    try {
+      await stat(sidecar)
+      return [ref.path, sidecar]
+    } catch (error) {
+      if (isMissingPathError(error)) return [ref.path]
+      throw error
+    }
+  }
+
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     // Sidecar holds model + session-total tokens.
     let settings: FactorySettings = {}
@@ -151,6 +164,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
               parentSpanId: sourceRootId,
               startTime: ts,
               content: text,
+              contentSource: textSources(l.message, 'content'),
               service: SERVICE,
               agent: SERVICE,
               step,
@@ -173,6 +187,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
             model: settings.model ?? null,
             step,
             content: text || null,
+            contentSource: textSources(l.message, 'content'),
           }),
         )
         lastLlm = llmId
@@ -192,7 +207,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
             agent: SERVICE,
             tool: b.name,
             step,
-            extra: toolIoAttributes({ input: b.input }),
+            extra: toolIoAttributes({ input: b.input, inputSource: sourceOf(b, 'input') }),
           })
           spans.push(t)
           if (b.id) toolByUseId.set(b.id, t)
@@ -201,7 +216,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
           const t = toolByUseId.get(b.tool_use_id)
           if (t) {
             t.status = b.is_error === true ? { code: 'ERROR', message: 'tool reported error' } : { code: 'OK' }
-            recordToolOutput(t, b.content)
+            recordToolOutput(t, b.content, sourceOf(b, 'content'))
           }
         }
       }

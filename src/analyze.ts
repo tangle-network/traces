@@ -25,8 +25,11 @@ import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
+import { assertOutsideSourceBundle, createBundleSourceReader } from './bundle-source.js'
 
 export interface AnalyzeOptions {
+  /** Explicitly authorize original source reads from this full session bundle. */
+  sourceBundle?: { path: string; maxRecordBytes?: number }
   /**
    * Recursive analysis engine enabling the agentic analyst kinds. Omit →
    * deterministic only. The engine's id, version, and model become the
@@ -97,6 +100,10 @@ function mergeCostProvenance(
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
+  if (opts.sourceBundle && opts.otlpOutPath) await assertOutsideSourceBundle(opts.sourceBundle.path, opts.otlpOutPath)
+  const sourceReader = opts.sourceBundle
+    ? await createBundleSourceReader(opts.sourceBundle.path, spans, { signal: opts.signal, maxRecordBytes: opts.sourceBundle.maxRecordBytes })
+    : undefined
   const otlpPath = await writeOtlpFile(spans, opts.otlpOutPath)
   opts.signal?.throwIfAborted()
   const runId = opts.runId ?? `traces-${Date.now()}`
@@ -111,6 +118,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     path: otlpPath,
     maxFileBytes: GENERATED_TRACE_FILE_CEILING,
     perCallByteCeiling: GENERATED_TRACE_FILE_CEILING,
+    ...(sourceReader ? { sourceReader } : {}),
   })
   await detStore.ensureIndexed()
   opts.signal?.throwIfAborted()
@@ -122,7 +130,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
   let agenticPerAnalyst: readonly AnalystRunSummary[] | undefined
   if (opts.engine || opts.agenticRegistry) {
-    const agStore = new OtlpFileTraceStore({ path: otlpPath, maxFileBytes: GENERATED_TRACE_FILE_CEILING })
+    const agStore = new OtlpFileTraceStore({ path: otlpPath, maxFileBytes: GENERATED_TRACE_FILE_CEILING, ...(sourceReader ? { sourceReader } : {}) })
     await agStore.ensureIndexed()
     const agRegistry = opts.agenticRegistry ?? buildDefaultAnalystRegistry({
       engine: opts.engine!,

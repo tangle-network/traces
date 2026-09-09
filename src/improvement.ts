@@ -20,7 +20,8 @@ import {
   traceAgenticKinds,
   type TraceAgenticRoute,
 } from './agentic-routing.js'
-import { analyzeSpans } from './analyze.js'
+import { assertOutsideSourceBundle } from './bundle-source.js'
+import { analyzeSpans, type AnalyzeOptions } from './analyze.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { conformanceOfSpans, renderConformance, unavailableCapabilities } from './conformance.js'
 import {
@@ -64,6 +65,8 @@ export interface TracesConfig {
 }
 
 export interface TraceInvestigationOptions {
+  /** Explicit full-bundle source access for local analyst tools only. */
+  readonly sourceBundle?: AnalyzeOptions['sourceBundle']
   readonly spans: readonly OtlpSpan[]
   readonly harness: string
   readonly sources?: readonly ReportSource[]
@@ -691,6 +694,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     ? planTraceAgenticRoute(pipelines, reactions)
     : undefined
   const analysis = await analyzeSpans(opts.spans, {
+    sourceBundle: opts.sourceBundle,
     engine: opts.engine,
     model: opts.model,
     budgetUsd: opts.budgetUsd,
@@ -847,6 +851,7 @@ export async function writeTraceImprovementArtifacts(
 export async function runTraceImprovement(
   opts: TraceImprovementOptions,
 ): Promise<TraceImprovementResult> {
+  if (opts.sourceBundle && opts.outDir) await assertOutsideSourceBundle(opts.sourceBundle.path, opts.outDir)
   const directory = opts.outDir
     ? resolve(opts.outDir)
     : await mkdtemp(join(tmpdir(), 'traces-improvement-'))

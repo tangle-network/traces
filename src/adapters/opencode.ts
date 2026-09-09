@@ -8,13 +8,15 @@
  * marks a failed call.
  */
 
+import { sourceOf } from '../source-location.js'
+
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { isMissingJsonSource, isMissingPathError, listJsonFiles, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
-import type { HarnessTraceAdapter, LocateOptions, SessionRef } from '../types.js'
+import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
 import { capText, userPromptSpan } from './conversation.js'
 import { toolIoAttributes } from './tool-io.js'
 
@@ -92,7 +94,34 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
-  async parse(ref: SessionRef): Promise<OtlpSpan[]> {
+  async sourcePaths(ref: SessionRef): Promise<readonly string[]> {
+    const paths: string[] = []
+    let step = 0
+    const messages = await Promise.all((await listJsonFiles(ref.path)).map(async (file) => {
+      const path = join(ref.path, file)
+      paths.push(path)
+      return readJsonFile<OcMessage>(path)
+    }))
+    messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+    for (const message of messages) {
+      const mid = message.id ?? `m${step}`
+      const directory = join(this.storage(), 'part', mid)
+      let files: string[] = []
+      try {
+        files = await listJsonFiles(directory)
+      } catch (error) {
+        if (!isMissingJsonSource(error)) throw error
+      }
+      paths.push(...files.map((file) => join(directory, file)))
+      // The parser's fallback message ID depends on emitted spans, not file count.
+      const parts = await Promise.all(files.map((file) => readJsonFile<OcPart>(join(directory, file))))
+      if (message.role !== 'user' || textOf(parts)) step += 1
+      step += parts.filter((part) => part.type === 'tool' && part.tool).length
+    }
+    return paths.sort()
+  }
+
+  async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     const traceId = ref.sessionId
     const rootId = `root:${traceId}`
     const partRoot = join(this.storage(), 'part')
@@ -101,7 +130,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
 
     const messages: OcMessage[] = []
     for (const f of msgFiles) {
-      messages.push(await readJsonFile<OcMessage>(join(ref.path, f)))
+      messages.push(await readJsonFile<OcMessage>(join(ref.path, f), options))
     }
     messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
 
@@ -135,7 +164,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
         if (!isMissingJsonSource(error)) throw error
       }
       for (const pf of partFiles) {
-        parts.push(await readJsonFile<OcPart>(join(pdir, pf)))
+        parts.push(await readJsonFile<OcPart>(join(pdir, pf), options))
       }
 
       const turnText = textOf(parts)
@@ -153,6 +182,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
               agent: SERVICE,
               step,
               content: turnText,
+              contentSource: parts.filter((part) => part.type === 'text').flatMap((part) => { const ref = sourceOf(part, 'text'); return ref ? [ref] : [] }),
             }),
           )
           step += 1
@@ -177,6 +207,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
             cacheWriteInputTokens: msg.tokens?.cache?.write ?? null,
             step,
             content: turnText || null,
+            contentSource: parts.filter((part) => part.type === 'text').flatMap((part) => { const ref = sourceOf(part, 'text'); return ref ? [ref] : [] }),
           }),
         )
         step += 1
@@ -202,6 +233,8 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
             step,
             extra: toolIoAttributes({
               input: part.state?.input,
+              inputSource: sourceOf(part, 'state', 'input'),
+              outputSource: sourceOf(part, 'state', part.state?.output != null ? 'output' : 'error'),
               output: part.state?.output ?? part.state?.error,
             }),
           }),
