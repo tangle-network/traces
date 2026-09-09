@@ -56,6 +56,22 @@ Returned directories from another resumed Claude session are parsed and included
 The OpenInference file is the shared input for external engines.
 The original trace and exact cited span remain available for review.
 
+## Codex tool outcomes
+
+Both function and custom tool outputs use the same status parser.
+Explicit exit codes, error flags, and runner headers determine tool status.
+Explicit failure takes precedence when structured fields conflict.
+Text such as `error:`, `ENOENT`, or `command failed` inside stdout does not determine status.
+An unmatched call, running process, or output without trustworthy status remains `UNSET`.
+A recorded `wait_agent` timeout is a completed poll, not proof that the agent finished.
+Tool output remains in `output.value`, with the existing size limit and truncation receipt.
+
+Error and retry counts use explicit failures.
+Successful follow-up counts require explicit success; unknown follow-up outcomes remain `null` in the detailed report.
+The runtime span projection leaves its optional status absent for `UNSET` spans.
+Use the execution report for terminal run outcomes.
+The older runtime store's required run status cannot represent unknown and is not completion evidence.
+
 ## External engines
 
 External engines are optional tools that you install separately.

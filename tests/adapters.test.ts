@@ -2147,9 +2147,9 @@ describe('codex current tool and subagent events', () => {
     expect(tools).toHaveLength(9)
     expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:read-source'))?.status).toEqual({ code: 'OK' })
     expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:failed-command'))?.status.code).toBe('ERROR')
-    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:domain-result'))?.status).toEqual({ code: 'OK' })
-    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:captured-log'))?.status).toEqual({ code: 'OK' })
-    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:captured-exit'))?.status).toEqual({ code: 'OK' })
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:domain-result'))?.status).toEqual({ code: 'UNSET' })
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:captured-log'))?.status).toEqual({ code: 'UNSET' })
+    expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:captured-exit'))?.status).toEqual({ code: 'UNSET' })
     expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:timed-out'))?.status.code).toBe('ERROR')
     expect(tools.find((item) => item.span_id === codexSpanId('codex-tool-status', 'tool:poll-timed-out'))).toMatchObject({
       status: { code: 'OK' },
@@ -2206,7 +2206,7 @@ describe('codex current tool and subagent events', () => {
         {
           type: 'response_item',
           timestamp: '2026-07-11T09:00:04.200Z',
-          payload: { type: 'custom_tool_call_output', call_id: 'custom-2', output: 'Script completed' },
+          payload: { type: 'custom_tool_call_output', call_id: 'custom-2', output: 'Script completed', is_error: false },
         },
         {
           type: 'response_item',
@@ -2221,7 +2221,7 @@ describe('codex current tool and subagent events', () => {
         {
           type: 'response_item',
           timestamp: '2026-07-11T09:00:04.400Z',
-          payload: { type: 'custom_tool_call_output', call_id: 'custom-3', output: 'Script completed' },
+          payload: { type: 'custom_tool_call_output', call_id: 'custom-3', output: 'Script completed', is_error: false },
         },
         {
           type: 'response_item',
@@ -2236,7 +2236,7 @@ describe('codex current tool and subagent events', () => {
         {
           type: 'response_item',
           timestamp: '2026-07-11T09:00:04.600Z',
-          payload: { type: 'custom_tool_call_output', call_id: 'custom-4', output: 'Script completed' },
+          payload: { type: 'custom_tool_call_output', call_id: 'custom-4', output: 'Script completed', is_error: false },
         },
         {
           type: 'response_item',
@@ -2251,7 +2251,7 @@ describe('codex current tool and subagent events', () => {
         {
           type: 'response_item',
           timestamp: '2026-07-11T09:00:04.800Z',
-          payload: { type: 'function_call_output', call_id: 'blocking-1', output: 'Completed' },
+          payload: { type: 'function_call_output', call_id: 'blocking-1', output: 'Completed', is_error: false },
         },
         {
           type: 'response_item',
@@ -2266,7 +2266,7 @@ describe('codex current tool and subagent events', () => {
         {
           type: 'response_item',
           timestamp: '2026-07-11T09:00:05.000Z',
-          payload: { type: 'function_call_output', call_id: 'domain-wait-1', output: 'Completed' },
+          payload: { type: 'function_call_output', call_id: 'domain-wait-1', output: 'Completed', is_error: false },
         },
         {
           type: 'response_item',
@@ -2281,7 +2281,7 @@ describe('codex current tool and subagent events', () => {
         {
           type: 'response_item',
           timestamp: '2026-07-11T09:00:05.200Z',
-          payload: { type: 'custom_tool_call_output', call_id: 'malformed-input-1', output: 'Completed' },
+          payload: { type: 'custom_tool_call_output', call_id: 'malformed-input-1', output: 'Completed', is_error: false },
         },
         {
           type: 'response_item',
@@ -2296,7 +2296,7 @@ describe('codex current tool and subagent events', () => {
         {
           type: 'response_item',
           timestamp: '2026-07-11T09:00:05.400Z',
-          payload: { type: 'custom_tool_call_output', call_id: 'write-stdin-1', output: 'Completed' },
+          payload: { type: 'custom_tool_call_output', call_id: 'write-stdin-1', output: 'Completed', is_error: false },
         },
         {
           type: 'event_msg',

@@ -93,7 +93,8 @@ export async function toRuntimeStore(spans: readonly OtlpSpan[]): Promise<Runtim
       name: s.name,
       startedAt,
       endedAt,
-      status: s.status.code === 'ERROR' ? ('error' as const) : ('ok' as const),
+      status: s.status.code === 'ERROR' ? ('error' as const)
+        : s.status.code === 'OK' ? ('ok' as const) : undefined,
       error: s.status.message,
       attributes,
     }

@@ -376,7 +376,12 @@ describe('analyzeAdoption', () => {
     expect(r.skillRunFilesRead).toBe(2)
   })
 
-  it('reports Codex skill invocation as unsupported while preserving catalog, file, and subagent evidence', async () => {
+  it.each([
+    { label: 'successful read', output: '{"exit_code":0,"output":"# Simplify"}', status: 'OK', reads: 1 },
+    { label: 'failed read', output: '{"exit_code":1,"output":"file not found"}', status: 'ERROR', reads: 0 },
+    { label: 'unknown read outcome', output: 'Script completed', status: 'UNSET', reads: 0 },
+    { label: 'running read', output: '{"session_id":123,"exit_code":null,"output":""}', status: 'UNSET', reads: 0 },
+  ])('preserves Codex catalog and subagent evidence with $label', async ({ output, status, reads }) => {
     const path = join(dir, 'rollout-codex-skill-evidence.jsonl')
     const rows = [
       { type: 'session_meta', timestamp: '2026-06-20T00:00:00Z', payload: { id: 'codex-skill-evidence', cwd: '/x' } },
@@ -396,13 +401,13 @@ describe('analyzeAdoption', () => {
           type: 'custom_tool_call',
           call_id: 'skill-file',
           name: 'exec',
-          input: 'const r = await tools.exec_command({cmd:"sed -n 1,80p /skills/simplify/SKILL.md"}); text(r.output)',
+          input: 'const r = await tools.exec_command({cmd:"sed -n 1,80p /skills/simplify/SKILL.md"}); text(r)',
         },
       },
       {
         type: 'response_item',
         timestamp: '2026-06-20T00:00:03Z',
-        payload: { type: 'custom_tool_call_output', call_id: 'skill-file', output: 'Script completed' },
+        payload: { type: 'custom_tool_call_output', call_id: 'skill-file', output },
       },
       {
         type: 'response_item',
@@ -411,13 +416,13 @@ describe('analyzeAdoption', () => {
           type: 'custom_tool_call',
           call_id: 'skill-catalog',
           name: 'exec',
-          input: 'const r = await tools.exec_command({cmd:"rg --files /skills/simplify/SKILL.md"}); text(r.output)',
+          input: 'const r = await tools.exec_command({cmd:"rg --files /skills/simplify/SKILL.md"}); text(r)',
         },
       },
       {
         type: 'response_item',
         timestamp: '2026-06-20T00:00:03.200Z',
-        payload: { type: 'custom_tool_call_output', call_id: 'skill-catalog', output: 'Script completed' },
+        payload: { type: 'custom_tool_call_output', call_id: 'skill-catalog', output: '{"exit_code":0,"output":"/skills/simplify/SKILL.md"}' },
       },
       {
         type: 'event_msg',
@@ -433,6 +438,8 @@ describe('analyzeAdoption', () => {
     writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n'))
 
     const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
+    const skillRead = spans.find((item) => String(item.attributes['input.value']).includes('sed -n'))
+    expect(skillRead?.status.code).toBe(status)
     const report = await analyzeAdoption(spans)
     const rendered = renderAdoption(report)
 
@@ -440,14 +447,18 @@ describe('analyzeAdoption', () => {
     expect(report.skillTelemetryStatus).toBe('unsupported')
     expect(report.skillTelemetrySessions).toBe(0)
     expect(report.sessionsWithMaterializedSkills).toBe(1)
-    expect(report.sessionsWithSkillFileReference).toBe(1)
-    expect(report.skillDocumentReads.simplify).toBe(1)
+    expect(report.sessionsWithSkillFileReference).toBe(reads)
+    expect(report.skillDocumentReads).toEqual(reads === 1 ? { simplify: 1 } : {})
     expect(report.totalSubagentSpawns).toBe(1)
     expect(report.subagentSpawns.reviewer).toBe(1)
     expect(rendered).toContain('Explicit skill invocation rate:** uncaptured/unsupported')
     expect(rendered).toContain('Materialized skill catalogs/instructions:** 1/1')
-    expect(rendered).toContain('Sessions with successful skill-document reads:** 1/1')
-    expect(rendered).toContain('Successful skill-document reads:** 1; inspection is not outcome evidence.')
+    expect(rendered).toContain(`Sessions with successful skill-document reads:** ${reads}/1`)
+    if (reads > 0) {
+      expect(rendered).toContain(`Successful skill-document reads:** ${reads}; inspection is not outcome evidence.`)
+    } else {
+      expect(rendered).not.toContain('- **Successful skill-document reads:**')
+    }
     expect(rendered).toContain('Subagent spawns observed:** 1')
     expect(rendered).toContain('Prompt, tools, MCP, hooks, and full agent profile:** not assessed')
     expect(rendered).not.toContain('Skill penetration')
