@@ -95,6 +95,8 @@ export function describeSessionRelationship(
   spans: readonly OtlpSpan[],
 ): SessionRelationship {
   const root = sessionRoot(ref, spans)
+  const sessionId = sessionIdFromAttributes(root?.attributes ?? {}) ?? root?.trace_id ?? ref.sessionId
+  const parentSessionId = stringAttribute(root, 'traces.parent_session_id')
   const childSessionIds = new Set<string>()
   const spawnedChildSessionIds = new Set<string>()
   const resumedChildSessionIds = new Set<string>()
@@ -125,8 +127,14 @@ export function describeSessionRelationship(
     }
   }
 
+  // A child that messages its parent (`send_message`, `followup_task`) names the
+  // parent as a target; the session and its parent are never its own children.
+  for (const ids of [childSessionIds, spawnedChildSessionIds, resumedChildSessionIds]) {
+    ids.delete(sessionId)
+    if (parentSessionId) ids.delete(parentSessionId)
+  }
+
   const role = stringAttribute(root, 'traces.session.role')
-  const parentSessionId = stringAttribute(root, 'traces.parent_session_id')
   const depth = numberAttribute(root, 'traces.codex.agent_depth')
   const agentNickname = stringAttribute(root, 'traces.codex.agent_nickname')
   const agentRole = stringAttribute(root, 'traces.codex.agent_role')
@@ -140,7 +148,7 @@ export function describeSessionRelationship(
     : undefined
   const turnId = stringAttribute(root, 'traces.codex.turn_id')
   return {
-    sessionId: sessionIdFromAttributes(root?.attributes ?? {}) ?? root?.trace_id ?? ref.sessionId,
+    sessionId,
     role: role === 'operator' || role === 'child' ? role : 'unknown',
     ...(parentSessionId ? { parentSessionId } : {}),
     childSessionIds: [...childSessionIds].sort(),

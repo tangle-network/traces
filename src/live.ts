@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isInnerToolCall } from './adapters/tool-io.js'
 import type { OtlpSpan } from './otlp.js'
 import type { PipelineReport } from './pipelines.js'
 import { runPipelines } from './pipelines.js'
@@ -241,8 +242,9 @@ function isTool(span: OtlpSpan): boolean {
   return spanKind(span) === 'TOOL' || span.attributes['tool.name'] != null || span.name.startsWith('tool.')
 }
 
+/** Command and file-change records inside a tool call carry tool I/O, not prose. */
 function isTextSpan(span: OtlpSpan): boolean {
-  return !isTool(span) && spanContent(span).length > 0
+  return !isTool(span) && !isInnerToolCall(span.attributes) && spanContent(span).length > 0
 }
 
 function isVerification(span: OtlpSpan): boolean {
