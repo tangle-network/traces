@@ -151,7 +151,7 @@ interface ClaudeEvent {
   isSidechain?: boolean
   isMeta?: boolean
   userType?: string
-  origin?: { kind?: string }
+  origin?: { kind?: unknown }
   /** `file-history-delta`: the path the harness backed up before changing it. */
   trackingPath?: string
   message?: {
@@ -174,8 +174,8 @@ interface ClaudeEvent {
     exitCode?: number
     stderr?: string
     /** `queued_command`: the message a person sent while the turn was running. */
-    prompt?: string
-    origin?: { kind?: string }
+    prompt?: unknown
+    origin?: { kind?: unknown }
     timestamp?: string
   }
   toolUseResult?: {
@@ -427,7 +427,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
             isSidechain: event.isSidechain === true,
             isMeta: event.isMeta === true,
             userType: event.userType ?? null,
-            originKind: event.origin?.kind ?? null,
+            originKind: recordedOrigin(event.origin),
           }
         : {}),
       results,
@@ -447,7 +447,10 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
     }
   }
   if (event.type === 'attachment' && event.attachment?.type === 'queued_command') {
-    const prompt = capText(event.attachment.prompt ?? '')
+    // The queued text is a message body, so it arrives in either shape a
+    // message body takes: a string, or the content blocks of a message that
+    // carried an image alongside the words.
+    const prompt = textOf(event.attachment.prompt)
     if (prompt) {
       return {
         kind: 'queued-prompt',
@@ -455,7 +458,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
         // turn that absorbed it; the sent time is the time of the turn.
         timestamp: event.attachment.timestamp ?? timestamp,
         prompt,
-        originKind: event.attachment.origin?.kind ?? null,
+        originKind: recordedOrigin(event.attachment.origin),
         contentSource: sourceOf(event.attachment, 'prompt'),
       }
     }
@@ -507,6 +510,12 @@ function typedPromptText(text: string): string {
   if (!name) return text
   const args = COMMAND_ARGS.exec(text)?.[1]?.trim()
   return args ? `${name} ${args}` : name
+}
+
+/** Claude Code's `origin.kind`, when the record carries a usable one. */
+function recordedOrigin(origin: { kind?: unknown } | undefined): string | null {
+  const kind = origin?.kind
+  return typeof kind === 'string' && kind.length > 0 ? kind : null
 }
 
 /** The task name a spawn call gave its child, when the call named one. */
@@ -1420,10 +1429,12 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
 
 /** The task the parent's spawn call gave this child, as the harness recorded it. */
 function subagentTaskName(agent: ClaudeSubagentFile): string | null {
-  const described = agent.meta.description?.trim()
-  if (described) return described
-  const type = agent.meta.agentType?.trim()
-  return type ? type : null
+  // The metadata file is untrusted input: a field that is not a string names no
+  // task, and must not take the parse down.
+  for (const value of [agent.meta.description, agent.meta.agentType]) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+  }
+  return null
 }
 
 /**

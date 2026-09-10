@@ -314,6 +314,57 @@ describe('session facts from a Claude Code transcript', () => {
     ])
   })
 
+  it('reads a queued message that arrived as content blocks beside an image', async () => {
+    const path = join(dir, 'queued-blocks.jsonl')
+    writeJsonl(path, [
+      {
+        type: 'user',
+        uuid: 'typed-1',
+        sessionId: 'queued-blocks',
+        timestamp: '2026-02-04T00:00:00Z',
+        userType: 'external',
+        origin: { kind: 'human' },
+        message: { role: 'user', content: 'start the run' },
+      },
+      // A queued message is a message body, so it takes either shape a message
+      // body takes. This one carried a screenshot alongside the words.
+      {
+        type: 'attachment',
+        uuid: 'queued-blocks-1',
+        sessionId: 'queued-blocks',
+        timestamp: '2026-02-04T00:00:01Z',
+        attachment: {
+          type: 'queued_command',
+          prompt: [
+            { type: 'text', text: 'the button is the wrong colour' },
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+          ],
+          commandMode: 'prompt',
+          origin: { kind: 'human' },
+          timestamp: '2026-02-04T00:00:01Z',
+        },
+      },
+      // A record whose origin is not a usable string falls back rather than
+      // being trusted as a label.
+      {
+        type: 'user',
+        uuid: 'odd-origin',
+        sessionId: 'queued-blocks',
+        timestamp: '2026-02-04T00:00:02Z',
+        userType: 'external',
+        origin: { kind: 7 },
+        message: { role: 'user', content: '<system-reminder>budget is low</system-reminder>' },
+      },
+    ])
+
+    const facts = await factsFor(path)
+
+    expect(facts.humanTurns.value!.map((turn) => turn.text)).toEqual([
+      'start the run',
+      'the button is the wrong colour',
+    ])
+  })
+
   it('falls back to the text heuristics when the transcript records no origin', async () => {
     const path = join(dir, 'no-origin.jsonl')
     writeJsonl(path, [
