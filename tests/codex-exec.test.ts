@@ -168,6 +168,7 @@ describe('Codex exec JSONL adapter', () => {
       'input.value': '{"cmd":"printf ok"}',
       'output.value': 'ok',
       'traces.codex.exec_exit_code': 0,
+      'process.exit_code': 0,
       'traces.codex.exec_lifecycle': 'paired',
     })
     expect(file).toMatchObject({

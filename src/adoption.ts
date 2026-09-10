@@ -13,6 +13,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isSynthesizedSpan } from './adapters/provenance.js'
 import { toolArgumentsFromAttributes } from './adapters/tool-io.js'
 import {
   indexSessionIdsByTrace,
@@ -299,12 +300,17 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
       addCounts(skillDocumentReads, skillDocuments)
     }
     const tn = toolName(s)
+    // A Codex subagent's lifecycle span is synthesized from harness events, so
+    // it carries no `tool.name`. It still reports one child thread, which is
+    // what the canonical subagent count means.
+    const subagentLifecycle = isSynthesizedSpan(s.attributes)
+      && typeof s.attributes['traces.codex.subagent_thread_id'] === 'string'
     if (tn === 'Skill') {
       sessionCapabilities.set(group, 'supported')
       const name = skillNameOf(parseInput(s))
       skillInvocations[name] = (skillInvocations[name] ?? 0) + 1
       sessionsWithSkill.add(group)
-    } else if (tn === 'Task' || tn === 'Agent') {
+    } else if (tn === 'Task' || tn === 'Agent' || subagentLifecycle) {
       const type = subagentTypeOf(parseInput(s))
       subagentSpawns[type] = (subagentSpawns[type] ?? 0) + 1
       sessionsWithSubagent.add(group)

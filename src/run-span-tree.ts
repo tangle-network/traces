@@ -39,6 +39,7 @@ import {
   LLM_OUTPUT_TOKEN_ATTR_KEYS,
   SPAN_KIND_ATTR_KEYS,
 } from '@tangle-network/agent-eval/trace-attributes'
+import { isSynthesizedSpan } from './adapters/provenance.js'
 import { exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
 import { connectors, forEachTreeNode, int, ms, tokens, usd } from './run-view-format.js'
@@ -291,7 +292,10 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
           llmSpansWithoutTokens += 1
         }
         if (firstNumberAttr(span.attributes, LLM_COST_ATTR_KEYS) === null) llmSpansWithoutCost += 1
-      } else if (kind === 'TOOL') host.toolCalls += 1
+      } else if (kind === 'TOOL' && !isSynthesizedSpan(span.attributes)) {
+        // A synthesized lifecycle span is not a call this node made.
+        host.toolCalls += 1
+      }
       host.startMs = Math.min(host.startMs, epoch(span.start_time))
       host.endMs = Math.max(host.endMs, epoch(span.end_time))
       if (span.status.code === 'ERROR') {

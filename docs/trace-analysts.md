@@ -9,6 +9,7 @@ Keeping them separate prevents an exploratory model output from being reported a
 | Why might it have happened? | `--llm`, HALO, or a custom analyst | Findings or a diagnosis report with cited spans |
 | What behavior should we inspect? | Hodoscope | Samples marked `needs_review` |
 | What exactly does this session say about X? | `traces ask` | An answer per question, with checked `trace://` citations |
+| What does this session state, exactly and for free? | `traces facts` | A deterministic facts sheet, no model call |
 
 ## Start here
 
@@ -115,6 +116,7 @@ This package carries no JSON Schema library, and a constraint that is quietly ig
 
 ### What the run guarantees
 
+- Every question receives the deterministic [session-facts sheet](#session-facts) as prepared context, before its first model call. It costs nothing and answers the counting questions the bounded trace tools cannot.
 - Every `trace://<trace_id>/span/<span_id>` URI in an answer is resolved against the store. An unresolvable citation fails that question.
   A citation the model wrapped in Markdown emphasis (`**...**`, `_..._`, `~~...~~`) or ended a sentence with resolves like a bare one: the delimiters are prose, not part of the span ID.
 - Findings the answer submits still pass the same evidence gate as the built-in kinds. Refused findings are counted by reason in both artifacts.
@@ -161,6 +163,95 @@ if (!result.ok) process.exitCode = 1
 `result.questions[i].answer` is the engine's prose, unedited.
 `result.totals` carries the wall time, the summed question time, the peak concurrency, and the cost with its provenance.
 
+## Session facts
+
+`traces facts` computes a fixed set of session facts straight from the spans.
+It runs no model, opens no engine, and spends nothing.
+The same spans always produce the same sheet.
+
+```bash
+traces facts --harness codex --session <id>            # JSON on stdout
+traces facts --harness codex --last 5 --format text    # the short readable form
+traces facts --otlp spans.otlp.jsonl --out facts.json
+```
+
+### Why it exists
+
+The trace tools are bounded, and above their bounds they answer a different question than the one asked.
+`viewTrace` returns a `≤20`-entry span-name histogram once a trace exceeds `perCallByteCeiling` (150,000 bytes).
+`countTraces` counts traces, not spans.
+`viewSpans` needs span ids the reader does not have yet.
+`searchTrace` stops at 500 hits.
+
+A model asked "how many tool calls ran?" therefore adds up a capped histogram and decides by eye which names belong.
+Measured over twelve private audit sessions, the model-backed analyst arm scored a deterministic mean of **0.389**.
+Extracting the same answers mechanically from the OTLP spans those runs already wrote scored **0.858** — the facts were present and exact the whole time.
+The sheet is that extraction, made part of the tool.
+
+### What it states
+
+| Field | Value |
+| --- | --- |
+| `toolCalls` | TOOL spans the agent invoked. Synthesized subagent lifecycle spans are excluded and counted in `synthesizedToolSpans` |
+| `toolCallsByName` | the same calls by tool name |
+| `subagents` | every `spawn_agent` call with the task name from `traces.codex.spawn_agent_path` |
+| `pullRequests` | pull requests the commands created and merged, each named by number or head branch, with the command span and the join evidence |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with timestamps |
+| `excludedTurns` | every `user.prompt` turn `humanTurns` left out, grouped by the reason, with the span ids |
+| `turnsByActor` | every `user.prompt` turn by actor, so the human filter is checkable |
+| `finalMessages` | the last message of the session's own agent, and of each subagent task, separately |
+| `changedFiles` | paths from `*** Add/Update/Delete/Move to File:` patch headers and from file-editing tool arguments |
+| `firstRecordAt`, `lastRecordAt` | the trace's earliest span start and latest span end |
+| `unreadRecords` | records the session reader could not parse |
+| `tokenTotal` | the harness's cumulative total, when a span carries `traces.session.total_tokens` |
+
+Two rules hold for every field.
+
+- **Every fact names the span ids it came from.** A reader can open those spans and check the number. The sheet is not a span and cannot be cited.
+- **A fact the spans cannot support is `null` with a stated reason.** It is never guessed and never a silent zero. `partial` marks a measured value known to be incomplete.
+
+`facts` exits non-zero when a selected session produced no record spans, rather than printing a sheet of zeros for a session it could not read.
+
+#### Pull requests
+
+The command spans carry the script, the exit code and the output.
+`pullRequests` scans each script the way a shell would, so a `gh pr create` inside a heredoc body or a commit message is not counted as a command that ran.
+A pull request is named by its number when the command or an output that joins to it shows one, and by its head branch when neither does.
+A create whose stdout was redirected away takes the number a later output states for the same branch on the same line, and names the span that stated it.
+A failed `git push && gh pr create` counts only when the output shows `gh` itself answering; otherwise the shell never reached it.
+A trace whose spans carry no executed command returns `null` with that reason, because "no pull requests" and "the spans cannot say" are different answers.
+
+#### Human turns
+
+A user message is one the human typed into this session.
+Three filters run in order, and each excluded span is listed in `excludedTurns` with its reason, never silently dropped:
+
+- history the session carries but did not receive — the prefix a fork copies from its parent, and the turns a compaction replays;
+- turns whose actor is not a person — an instruction file, an environment-context block, a system reminder, a subagent notification, a turn-aborted marker, or a skill or slash-command expansion;
+- a second record of the turn before it, meaning the same text at the same instant with no model call, tool call or assistant message between them.
+
+For Codex the actor comes from the harness's own per-item labelling (`internal_chat_message_metadata_passthrough.content_item_kinds`) whenever the record carries it: a message is the person's exactly when every item in it is a `user.` kind.
+
+### Session facts as prepared context
+
+The same sheet is supplied to the model-backed analysts before their first model call, through `TraceAnalystDefinition.prepareContext`.
+It reaches the built-in kinds run by `analyze --llm`, `investigate`, and `improve`, and it reaches every `traces ask` question inside `PREPARED CONTEXT:`.
+
+- The sheet is bounded at `PREPARED_CONTEXT_BYTE_CEILING` (30,000 bytes), a fifth of the `perCallByteCeiling` of 150,000 the trace tools work to, so the rest of the budget stays available for the tool calls the model still makes.
+- When the sheet does not fit, fields are shed from the largest downward and the shed is listed in `omitted_fields`. The tool-call counts are the last facts to go.
+- Receiving the sheet changes an analyst's behavior, so its version carries `+session-facts.1`. `createTraceAnalyst` records `prepare_context` in the exact-run identity, and a changed prepared context must not hide behind an unchanged version.
+- The sheet is not evidence. Citations still resolve against the raw spans, which is why every fact names its span ids rather than asking the model to trust the sheet.
+
+Pass `sessionFactsContext: false` to `analyzeSpans` to run an analyst without it.
+
+```ts
+import { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from '@tangle-network/traces'
+
+const [facts] = computeSessionFacts(spans)
+console.log(facts.toolCalls.value, facts.toolCalls.spanIds)
+console.log(renderSessionFacts(buildSessionFactsReport(spans)))
+```
+
 ## Evidence-gate rejections
 
 A model-backed analyst can submit a finding the evidence gate then refuses.
@@ -199,6 +290,27 @@ Successful follow-up counts require explicit success; unknown follow-up outcomes
 The runtime span projection leaves its optional status absent for `UNSET` spans.
 Use the execution report for terminal run outcomes.
 The older runtime store's required run status cannot represent unknown and is not completion evidence.
+
+## Model-assisted citations
+
+agent-eval's evidence gate accepts a model finding only when each cited span exists and each excerpt appears in that span.
+Before the gate runs, `traces` normalizes the citations of the built-in `--llm` analysts against the analyzed spans.
+
+- An excerpt copied from a `searchTrace` hit carries JSON escapes such as `\"` and `\n`.
+  It is replaced by its decoded form only when the cited span contains that decoded text.
+- A citation of a readable harness ID, such as `tool:<call_id>` or the Codex session ID, is replaced by the hex OTLP span ID.
+  The readable ID must name exactly one span through its `traces.<harness>.source_*` attributes.
+- A subject from another analyst's vocabulary is removed, because the subject is optional.
+  The claim and its citations still go through the gate.
+
+The gate itself is unchanged and checks every rewritten finding.
+A fabricated excerpt, an unknown ID, or an ambiguous ID remains rejected.
+Normalization never adds a citation, so a failure-mode finding still needs two distinct spans.
+A subject outside the subject grammar is rejected before normalization runs.
+Wrapped analysts report a version ending in `+traces-citations-1`.
+
+A custom analyst built with `createTraceAnalyst` gets the same behavior through `normalizeAnalystCitations(definitions, spans)`.
+Pass the spans that the analyst's trace store was written from.
 
 ## External engines
 

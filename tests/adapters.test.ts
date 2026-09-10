@@ -307,6 +307,102 @@ describe('JSONL adapter streaming', () => {
     expect(result.maxRssKb).toBeLessThan(maxRssMb * 1024)
   })
 
+  it('parses a 100 MB Codex rollout of command items within a bounded heap', () => {
+    const path = join(dir, 'large-codex-items.jsonl')
+    const output = 'y'.repeat(1024 * 1024)
+    const itemCount = 101
+    const at = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString()
+    const file = openSync(path, 'w')
+    try {
+      writeSync(file, `${JSON.stringify({
+        type: 'session_meta',
+        timestamp: at(0),
+        payload: { id: 'large-codex', cwd: '/workspace/demo' },
+      })}\n`)
+      writeSync(file, `${JSON.stringify({
+        type: 'response_item',
+        timestamp: at(1),
+        payload: { type: 'custom_tool_call', call_id: 'call-0', name: 'exec', input: 'await tools.exec_command({ cmd: "pnpm test" })' },
+      })}\n`)
+      for (let index = 0; index < itemCount; index += 1) {
+        writeSync(file, `${JSON.stringify({
+          type: 'event_msg',
+          timestamp: at(2 + index),
+          payload: {
+            type: 'item_completed',
+            item: {
+              id: `item-${index}`,
+              type: 'CommandExecution',
+              command: ['pnpm', 'test', `--shard=${index}`],
+              cwd: '/workspace/demo',
+              status: 'completed',
+              exit_code: 0,
+              aggregated_output: `${index}:${output}`,
+            },
+          },
+        })}\n`)
+      }
+      writeSync(file, `${JSON.stringify({
+        type: 'response_item',
+        timestamp: at(2 + itemCount),
+        payload: { type: 'custom_tool_call_output', call_id: 'call-0', output: 'Process exited with code 0' },
+      })}\n`)
+    } finally {
+      closeSync(file)
+    }
+    expect(statSync(path).size).toBeGreaterThan(100 * 1024 * 1024)
+
+    const adapterUrl = pathToFileURL(join(process.cwd(), 'src/adapters/codex.ts')).href
+    const childSource = `
+      import { CodexAdapter } from ${JSON.stringify(adapterUrl)}
+      const ref = {
+        harness: 'codex',
+        sessionId: 'large-codex',
+        path: ${JSON.stringify(path)},
+        cwd: null,
+        mtimeMs: 0,
+      }
+      const spans = await new CodexAdapter().parse(ref)
+      const commands = spans.filter((span) => span.attributes['traces.codex.item_type'] === 'CommandExecution')
+      process.stdout.write(JSON.stringify({
+        spanCount: spans.length,
+        commandCount: commands.length,
+        joinedToCall: commands.filter((span) => span.attributes['traces.codex.item_join'] === 'call').length,
+        maxRssKb: process.resourceUsage().maxRSS,
+        bounded: commands.every((span) =>
+          span.attributes['traces.output.truncated'] === true &&
+          Buffer.byteLength(String(span.attributes['input.value'])) <= 16 * 1024 &&
+          Buffer.byteLength(String(span.attributes['output.value'])) <= 16 * 1024
+        ),
+      }))
+    `
+    const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' }
+    delete env.NODE_OPTIONS
+    // Retaining the parsed items instead of the built spans exhausts this cap.
+    const childHeapLimitMb = 64
+    const maxRssMb = 224
+    const child = spawnSync(
+      process.execPath,
+      [`--max-old-space-size=${childHeapLimitMb}`, '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      { cwd: process.cwd(), encoding: 'utf8', env, timeout: 60_000 },
+    )
+
+    expect(child.status, child.stderr || child.error?.message).toBe(0)
+    const result = JSON.parse(child.stdout) as {
+      spanCount: number
+      commandCount: number
+      joinedToCall: number
+      maxRssKb: number
+      bounded: boolean
+    }
+    expect(result).toMatchObject({
+      commandCount: itemCount,
+      joinedToCall: itemCount,
+      bounded: true,
+    })
+    expect(result.maxRssKb).toBeLessThan(maxRssMb * 1024)
+  })
+
   it('customer session parsing retains valid Codex records and stamps a degraded receipt', async () => {
     const path = join(dir, 'codex-recovered-session.jsonl')
     const rawSecret = 'secret-corrupt-codex-record'
@@ -1800,8 +1896,16 @@ describe('codex current tool and subagent events', () => {
       'traces.codex.task_scope': 'fork-current',
       'traces.codex.turn_id': currentTurnId,
     })
-    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content))
+    const prompts = spans.filter((item) => item.name === 'user.prompt')
+    expect(prompts.filter((item) => item.attributes['traces.session.inherited'] !== true)
+      .map((item) => item.attributes.content))
       .toEqual(['current child prompt'])
+    // The pre-fork prefix is kept, marked, and left out of this turn's identity.
+    const inherited = prompts.filter((item) => item.attributes['traces.session.inherited'] === true)
+    expect(inherited.map((item) => item.attributes.content)).toEqual(['inherited parent prompt'])
+    expect(inherited[0]?.attributes['traces.session.inherited_source']).toBe('pre-task-prefix')
+    expect(inherited[0]?.attributes['traces.codex.turn_id']).toBeUndefined()
+    expect(spans[0]?.attributes['traces.session.inherited_span_count']).toBe(1)
   })
 
   it('uses task timestamps when older child events omit started_at', async () => {
@@ -2365,7 +2469,9 @@ describe('codex current tool and subagent events', () => {
 
     const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
     const tools = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
-    expect(tools).toHaveLength(10)
+    // The two subagent lifecycles are AGENT spans, not calls the model made.
+    expect(tools).toHaveLength(8)
+    expect(tools.every((item) => item.attributes['traces.span.synthesized'] === undefined)).toBe(true)
     const verifications = tools.filter((item) => item.attributes['tool.name'] === 'exec_command.verify')
     expect(verifications).toHaveLength(2)
     const failedVerification = verifications.find((item) => item.status.code === 'ERROR')
@@ -2401,8 +2507,12 @@ describe('codex current tool and subagent events', () => {
     expect(writeStdin?.attributes['traces.expected_blocking']).toBe(true)
     expect(writeStdin?.status.code).toBe('OK')
 
-    const agents = tools.filter((item) => item.attributes['tool.name'] === 'Agent')
+    const agents = spans.filter((item) => item.attributes['traces.span.synthesized'] === true)
     expect(agents).toHaveLength(2)
+    expect(agents.every((item) => item.name === 'subagent.lifecycle')).toBe(true)
+    expect(agents.every((item) => item.attributes['openinference.span.kind'] === 'AGENT')).toBe(true)
+    expect(agents.every((item) => item.attributes['tool.name'] === undefined)).toBe(true)
+    expect(agents.every((item) => item.attributes['traces.span.synthesized_from'] === 'codex.sub_agent_activity')).toBe(true)
     const agent = agents.find((item) => String(item.attributes['input.value']).includes('paper_audit'))
     expect(JSON.parse(String(agent?.attributes['input.value']))).toEqual({
       subagent_type: 'paper_audit',

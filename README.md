@@ -31,6 +31,7 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Watch a run tree](#watch-a-run-tree)
 - [Improvement engine](#improvement-engine)
 - [Ask questions](#ask-questions)
+- [Session facts](#session-facts)
 - [Session index](#session-index)
 - [Session bundle](#session-bundle) · [Two views](#two-views-two-consumers)
 - [Policy-mining evidence](#policy-mining-evidence)
@@ -39,6 +40,7 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Agent skills](#agent-skills)
 - [Library (SDK)](#library-sdk)
 - [Examples](#examples)
+- [Audit benchmark](#audit-benchmark)
 - [Develop](#develop)
 
 ## Install
@@ -245,6 +247,7 @@ traces analyze --harness claude-code --session <path> --latest-turn # latest tas
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
 traces ask --harness codex --session <id> --question "Which commands failed?"
+traces facts --harness codex --session <id>        # the deterministic facts sheet, $0
 traces analyze  --all --since 2026-06-18 --out report.md
 traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
 traces validate results/sessions --out conformance.md  # a whole directory of exports
@@ -493,6 +496,7 @@ The command writes two artifacts to `--dir`:
 
 What it checks, and what it costs:
 
+- **Facts first.** Every question receives the deterministic [session-facts sheet](#session-facts) as prepared context before its first model call, at $0. The sheet is not citable; it names the span ids behind each fact.
 - **Citations.** Every `trace://<trace_id>/span/<span_id>` URI in an answer is looked up in the trace. An answer that cites a span the trace does not hold fails.
 - **Budget.** `--budget` is one ceiling shared by every question. `--question-budget` bounds one question. The run refuses to start when the budget cannot cover a single model call, and warns when the budget admits fewer concurrent calls than `--concurrency`.
 - **Cost.** Each cost carries its provenance: `observed` from a provider receipt, `estimated` from token counts, or `uncaptured`. An uncaptured cost stays null; it never becomes zero.
@@ -501,6 +505,39 @@ What it checks, and what it costs:
 
 `ask` uses the same engine and credentials as `--llm`, so it needs `TANGLE_API_KEY` and a Python interpreter with `agent-eval-rpc[dspy]`.
 Do not pass `--llm`; the command is model-backed by definition.
+
+## Session facts
+
+`traces facts` prints the deterministic session-facts sheet: the answers a session audit needs first, computed straight from the spans.
+No model call, no engine, no budget — it costs $0 and always returns the same sheet for the same spans.
+
+```bash
+traces facts --harness codex --session <id>                 # JSON on stdout
+traces facts --harness codex --last 5 --format text         # the short readable form
+traces facts --otlp spans.otlp.jsonl --out facts.json
+```
+
+| Fact | What it is |
+|---|---|
+| `toolCalls` | TOOL spans the agent actually invoked. Synthesized subagent lifecycle spans are excluded and counted separately in `synthesizedToolSpans`, so the total is not high by the number of subagents |
+| `toolCallsByName` | the same calls by tool name, so a category decision is the reader's, not a guess |
+| `subagents` | every `spawn_agent` call with the task name the adapter recorded |
+| `pullRequests` | the pull requests the commands created and merged, each named by number or head branch, with the command span and how the identity was joined. Scanned the way a shell reads the script, so a `gh pr create` inside a heredoc body is not a command that ran |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable |
+| `finalMessages` | the last message of the session's own agent, and of each subagent task, kept apart |
+| `changedFiles` | paths named by patch headers and file-editing tool arguments, with the operation |
+| `firstRecordAt` / `lastRecordAt` | the trace's earliest span start and latest span end |
+| `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
+| `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
+
+Two rules hold for every field:
+
+- **Every fact names its span ids.** `spanIds` lists the spans the value was computed from, so any number here can be opened and checked. The sheet itself is not a span and cannot be cited.
+- **A fact the spans cannot support is `null` with its reason.** It is never guessed, and never a silent zero. `partial` marks a measured value that is known to be incomplete — a truncated patch, or a list above the entry cap.
+
+`facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
+
+The same sheet reaches the model-backed analysts as prepared context, before their first model call — see [Trace analysts](docs/trace-analysts.md#session-facts-as-prepared-context).
 
 ## Session index
 
@@ -818,6 +855,24 @@ Runnable, in [`examples/`](./examples):
 | [`custom-backend.ts`](./examples/custom-backend.ts) | redact + dedup + upload to your own sink |
 | [`register-harness.ts`](./examples/register-harness.ts) | add a new harness by implementing `HarnessTraceAdapter` |
 | [`external-engines.ts`](./examples/external-engines.ts) | drive HALO, Hodoscope, and an external PII scrubber |
+
+## Audit benchmark
+
+[`bench/audit/`](./bench/audit) asks nineteen questions about three synthetic agent
+sessions and scores an arm's answers by exact match, with no model judging anything. It
+measures whether reading a session with `traces` beats reading the raw files, on facts a
+single read cannot cover: counts over hundreds of records, timestamps of specific records,
+and facts linked across tool calls and sessions.
+
+```bash
+pnpm bench:audit fixtures --out /tmp/audit-bench   # the tree an arm may read
+pnpm bench:audit gold --out /tmp/audit-gold.json   # the answer key, kept away from the arm
+pnpm bench:audit score /tmp/arm-answers.json --fixtures /tmp/audit-bench
+```
+
+[`bench/audit/README.md`](./bench/audit/README.md) documents the questions, the scoring
+rules, the answers-file format, and which answers are re-derived from the generated bytes.
+The benchmark ships outside the published package; the model arms are run by hand.
 
 ## Develop
 

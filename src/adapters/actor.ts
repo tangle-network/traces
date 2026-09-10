@@ -161,11 +161,93 @@ export function claudeActor(args: {
 }
 
 /**
- * Derive the actor for a Codex user message. Codex has no sidechain/userType,
- * so it's text-only: synthetic markers → injected, first-turn agent-spawn
- * brief → injected, otherwise human.
+ * Context blocks Codex writes as user-role messages and never reports as a user
+ * turn. The list mirrors `CONTEXTUAL_USER_FRAGMENT_MATCHERS` (openai/codex
+ * `codex-rs/core/src/context/contextual_user_message.rs`); the default matcher
+ * accepts a trimmed block that starts with the open marker and ends with the
+ * close marker, ignoring ASCII case (openai/codex
+ * `codex-rs/context-fragments/src/fragment.rs`).
  */
-export function codexActor(args: { text: string; isFirstUserTurn?: boolean }): Actor {
+const CODEX_CONTEXT_BLOCKS: ReadonlyArray<readonly [open: string, close: string]> = [
+  ['# AGENTS.md instructions', '</INSTRUCTIONS>'],
+  ['<user_instructions>', '</user_instructions>'],
+  ['<environment_context>', '</environment_context>'],
+  ['<skills_instructions>', '</skills_instructions>'],
+  ['<user_shell_command>', '</user_shell_command>'],
+  ['<turn_aborted>', '</turn_aborted>'],
+  ['<subagent_notification>', '</subagent_notification>'],
+  ['<codex_internal_context', '</codex_internal_context>'],
+  ['<goal_context>', '</goal_context>'],
+  ['<recommended_plugins>', '</recommended_plugins>'],
+]
+
+/** Harness warnings Codex also injects as user-role text, matched by prefix. */
+const CODEX_CONTEXT_PREFIXES = [
+  'Warning: apply_patch was requested via ',
+  'Warning: Your account was flagged for potentially high-risk cyber activity',
+  'Warning: The maximum number of unified exec processes you can keep open is',
+] as const
+
+const CODEX_EXTERNAL_CONTEXT = /^<external_([^>]+)>[\s\S]*<\/external_\1>$/
+
+function startsWithIgnoringCase(text: string, prefix: string): boolean {
+  return text.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()
+}
+
+function endsWithIgnoringCase(text: string, suffix: string): boolean {
+  return text.slice(-suffix.length).toLowerCase() === suffix.toLowerCase()
+}
+
+/** Whether one text block of a Codex user-role message is harness context. */
+export function isCodexContextBlock(block: string): boolean {
+  const text = block.trim()
+  if (CODEX_CONTEXT_PREFIXES.some((prefix) => text.startsWith(prefix))) return true
+  if (CODEX_EXTERNAL_CONTEXT.test(text)) return true
+  return CODEX_CONTEXT_BLOCKS.some(
+    ([open, close]) => startsWithIgnoringCase(text, open) && endsWithIgnoringCase(text, close),
+  )
+}
+
+/**
+ * Codex's own label for each content item of a user-role message, from
+ * `internal_chat_message_metadata_passthrough.content_item_kinds`.
+ *
+ * Codex tags every item it puts in a user message with what the item is:
+ * `user.text` for what the person typed, and a namespaced kind for everything
+ * the harness added — `agents_md.instructions` for an AGENTS.md file,
+ * `environments.environment_context` for the environment block,
+ * `goal.internal_context`, `plugins.recommendations`, and so on. A message is
+ * one a person typed exactly when every item in it is a `user.` kind.
+ *
+ * This is the structural signal, so it decides on its own: it is what the
+ * harness recorded, not what the text looks like. Returns undefined when the
+ * record carries no kinds — older rollouts and event mirrors — and the text
+ * heuristics answer instead.
+ */
+export function codexKindsAreHuman(kinds: readonly unknown[] | undefined): boolean | undefined {
+  if (!Array.isArray(kinds) || kinds.length === 0) return undefined
+  if (!kinds.every((kind) => typeof kind === 'string')) return undefined
+  return kinds.every((kind) => (kind as string).startsWith('user.'))
+}
+
+/**
+ * Derive the actor for a Codex user message.
+ *
+ * `kinds` is Codex's own per-item labelling and decides whenever the record
+ * carries it. Without it the decision is text-only: a Codex context block →
+ * injected, synthetic markers → injected, first-turn agent-spawn brief →
+ * injected, otherwise human. `blocks` are the message's separate text blocks;
+ * Codex treats the whole message as context when any one block is.
+ */
+export function codexActor(args: {
+  text: string
+  blocks?: readonly string[]
+  isFirstUserTurn?: boolean
+  kinds?: readonly unknown[]
+}): Actor {
+  const recorded = codexKindsAreHuman(args.kinds)
+  if (recorded !== undefined) return recorded ? 'human' : 'injected'
+  if ((args.blocks ?? [args.text]).some(isCodexContextBlock)) return 'injected'
   if (textIsCmdOrInject(args.text)) return 'injected'
   if (textIsSynthetic(args.text)) return 'injected'
   if (args.isFirstUserTurn && looksLikeAgentPrompt(args.text)) return 'injected'

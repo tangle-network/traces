@@ -36,6 +36,7 @@ import {
 } from './finding-rejections.js'
 import { isBridgeMismatchError } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
+import { sessionFactsContext } from './session-facts.js'
 
 /** One question to ask of the selected traces. */
 export interface TraceQuestion {
@@ -206,11 +207,11 @@ export const MAX_TRACE_QUESTION_CHARS = QUESTION_FIELD_MAX_CHARS - ASK_QUESTION_
 const ASK_RULES = [
   'TRACES ASK RULES',
   '1. Answer QUESTION only from trace tool results retrieved in this run.',
-  '2. PREPARED CONTEXT: near the end of analyst_instructions holds JSON listing every trace. Parse it; copy IDs from it or from tool output.',
+  '2. PREPARED CONTEXT ends analyst_instructions: the trace list JSON, then a SESSION FACTS sheet. Parse both; copy IDs from them.',
   // The rules must fit the DSPy preview head, so this one does not also legislate
   // formatting: `traceCitationsInText` reads a citation the model emphasised.
-  '3. Cite each fact as trace://<trace_id>/span/<span_id>. Every cited span must exist.',
-  '4. Quote excerpts from viewSpans output, never from searchTrace hits.',
+  '3. Cite each fact as trace://<trace_id>/span/<span_id>: span ids the sheet names, never the sheet.',
+  '4. Quote excerpts from viewSpans output, never searchTrace hits.',
   '5. If the trace does not record a fact, say "not in trace".',
 ].join('\n')
 
@@ -358,8 +359,18 @@ function describeTraces(spans: readonly OtlpSpan[]): TraceQuestionTrace[] {
   }))
 }
 
-function preparedContext(traces: readonly TraceQuestionTrace[]): string {
-  return JSON.stringify({
+/**
+ * What every question receives before its first model call: the trace list,
+ * then the deterministic session-facts sheet.
+ *
+ * Both are free. The list lets the model copy trace IDs instead of guessing
+ * them; the sheet answers the counting questions the bounded trace tools cannot
+ * (`viewTrace` degrades to a 20-entry histogram above 150,000 bytes, and
+ * `searchTrace` stops at 500 hits). Neither is citable: the sheet names the span
+ * ids behind every fact, and a citation still has to resolve against the store.
+ */
+function preparedContext(traces: readonly TraceQuestionTrace[], spans: readonly OtlpSpan[]): string {
+  const list = JSON.stringify({
     traces: traces.slice(0, MAX_CONTEXT_TRACES).map((trace) => ({
       trace_id: trace.traceId,
       session_id: trace.sessionId,
@@ -370,6 +381,8 @@ function preparedContext(traces: readonly TraceQuestionTrace[]): string {
     })),
     omitted_traces: Math.max(0, traces.length - MAX_CONTEXT_TRACES),
   })
+  const sheet = sessionFactsContext(spans)
+  return sheet ? `${list}\n\n${sheet}` : list
 }
 
 const TRACE_URI = /trace:\/\/[^\s/"'`<>()[\]{}]+\/span\/[^\s/"'`<>()[\]{},;]+/g
@@ -590,7 +603,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   })
   const store = await openAgenticTraceStore(traceFile)
   const traces = describeTraces(opts.spans)
-  const context = preparedContext(traces)
+  const context = preparedContext(traces, opts.spans)
   const runId = `traces-ask-${Date.parse(generatedAt) || Date.now()}`
   const ledger = new CostLedger(budgetUsd)
 

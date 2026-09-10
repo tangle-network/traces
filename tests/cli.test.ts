@@ -131,7 +131,11 @@ describe('traces CLI', () => {
     expect(result.spanCount).toBe(2)
     expect(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8')).not.toBe('')
     expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain('1 session(s), 2 spans')
-  }, 15_000)
+    // Three cold CLI subprocesses, each allowed 30s of its own. A 15s outer
+    // budget was shorter than the inner ones and failed on a loaded machine
+    // while every subprocess was still inside its own timeout, which is the
+    // disagreement `vitest.config.ts` raised the default to fix.
+  }, 90_000)
 
   it('turns deterministic analyze signals into actionable findings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-actionable-'))
