@@ -19,6 +19,7 @@ import { ClaudeAdapter } from '../../src/adapters/claude.js'
 import { CodexAdapter } from '../../src/adapters/codex.js'
 import { generateBench, writeFixtures } from './fixtures.js'
 import { QUESTIONS, answerJsonSchema, promptRows } from './questions.js'
+import { TIME_TOLERANCE_MS } from './score.js'
 
 const bench = generateBench()
 const fileByPath = new Map(bench.files.map((file) => [file.path, file.content]))
@@ -76,6 +77,30 @@ const operatorCalls = codexCalls(operator)
 const commandOf = (call: CodexCall): string => String((JSON.parse(call.argument) as { cmd?: string }).cmd ?? '')
 const execCalls = operatorCalls.filter((call) => call.name === 'exec_command')
 const scripts = operatorCalls.filter((call) => call.name === 'exec')
+const spawnCalls = operatorCalls.filter((call) => call.name === 'spawn_agent')
+
+/** A run one launch reported as started, read from the output line that announced it. */
+interface StartedRun {
+  id: string
+  spec: string
+  variant?: string
+}
+
+/** Every launch these outputs announced, whether the command ran directly or inside a script. */
+function startedRuns(calls: readonly CodexCall[]): StartedRun[] {
+  return calls.flatMap((call) =>
+    [...call.output.matchAll(/^started run (\S+) \(spec ([^,)]+)(?:, variant ([^)]+))?\)$/gm)]
+      .map((match) => ({ id: match[1]!, spec: match[2]!, ...(match[3] ? { variant: match[3] } : {}) })),
+  )
+}
+
+/** Pull request numbers a merge confirmation names in a tool output. */
+const mergedIn = (text: string): number[] =>
+  [...text.matchAll(/Squashed and merged pull request [^#]+#(\d+)/g)].map((match) => Number(match[1]))
+
+const directLaunches = execCalls.filter((call) => commandOf(call).startsWith('labctl run '))
+const failedLaunches = directLaunches.filter((call) => /Process exited with code (?!0)/.test(call.output))
+const launches = startedRuns([...execCalls, ...scripts])
 
 /** Text of a user message, or undefined for any other record. */
 function userText(row: CodexRow): string | undefined {
@@ -89,6 +114,19 @@ const humanTurns = operator
   .map((row) => ({ row, text: userText(row) }))
   .filter((item): item is { row: CodexRow; text: string } => item.text !== undefined)
   .filter((item) => !item.text.startsWith('<') && !item.text.startsWith('#'))
+
+/** Every gold value the scorer compares as a time, wherever it sits in an answer. */
+const scoredTimes = QUESTIONS.flatMap((question) => {
+  const gold = bench.gold[question.id]!
+  return Object.entries(question.schema).flatMap(([name, field]) => {
+    if (field.kind === 'time') return [String(gold[name])]
+    if (field.kind !== 'records') return []
+    const rows = gold[name] as Array<Record<string, unknown>>
+    return Object.entries(field.fields)
+      .filter(([, subfield]) => subfield.kind === 'time')
+      .flatMap(([subfield]) => rows.map((row) => row[subfield]).filter((value) => value != null).map(String))
+  })
+})
 
 describe('audit benchmark generator', () => {
   it('produces the same bytes on every run', () => {
@@ -117,6 +155,19 @@ describe('audit benchmark generator', () => {
     for (const question of QUESTIONS) {
       const schema = answerJsonSchema(question) as { required: string[] }
       expect(schema.required.sort()).toEqual(Object.keys(bench.gold[question.id]!).sort())
+    }
+  })
+
+  it('keeps every scored time further apart than the scorer tolerates', () => {
+    // The 1 s tolerance is only safe while no other record in the same file carries a time
+    // within 1 s of a scored one; otherwise a neighbor's time would be accepted as correct.
+    const codexTimes = [operatorPath, childPath].map((path) => codexRows(path).map((row) => Date.parse(row.timestamp)))
+    expect(scoredTimes.length).toBeGreaterThan(5)
+    for (const value of scoredTimes) {
+      const at = Date.parse(value)
+      const times = codexTimes.find((list) => list.includes(at))
+      expect(times, `${value} is not the timestamp of any record`).toBeDefined()
+      expect(times!.filter((other) => other !== at && Math.abs(other - at) <= TIME_TOLERANCE_MS)).toEqual([])
     }
   })
 
@@ -155,10 +206,9 @@ describe('planted facts in the operator session', () => {
   })
 
   it('spawns sixteen agents, one of which fails', () => {
-    const spawns = operatorCalls.filter((call) => call.name === 'spawn_agent')
-    expect(spawns).toHaveLength(16)
-    expect(spawns.filter((call) => call.output.startsWith('spawn_agent failed'))).toHaveLength(1)
-    const succeeded = spawns.filter((call) => !call.output.startsWith('spawn_agent failed'))
+    expect(spawnCalls).toHaveLength(16)
+    expect(spawnCalls.filter((call) => call.output.startsWith('spawn_agent failed'))).toHaveLength(1)
+    const succeeded = spawnCalls.filter((call) => !call.output.startsWith('spawn_agent failed'))
     const names = [...new Set(succeeded.map((call) => String((JSON.parse(call.argument) as { task_name: string }).task_name)))].sort()
     expect(bench.gold['op.subagents']).toEqual({ spawn_calls: 16, failed_spawns: 1, task_names: names })
   })
@@ -177,10 +227,9 @@ describe('planted facts in the operator session', () => {
   })
 
   it('merges three pull requests three different ways', () => {
-    const merged = (text: string): number[] => [...text.matchAll(/Squashed and merged pull request [^#]+#(\d+)/g)].map((match) => Number(match[1]))
-    expect(execCalls.flatMap((call) => merged(call.output))).toEqual([41])
-    expect(operatorCalls.filter((call) => call.name === 'write_stdin').flatMap((call) => merged(call.output))).toEqual([42])
-    expect(scripts.flatMap((call) => merged(call.output))).toEqual([43])
+    expect(execCalls.flatMap((call) => mergedIn(call.output))).toEqual([41])
+    expect(operatorCalls.filter((call) => call.name === 'write_stdin').flatMap((call) => mergedIn(call.output))).toEqual([42])
+    expect(scripts.flatMap((call) => mergedIn(call.output))).toEqual([43])
     const prs = bench.gold['op.pull-requests']!.prs as Array<{ number: number; merged_at?: string }>
     expect(prs.filter((pr) => pr.merged_at)).toHaveLength(3)
     // A merge that the harness refused must not count as the merge.
@@ -188,13 +237,36 @@ describe('planted facts in the operator session', () => {
   })
 
   it('repeats and cancels run commands', () => {
-    const launches = execCalls.filter((call) => commandOf(call).startsWith('labctl run '))
-    const specs = launches.map((call) => commandOf(call).split(' ')[2]!)
+    // A direct launch either announced a run or exited nonzero; nothing else is a launch,
+    // so the announcements and the failures together account for every `labctl run` call.
+    expect(startedRuns(execCalls).length + failedLaunches.length).toBe(directLaunches.length)
+    // Two more launches happen inside an exec script, where no `labctl run` call record exists.
+    expect(startedRuns(scripts).length).toBeGreaterThan(0)
+    const specs = launches.map((run) => run.spec)
     expect(new Set(specs).size).toBeLessThan(specs.length)
     const cancels = execCalls.filter((call) => commandOf(call).startsWith('labctl cancel '))
     const cancelled = cancels.filter((call) => call.output.includes('Process exited with code 0'))
-    expect(bench.gold['op.runs']!.cancelled).toBe(cancelled.length)
     expect(cancels.length).toBeGreaterThan(cancelled.length)
+    expect(bench.gold['op.runs']).toEqual({
+      launched: launches.length,
+      failed_launches: failedLaunches.length,
+      cancelled: cancelled.length,
+      specs: [...new Set(specs)].sort(),
+      beta_probe_variants: [...new Set(launches.filter((run) => run.spec === 'beta-probe').map((run) => run.variant!))].sort(),
+    })
+  })
+
+  it('acted as an operator, in the merges, launches and spawns the bytes show', () => {
+    // What makes this session the operator rather than an observer: it carries typed human
+    // turns, no parent thread claims it, and it merged, launched and spawned work itself.
+    expect(operator[0]!.payload.parent_thread_id).toBeUndefined()
+    expect(humanTurns.length).toBeGreaterThan(3)
+    expect(bench.gold['op.role']).toEqual({
+      role: 'operator',
+      merged_prs: operatorCalls.flatMap((call) => mergedIn(call.output)).length,
+      launched_runs: launches.length,
+      spawn_calls: spawnCalls.length,
+    })
   })
 
   it('ends with a short human turn after a substantive one, then injected text', () => {

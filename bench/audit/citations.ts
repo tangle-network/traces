@@ -146,6 +146,10 @@ export async function spanRecordMap(root: string, manifest: BenchManifest): Prom
         }
       }
       const records = [...refs.values()]
+      // A span that carries no source record names nothing. Mapping it to an empty list
+      // would report a citation of it as resolved, which is what citing a real but wrong
+      // record looks like, and the two failures have to stay apart in the report.
+      if (records.length === 0) continue
       spans.set(span.span_id, records)
       for (const key of ['traces.codex.source_span_id', 'traces.claude.source_span_id']) {
         const alias = span.attributes[key]

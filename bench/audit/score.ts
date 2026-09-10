@@ -3,8 +3,9 @@
  *
  * Each schema leaf is scored on its own: counts, numbers, names and paths by
  * equality, sets by set equality, times within 1 s, and quotes by verbatim
- * text plus a citation that resolves to the gold record. A question is correct
- * when every leaf is, wrong when none is, and partial otherwise.
+ * text plus a citation that resolves to the gold record. A leaf the gold has no
+ * value for is correct only when the answer says "not in trace". A question is
+ * correct when every leaf is, wrong when none is, and partial otherwise.
  */
 
 import { type CitationIndex, normalizeText, type RecordRef } from './citations.js'
@@ -113,6 +114,9 @@ function sameSet(answer: unknown, gold: readonly unknown[], of: 'integer' | 'str
 }
 
 function scoreField(path: string, field: Field, answer: unknown, gold: unknown, index: CitationIndex): LeafResult[] {
+  // A gold leaf the trace has no value for is answered by "not in trace" and by nothing
+  // else, whatever its kind. Without this, an optional field could not be scored at all.
+  if (gold === null || gold === undefined) return [leaf(path, isNotInTrace(answer), answer)]
   switch (field.kind) {
     case 'count':
       return [leaf(path, Number.isSafeInteger(answer) && answer === gold, answer)]
@@ -268,7 +272,9 @@ export interface ArmScore {
 
 function tally(rows: ReadonlyArray<{ row: AnswerRow; scored: ScoredAnswer }>): Tally {
   const citations = rows.flatMap(({ scored }) => scored.leaves.flatMap((item) => item.citations))
-  const bases = new Set(rows.map(({ row }) => (row.cost_usd == null ? null : row.cost_basis ?? null)))
+  // An attempt that reported no cost says nothing about the basis of the ones that did;
+  // `missing` already carries the omission.
+  const bases = new Set(rows.filter(({ row }) => row.cost_usd != null).map(({ row }) => row.cost_basis ?? null))
   const cost = distribution(rows.map(({ row }) => row.cost_usd))
   const knownBases = [...bases].filter((basis): basis is CostBasis => basis !== null)
   return {
@@ -288,7 +294,7 @@ function tally(rows: ReadonlyArray<{ row: AnswerRow; scored: ScoredAnswer }>): T
     toolCalls: distribution(rows.map(({ row }) => row.tool_calls)),
     cost: {
       ...cost,
-      basis: cost.reported === 0 ? 'unknown' : knownBases.length === 1 && !bases.has(null) ? knownBases[0]! : 'mixed',
+      basis: knownBases.length === 0 ? 'unknown' : knownBases.length === 1 && !bases.has(null) ? knownBases[0]! : 'mixed',
     },
   }
 }
@@ -323,25 +329,34 @@ function costCell(cost: Tally['cost']): string {
   return `$${cost.total.toFixed(4)} ${cost.basis}${missing}`
 }
 
-function row(label: string, item: Tally): string {
+/**
+ * One table row. `wordings` is the denominator a reader compares arms on: for the two
+ * aggregate rows it is every wording the benchmark asks, so an arm that skipped the hard
+ * questions is not rewarded with a smaller denominator.
+ */
+function row(label: string, item: Tally, wordings = item.attempts): string {
   const cites = item.citations.total === 0
     ? 'none'
     : `${item.citations.verified}/${item.citations.total} verify, ${item.citations.onGold} on gold`
-  return `| ${label} | ${item.correct}/${item.partial}/${item.wrong} of ${item.attempts} | ${item.falseNotInTrace} | ${cites} | ${fmt(item.wallMs.median)} / ${fmt(item.wallMs.max)} | ${fmt(item.modelCalls.total)} | ${fmt(item.toolCalls.total)} | ${costCell(item.cost)} |`
+  const skipped = wordings - item.attempts
+  const verdicts = `${item.correct}/${item.partial}/${item.wrong} of ${wordings}${skipped > 0 ? ` (${skipped} not attempted)` : ''}`
+  return `| ${label} | ${verdicts} | ${item.falseNotInTrace} | ${cites} | ${fmt(item.wallMs.median)} / ${fmt(item.wallMs.max)} | ${fmt(item.modelCalls.total)} | ${fmt(item.toolCalls.total)} | ${costCell(item.cost)} |`
 }
 
 export function renderArmScore(score: ArmScore): string {
   const header = [
-    '| Question | Correct/partial/wrong | False "not in trace" | Citations | Wall ms median / max | Model calls | Tool calls | Cost |',
+    '| Question | Correct/partial/wrong of wordings | False "not in trace" | Citations | Wall ms median / max | Model calls | Tool calls | Cost |',
     '|---|---|---|---|---|---|---|---|',
   ]
+  const canonicalWordings = QUESTIONS.length
+  const heldOutWordings = QUESTIONS.reduce((sum, question) => sum + question.paraphrases.length, 0)
   return [
     `# Audit benchmark score: ${score.arm}`,
     '',
     ...(score.notes ? [score.notes, ''] : []),
     ...header,
-    row('all canonical', score.canonical),
-    row('all held-out', score.heldOut),
+    row('all canonical', score.canonical, canonicalWordings),
+    row('all held-out', score.heldOut, heldOutWordings),
     ...score.questions.map((item) => row(`${item.question}${item.heldOut ? ` (paraphrase ${item.variant})` : ''}`, item)),
     '',
     score.notAttempted.length === 0

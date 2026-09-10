@@ -6,8 +6,12 @@
  * the files back. The gold therefore does not depend on any traces adapter, and
  * an adapter defect shows up as a wrong answer instead of a wrong answer key.
  *
- * Neighboring records are at least 2 s apart, so the scorer's 1 s tolerance for
- * times can never accept the time of an adjacent record.
+ * Every timestamp the gold scores as a time is more than the scorer's 1 s
+ * tolerance away from any other record time in its file, so the tolerance can
+ * never accept a neighboring record's time. That is the property the tolerance
+ * rests on, and `fixtures.test.ts` asserts it. It is narrower than a uniform
+ * spacing: the child's inherited history all carries the fork timestamp, as
+ * Codex rewrites it, and no scored time is read from that block.
  */
 
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -832,7 +836,9 @@ export function generateBench(): GeneratedBench {
     { path: operator.file, content: `${operator.rows.join('\n')}\n` },
     { path: child.file, content: child.content },
     ...claude.files,
-  ].sort((a, b) => a.path.localeCompare(b.path))
+    // Code-unit order, the order `manifest.files` is asserted in and the order a
+    // plain `sort()` gives, rather than a locale-dependent collation.
+  ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const basenames = new Set(files.map((item) => item.path.split('/').at(-1)))
   if (basenames.size !== files.length) throw new Error('fixture file basenames must be unique so line citations resolve')
   return {
