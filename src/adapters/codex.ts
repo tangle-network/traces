@@ -14,7 +14,7 @@
  * Shared by the codex-acp wrapper via alias (same rollout format).
  */
 
-import { sourceOf, textSources } from '../source-location.js'
+import { type SourceReferences, sourceOf, textSources } from '../source-location.js'
 
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -34,11 +34,16 @@ import type {
   SpawnedChildResolution,
 } from '../types.js'
 import { codexActor } from './actor.js'
-import { capText, userPromptSpan } from './conversation.js'
+import { ACTOR_ATTR, capText, userPromptSpan } from './conversation.js'
 import {
+  type CodexCommandExecution,
+  type CodexCompletedItem,
+  codexCompletedItem,
+  type CodexFileChange,
   type CodexLine,
   codexSubagentActivity,
   type CodexTokenUsage,
+  contentTextBlocks,
   contentToString,
   latestTimestamp,
   multiAgentOperation,
@@ -57,16 +62,57 @@ import {
   isCodexTaskBoundary,
   resolveCodexParentTask,
 } from './codex-task-scope.js'
-import { recordToolOutput, toolIoAttributes } from './tool-io.js'
+import {
+  INHERITED_SOURCE_ATTR,
+  INHERITED_SPAN_ATTR,
+  INHERITED_SPAN_COUNT_ATTR,
+  INHERITED_SPANS_OMITTED_ATTR,
+  type InheritedSpanSource,
+  isInheritedSpan,
+  SYNTHESIZED_SOURCE_ATTR,
+  SYNTHESIZED_SPAN_ATTR,
+} from './provenance.js'
+import { INNER_TOOL_CALL_LEVEL, recordToolOutput, TOOL_CALL_LEVEL_ATTR, toolIoAttributes } from './tool-io.js'
 
 export { CodexTaskScopeError } from './codex-task-scope.js'
 
 const SERVICE = 'codex'
 const SESSION_HEAD_LINES = 40
 
+/**
+ * Per-session ceiling on inherited spans. The prefix of a fork and the retained
+ * history of every `compacted` record are unbounded in a long rollout, and this
+ * adapter parses under a bounded heap. What the cap drops is counted on the root
+ * in `traces.session.inherited_spans_omitted`, never silently discarded.
+ */
+const MAX_INHERITED_SPANS = 200
+
 const CODEX_SOURCE_TRACE_ID = 'traces.codex.source_trace_id'
 const CODEX_SOURCE_SPAN_ID = 'traces.codex.source_span_id'
 const CODEX_SOURCE_PARENT_SPAN_ID = 'traces.codex.source_parent_span_id'
+
+/**
+ * The harness's own cumulative token counter, carried verbatim.
+ *
+ * Codex reports `token_count.info.total_token_usage` beside the per-turn
+ * `last_token_usage` delta. The two are different numbers and neither derives
+ * the other: summing the deltas misses whatever the harness counted outside the
+ * recorded turns, and summing the cumulative snapshots multiplies the session
+ * total by the number of events. The last snapshot IS the session total, so it
+ * is copied onto the root span and never recomputed here.
+ */
+const SESSION_TOTAL_TOKENS = 'traces.session.total_tokens'
+const SESSION_TOTAL_INPUT_TOKENS = 'traces.session.total_input_tokens'
+const SESSION_TOTAL_OUTPUT_TOKENS = 'traces.session.total_output_tokens'
+const SESSION_TOTAL_REASONING_TOKENS = 'traces.session.total_reasoning_tokens'
+const SESSION_TOTAL_CACHED_INPUT_TOKENS = 'traces.session.total_cached_input_tokens'
+const SESSION_TOTAL_TOKENS_SOURCE = 'traces.session.total_tokens_source'
+const CODEX_TOTAL_TOKENS_SOURCE = 'codex.token_count.info.total_token_usage'
+
+/** Carry a reported counter only when it is a usable non-negative number. */
+function reportedCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
 
 /** Convert Codex's readable span identities to fixed-width OTLP wire IDs. */
 function normalizeCodexIds(spans: OtlpSpan[]): void {
@@ -167,8 +213,9 @@ function explicitOutputError(value: unknown, timeoutIsError = true): boolean | u
     const exitCode = numericStatus(header.match(/^Process exited with code[ \t]+(-?\d+)[ \t]*$/im)?.[1])
     if (exitCode !== undefined) return exitCode !== 0
   }
-  if (/^Script completed\s*\nWall time:/i.test(header)) return false
-  if (/^Script failed\s*\nWall time:/i.test(header)) return true
+  // Receipts print either "Wall time: 1.2 seconds" or "Wall time 1.2 seconds".
+  if (/^Script completed\s*\nWall time\b/i.test(header)) return false
+  if (/^Script failed\s*\nWall time\b/i.test(header)) return true
   const scriptExitCode = numericStatus(header.match(/^Script error:[ \t]*\r?\nExit code:[ \t]*(-?\d+)[ \t]*(?:\r?\n|$)/i)?.[1])
   if (scriptExitCode !== undefined) return scriptExitCode !== 0
   const commandExitCode = numericStatus(text.match(/^Command failed with exit code[ \t]+(-?\d+)\.?$/i)?.[1])
@@ -379,6 +426,189 @@ function closeSpanAt(target: OtlpSpan, sourceEndTime: string): void {
   }
   target.end_time = sourceEndTime
 }
+
+/** A completed item the adapter turns into spans; user messages take the turn path instead. */
+type CompletedItem =
+  & Extract<CodexCompletedItem, { type: 'CommandExecution' | 'FileChange' }>
+  & { readonly recordTime: string }
+
+/** The time window of a model-issued call: its call record to its output record. */
+interface ToolWindow {
+  readonly startMs: number
+  readonly endMs: number
+}
+
+/**
+ * How an item was placed. Codex item IDs never equal call IDs, so an item joins
+ * the one call whose window contains the item's whole run. An item that ran
+ * past every window (a command left running, then polled) or sits inside two
+ * windows (parallel calls) stays under the session root instead of a guess.
+ */
+type ItemJoin = 'call' | 'unmatched' | 'ambiguous'
+
+function joinItem(
+  windows: ReadonlyMap<OtlpSpan, ToolWindow>,
+  startMs: number,
+  endMs: number,
+): { parent?: OtlpSpan; join: ItemJoin } {
+  const matches: OtlpSpan[] = []
+  for (const [toolSpan, window] of windows) {
+    if (window.startMs <= startMs && endMs <= window.endMs) matches.push(toolSpan)
+  }
+  if (matches.length === 1) return { parent: matches[0], join: 'call' }
+  return { join: matches.length === 0 ? 'unmatched' : 'ambiguous' }
+}
+
+function itemTimes(
+  item: { readonly startedAtMs?: number; readonly completedAtMs?: number },
+  recordTime: string,
+): { start: string; end: string; timeSource?: 'completed_only' | 'record' } {
+  const end = timestampFromEpochMs(item.completedAtMs) ?? recordTime
+  const start = timestampFromEpochMs(item.startedAtMs) ?? end
+  if (item.startedAtMs !== undefined && item.completedAtMs !== undefined) return { start, end }
+  return { start, end, timeSource: item.completedAtMs === undefined ? 'record' : 'completed_only' }
+}
+
+function itemStatus(
+  status: string | undefined,
+  noun: string,
+  exitCode?: number,
+): { code: OtlpSpan['status']['code']; message?: string } {
+  if (exitCode !== undefined && exitCode !== 0) return { code: 'ERROR', message: `${noun} exited ${exitCode}` }
+  if (status === 'failed' || status === 'declined') return { code: 'ERROR', message: `${noun} ${status}` }
+  if (exitCode === 0 || status === 'completed') return { code: 'OK' }
+  return { code: 'UNSET' }
+}
+
+function itemSources(item: object, fields: readonly string[]) {
+  return fields.flatMap((field) => {
+    const reference = sourceOf(item, field)
+    return reference ? [reference] : []
+  })
+}
+
+function innerItemAttributes(
+  type: CompletedItem['type'],
+  itemId: string,
+  join: ItemJoin,
+  timeSource: string | undefined,
+  status: string | undefined,
+): Record<string, unknown> {
+  return {
+    // Existing OTLP importers classify this marker as a container, not a call.
+    'span.type': 'tool.execution',
+    [TOOL_CALL_LEVEL_ATTR]: INNER_TOOL_CALL_LEVEL,
+    'traces.codex.item_type': type,
+    'traces.codex.item_id': itemId,
+    'traces.codex.item_join': join,
+    ...(timeSource ? { 'traces.codex.item_time_source': timeSource } : {}),
+    ...(status ? { 'traces.codex.item_status': status } : {}),
+  }
+}
+
+interface ItemSpanContext {
+  readonly traceId: string
+  readonly rootId: string
+  readonly windows: ReadonlyMap<OtlpSpan, ToolWindow>
+}
+
+/**
+ * One CHAIN span per command. Command text, cwd, and output stay in the tool
+ * I/O keys, which metadata-only upload strips and external redactors scrub.
+ */
+function commandSpan(context: ItemSpanContext, item: object, command: CodexCommandExecution, recordTime: string): OtlpSpan {
+  const { start, end, timeSource } = itemTimes(command, recordTime)
+  const { parent, join } = joinItem(context.windows, Date.parse(start), Date.parse(end))
+  const status = itemStatus(command.status, 'command', command.exitCode)
+  const commandSpan = span({
+    traceId: context.traceId,
+    spanId: `command:${command.itemId}`,
+    parentSpanId: parent?.span_id ?? context.rootId,
+    name: 'command.execution',
+    kind: 'CHAIN',
+    startTime: start,
+    status: status.code,
+    statusMessage: status.message,
+    service: SERVICE,
+    agent: SERVICE,
+    extra: {
+      ...toolIoAttributes({
+        input: { command: command.command, ...(command.cwd ? { cwd: command.cwd } : {}) },
+        inputSource: itemSources(item, ['command', ...(command.cwd ? ['cwd'] : [])]),
+        output: command.output,
+        outputSource: itemSources(item, command.outputFields),
+      }),
+      ...innerItemAttributes('CommandExecution', command.itemId, join, timeSource, command.status),
+      ...(command.exitCode === undefined ? {} : { 'process.exit_code': command.exitCode }),
+      ...(command.processId ? { 'traces.codex.process_id': command.processId } : {}),
+      ...(command.source ? { 'traces.codex.command_source': command.source } : {}),
+    },
+  })
+  closeSpanAt(commandSpan, end)
+  return commandSpan
+}
+
+/** One CHAIN span per changed path; the path stays in `input.value` for the same reason as commands. */
+function fileChangeSpans(context: ItemSpanContext, item: object, fileChange: CodexFileChange, recordTime: string): OtlpSpan[] {
+  const { start, end, timeSource } = itemTimes(fileChange, recordTime)
+  const { parent, join } = joinItem(context.windows, Date.parse(start), Date.parse(end))
+  const status = itemStatus(fileChange.status, 'file change')
+  return fileChange.changes.map((change, index) => {
+    const changeSpan = span({
+      traceId: context.traceId,
+      spanId: `file-change:${fileChange.itemId}:${index}`,
+      parentSpanId: parent?.span_id ?? context.rootId,
+      name: 'file.change',
+      kind: 'CHAIN',
+      startTime: start,
+      status: status.code,
+      statusMessage: status.message,
+      service: SERVICE,
+      agent: SERVICE,
+      extra: {
+        ...toolIoAttributes({
+          input: { path: change.path, kind: change.kind, ...(change.movePath ? { move_path: change.movePath } : {}) },
+          inputSource: sourceOf(item, 'changes'),
+        }),
+        ...innerItemAttributes('FileChange', fileChange.itemId, join, timeSource, fileChange.status),
+        'traces.codex.file_change_kind': change.kind,
+      },
+    })
+    closeSpanAt(changeSpan, end)
+    return changeSpan
+  })
+}
+
+/** A user turn awaiting its second record: Codex logs each typed turn as a response item and a `user_message` event. */
+interface UserTurnCandidate {
+  readonly span: OtlpSpan
+  readonly key: string
+  readonly task: number
+}
+
+/**
+ * Legacy Codex prepends context to the submitted message and marks the typed
+ * text with this line (openai/codex `codex-rs/protocol/src/protocol.rs`
+ * `USER_MESSAGE_BEGIN`), so the two records of one turn can differ by a prefix.
+ */
+const USER_MESSAGE_BEGIN = '## My request for Codex:'
+
+function userTurnKey(text: string): string {
+  const begin = text.indexOf(USER_MESSAGE_BEGIN)
+  const typed = begin === -1 ? text : text.slice(begin + USER_MESSAGE_BEGIN.length)
+  return typed.trim().replace(/\s+/g, ' ')
+}
+
+/** Remove and return the latest candidate with the same text in the same task. */
+function takeUserTurn(candidates: UserTurnCandidate[], key: string, task: number): UserTurnCandidate | undefined {
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index]!
+    if (candidate.key === key && candidate.task === task) return candidates.splice(index, 1)[0]
+  }
+  return undefined
+}
+
+const USER_MESSAGE_EVENT_ATTR = 'traces.codex.user_message_event'
 
 const verificationCommand =
   /\b(?:pnpm|npm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9:_-]+)?\b|\b(?:vitest|jest|pytest|tsc|biome|eslint|sha256sum|pdfinfo|pdftotext)\b|\bgo\s+test\b|\bcargo\s+(?:test|check|clippy|build)\b|\bgit\s+(?:status|diff|show|merge-tree)\b|\bgh-drew\s+pr\s+(?:view|checks)\b/i
@@ -663,9 +893,204 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let step = 0
     let lastLlm = rootId
     let sawUserTurn = false
+    let sawInheritedTurn = false
+    let inheritedSpansEmitted = 0
+    let inheritedSpansOmitted = 0
     let lastCumulativeTokenUsage: string | undefined
+    let sessionTotalUsage: CodexTokenUsage | undefined
     let lastTimestamp: string | undefined
     const awaitingModel = model ? [] : [root]
+    const toolWindows = new Map<OtlpSpan, ToolWindow>()
+    const completedItems: CompletedItem[] = []
+    const completedItemKeys = new Set<string>()
+    const skippedItemCounts = new Map<string, number>()
+    const countSkippedItem = (label: string): void => {
+      skippedItemCounts.set(label, (skippedItemCounts.get(label) ?? 0) + 1)
+    }
+    // Pairs the two records of one typed turn. A task index scopes the pairing,
+    // so the same short reply in two turns stays two turns.
+    let taskIndex = 0
+    const unpairedUserItems: UserTurnCandidate[] = []
+    const unpairedUserEvents: UserTurnCandidate[] = []
+    const tasksWithUserEvents = new Set<number>()
+    const inheritedTurnKeys = new Set<string>()
+    /**
+     * Record one turn Codex reports as submitted input. Codex reports these
+     * turns and never its own context blocks: the legacy `user_message` event
+     * and the current `item_completed`/`UserMessage` item both come from the
+     * same filter (openai/codex `codex-rs/core/src/event_mapping.rs`), and the
+     * rollout carries one or the other by history mode (openai/codex
+     * `codex-rs/rollout/src/policy.rs`). The response-item copy of the same turn
+     * pairs with this record instead of becoming a second span.
+     */
+    const recordSubmittedTurn = (raw: string, ts: string, contentSource: SourceReferences): void => {
+      const prompt = capText(raw)
+      if (!prompt) return
+      tasksWithUserEvents.add(taskIndex)
+      const key = userTurnKey(raw)
+      const recorded = takeUserTurn(unpairedUserItems, key, taskIndex)
+      if (recorded) {
+        recorded.span.attributes[USER_MESSAGE_EVENT_ATTR] = true
+        return
+      }
+      const actor = sessionRole === 'child'
+        ? 'agent'
+        : codexActor({ text: prompt, isFirstUserTurn: !sawUserTurn })
+      sawUserTurn = true
+      const turnSpan = userPromptSpan({
+        traceId,
+        spanId: `msg:${step}:user`,
+        parentSpanId: rootId,
+        startTime: ts,
+        content: prompt,
+        contentSource,
+        service: SERVICE,
+        agent: SERVICE,
+        step,
+        actor,
+      })
+      turnSpan.attributes[USER_MESSAGE_EVENT_ATTR] = true
+      spans.push(turnSpan)
+      unpairedUserEvents.push({ span: turnSpan, key, task: taskIndex })
+      step += 1
+    }
+    /** Reserve a slot for one inherited span, counting what the cap turns away. */
+    const claimInheritedSpan = (): boolean => {
+      if (inheritedSpansEmitted >= MAX_INHERITED_SPANS) {
+        inheritedSpansOmitted += 1
+        return false
+      }
+      inheritedSpansEmitted += 1
+      return true
+    }
+    /**
+     * A turn this session carries but did not receive: the prefix a fork copies
+     * from its parent, and the history a `compacted` record retains. Codex
+     * rewrites both into the child's rollout, and the task-scope walk used to
+     * drop them, so a forked child's human context reached no span at all and
+     * "what did the human ask for?" had no answer in the trace.
+     *
+     * The span is a normal `user.prompt` with its real actor, plus
+     * `traces.session.inherited` — a reader that wants the human's words finds
+     * them by name, and a count of THIS scope's turns excludes them by flag.
+     *
+     * Deduplicated on the turn text, because one retained turn is rewritten
+     * into every later `compacted` record. The key is bounded (length plus a
+     * text prefix) so a long session cannot grow the key set without bound.
+     */
+    const recordInheritedTurn = (
+      raw: string,
+      ts: string,
+      contentSource: SourceReferences,
+      source: InheritedSpanSource,
+      blocks?: readonly string[],
+    ): void => {
+      const prompt = capText(raw)
+      if (!prompt) return
+      const key = userTurnKey(raw)
+      const dedupKey = `${key.length}:${key.slice(0, 256)}`
+      if (inheritedTurnKeys.has(dedupKey)) return
+      if (!claimInheritedSpan()) return
+      inheritedTurnKeys.add(dedupKey)
+      const actor = codexActor({ text: prompt, blocks, isFirstUserTurn: !sawInheritedTurn })
+      sawInheritedTurn = true
+      const turnSpan = userPromptSpan({
+        traceId,
+        spanId: `inherited:${step}:user`,
+        parentSpanId: rootId,
+        startTime: ts,
+        content: prompt,
+        contentSource,
+        service: SERVICE,
+        agent: SERVICE,
+        step,
+        actor,
+      })
+      turnSpan.attributes[INHERITED_SPAN_ATTR] = true
+      turnSpan.attributes[INHERITED_SOURCE_ATTR] = source
+      spans.push(turnSpan)
+      step += 1
+    }
+    /**
+     * Records the parsed scope inherited rather than produced. Two shapes reach
+     * here: any line before the selected task boundary (the fork prefix), and a
+     * `compacted` record anywhere in the file. A compacted record carries the
+     * summary Codex replaced the context with, plus the history it retained.
+     */
+    const recordInheritedContext = (l: CodexLine, ts: string): void => {
+      if (l.type === 'compacted') {
+        const payload = l.payload
+        if (!payload) return
+        const summary = capText(typeof payload.message === 'string' ? payload.message : '')
+        if (summary && claimInheritedSpan()) {
+          spans.push(span({
+            traceId,
+            spanId: `inherited:${step}:compacted`,
+            parentSpanId: rootId,
+            name: 'session.compacted',
+            kind: 'CHAIN',
+            startTime: ts,
+            service: SERVICE,
+            agent: SERVICE,
+            step,
+            content: summary,
+            contentSource: textSources(payload, 'message'),
+            extra: {
+              [INHERITED_SPAN_ATTR]: true,
+              [INHERITED_SOURCE_ATTR]: 'compacted' satisfies InheritedSpanSource,
+              ...(typeof payload.window_number === 'number' ? { 'traces.codex.compaction_window_number': payload.window_number } : {}),
+              ...(payload.window_id ? { 'traces.codex.compaction_window_id': payload.window_id } : {}),
+              ...(payload.previous_window_id ? { 'traces.codex.compaction_previous_window_id': payload.previous_window_id } : {}),
+            },
+          }))
+          step += 1
+        }
+        for (const item of payload.replacement_history ?? []) {
+          if (!item || typeof item !== 'object') continue
+          if (item.type !== 'message' || item.role !== 'user') continue
+          recordInheritedTurn(
+            contentToString(item.content),
+            ts,
+            textSources(item, 'content'),
+            'compacted',
+            contentTextBlocks(item.content),
+          )
+        }
+        return
+      }
+      if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
+        recordInheritedTurn(
+          contentToString(l.payload.content),
+          ts,
+          textSources(l.payload, 'content'),
+          'pre-task-prefix',
+          contentTextBlocks(l.payload.content),
+        )
+        return
+      }
+      if (l.type === 'event_msg' && l.payload?.type === 'user_message') {
+        recordInheritedTurn(
+          typeof l.payload.message === 'string' ? l.payload.message : '',
+          ts,
+          textSources(l.payload, 'message'),
+          'pre-task-prefix',
+        )
+        return
+      }
+      // Only the turn shape is decoded here: a prefix `FileChange` item would
+      // parse a whole diff this walk never records.
+      if (l.type === 'event_msg' && l.payload?.type === 'item_completed' && l.payload.item?.type === 'UserMessage') {
+        const completed = codexCompletedItem(l)
+        if (completed?.type === 'UserMessage') {
+          recordInheritedTurn(
+            completed.userMessage.text,
+            ts,
+            textSources(completed.item, 'content'),
+            'pre-task-prefix',
+          )
+        }
+      }
+    }
     const ensureSubagentSpan = (
       threadId: string,
       agentPath: string,
@@ -696,16 +1121,21 @@ export class CodexAdapter implements HarnessTraceAdapter {
         return existing
       }
       const subagentType = agentPath.split('/').filter(Boolean).at(-1) ?? 'subagent'
+      // The child thread's lifecycle, assembled from `sub_agent_activity`
+      // events — NOT a call the model issued. It was a TOOL span named
+      // `tool.Agent`, so every tool-call count (here and in any consumer that
+      // counts TOOL spans or `tool.name`) ran high by one per child thread.
+      // It is an AGENT span with no `tool.name`, marked synthesized, so a
+      // counter needs no name allowlist to get the model's tool calls right.
       const toolSpan = span({
         traceId,
         spanId: `subagent:${threadId}`,
         parentSpanId: eventCallSpan?.span_id ?? lastLlm,
-        name: 'tool.Agent',
-        kind: 'TOOL',
+        name: 'subagent.lifecycle',
+        kind: 'AGENT',
         startTime: eventTime,
         service: SERVICE,
         agent: SERVICE,
-        tool: 'Agent',
         step,
         status: 'UNSET',
         extra: {
@@ -716,6 +1146,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
               agent_thread_id: threadId,
             },
           }),
+          [SYNTHESIZED_SPAN_ATTR]: true,
+          [SYNTHESIZED_SOURCE_ATTR]: 'codex.sub_agent_activity',
+          'traces.codex.subagent_type': subagentType,
           'traces.codex.subagent_path': agentPath,
           'traces.codex.subagent_thread_id': threadId,
           ...(!observedStart ? { 'traces.codex.subagent_start_missing': true } : {}),
@@ -729,9 +1162,14 @@ export class CodexAdapter implements HarnessTraceAdapter {
     }
 
     let reachedCurrentTask = !selectedBoundary
+    let prefixTimestamp: string | undefined
     for await (const l of readJsonl<CodexLine>(ref.path, jsonl)) {
       if (!reachedCurrentTask) {
-        if (!isCodexTaskBoundary(l, selectedBoundary!)) continue
+        if (!isCodexTaskBoundary(l, selectedBoundary!)) {
+          prefixTimestamp = validTimestamp(l.timestamp) ?? prefixTimestamp
+          recordInheritedContext(l, prefixTimestamp ?? root.start_time)
+          continue
+        }
         reachedCurrentTask = true
         if (options.taskScope === 'turn') {
           root.start_time = codexTaskBoundary(l)?.timestamp ?? root.start_time
@@ -748,6 +1186,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       lastTimestamp = latestTimestamp(lastTimestamp, l.timestamp)
       const ts = validTimestamp(l.timestamp) ?? lastTimestamp ?? root.start_time
       if (l.type === 'event_msg' && l.payload?.type === 'task_started') {
+        taskIndex += 1
         activeTaskTurnId = l.payload.turn_id ?? null
         root.status = { code: 'UNSET' }
       } else if (l.type === 'event_msg' && l.payload?.type === 'task_complete') {
@@ -763,6 +1202,13 @@ export class CodexAdapter implements HarnessTraceAdapter {
         awaitingModel.length = 0
       } else if (l.type === 'event_msg' && l.payload?.type === 'token_count') {
         const u = l.payload.info?.last_token_usage
+        // Read before the delta gate: a `token_count` event that reports no
+        // per-turn delta still advances the harness's cumulative counter, and
+        // the last snapshot in scope is the session total.
+        const reportedTotal = l.payload.info?.total_token_usage
+        if (reportedTotal && reportedCount(reportedTotal.total_tokens) !== undefined) {
+          sessionTotalUsage = reportedTotal
+        }
         if (u && (u.input_tokens || u.output_tokens)) {
           const cumulative = l.payload.info?.total_token_usage
           const cumulativeSignature = cumulative ? tokenUsageSignature(cumulative) : undefined
@@ -790,6 +1236,10 @@ export class CodexAdapter implements HarnessTraceAdapter {
           lastLlm = id
           step += 1
         }
+      } else if (l.type === 'compacted') {
+        // Compaction replaces the model's context with a summary and a retained
+        // history. Both are inherited context, not new turns in this scope.
+        recordInheritedContext(l, ts)
       } else if (
         l.type === 'response_item' &&
         (l.payload?.type === 'function_call' || l.payload?.type === 'custom_tool_call')
@@ -848,6 +1298,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
           const name = String(t.attributes['tool.name'] ?? '')
           const { status, pollOutcome } = outputStatus(name, l.payload)
           closeSpanAt(t, ts)
+          toolWindows.set(t, { startMs: Date.parse(t.start_time), endMs: Date.parse(ts) })
           t.status = status
           if (pollOutcome) t.attributes['traces.poll.outcome'] = pollOutcome
           recordToolOutput(t, l.payload.output, sourceOf(l.payload, 'output'))
@@ -864,9 +1315,31 @@ export class CodexAdapter implements HarnessTraceAdapter {
             if (requestId) t.attributes['traces.codex.agent_request_id'] = requestId
           }
         }
+      } else if (l.type === 'event_msg' && l.payload?.type === 'user_message') {
+        recordSubmittedTurn(
+          typeof l.payload.message === 'string' ? l.payload.message : '',
+          ts,
+          textSources(l.payload, 'message'),
+        )
       } else if (l.type === 'event_msg') {
         const activity = codexSubagentActivity(l)
-        if (!activity) continue
+        if (!activity) {
+          const completed = codexCompletedItem(l)
+          if (completed?.type === 'skipped') {
+            countSkippedItem(completed.label)
+          } else if (completed?.type === 'UserMessage') {
+            recordSubmittedTurn(completed.userMessage.text, ts, textSources(completed.item, 'content'))
+          } else if (completed) {
+            const itemId = completed.type === 'CommandExecution' ? completed.command.itemId : completed.fileChange.itemId
+            const itemKey = `${completed.type}:${itemId}`
+            if (completedItemKeys.has(itemKey)) countSkippedItem(`${completed.type}:duplicate`)
+            else {
+              completedItemKeys.add(itemKey)
+              completedItems.push({ ...completed, recordTime: ts })
+            }
+          }
+          continue
+        }
         const threadId = activity.agentThreadId
         const eventTime = timestampFromEpochMs(activity.occurredAtMs) ?? ts
         const eventCallSpan = toolByCallId.get(activity.eventId ?? '')
@@ -953,26 +1426,30 @@ export class CodexAdapter implements HarnessTraceAdapter {
       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
         // The human's prompt text. Codex drops the user turn from token events,
         // so capture it here as its own CHAIN span (no text → no span).
-        const prompt = textOf(l.payload.content)
+        const raw = contentToString(l.payload.content)
+        const prompt = capText(raw)
         if (prompt) {
+          const key = userTurnKey(raw)
+          // The user_message event already recorded this turn.
+          if (takeUserTurn(unpairedUserEvents, key, taskIndex)) continue
           const actor = sessionRole === 'child'
             ? 'agent'
-            : codexActor({ text: prompt, isFirstUserTurn: !sawUserTurn })
+            : codexActor({ text: prompt, blocks: contentTextBlocks(l.payload.content), isFirstUserTurn: !sawUserTurn })
           sawUserTurn = true
-          spans.push(
-            userPromptSpan({
-              traceId,
-              spanId: `msg:${step}:user`,
-              parentSpanId: rootId,
-              startTime: ts,
-              content: prompt,
-              contentSource: textSources(l.payload, 'content'),
-              service: SERVICE,
-              agent: SERVICE,
-              step,
-              actor,
-            }),
-          )
+          const turnSpan = userPromptSpan({
+            traceId,
+            spanId: `msg:${step}:user`,
+            parentSpanId: rootId,
+            startTime: ts,
+            content: prompt,
+            contentSource: textSources(l.payload, 'content'),
+            service: SERVICE,
+            agent: SERVICE,
+            step,
+            actor,
+          })
+          spans.push(turnSpan)
+          unpairedUserItems.push({ span: turnSpan, key, task: taskIndex })
           step += 1
         }
       } else if (l.type === 'response_item' && l.payload?.type === 'message') {
@@ -1003,8 +1480,53 @@ export class CodexAdapter implements HarnessTraceAdapter {
         `Codex turn ${JSON.stringify(options.taskTurnId)} does not exist in ${ref.path}`,
       )
     }
+    // Where Codex recorded user_message events for a task, a user-role message
+    // without one is harness context, even under a wrapper not listed in actor.ts.
+    for (const candidate of unpairedUserItems) {
+      if (candidate.span.attributes[ACTOR_ATTR] !== 'human' || !tasksWithUserEvents.has(candidate.task)) continue
+      candidate.span.attributes[ACTOR_ATTR] = 'injected'
+      candidate.span.attributes['traces.codex.actor_evidence'] = 'no_user_message_event'
+    }
+    const itemContext: ItemSpanContext = { traceId, rootId, windows: toolWindows }
+    for (const completed of completedItems) {
+      if (completed.type === 'CommandExecution') {
+        spans.push(commandSpan(itemContext, completed.item, completed.command, completed.recordTime))
+      } else {
+        spans.push(...fileChangeSpans(itemContext, completed.item, completed.fileChange, completed.recordTime))
+      }
+    }
+    if (skippedItemCounts.size > 0) {
+      root.attributes['traces.codex.skipped_item_counts'] = JSON.stringify(
+        Object.fromEntries([...skippedItemCounts].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))),
+      )
+    }
+    if (sessionTotalUsage) {
+      const total = reportedCount(sessionTotalUsage.total_tokens)
+      if (total !== undefined) {
+        root.attributes[SESSION_TOTAL_TOKENS] = total
+        root.attributes[SESSION_TOTAL_TOKENS_SOURCE] = CODEX_TOTAL_TOKENS_SOURCE
+        // The rest of the same snapshot, so the parts and the total agree.
+        const input = reportedCount(sessionTotalUsage.input_tokens)
+        const output = reportedCount(sessionTotalUsage.output_tokens)
+        const reasoning = reportedCount(sessionTotalUsage.reasoning_output_tokens)
+        const cached = reportedCount(sessionTotalUsage.cached_input_tokens)
+        if (input !== undefined) root.attributes[SESSION_TOTAL_INPUT_TOKENS] = input
+        if (output !== undefined) root.attributes[SESSION_TOTAL_OUTPUT_TOKENS] = output
+        if (reasoning !== undefined) root.attributes[SESSION_TOTAL_REASONING_TOKENS] = reasoning
+        if (cached !== undefined) root.attributes[SESSION_TOTAL_CACHED_INPUT_TOKENS] = cached
+      }
+    }
+    if (inheritedSpansEmitted > 0) root.attributes[INHERITED_SPAN_COUNT_ATTR] = inheritedSpansEmitted
+    // A dropped record stays visible as a count: inherited context is bounded,
+    // and "the cap was hit" must not read as "there was nothing before this".
+    if (inheritedSpansOmitted > 0) root.attributes[INHERITED_SPANS_OMITTED_ATTR] = inheritedSpansOmitted
     if (selectedBoundary?.turnId) {
-      for (const item of spans) item.attributes['traces.codex.turn_id'] ??= selectedBoundary.turnId
+      // An inherited record predates the selected turn; stamping it with that
+      // turn id would claim it happened inside the turn.
+      for (const item of spans) {
+        if (isInheritedSpan(item.attributes)) continue
+        item.attributes['traces.codex.turn_id'] ??= selectedBoundary.turnId
+      }
     }
     closeSpanAt(root, lastTimestamp ?? root.start_time)
     normalizeCodexIds(spans)

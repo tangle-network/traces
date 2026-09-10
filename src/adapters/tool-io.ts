@@ -5,6 +5,19 @@ import { sourceAttributes, SOURCE_ATTRIBUTE_PREFIX, type SourceReferences } from
 export const TOOL_IO_VALUE_MAX_BYTES = 16 * 1024
 export const TOOL_IO_VALUE_KEYS = ['input.value', 'output.value'] as const
 
+/**
+ * Marks work recorded inside a model-issued tool call, such as each command a
+ * code-mode script ran. These spans are CHAIN, not TOOL, and carry no
+ * `tool.name`, so every tool-call counter here and in agent-eval stays at the
+ * model-issued level; readers that want the inner facts select this value.
+ */
+export const TOOL_CALL_LEVEL_ATTR = 'traces.tool_call.level'
+export const INNER_TOOL_CALL_LEVEL = 'inner'
+
+export function isInnerToolCall(attributes: Readonly<Record<string, unknown>>): boolean {
+  return attributes[TOOL_CALL_LEVEL_ATTR] === INNER_TOOL_CALL_LEVEL
+}
+
 interface ToolIoInput {
   inputSource?: SourceReferences
   outputSource?: SourceReferences

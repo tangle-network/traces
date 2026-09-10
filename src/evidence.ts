@@ -6,6 +6,7 @@ import {
   OPENINFERENCE_SPAN_KIND,
   TOOL_NAME,
 } from '@tangle-network/agent-eval/trace-attributes'
+import { isInheritedSpan, isSynthesizedSpan } from './adapters/provenance.js'
 import { ATTR } from './attributes.js'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -113,6 +114,11 @@ function spanKind(span: OtlpSpan): string | undefined {
   return stringAttr(span, OPENINFERENCE_SPAN_KIND)
 }
 
+/** A tool call the model issued — the only thing "tool call count" may mean. */
+function isModelToolCall(span: OtlpSpan): boolean {
+  return spanKind(span) === 'TOOL' && !isSynthesizedSpan(span.attributes)
+}
+
 function repoFromSpans(spans: readonly OtlpSpan[]): PolicyEvidenceRecord['repo'] {
   const attrs: {
     subjectKey?: string
@@ -134,8 +140,15 @@ function repoFromSpans(spans: readonly OtlpSpan[]): PolicyEvidenceRecord['repo']
   return attrs
 }
 
+/**
+ * The window this session ACTED in. An inherited span carries context from
+ * before the parsed scope (a fork prefix, a compacted history), so counting its
+ * timestamps here would stretch the session window over the parent's work —
+ * and `buildSessionBundle` joins external evidence by exactly this window.
+ */
 function timeBounds(spans: readonly OtlpSpan[]): { firstSpanAt: string | null; lastSpanAt: string | null } {
   const times = spans
+    .filter((span) => !isInheritedSpan(span.attributes))
     .flatMap((span) => [span.start_time, span.end_time])
     .filter((value) => value && value !== 'now')
     .sort()
@@ -145,10 +158,15 @@ function timeBounds(spans: readonly OtlpSpan[]): { firstSpanAt: string | null; l
   }
 }
 
+/**
+ * One row per tool the MODEL called. A synthesized span (a subagent's lifecycle
+ * assembled from harness events) is not a call the model issued, so it is
+ * excluded here and from every count below.
+ */
 function summarizeTools(spans: readonly OtlpSpan[]): PolicyEvidenceToolSummary[] {
   const byTool = new Map<string, { calls: number; errors: number }>()
   for (const span of spans) {
-    if (spanKind(span) !== 'TOOL') continue
+    if (!isModelToolCall(span)) continue
     const name = stringAttr(span, TOOL_NAME) ?? span.name.replace(/^tool\./, '')
     const current = byTool.get(name) ?? { calls: 0, errors: 0 }
     current.calls += 1
@@ -168,7 +186,7 @@ export async function buildPolicyEvidenceRecord(
   if (opts.sourceSha256 && !/^[a-f0-9]{64}$/.test(opts.sourceSha256)) {
     throw new Error('sourceSha256 must be a lowercase SHA-256 hex digest')
   }
-  const toolSpans = spans.filter((span) => spanKind(span) === 'TOOL')
+  const toolSpans = spans.filter(isModelToolCall)
   const erroredToolCallCount = toolSpans.filter((span) => span.status.code === 'ERROR').length
   const pipelines = await runPipelines(spans, { minLoopOccurrences: opts.minLoopOccurrences })
   const loopLimit = opts.maxLoopExamples ?? 25
