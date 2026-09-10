@@ -73,6 +73,19 @@ export const FACT_TEXT_CAP = 2000
 export const FACT_LIST_CAP = 200
 
 /**
+ * Entries kept for {@link SessionFacts.changedFiles}.
+ *
+ * The cap above bounds the sheet's size against lists whose entries carry up to
+ * {@link FACT_TEXT_CAP} characters of message or prompt text. A changed-file
+ * entry is a path and two short arrays, two orders of magnitude smaller, and a
+ * session that edits hundreds of files is the one whose file list a reader most
+ * needs whole — the rendered context prints only the count either way. So this
+ * list gets its own ceiling, still finite so a runaway session cannot make the
+ * sheet unbounded.
+ */
+export const CHANGED_FILE_LIST_CAP = 5000
+
+/**
  * One measured fact. `value` is `null` exactly when `unavailable` explains why
  * the spans cannot support it; `spanIds` names the spans the value came from,
  * in the order they appear in the trace.
@@ -482,16 +495,16 @@ function finalMessagesOf(spans: readonly OtlpSpan[]): FinalMessageFact[] {
     }))
 }
 
-function capList<T>(items: readonly T[]): { kept: readonly T[]; partial?: string } {
-  if (items.length <= FACT_LIST_CAP) return { kept: items }
+function capList<T>(items: readonly T[], cap = FACT_LIST_CAP): { kept: readonly T[]; partial?: string } {
+  if (items.length <= cap) return { kept: items }
   return {
-    kept: items.slice(0, FACT_LIST_CAP),
-    partial: `${items.length - FACT_LIST_CAP} of ${items.length} entries omitted; the count above the list is complete`,
+    kept: items.slice(0, cap),
+    partial: `${items.length - cap} of ${items.length} entries omitted; the count above the list is complete`,
   }
 }
 
-function listFact<T>(items: readonly T[], spanIds: readonly string[]): SessionFact<readonly T[]> {
-  const { kept, partial } = capList(items)
+function listFact<T>(items: readonly T[], spanIds: readonly string[], cap = FACT_LIST_CAP): SessionFact<readonly T[]> {
+  const { kept, partial } = capList(items, cap)
   return { value: kept, spanIds: [...new Set(spanIds)], unavailable: null, ...(partial ? { partial } : {}) }
 }
 
@@ -501,7 +514,7 @@ function changedFilesFact(
   truncatedInputs: number,
   unresolvedPaths: number,
 ): SessionFact<readonly ChangedFileFact[]> {
-  const fact = listFact(files, files.flatMap((entry) => entry.spanIds))
+  const fact = listFact(files, files.flatMap((entry) => entry.spanIds), CHANGED_FILE_LIST_CAP)
   const gaps = [
     ...(fact.partial ? [fact.partial] : []),
     ...(truncatedInputs > 0

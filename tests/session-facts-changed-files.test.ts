@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { CodexAdapter } from '../src/adapters/codex.js'
-import { computeSessionFacts, type SessionFacts } from '../src/session-facts.js'
+import { computeSessionFacts, FACT_LIST_CAP, type SessionFacts } from '../src/session-facts.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'traces-changed-files-'))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -154,6 +154,20 @@ describe('changed files', () => {
     ])
 
     expect(paths(session)).toEqual(['/repo/src/added.ts', '/repo/src/legacy.ts'])
+  })
+
+  it('lists every path of a session that changed more files than a text list holds', async () => {
+    // The list cap bounds the sheet against entries carrying whole messages. A
+    // path costs a fraction of that, and a run that edited hundreds of files is
+    // the one whose list a reader needs whole.
+    const many = FACT_LIST_CAP * 2
+    const changes = Object.fromEntries(
+      Array.from({ length: many }, (_unused, index) => [`/repo/src/file-${index}.ts`, { type: 'update' }]),
+    )
+    const session = await facts('over-the-cap', [META, fileChangeItem('item-many', 2, changes)])
+
+    expect(session.changedFiles.value?.length).toBe(many)
+    expect(session.changedFiles.partial).toBeUndefined()
   })
 
   it('names the rename destination and leaves a declined change out', async () => {
