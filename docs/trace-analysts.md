@@ -109,12 +109,14 @@ Read many questions from a file:
 
 An `answerSchema` makes the answer one JSON value a scorer can compare field by field.
 The supported keywords are `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `title`, and `description`.
+A keyword that constrains one JSON type must declare it: `required`, `properties`, and `additionalProperties` need `"type": "object"`, and `items` needs `"type": "array"`, or the constraint would be skipped for an answer of another shape.
 Any other keyword is rejected when the run starts.
 This package carries no JSON Schema library, and a constraint that is quietly ignored would let a wrong answer pass as checked.
 
 ### What the run guarantees
 
 - Every `trace://<trace_id>/span/<span_id>` URI in an answer is resolved against the store. An unresolvable citation fails that question.
+  A citation the model wrapped in Markdown emphasis (`**...**`, `_..._`, `~~...~~`) or ended a sentence with resolves like a bare one: the delimiters are prose, not part of the span ID.
 - Findings the answer submits still pass the same evidence gate as the built-in kinds. Refused findings are counted by reason in both artifacts.
 - A failed question never stops the others. Its failure is recorded on its own answer, and the remaining answers are written.
 - Ctrl-C keeps what the run already bought. The signal reaches the engine, not the checks that follow it: an answer that came back is kept with its citations resolved, and each question the run never reached is recorded as `aborted`.
@@ -133,7 +135,8 @@ Two consequences follow.
 A question the ledger refuses is reported as `budget-refused`, and the answers already produced are kept.
 That kind is decided from the accounting, not only from the error text.
 The refusal happens inside the model proxy, behind the DSPy bridge, whose HTTP error handling can replace the Node error with its own message.
-So a failed question is reported as `budget-refused` whenever the shared ledger's settled spend left less than one model call's reservation at the time it failed, whatever the message says.
+So a failed question is reported as `budget-refused` whenever the shared ledger's settled spend left less than one model call's reservation at the time it failed and nothing else in the failure names its cause.
+A failure whose own text names its cause keeps that cause: a bridge version mismatch stays `error`, so the reinstall hint still prints, and an empty answer from the bridge stays `no-answer`.
 The message itself is kept verbatim on the answer.
 
 ### SDK
@@ -165,7 +168,7 @@ Without the reason, a report showing "0 findings" reads as "the model found noth
 
 `analyze`, `investigate`, `improve`, and `ask` now carry those refusals:
 
-- the CLI log prints the reason and the offending URI on each `finding rejected` line;
+- the CLI log adds whatever the event carries beyond its own text to each `finding rejected` line: the cause (`reason` for the gate's rejections and the bridge-row rejection, `issues` for a schema failure), the offending URI, the citation counts, and the subject;
 - the analyst table's Detail cell names the reasons and their counts;
 - `result.findingRejections` (investigation and improvement) and `answers.json` (`ask`) hold the counts per analyst and reason.
 

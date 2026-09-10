@@ -22,9 +22,24 @@ describe('finding rejections', () => {
       uri: 'trace://t/span/s',
       reason: 'trace span does not exist',
     })).toBe('trace span does not exist; uri trace://t/span/s')
+    // The kind is already in the message; repeating it would print
+    // "finding rejected: insufficient evidence citations — insufficient evidence citations".
     expect(findingRejectionDetail('finding rejected: insufficient evidence citations', { required: 2, distinct: 1 }))
-      .toBe('insufficient evidence citations; 1 of 2 required distinct citation(s)')
+      .toBe('1 of 2 required distinct citation(s)')
     expect(findingRejectionDetail('[analyst] ok failure-mode', {})).toBeUndefined()
+  })
+
+  it('names the cause of every rejection kind that carries one', () => {
+    // The dspy engine's bridge-row rejection puts its cause in `reason`.
+    expect(findingRejectionDetail('finding rejected: bridge row failed schema validation', {
+      reason: 'invalid_type at findings.0.severity: expected string',
+    })).toBe('invalid_type at findings.0.severity: expected string')
+    // The kind factory's schema failure puts its cause in `issues`.
+    expect(findingRejectionDetail('[improvement] finding rejected: schema failure', {
+      issues: ['claim: required', 'confidence: expected number'],
+    })).toBe('claim: required; confidence: expected number')
+    // A kind that carries no cause adds nothing: the caller prints the message alone.
+    expect(findingRejectionDetail('[improvement] finding rejected: schema failure', {})).toBe('')
   })
 
   it('counts per analyst, with a default for unprefixed events', () => {

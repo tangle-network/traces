@@ -34,6 +34,7 @@ import {
   formatFindingRejections,
   totalFindingRejections,
 } from './finding-rejections.js'
+import { isBridgeMismatchError } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
 
 /** One question to ask of the selected traces. */
@@ -206,6 +207,8 @@ const ASK_RULES = [
   'TRACES ASK RULES',
   '1. Answer QUESTION only from trace tool results retrieved in this run.',
   '2. PREPARED CONTEXT: near the end of analyst_instructions holds JSON listing every trace. Parse it; copy IDs from it or from tool output.',
+  // The rules must fit the DSPy preview head, so this one does not also legislate
+  // formatting: `traceCitationsInText` reads a citation the model emphasised.
   '3. Cite each fact as trace://<trace_id>/span/<span_id>. Every cited span must exist.',
   '4. Quote excerpts from viewSpans output, never from searchTrace hits.',
   '5. If the trace does not record a fact, say "not in trace".',
@@ -371,13 +374,24 @@ function preparedContext(traces: readonly TraceQuestionTrace[]): string {
 
 const TRACE_URI = /trace:\/\/[^\s/"'`<>()[\]{}]+\/span\/[^\s/"'`<>()[\]{},;]+/g
 
+/**
+ * Trailing characters that are prose around a citation, not part of the span ID.
+ *
+ * Sentence punctuation is the obvious case. The Markdown emphasis run matters
+ * just as much: a model that writes `**trace://t/span/s**` or `_trace://t/span/s_`
+ * has cited a real span, and keeping its closing delimiters in the ID makes a
+ * correct answer fail with `unresolved-citations` and drives `ask` to exit 1.
+ * Adapter-assigned span and trace IDs do not end in these characters, so
+ * trimming them cannot hide a citation that would otherwise resolve.
+ */
+const TRAILING_PROSE = /[.,:;!?*_~]+$/
+
 /** Every distinct `trace://<trace>/span/<span>` URI in the text, in order. */
 export function traceCitationsInText(text: string): Array<{ uri: string; traceId: string | null; spanId: string | null }> {
   const seen = new Set<string>()
   const out: Array<{ uri: string; traceId: string | null; spanId: string | null }> = []
   for (const match of text.matchAll(TRACE_URI)) {
-    // Sentence punctuation after a URI is prose, not part of the ID.
-    const uri = match[0].replace(/[.:!?]+$/, '')
+    const uri = match[0].replace(TRAILING_PROSE, '')
     if (seen.has(uri)) continue
     seen.add(uri)
     const parts = /^trace:\/\/([^/]+)\/span\/([^/]+)$/.exec(uri)
@@ -446,6 +460,29 @@ function ledgerIsExhausted(ledger: CostLedger, budgetUsd: number | undefined, fl
   if (budgetUsd === undefined || floorUsd === undefined) return false
   const settled = ledger.summary({ channel: 'analyst' }).totalCostUsd
   return Number.isFinite(settled) && budgetUsd - settled < floorUsd
+}
+
+/** agent-eval's own text for a run that finished with an empty answer field. */
+const ENGINE_NO_ANSWER = /returned no answer/
+
+/**
+ * Name the cause of a failed question.
+ *
+ * Order matters. A failure whose own text names its cause keeps that cause:
+ * the ledger reconciliation is a fallback for a refusal the bridge hid, and
+ * relabelling a bridge-version mismatch as `budget-refused` because the budget
+ * happened to be nearly spent would also suppress the CLI's reinstall hint.
+ */
+function questionFailureKind(
+  error: unknown,
+  state: { aborted: boolean; ledgerExhausted: boolean },
+): TraceQuestionFailureKind {
+  if (state.aborted) return 'aborted'
+  if (isBudgetRefusal(error)) return 'budget-refused'
+  const message = errorMessage(error)
+  if (isBridgeMismatchError(message)) return 'error'
+  if (ENGINE_NO_ANSWER.test(message)) return 'no-answer'
+  return state.ledgerExhausted ? 'budget-refused' : 'error'
 }
 
 function errorMessage(error: unknown): string {
@@ -606,11 +643,10 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
         })
       } catch (error) {
         failure = {
-          kind: opts.signal?.aborted
-            ? 'aborted'
-            : isBudgetRefusal(error) || ledgerIsExhausted(ledger, budgetUsd, floor)
-              ? 'budget-refused'
-              : 'error',
+          kind: questionFailureKind(error, {
+            aborted: opts.signal?.aborted ?? false,
+            ledgerExhausted: ledgerIsExhausted(ledger, budgetUsd, floor),
+          }),
           message: errorMessage(error),
         }
       } finally {
@@ -685,25 +721,23 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   const answers = new Array<TraceQuestionAnswer>(questions.length)
   let next = 0
   const setupTimeMs = Math.round(performance.now() - runStarted)
-  let poolError: unknown
-  try {
-    await Promise.all(Array.from({ length: effectiveConcurrency }, async () => {
-      while (next < questions.length) {
-        const index = next
-        next += 1
-        answers[index] = await askOne(questions[index]!)
-      }
-    }))
-  } catch (error) {
-    poolError = error
-  }
+  // allSettled, not Promise.all: a rejection must not hand the answers array
+  // back to the caller while the other workers are still writing into it.
+  const settled = await Promise.allSettled(Array.from({ length: effectiveConcurrency }, async () => {
+    while (next < questions.length) {
+      const index = next
+      next += 1
+      answers[index] = await askOne(questions[index]!)
+    }
+  }))
+  const failedWorker = settled.find((worker) => worker.status === 'rejected')
   const wallTimeMs = Math.round(performance.now() - runStarted)
   // `askOne` records every failure on its own answer, so the pool is not
   // expected to reject. If it ever does, the answers already bought are still
   // returned and written rather than lost with the exception: the caller sees
   // the cause in the warnings and in each question the pool never reached.
-  if (poolError !== undefined) {
-    const message = errorMessage(poolError)
+  if (failedWorker) {
+    const message = errorMessage(failedWorker.reason)
     warnings.push(`the question pool stopped early: ${message}`)
     const kind: TraceQuestionFailureKind = opts.signal?.aborted ? 'aborted' : 'error'
     for (const [index, question] of questions.entries()) {
@@ -836,7 +870,9 @@ export function renderTraceQuestionsReport(result: Omit<TraceQuestionsResult, 'r
   }
   lines.push('')
   for (const answer of result.questions) {
-    lines.push(`## ${answer.id}: ${answer.question}`)
+    // A question may be several lines; a heading is one. The answers file keeps
+    // the question verbatim, so folding the whitespace here loses nothing.
+    lines.push(`## ${answer.id}: ${answer.question.replace(/\s+/g, ' ').trim()}`)
     lines.push('')
     if (answer.failure) {
       lines.push(`**Failed (${answer.failure.kind}):** ${answer.failure.message.trim()}`)

@@ -408,6 +408,44 @@ describe('runTraceQuestions', () => {
     expect(result.report).toContain('failed: budget-refused')
   })
 
+  it('keeps a failure that names its own cause out of the budget reconciliation', async () => {
+    const bridge = 'DSPY-BRIDGE-FAILURE: RuntimeError: could not start the bridge'
+    const { engine } = scriptedEngine(async (request) => {
+      if (questionId(request) === 'q1') {
+        const paid = await request.costLedger.runPaidCall({
+          channel: 'analyst',
+          phase: request.costPhase,
+          actor: request.analystId,
+          ...(request.costTags ? { tags: request.costTags } : {}),
+          maximumCharge: { externallyEnforcedMaximumUsd: 0.7 },
+          execute: async () => 'ok',
+          receipt: () => ({ model: 'test-model', inputTokens: 100, outputTokens: 50, actualCostUsd: 0.7 }),
+        })
+        if (!paid.succeeded) throw paid.error
+        return { answer: 'answer q1' }
+      }
+      if (questionId(request) === 'q2') throw new Error(bridge)
+      throw new Error('DSPy RLM bridge returned no answer')
+    }, {
+      pricing: { inputUsdPerMillion: 1.25, outputUsdPerMillion: 10 },
+      max_output_tokens: 8_192,
+      max_reasoning_tokens: 32_768,
+    })
+    const result = await runTraceQuestions({
+      questions: ['Which commands ran?', 'Which failed?', 'What was asked?'].map((question) => ({ question })),
+      spans: fixtureSpans(),
+      engine,
+      concurrency: 1,
+      budgetUsd: 1,
+    })
+
+    // The ledger is exhausted for both failures ($0.70 settled against a $0.41
+    // reservation), but each failure names its own cause, so neither is
+    // relabelled: the bridge one keeps the kind the CLI's reinstall hint reads.
+    expect(result.questions.map((answer) => answer.failure?.kind)).toEqual([undefined, 'error', 'no-answer'])
+    expect(result.questions[1]!.failure?.message).toContain('could not start')
+  })
+
   it('nests an answer\'s own headings under its question section, leaving fenced text alone', async () => {
     const answer = [
       '# traces ask',
@@ -432,6 +470,19 @@ describe('runTraceQuestions', () => {
     expect(result.report).toContain('### traces ask')
     expect(result.report).not.toContain('\n# traces ask\n\n| command | exit |')
     expect(result.report).toContain('```sh\n# not a heading\n```')
+  })
+
+  it('keeps a multi-line question on one heading line', async () => {
+    const question = 'Which shell commands ran?\nName each one and its exit code.'
+    const { engine } = scriptedEngine(async () => ({ answer: 'one command ran' }))
+    const result = await runTraceQuestions({
+      questions: [{ id: 'commands', question }],
+      spans: fixtureSpans(),
+      engine,
+    })
+    // A heading is one line; the answers file keeps the question verbatim.
+    expect(result.report).toContain('## commands: Which shell commands ran? Name each one and its exit code.\n')
+    expect(result.questions[0]!.question).toBe(question)
   })
 
   it('reports the effective concurrency next to the requested one', async () => {
@@ -465,6 +516,25 @@ describe('runTraceQuestions', () => {
       ['invented-span', false],
     ])
     expect(result.report).toContain(`**Unresolved:** trace://${TRACE}/span/invented-span`)
+  })
+
+  it('answers a question whose citation the model wrote in bold', async () => {
+    const { engine } = scriptedEngine(async () => ({
+      answer: `The session ran one command (**trace://${TRACE}/span/tool-1**).`,
+    }))
+    const result = await runTraceQuestions({
+      questions: [{ id: 'commands', question: 'Which shell commands ran?' }],
+      spans: fixtureSpans(),
+      engine,
+    })
+    const [answer] = result.questions
+    expect(answer!.citations).toEqual([
+      { uri: `trace://${TRACE}/span/tool-1`, traceId: TRACE, spanId: 'tool-1', resolved: true },
+    ])
+    expect(answer!.failure).toBeUndefined()
+    expect(answer!.status).toBe('answered')
+    // The exit code follows `ok`, so the formatting must not decide it.
+    expect(result.ok).toBe(true)
   })
 
   it('fails an empty answer', async () => {
@@ -603,6 +673,23 @@ describe('question input', () => {
         { uri: 'trace://t2/span/def', traceId: 't2', spanId: 'def' },
       ])
   })
+
+  it('extracts a citation the model wrapped in Markdown emphasis', () => {
+    // A model emphasises a citation as readily as it writes one bare; keeping
+    // the closing delimiters in the span ID fails a correct answer.
+    expect(traceCitationsInText('**trace://t/span/abc**, _trace://t/span/def_, ~~trace://t/span/ghi~~.'))
+      .toEqual([
+        { uri: 'trace://t/span/abc', traceId: 't', spanId: 'abc' },
+        { uri: 'trace://t/span/def', traceId: 't', spanId: 'def' },
+        { uri: 'trace://t/span/ghi', traceId: 't', spanId: 'ghi' },
+      ])
+    // Emphasis and sentence punctuation in either order.
+    expect(traceCitationsInText('ran it (**trace://t/span/abc**). Then **trace://t/span/def.**'))
+      .toEqual([
+        { uri: 'trace://t/span/abc', traceId: 't', spanId: 'abc' },
+        { uri: 'trace://t/span/def', traceId: 't', spanId: 'def' },
+      ])
+  })
 })
 
 describe('answer schemas', () => {
@@ -610,6 +697,19 @@ describe('answer schemas', () => {
     expect(() => assertAnswerSchema({ type: 'string', pattern: '^PR' })).toThrow('unsupported JSON Schema keyword "pattern"')
     expect(() => assertAnswerSchema({ type: 'object', properties: { n: { minimum: 1 } } }))
       .toThrow('answerSchema.properties.n: unsupported JSON Schema keyword "minimum"')
+  })
+
+  it('rejects a type-specific keyword whose type is not declared', () => {
+    // Without "type": "object" the constraint is skipped for every non-object
+    // answer, so `5` would pass a schema that demands a property.
+    expect(() => assertAnswerSchema({ required: ['a'] }))
+      .toThrow('answerSchema: "required" is checked only for an object; declare "type": "object" alongside it')
+    expect(() => assertAnswerSchema({ type: 'array', items: { properties: { a: { type: 'string' } } } }))
+      .toThrow('answerSchema.items: "properties" is checked only for an object')
+    expect(() => assertAnswerSchema({ items: { type: 'string' } }))
+      .toThrow('answerSchema: "items" is checked only for an array; declare "type": "array" alongside it')
+    // A nullable object still declares the type it constrains.
+    expect(() => assertAnswerSchema({ type: ['object', 'null'], required: ['a'] })).not.toThrow()
   })
 
   it('checks types, required properties, enums, and array items', () => {

@@ -1134,8 +1134,8 @@ function analystLog(msg: string, fields?: Record<string, unknown>): void {
   // A gate rejection names its cause only in the fields; without them the
   // line says a finding was dropped but not why, which nobody can act on.
   const rejection = findingRejectionDetail(msg, fields)
-  if (rejection) {
-    process.stderr.write(`${msg} — ${rejection}\n`)
+  if (rejection !== undefined) {
+    process.stderr.write(rejection ? `${msg} — ${rejection}\n` : `${msg}\n`)
     return
   }
   const error = typeof fields?.error === 'string' && fields.error ? fields.error : undefined
@@ -1271,14 +1271,16 @@ async function cmdAsk(args: Args): Promise<void> {
   if (args.budget !== undefined && (!Number.isFinite(args.budget) || args.budget <= 0)) {
     throw new Error('--budget must be a positive number of USD')
   }
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
-  warnIncompleteWorkflow(collected.workflow)
+  // Before the adapter pass: a missing API key must not cost an operator the
+  // wait for a large session to be parsed before it is reported.
   const engine = analysisEngineFromEnv({
     model: analystModelFor(args),
     maxCostUsd: args.questionBudget ?? Math.min(args.budget ?? Infinity, DEFAULT_QUESTION_MAX_COST_USD),
     log: analystLog,
   })
+  const collected = await collectSpans(args)
+  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
   const directory = resolve(args.dir ?? await mkdtemp(join(tmpdir(), 'traces-ask-')))
   await mkdir(directory, { recursive: true })
   const controller = new AbortController()
@@ -1314,7 +1316,9 @@ async function cmdAsk(args: Args): Promise<void> {
       `${failed.length} of ${result.questions.length} question(s) failed; the answers file holds every result.`,
       ...failed.map((answer) => `  ${answer.id}: ${answer.failure?.kind}: ${answer.failure?.message.slice(0, 300)}`),
     ]
-    if (failed.some((answer) => answer.failure?.kind === 'error' && isBridgeMismatchError(answer.failure.message))) {
+    // Any kind, not only `error`: the hint is decided by the message, and a
+    // mismatch that also exhausted the budget still needs the reinstall line.
+    if (failed.some((answer) => isBridgeMismatchError(answer.failure?.message ?? ''))) {
       lines.push(
         'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
           `agent-eval-rpc[dspy]==${requiredBridgeVersion()} (matching this package's @tangle-network/agent-eval).`,
