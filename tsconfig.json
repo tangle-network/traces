@@ -15,5 +15,5 @@
       "@tangle-network/traces": ["./src/index.ts"]
     }
   },
-  "include": ["src", "tests", "examples"]
+  "include": ["src", "tests", "examples", "bench"]
 }
