@@ -701,4 +701,33 @@ describe('analystRunDetail', () => {
       usage,
     })).toBe('—')
   })
+
+  it('names the evidence gate\'s rejection reasons for an analyst that returned no findings', () => {
+    const summary = {
+      analyst_id: 'failure-mode',
+      status: 'ok',
+      findings_count: 0,
+      latency_ms: 5,
+      usage,
+    } as const
+    expect(analystRunDetail(summary, {
+      'excerpt is not present in the cited span content': 2,
+      'trace span does not exist': 3,
+    })).toBe(
+      '5 finding(s) rejected: trace span does not exist ×3; excerpt is not present in the cited span content ×2',
+    )
+    expect(analystRunDetail(summary, {})).toBe('—')
+
+    const result = emptyResult()
+    result.per_analyst.push(summary)
+    const report = renderReport(result, {
+      harness: 'codex',
+      sessionCount: 1,
+      spanCount: 10,
+      otlpPath: '/tmp/spans.openinference.jsonl',
+      execution: EMPTY_EXECUTION,
+      findingRejections: { 'failure-mode': { 'insufficient evidence citations': 1 } },
+    })
+    expect(report).toContain('| `failure-mode` | ok | 0 | 5ms | 1 finding(s) rejected: insufficient evidence citations ×1 |')
+  })
 })

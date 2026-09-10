@@ -14,8 +14,14 @@ import type {
 } from '@tangle-network/agent-eval/contract'
 import type { AdoptionReport } from './adoption.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import { isInheritedSpan } from './adapters/provenance.js'
 import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { incompleteInputsNote, type UnavailableCapabilities } from './conformance.js'
+import {
+  type FindingRejectionCounts,
+  type FindingRejectionReasons,
+  formatFindingRejections,
+} from './finding-rejections.js'
 import type { LoopConvergenceReport, SteeringChainReport } from './loop-analysis.js'
 import type { OtlpSpan } from './otlp.js'
 import type { PipelineReport } from './pipelines.js'
@@ -58,6 +64,8 @@ export interface ReportMeta {
    * confident totals, is worse than no conformance section at all.
    */
   unavailableCapabilities?: UnavailableCapabilities
+  /** Findings the evidence gate refused, by analyst ID and reason. */
+  findingRejections?: FindingRejectionCounts
 }
 
 export interface ReportSource {
@@ -91,9 +99,12 @@ export function sessionReportSource(
   sessionIdOverride?: string,
 ): ReportSource {
   const root = spans.find((item) => item.parent_span_id === null) ?? spans[0]
-  const prompt = spans.find(
+  // The subject names what THIS scope was asked to do, so an inherited turn
+  // (a fork's parent prompt, a compacted history) never supplies it.
+  const inScope = spans.filter((item) => !isInheritedSpan(item.attributes))
+  const prompt = inScope.find(
     (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
-  ) ?? spans.find((item) => item.name === 'user.prompt') ?? spans.find(
+  ) ?? inScope.find((item) => item.name === 'user.prompt') ?? inScope.find(
     (item) => item.attributes['span.type'] === 'interaction' && typeof item.attributes.content === 'string',
   )
   const content = typeof prompt?.attributes.content === 'string' ? prompt.attributes.content : ''
@@ -221,13 +232,16 @@ export function condenseAnalystError(raw: string, maxChars: number): string {
  * Failed engine runs die with the whole bridge stderr in the error message;
  * without this cell the report scores the analyst without saying why.
  */
-export function analystRunDetail(summary: AnalystRunSummary): string {
+export function analystRunDetail(summary: AnalystRunSummary, rejections?: FindingRejectionReasons): string {
   const raw = summary.status === 'failed' && summary.error
     ? [summary.error.class, summary.error.message].map((part) => part.trim()).filter(Boolean).join(': ')
     : summary.status === 'skipped' && summary.reason
       ? summary.reason
       : ''
-  const cell = tableCell(condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS))
+  const detail = condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS)
+  // The rejection text is short and bounded by the gate's reason vocabulary,
+  // so it is appended after the condensed error rather than competing for it.
+  const cell = tableCell([detail, formatFindingRejections(rejections)].filter(Boolean).join('; '))
   return cell === '' ? '—' : cell
 }
 
@@ -567,7 +581,10 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
   lines.push('| Analyst | Status | Findings | Latency | Detail |')
   lines.push('|---|---|---|---|---|')
   for (const s of result.per_analyst) {
-    lines.push(`| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms | ${analystRunDetail(s)} |`)
+    lines.push(
+      `| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms | ` +
+        `${analystRunDetail(s, meta.findingRejections?.[s.analyst_id])} |`,
+    )
   }
   lines.push('')
 

@@ -44,8 +44,27 @@ export interface CodexLine {
     author?: string
     recipient?: string
     namespace?: string
-    /** `user_message` event text. */
+    /** `user_message` event text, and the summary on a `compacted` record. */
     message?: unknown
+    /**
+     * Conversation history a `compacted` record retained, in response-item
+     * shape. Codex writes the pre-compaction turns here and nowhere else, so
+     * this is the only surviving copy of what the human typed before the
+     * context was replaced.
+     */
+    replacement_history?: ReadonlyArray<{
+      type?: string
+      id?: string
+      role?: string
+      content?: unknown
+      internal_chat_message_metadata_passthrough?: {
+        content_item_kinds?: readonly unknown[]
+      }
+    }>
+    window_id?: string
+    previous_window_id?: string
+    first_window_id?: string
+    window_number?: number
     item?: {
       type?: string
       id?: string
@@ -58,6 +77,9 @@ export interface CodexLine {
     }
     internal_chat_message_metadata_passthrough?: {
       turn_id?: string
+      /** What each content item of a user-role message is: `user.text` for the
+       *  person's own words, a namespaced kind for anything the harness added. */
+      content_item_kinds?: readonly unknown[]
     }
     source?: {
       subagent?: {

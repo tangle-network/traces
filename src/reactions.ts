@@ -18,6 +18,7 @@
 
 import { classifyReaction, CORRECTIVE_REACTIONS, type Reaction } from './adapters/actor.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import { isInheritedSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
 
 /** Reaction labels in stable render order. */
@@ -80,7 +81,10 @@ function isAssistant(s: OtlpSpan): boolean {
   return kind === 'LLM' || s.name.startsWith('message.assistant')
 }
 
+/** An inherited turn was typed into ANOTHER scope (a fork's parent, a
+ *  compacted history), so it has no assistant turn here to react to. */
 function isHumanPrompt(s: OtlpSpan): boolean {
+  if (isInheritedSpan(s.attributes)) return false
   return s.name === 'user.prompt' && s.attributes[ACTOR_ATTR] === 'human'
 }
 

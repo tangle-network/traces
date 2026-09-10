@@ -38,6 +38,7 @@ import type {
   UnreadableSourceRows,
 } from './otlp-input.js'
 import type { ExternalAnalysisResult, ExternalAnalyzer } from './external.js'
+import { createFindingRejectionTally, type FindingRejectionCounts } from './finding-rejections.js'
 import { spanEvidenceUri } from './external-analysis-validation.js'
 import { runExternalAnalyzers } from './external.js'
 import type { TraceLiveAnalyst } from './live.js'
@@ -161,6 +162,12 @@ export interface TraceInvestigationResult {
    * findings as if the requested LLM analysis had happened.
    */
   readonly agenticPerAnalyst?: readonly AnalystRunSummary[]
+  /**
+   * Findings the evidence gate refused, by analyst ID and reason. Present
+   * whenever an agentic pass ran, empty when nothing was refused, so a zero
+   * finding count can be told apart from "every finding was rejected".
+   */
+  readonly findingRejections?: FindingRejectionCounts
   readonly external: readonly ExternalAnalysisResult[]
   readonly report: string
 }
@@ -614,6 +621,7 @@ function renderInvestigationReport(
       workflow: result.workflow,
       conformance,
       unavailableCapabilities: unavailable,
+      ...(result.findingRejections ? { findingRejections: result.findingRejections } : {}),
     })}\n${renderAgenticRoute(result.agenticRoute)}` +
     `${renderPipelines(result.pipelines, unavailable)}\n` +
     `${renderLoopConvergence(result.loopConvergence, unavailable)}\n` +
@@ -693,6 +701,13 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
   const agenticRoute = opts.engine && !opts.agenticRegistry
     ? planTraceAgenticRoute(pipelines, reactions)
     : undefined
+  // The evidence gate reports each refused finding only as a log event.
+  // Counting here keeps those refusals in the report and the JSON result.
+  const rejections = createFindingRejectionTally()
+  const log = (msg: string, fields?: Record<string, unknown>): void => {
+    rejections.record(msg, fields)
+    opts.log?.(msg, fields)
+  }
   const analysis = await analyzeSpans(opts.spans, {
     sourceBundle: opts.sourceBundle,
     engine: opts.engine,
@@ -705,7 +720,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     otlpOutPath: opts.otlpOutPath,
     runId: `traces-investigation-${Date.parse(generatedAt) || Date.now()}`,
     signal: opts.signal,
-    log: opts.log,
+    log,
   })
   const external = opts.externalAnalyzers?.length
     ? await runExternalAnalyzers(analysis.otlpPath, opts.externalAnalyzers, {
@@ -741,7 +756,9 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     loopConvergence: analyzeLoopConvergence(opts.spans),
     steeringChain: analyzeSteeringChain(opts.spans),
     ...(agenticRoute ? { agenticRoute } : {}),
-    ...(analysis.agenticPerAnalyst ? { agenticPerAnalyst: analysis.agenticPerAnalyst } : {}),
+    ...(analysis.agenticPerAnalyst
+      ? { agenticPerAnalyst: analysis.agenticPerAnalyst, findingRejections: rejections.counts() }
+      : {}),
     external,
   }
   const result = { ...partial, report: '' }
@@ -759,6 +776,11 @@ const AGENTIC_FAILURE_REASON_MAX_CHARS = 400
  * a generic marker alone would point mid-analysis model errors at pip.
  */
 const BRIDGE_MISMATCH_PATTERN = /must contain exactly|No module named ['"]?agent_eval_rpc|could not start/
+
+/** True when an engine error looks like bridge version skew or a missing bridge install. */
+export function isBridgeMismatchError(message: string): boolean {
+  return BRIDGE_MISMATCH_PATTERN.test(message)
+}
 
 function condensedReason(summary: AnalystRunSummary): string {
   const raw = summary.status === 'skipped'
@@ -789,7 +811,7 @@ export function totalAgenticFailureMessage(
   ]
   if (
     opts.requiredBridgeVersion &&
-    agenticPerAnalyst.some((summary) => BRIDGE_MISMATCH_PATTERN.test(summary.error?.message ?? ''))
+    agenticPerAnalyst.some((summary) => isBridgeMismatchError(summary.error?.message ?? ''))
   ) {
     lines.push(
       'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +

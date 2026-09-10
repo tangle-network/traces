@@ -30,6 +30,8 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Live stream](#live-stream)
 - [Watch a run tree](#watch-a-run-tree)
 - [Improvement engine](#improvement-engine)
+- [Ask questions](#ask-questions)
+- [Session facts](#session-facts)
 - [Session index](#session-index)
 - [Session bundle](#session-bundle) · [Two views](#two-views-two-consumers)
 - [Policy-mining evidence](#policy-mining-evidence)
@@ -244,6 +246,8 @@ traces analyze --harness codex --current --latest-turn --workflow  # current tur
 traces analyze --harness claude-code --session <path> --latest-turn # latest task plus its subagents
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
+traces ask --harness codex --session <id> --question "Which commands failed?"
+traces facts --harness codex --session <id>        # the deterministic facts sheet, $0
 traces analyze  --all --since 2026-06-18 --out report.md
 traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
 traces validate results/sessions --out conformance.md  # a whole directory of exports
@@ -292,11 +296,15 @@ See [Replay verification](./docs/replay-verify.md) for setup, semantics, and hon
 | `--cwd <dir>` | Filter by working directory |
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
-| `--dir <path>` | `improve`: write the full artifact pack to this directory |
+| `--dir <path>` | `improve`: write the full artifact pack to this directory; `ask`: write `answers.json` + `report.md` there |
 | `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `analyze`, `investigate`, `improve`, `stream` |
 | `--otlp-out <path>` | **WRITE** the OTLP artifact here (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `TANGLE_API_KEY` + Python with `agent-eval-rpc[dspy]`) / cap their spend |
+| `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
+| `--questions <file>` | `ask`: JSON array of questions — strings, or `{ id?, question, instructions?, answerSchema? }` |
+| `--question-budget <usd>` | `ask`: provider ceiling for ONE question; `--budget` is the ceiling shared by all of them |
+| `--concurrency <n>` | `ask`: questions running at once (default 4); `import-codetracebench`: trajectories imported at once |
 | `--config <path>` | `analyze` / `investigate` / `improve` / `stream`: load BYO analysts, live analysts, and external analyzers |
 | `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (sessions 5, run tree 2) / active-session window minutes (default 30) |
 | `--min-loop <n>` | Identical repeated calls before flagging a loop (default 3) |
@@ -443,6 +451,91 @@ The config can export:
 
 Traces does not pretend that an action is a measured candidate.
 Use `agent-eval` to propose and compare candidate changes, `agent-runtime` to package an approved improvement, and `agent-interface` to represent profile edits.
+
+## Ask questions
+
+`traces ask` answers free-form questions about the selected sessions.
+Each question becomes its own recursive investigation over the same trace, and the questions run at the same time under one budget.
+
+```bash
+traces ask --harness codex --session <id> \
+  --question "Which shell commands exited non-zero, and what were they?" \
+  --question "What was the last thing the human asked for?" \
+  --dir .traces/ask
+```
+
+Ask many questions from a file, and hold an answer to a shape a scorer can compare:
+
+```bash
+traces ask --all --last 3 --questions questions.json --concurrency 6 --budget 2 --dir .traces/ask
+```
+
+```json
+[
+  "Which pull requests did this session open?",
+  {
+    "id": "merged-prs",
+    "question": "Which pull requests were merged?",
+    "instructions": "Count only merges the trace records, not merges the agent said it would do.",
+    "answerSchema": { "type": "array", "items": { "type": "integer" } }
+  }
+]
+```
+
+An entry is a question string, or an object with `question` and an optional `id`, `instructions`, and `answerSchema`.
+The schema accepts a small JSON Schema subset: `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, and `const`.
+Any other keyword is rejected when the run starts, because a constraint that is silently ignored would let a wrong answer pass as checked.
+
+The command writes two artifacts to `--dir`:
+
+| File | Contents |
+|---|---|
+| `answers.json` | per question: the answer text, the parsed answer, every citation with whether it resolves, accepted findings, evidence-gate rejections by reason, model calls, tool calls, cost with provenance, and latency |
+| `report.md` | the same run as readable Markdown: a summary line, a per-question table, then each answer with its citation and rejection notes |
+
+What it checks, and what it costs:
+
+- **Facts first.** Every question receives the deterministic [session-facts sheet](#session-facts) as prepared context before its first model call, at $0. The sheet is not citable; it names the span ids behind each fact.
+- **Citations.** Every `trace://<trace_id>/span/<span_id>` URI in an answer is looked up in the trace. An answer that cites a span the trace does not hold fails.
+- **Budget.** `--budget` is one ceiling shared by every question. `--question-budget` bounds one question. The run refuses to start when the budget cannot cover a single model call, and warns when the budget admits fewer concurrent calls than `--concurrency`.
+- **Cost.** Each cost carries its provenance: `observed` from a provider receipt, `estimated` from token counts, or `uncaptured`. An uncaptured cost stays null; it never becomes zero.
+- **Exit code.** `ask` writes both artifacts first, then exits 1 when any question failed, returned no answer, broke its schema, or cited a span that does not exist. A failed question never costs the other answers.
+
+`ask` uses the same engine and credentials as `--llm`, so it needs `TANGLE_API_KEY` and a Python interpreter with `agent-eval-rpc[dspy]`.
+Do not pass `--llm`; the command is model-backed by definition.
+
+## Session facts
+
+`traces facts` prints the deterministic session-facts sheet: the answers a session audit needs first, computed straight from the spans.
+No model call, no engine, no budget — it costs $0 and always returns the same sheet for the same spans.
+
+```bash
+traces facts --harness codex --session <id>                 # JSON on stdout
+traces facts --harness codex --last 5 --format text         # the short readable form
+traces facts --otlp spans.otlp.jsonl --out facts.json
+```
+
+| Fact | What it is |
+|---|---|
+| `toolCalls` | TOOL spans the agent actually invoked. Synthesized subagent lifecycle spans are excluded and counted separately in `synthesizedToolSpans`, so the total is not high by the number of subagents |
+| `toolCallsByName` | the same calls by tool name, so a category decision is the reader's, not a guess |
+| `subagents` | every `spawn_agent` call with the task name the adapter recorded |
+| `pullRequests` | the pull requests the commands created and merged, each named by number or head branch, with the command span and how the identity was joined. Scanned the way a shell reads the script, so a `gh pr create` inside a heredoc body is not a command that ran |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable |
+| `finalMessages` | the last message of the session's own agent, and of each subagent task, kept apart |
+| `changedFiles` | paths named by patch headers and file-editing tool arguments, with the operation |
+| `firstRecordAt` / `lastRecordAt` | the trace's earliest span start and latest span end |
+| `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
+| `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
+
+Two rules hold for every field:
+
+- **Every fact names its span ids.** `spanIds` lists the spans the value was computed from, so any number here can be opened and checked. The sheet itself is not a span and cannot be cited.
+- **A fact the spans cannot support is `null` with its reason.** It is never guessed, and never a silent zero. `partial` marks a measured value that is known to be incomplete — a truncated patch, or a list above the entry cap.
+
+`facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
+
+The same sheet reaches the model-backed analysts as prepared context, before their first model call — see [Trace analysts](docs/trace-analysts.md#session-facts-as-prepared-context).
 
 ## Session index
 
@@ -609,6 +702,8 @@ traces analyze --last 1 --analyzer prime
 traces analyze --last 1 --analyzer my-installed-command
 ```
 
+To ask your own question instead of the built-in kinds, use [`traces ask`](#ask-questions).
+
 HALO returns a diagnosis report.
 Hodoscope samples distinct behaviors and marks every sample `needs_review`.
 Prime posts the full span projection to an OpenAI-compatible bridge (`TRACES_PRIME_BRIDGE_URL`, default `http://localhost:4181`) and returns validated findings with span evidence.
@@ -631,6 +726,7 @@ See [`examples/external-engines.ts`](./examples/external-engines.ts).
 > `--llm` also needs a Python interpreter with `agent-eval-rpc[dspy]` installed, because agent-eval's model-backed analysts run through the DSPy RLM engine out of process; set `TRACES_PYTHON` to choose the interpreter.
 > The bridge protocol is version-locked: install the exact version matching this package's `@tangle-network/agent-eval` dependency (`pip install "agent-eval-rpc[dspy]==$(npm view @tangle-network/traces dependencies.@tangle-network/agent-eval)"`) — a skewed bridge kills every agentic analyst at startup.
 > When `--llm` was requested and every agentic analyst fails, `analyze`/`investigate`/`improve` still write the deterministic report, then exit 1 with each analyst's underlying error.
+> A requested `--analyzer` behaves the same way: its error is written into the report, and `analyze` then exits 1 naming every external analyzer that failed.
 > Every deterministic command — `list`, `analyze` without `--llm`, `convert`, `index`, `inspect`, `export`, `evidence`, `stream`, `watch`, `analyze --supervisor-run-dir` — needs neither a key nor Python.
 
 ## Agent skills
@@ -690,6 +786,7 @@ The CLI is a thin consumer of these exports.
 | `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run built-in analysts, or **your own** via `registry` |
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings with actions/checks, execution facts, external analyzer output, and report |
 | `runTraceImprovement` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full findings, evidence, report, and trace artifact pack |
+| `runTraceQuestions` | `(TraceQuestionsOptions) → TraceQuestionsResult` | ask many free-form questions of one span list, concurrently, under one shared cost ledger; keeps each answer and checks its citations |
 | `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | render any `AnalystFinding[]` without changing its schema |
 | `runTraceStoreInvestigation` | `({ traceStore }) → TraceStoreInvestigationResult` | run the same packet layer over a hosted/custom `TraceAnalysisStore` |
 | `loadTracesConfig` | `(path?) → TracesConfig \| undefined` | load BYO analysts and external analyzers |

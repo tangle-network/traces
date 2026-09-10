@@ -209,13 +209,44 @@ export function isCodexContextBlock(block: string): boolean {
 }
 
 /**
- * Derive the actor for a Codex user message. Codex has no sidechain/userType,
- * so it's text-only: a Codex context block → injected, synthetic markers →
- * injected, first-turn agent-spawn brief → injected, otherwise human.
- * `blocks` are the message's separate text blocks; Codex treats the whole
- * message as context when any one block is.
+ * Codex's own label for each content item of a user-role message, from
+ * `internal_chat_message_metadata_passthrough.content_item_kinds`.
+ *
+ * Codex tags every item it puts in a user message with what the item is:
+ * `user.text` for what the person typed, and a namespaced kind for everything
+ * the harness added — `agents_md.instructions` for an AGENTS.md file,
+ * `environments.environment_context` for the environment block,
+ * `goal.internal_context`, `plugins.recommendations`, and so on. A message is
+ * one a person typed exactly when every item in it is a `user.` kind.
+ *
+ * This is the structural signal, so it decides on its own: it is what the
+ * harness recorded, not what the text looks like. Returns undefined when the
+ * record carries no kinds — older rollouts and event mirrors — and the text
+ * heuristics answer instead.
  */
-export function codexActor(args: { text: string; blocks?: readonly string[]; isFirstUserTurn?: boolean }): Actor {
+export function codexKindsAreHuman(kinds: readonly unknown[] | undefined): boolean | undefined {
+  if (!Array.isArray(kinds) || kinds.length === 0) return undefined
+  if (!kinds.every((kind) => typeof kind === 'string')) return undefined
+  return kinds.every((kind) => (kind as string).startsWith('user.'))
+}
+
+/**
+ * Derive the actor for a Codex user message.
+ *
+ * `kinds` is Codex's own per-item labelling and decides whenever the record
+ * carries it. Without it the decision is text-only: a Codex context block →
+ * injected, synthetic markers → injected, first-turn agent-spawn brief →
+ * injected, otherwise human. `blocks` are the message's separate text blocks;
+ * Codex treats the whole message as context when any one block is.
+ */
+export function codexActor(args: {
+  text: string
+  blocks?: readonly string[]
+  isFirstUserTurn?: boolean
+  kinds?: readonly unknown[]
+}): Actor {
+  const recorded = codexKindsAreHuman(args.kinds)
+  if (recorded !== undefined) return recorded ? 'human' : 'injected'
   if ((args.blocks ?? [args.text]).some(isCodexContextBlock)) return 'injected'
   if (textIsCmdOrInject(args.text)) return 'injected'
   if (textIsSynthetic(args.text)) return 'injected'

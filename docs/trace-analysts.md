@@ -8,6 +8,8 @@ Keeping them separate prevents an exploratory model output from being reported a
 | What happened? | Built-in local checks | Findings from explicit trace facts |
 | Why might it have happened? | `--llm`, HALO, or a custom analyst | Findings or a diagnosis report with cited spans |
 | What behavior should we inspect? | Hodoscope | Samples marked `needs_review` |
+| What exactly does this session say about X? | `traces ask` | An answer per question, with checked `trace://` citations |
+| What does this session state, exactly and for free? | `traces facts` | A deterministic facts sheet, no model call |
 
 ## Start here
 
@@ -55,6 +57,210 @@ Returned directories from another resumed Claude session are parsed and included
 
 The OpenInference file is the shared input for external engines.
 The original trace and exact cited span remain available for review.
+
+## Ask free-form questions
+
+The built-in kinds ask fixed questions.
+`traces ask` asks your own.
+
+```bash
+traces ask --harness codex --session <id> \
+  --question "Which shell commands exited non-zero?" \
+  --question "Which pull requests did the session open, and were they merged?" \
+  --dir .traces/ask
+```
+
+Each question runs through agent-eval's `runTraceAnalyst` directly, not through the analyst registry.
+That matters for three reasons.
+
+- The registry keeps only findings, so it discards the engine's prose answer. `ask` keeps the answer text verbatim.
+- The registry runs analysts one at a time. `ask` runs questions concurrently, so wall time falls toward the slowest question instead of the sum.
+- One shared `CostLedger` bounds the whole run, so `--budget` means the same thing whatever the number of questions.
+
+### Questions
+
+A question stays short on purpose.
+The engine shows the model a preview of each long input: it keeps the first 500 and last 500 characters and drops the middle.
+A question inside the limit therefore reaches the model whole, and the answer rules sit in the first 500 characters of the instructions, which the preview always keeps.
+`ask` rejects an over-long question before it starts a model call and names the limit.
+Put the detail in the entry's `instructions` field instead, which the model reads after the rules.
+
+Read many questions from a file:
+
+```json
+{
+  "questions": [
+    "What was the last thing the human asked for?",
+    {
+      "id": "failed-commands",
+      "question": "Which shell commands exited non-zero?",
+      "instructions": "Report the command line and the exit code. Ignore commands the agent only proposed.",
+      "answerSchema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": { "command": { "type": "string" }, "exit_code": { "type": "integer" } },
+          "required": ["command", "exit_code"]
+        }
+      }
+    }
+  ]
+}
+```
+
+An `answerSchema` makes the answer one JSON value a scorer can compare field by field.
+The supported keywords are `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `title`, and `description`.
+Any other keyword is rejected when the run starts.
+This package carries no JSON Schema library, and a constraint that is quietly ignored would let a wrong answer pass as checked.
+
+### What the run guarantees
+
+- Every question receives the deterministic [session-facts sheet](#session-facts) as prepared context, before its first model call. It costs nothing and answers the counting questions the bounded trace tools cannot.
+- Every `trace://<trace_id>/span/<span_id>` URI in an answer is resolved against the store. An unresolvable citation fails that question.
+- Findings the answer submits still pass the same evidence gate as the built-in kinds. Refused findings are counted by reason in both artifacts.
+- A failed question never stops the others. Its failure is recorded on its own answer, and the remaining answers are written.
+- The artifacts are written before the exit code is decided. `ask` exits 1 when any question failed, returned no answer, broke its schema, or cited a missing span.
+
+### Budget under concurrency
+
+`--budget` is the ceiling shared by every question; `--question-budget` is the provider ceiling for one question.
+The ledger reserves each model call's maximum charge before the call runs, and releases the unused part when the call settles.
+Two consequences follow.
+
+- A budget below one call's reservation refuses the run before any model call, rather than failing every question.
+- A budget that admits fewer concurrent reservations than `--concurrency` still runs, and the report carries a warning naming how many concurrent calls it covers.
+
+A question the ledger refuses is reported as `budget-refused`, and the answers already produced are kept.
+
+### SDK
+
+```ts
+import { analysisEngineFromEnv, runTraceQuestions, writeTraceQuestionsArtifacts } from '@tangle-network/traces'
+
+const result = await runTraceQuestions({
+  questions: [
+    { id: 'failed-commands', question: 'Which shell commands exited non-zero?' },
+    { id: 'last-ask', question: 'What was the last thing the human asked for?' },
+  ],
+  spans,
+  engine: analysisEngineFromEnv({ model: 'gpt-5.6-luna', maxCostUsd: 1 }),
+  concurrency: 4,
+  budgetUsd: 2,
+})
+await writeTraceQuestionsArtifacts(result, '.traces/ask')
+if (!result.ok) process.exitCode = 1
+```
+
+`result.questions[i].answer` is the engine's prose, unedited.
+`result.totals` carries the wall time, the summed question time, the peak concurrency, and the cost with its provenance.
+
+## Session facts
+
+`traces facts` computes a fixed set of session facts straight from the spans.
+It runs no model, opens no engine, and spends nothing.
+The same spans always produce the same sheet.
+
+```bash
+traces facts --harness codex --session <id>            # JSON on stdout
+traces facts --harness codex --last 5 --format text    # the short readable form
+traces facts --otlp spans.otlp.jsonl --out facts.json
+```
+
+### Why it exists
+
+The trace tools are bounded, and above their bounds they answer a different question than the one asked.
+`viewTrace` returns a `≤20`-entry span-name histogram once a trace exceeds `perCallByteCeiling` (150,000 bytes).
+`countTraces` counts traces, not spans.
+`viewSpans` needs span ids the reader does not have yet.
+`searchTrace` stops at 500 hits.
+
+A model asked "how many tool calls ran?" therefore adds up a capped histogram and decides by eye which names belong.
+Measured over twelve private audit sessions, the model-backed analyst arm scored a deterministic mean of **0.389**.
+Extracting the same answers mechanically from the OTLP spans those runs already wrote scored **0.858** — the facts were present and exact the whole time.
+The sheet is that extraction, made part of the tool.
+
+### What it states
+
+| Field | Value |
+| --- | --- |
+| `toolCalls` | TOOL spans the agent invoked. Synthesized subagent lifecycle spans are excluded and counted in `synthesizedToolSpans` |
+| `toolCallsByName` | the same calls by tool name |
+| `subagents` | every `spawn_agent` call with the task name from `traces.codex.spawn_agent_path` |
+| `pullRequests` | pull requests the commands created and merged, each named by number or head branch, with the command span and the join evidence |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with timestamps |
+| `excludedTurns` | every `user.prompt` turn `humanTurns` left out, grouped by the reason, with the span ids |
+| `turnsByActor` | every `user.prompt` turn by actor, so the human filter is checkable |
+| `finalMessages` | the last message of the session's own agent, and of each subagent task, separately |
+| `changedFiles` | paths from `*** Add/Update/Delete/Move to File:` patch headers and from file-editing tool arguments |
+| `firstRecordAt`, `lastRecordAt` | the trace's earliest span start and latest span end |
+| `unreadRecords` | records the session reader could not parse |
+| `tokenTotal` | the harness's cumulative total, when a span carries `traces.session.total_tokens` |
+
+Two rules hold for every field.
+
+- **Every fact names the span ids it came from.** A reader can open those spans and check the number. The sheet is not a span and cannot be cited.
+- **A fact the spans cannot support is `null` with a stated reason.** It is never guessed and never a silent zero. `partial` marks a measured value known to be incomplete.
+
+`facts` exits non-zero when a selected session produced no record spans, rather than printing a sheet of zeros for a session it could not read.
+
+#### Pull requests
+
+The command spans carry the script, the exit code and the output.
+`pullRequests` scans each script the way a shell would, so a `gh pr create` inside a heredoc body or a commit message is not counted as a command that ran.
+A pull request is named by its number when the command or an output that joins to it shows one, and by its head branch when neither does.
+A create whose stdout was redirected away takes the number a later output states for the same branch on the same line, and names the span that stated it.
+A failed `git push && gh pr create` counts only when the output shows `gh` itself answering; otherwise the shell never reached it.
+A trace whose spans carry no executed command returns `null` with that reason, because "no pull requests" and "the spans cannot say" are different answers.
+
+#### Human turns
+
+A user message is one the human typed into this session.
+Three filters run in order, and each excluded span is listed in `excludedTurns` with its reason, never silently dropped:
+
+- history the session carries but did not receive — the prefix a fork copies from its parent, and the turns a compaction replays;
+- turns whose actor is not a person — an instruction file, an environment-context block, a system reminder, a subagent notification, a turn-aborted marker, or a skill or slash-command expansion;
+- a second record of the turn before it, meaning the same text at the same instant with no model call, tool call or assistant message between them.
+
+For Codex the actor comes from the harness's own per-item labelling (`internal_chat_message_metadata_passthrough.content_item_kinds`) whenever the record carries it: a message is the person's exactly when every item in it is a `user.` kind.
+
+### Session facts as prepared context
+
+The same sheet is supplied to the model-backed analysts before their first model call, through `TraceAnalystDefinition.prepareContext`.
+It reaches the built-in kinds run by `analyze --llm`, `investigate`, and `improve`, and it reaches every `traces ask` question inside `PREPARED CONTEXT:`.
+
+- The sheet is bounded at `PREPARED_CONTEXT_BYTE_CEILING` (30,000 bytes), a fifth of the `perCallByteCeiling` of 150,000 the trace tools work to, so the rest of the budget stays available for the tool calls the model still makes.
+- When the sheet does not fit, fields are shed from the largest downward and the shed is listed in `omitted_fields`. The tool-call counts are the last facts to go.
+- Receiving the sheet changes an analyst's behavior, so its version carries `+session-facts.1`. `createTraceAnalyst` records `prepare_context` in the exact-run identity, and a changed prepared context must not hide behind an unchanged version.
+- The sheet is not evidence. Citations still resolve against the raw spans, which is why every fact names its span ids rather than asking the model to trust the sheet.
+
+Pass `sessionFactsContext: false` to `analyzeSpans` to run an analyst without it.
+
+```ts
+import { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from '@tangle-network/traces'
+
+const [facts] = computeSessionFacts(spans)
+console.log(facts.toolCalls.value, facts.toolCalls.spanIds)
+console.log(renderSessionFacts(buildSessionFactsReport(spans)))
+```
+
+## Evidence-gate rejections
+
+A model-backed analyst can submit a finding the evidence gate then refuses.
+Without the reason, a report showing "0 findings" reads as "the model found nothing" when the truth may be "the gate refused everything it found".
+
+`analyze`, `investigate`, `improve`, and `ask` now carry those refusals:
+
+- the CLI log prints the reason and the offending URI on each `finding rejected` line;
+- the analyst table's Detail cell names the reasons and their counts;
+- `result.findingRejections` (investigation and improvement) and `answers.json` (`ask`) hold the counts per analyst and reason.
+
+The common reasons are an excerpt the cited span does not contain, a span the trace does not hold, and too few distinct citations for the kind.
+
+## External analyzer failures exit non-zero
+
+`--analyzer halo|hodoscope|prime|<command>` promises that engine's output.
+An analyzer that fails now writes its error into the report as before, and then `analyze` exits 1 naming every analyzer that failed.
+Scripts that treated exit 0 as "the analyzer ran" were reading a report that said otherwise.
 
 ## Codex tool outcomes
 

@@ -11,6 +11,8 @@
  *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
  *   traces investigate [input.jsonl] [--format auto] [--out report.md]
  *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
+ *   traces ask --harness codex --session <id> --question "..." [--questions q.json] [--dir <dir>]
+ *   traces facts [--harness codex] [--last 5] [--format json|text] [--out facts.json]
  *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces bundle  --harness claude-code --session <id|path> --out <dir>
@@ -42,7 +44,8 @@
 
 import { assertOutsideSourceBundle } from './bundle-source.js'
 import { readFileSync } from 'node:fs'
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
@@ -58,7 +61,8 @@ import {
   type VerifyFindingsRun,
 } from './analyze-verify.js'
 import { parseCorpusFlag } from './replay-corpus.js'
-import { commandAnalyzer, commandRedactor, haloAnalyzer } from './external.js'
+import { commandAnalyzer, commandRedactor, externalFailureMessage, haloAnalyzer } from './external.js'
+import { findingRejectionDetail } from './finding-rejections.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
 import { primeAnalyzer } from './analyst-engine-prime.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
@@ -66,6 +70,7 @@ import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writ
 import {
   loadTracesConfig,
   mergeTracesConfig,
+  isBridgeMismatchError,
   runTraceImprovement,
   runTraceInvestigation,
   saveReport,
@@ -89,8 +94,17 @@ import {
 } from '@tangle-network/agent-eval/supervisor-run'
 import { fileRunContextSupervisorRunReader, isFileRunContextDir } from './supervisor-run-context.js'
 import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
-import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import { analystMaxOutputTokens, createAnalystModelOwner } from './analyst-model-call.js'
+import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
+import { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL, DEFAULT_QUESTION_MAX_COST_USD } from './analyst-model-call.js'
+import {
+  loadTraceQuestionsFile,
+  MAX_TRACE_QUESTION_CHARS,
+  normalizeTraceQuestions,
+  runTraceQuestions,
+  type TraceQuestion,
+  type TraceQuestionsResult,
+  writeTraceQuestionsArtifacts,
+} from './ask.js'
 import type { OtlpSpan } from './otlp.js'
 import { serializeSpans, writeOtlpFile } from './otlp.js'
 import type {
@@ -101,6 +115,7 @@ import type {
   UnreadableSourceRows,
 } from './otlp-input.js'
 import { readOtlpInput } from './otlp-input.js'
+import { buildSessionFactsReport, renderSessionFacts } from './session-facts.js'
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
@@ -179,12 +194,13 @@ interface Args {
   replayCorpora: string[]
   /** Receipt root for --verify-findings; defaults next to --out. */
   verifyOut?: string
+  /** ask: repeatable `--question` texts. */
+  questions: string[]
+  /** ask: JSON file of questions, with optional IDs, guidance, and answer schemas. */
+  questionsFile?: string
+  /** ask: provider ceiling for one question; `--budget` bounds all of them together. */
+  questionBudget?: number
 }
-
-const DEFAULT_ANALYST_MODEL = 'gpt-5.6-luna'
-
-/** Default `--llm` endpoint: the Tangle router, reached with TANGLE_API_KEY. */
-const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
 
 function packageVersion(): string {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
@@ -221,6 +237,7 @@ function parseArgs(argv: string[]): Args {
     concurrency: 4,
     verifyFindings: false,
     replayCorpora: [],
+    questions: [],
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -269,6 +286,9 @@ function parseArgs(argv: string[]): Args {
       case '--replay-corpus': { const v = next(); if (v) a.replayCorpora.push(v); break }
       case '--verify-out': a.verifyOut = next(); break
       case '--analyzer-prompt': a.analyzerPrompt = next(); break
+      case '--question': { const v = next(); if (v !== undefined) a.questions.push(v); break }
+      case '--questions': a.questionsFile = next(); break
+      case '--question-budget': a.questionBudget = Number(next()); break
       case '--redactor': a.redactorCmd = next(); break
       case '--format': a.format = next(); break
       case '--help':
@@ -289,7 +309,7 @@ function parseArgs(argv: string[]): Args {
  * artifact with `--otlp-out`: one flag, one direction, no command where the
  * same word means read here and write there.
  */
-const OTLP_INPUT_COMMANDS = new Set(['analyze', 'investigate', 'improve', 'stream', 'validate'])
+const OTLP_INPUT_COMMANDS = new Set(['analyze', 'facts', 'investigate', 'improve', 'ask', 'stream', 'validate'])
 
 /**
  * `--otlp` used to mean "write the artifact here" on every command. It now
@@ -327,8 +347,10 @@ function validateOtlpSelection(raw: Args): Args {
 
 const CURRENT_SESSION_COMMANDS = new Set([
   'analyze',
+  'facts',
   'investigate',
   'improve',
+  'ask',
   'convert',
   'index',
   'evidence',
@@ -338,8 +360,10 @@ const CURRENT_SESSION_COMMANDS = new Set([
 
 const WORKFLOW_COMMANDS = new Set([
   'analyze',
+  'facts',
   'investigate',
   'improve',
+  'ask',
   'convert',
   'index',
   'evidence',
@@ -481,68 +505,16 @@ async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTra
 }
 
 /**
- * The recursive analysis engine behind `--llm`. agent-eval's model-backed
- * analysts run through DSPy RLM, which drives `agent-eval-rpc[dspy]` out of
- * process — so `--llm` needs a Python interpreter with that extra installed,
- * selectable via TRACES_PYTHON. Every deterministic command is unaffected and
- * still needs neither a key nor Python.
+ * `--llm` engine. It forwards the whole `--budget` as the per-analyst provider
+ * ceiling: the registry already splits `--budget` across analysts, so this only
+ * stops the engine's own $1 default from cutting runs short.
  */
-function buildAnalysisEngine(model: string, budgetUsd?: number): TraceAnalysisEngine {
-  // The router is the default endpoint, so TANGLE_API_KEY alone is enough.
-  // OPENAI_API_KEY still works and, when it is the only key present, points at
-  // OpenAI directly — otherwise a plain OpenAI key would be sent to the router.
-  const tangleKey = process.env.TANGLE_API_KEY
-  const openAiKey = process.env.OPENAI_API_KEY
-  const apiKey = tangleKey || openAiKey
-  if (!apiKey) {
-    throw new Error(
-      '--llm needs a model key: TANGLE_API_KEY for the Tangle router (the default endpoint), or ' +
-        'OPENAI_API_KEY for OpenAI. Set OPENAI_BASE_URL to target any other OpenAI-compatible ' +
-        'gateway. Deterministic analysis needs no key.',
-    )
-  }
-  const baseUrl =
-    process.env.OPENAI_BASE_URL ||
-    (tangleKey ? TANGLE_ROUTER_BASE_URL : 'https://api.openai.com/v1')
-  const python = process.env.TRACES_PYTHON
-  const owner = createAnalystModelOwner({
-    apiKey,
-    baseUrl,
-    model,
-    provider:
-      baseUrl === TANGLE_ROUTER_BASE_URL
-        ? 'tangle-router'
-        : baseUrl.startsWith('https://api.openai.com/')
-          ? 'openai'
-          : 'openai-compatible',
-  })
-  const maxOutputTokens = analystMaxOutputTokens(model)
-  return createDspyRlmTraceEngine({
-    call: owner.call,
-    callRef: owner.callRef,
-    recordExecution: (observation) => {
-      analystLog(
-        `[analyst] model call ${observation.sequence} ${observation.succeeded ? 'ok' : 'FAIL'} ${observation.model}`,
-        observation.succeeded ? undefined : { error: observation.error },
-      )
-    },
-    model,
-    // Model-aware, not defaulted: GPT-5.6 needs less output room than models
-    // such as GLM, and every recursive call reserves this full amount before
-    // execution. An oversized reservation can reject useful later calls even
-    // when the run's measured spend remains well below its limit.
-    maxOutputTokens,
-    // maxCostUsd defaults to $1 per analyst — a proxy-side ceiling separate
-    // from --budget. With the larger token cap the per-call reservation grows
-    // ~4x, so that default binds before the registry's --budget allocation
-    // and kills analysts mid-run. --budget is the operator's spend authority
-    // and the registry still splits it across analysts, so forwarding it here
-    // only stops the engine's own default from cutting runs short.
-    ...(budgetUsd !== undefined && Number.isFinite(budgetUsd) && budgetUsd > 0
-      ? { maxCostUsd: budgetUsd }
-      : {}),
-    ...(python ? { runner: { command: python } } : {}),
-  })
+function llmAnalysisEngine(args: Args, model: string): TraceAnalysisEngine {
+  return analysisEngineFromEnv({ model, maxCostUsd: args.budget, log: analystLog })
+}
+
+function analystModelFor(args: Args): string {
+  return args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
 }
 
 /**
@@ -564,17 +536,24 @@ function requiredBridgeVersion(): string {
 }
 
 /**
- * `--llm` promises agentic findings; delivering a deterministic-only report
- * with exit 0 when every agentic analyst died reads as success. Throwing after
- * the report is written keeps the deterministic output AND fails loud. The
- * bridge-version read happens only once total failure is established, so a
- * package.json problem can never turn a successful run into exit 1.
+ * `--llm` promises agentic findings, and `--analyzer` promises that engine's
+ * output. Delivering the deterministic report with exit 0 when a requested
+ * analysis died reads as success. Throwing after the report is written keeps
+ * the deterministic output AND fails loud. The bridge-version read happens
+ * only once total agentic failure is established, so a package.json problem
+ * can never turn a successful run into exit 1.
  */
-function assertAgenticAnalystsRan(args: Args, agenticPerAnalyst: TraceInvestigationResult['agenticPerAnalyst']): void {
-  if (!args.llm) return
-  if (!totalAgenticFailureMessage(agenticPerAnalyst)) return
-  const message = totalAgenticFailureMessage(agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })
-  throw new Error(message!)
+function assertRequestedAnalysesRan(
+  args: Args,
+  result: Pick<TraceInvestigationResult, 'agenticPerAnalyst' | 'external'>,
+): void {
+  const messages: string[] = []
+  if (args.llm && totalAgenticFailureMessage(result.agenticPerAnalyst)) {
+    messages.push(totalAgenticFailureMessage(result.agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })!)
+  }
+  const external = externalFailureMessage(result.external)
+  if (external) messages.push(external)
+  if (messages.length > 0) throw new Error(messages.join('\n'))
 }
 
 async function cmdList(args: Args): Promise<void> {
@@ -654,7 +633,7 @@ async function collectOtlpSpans(path: string): Promise<CollectedSpans> {
 
 async function collectSpans(args: Args): Promise<CollectedSpans> {
   if (args.sourceBundle) {
-    if (!['analyze', 'investigate', 'improve'].includes(args.command)) throw new Error('--source-bundle is an analysis option')
+    if (!['analyze', 'investigate', 'improve', 'ask'].includes(args.command)) throw new Error('--source-bundle is an analysis option')
     if (args.session || args.otlp || args.input || args.current || args.workflow || args.noContent || args.redactorCmd) {
       throw new Error('--source-bundle cannot be combined with another input, redaction, or metadata-only selection')
     }
@@ -870,6 +849,49 @@ async function cmdBundleView(args: Args): Promise<void> {
   )
 }
 
+/**
+ * `traces facts` — the deterministic session-facts sheet, printed.
+ *
+ * No model, no engine, no budget: the numbers come out of the spans. JSON by
+ * default because the sheet's consumers are programs; `--format text` prints
+ * the short readable form. Every fact names the span ids it came from, so any
+ * number here can be checked with `traces export` or a trace tool.
+ *
+ * Exits non-zero when a selected session cannot be read: `collectSpans` throws,
+ * and an unreadable session must never be reported as a session with no facts.
+ */
+async function cmdFacts(args: Args): Promise<void> {
+  const format = args.format ?? 'json'
+  if (format !== 'json' && format !== 'text') {
+    throw new Error(`unknown facts format "${format}" (expected json or text)`)
+  }
+  const collected = await collectSpans(args)
+  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  const report = buildSessionFactsReport(collected.spans, { harness: collected.harness })
+  // A session that yielded no record spans was not read: only its root, and any
+  // integrity receipt for the bytes that failed to parse. Printing a sheet of
+  // zeros for it would state, in the sheet's own voice, that the session did
+  // nothing — which is the one thing the sheet must never do.
+  const unread = report.sessions.filter((facts) => facts.recordSpans === 0)
+  if (unread.length > 0) {
+    throw new Error(
+      `no records could be read from ${unread.length} selected session(s): ` +
+        unread
+          .map((facts) => `${facts.sessionId ?? facts.traceId} (${facts.unreadRecords.value ?? 0} unread record(s))`)
+          .join(', ') +
+        '. The facts sheet would state zeros the spans cannot support.',
+    )
+  }
+  const rendered = format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderSessionFacts(report)
+  if (args.out) {
+    await writeFile(args.out, rendered, 'utf8')
+    console.log(`session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`)
+    return
+  }
+  process.stdout.write(rendered)
+}
+
 async function cmdInspect(args: Args): Promise<void> {
   if (!args.input) throw new Error('inspect needs an index file; run `traces index --out session-index.json` first')
   const index = await readSessionIndexFile(args.input)
@@ -1011,7 +1033,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   } else {
     console.log(report)
   }
-  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
+  assertRequestedAnalysesRan(args, result)
 }
 
 /**
@@ -1156,6 +1178,13 @@ async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
  * every engine-startup failure into an unactionable one-liner.
  */
 function analystLog(msg: string, fields?: Record<string, unknown>): void {
+  // A gate rejection names its cause only in the fields; without them the
+  // line says a finding was dropped but not why, which nobody can act on.
+  const rejection = findingRejectionDetail(msg, fields)
+  if (rejection) {
+    process.stderr.write(`${msg} — ${rejection}\n`)
+    return
+  }
   const error = typeof fields?.error === 'string' && fields.error ? fields.error : undefined
   const errorClass = typeof fields?.error_class === 'string' && fields.error_class ? `${fields.error_class}: ` : ''
   process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
@@ -1181,7 +1210,7 @@ async function cmdInvestigate(args: Args): Promise<void> {
   } else {
     console.log(result.report)
   }
-  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
+  assertRequestedAnalysesRan(args, result)
 }
 
 /** Conformance fields threaded from the source into the investigation options. */
@@ -1204,8 +1233,8 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
   const config = args.config !== undefined || options.loadDefaultConfig !== false
     ? await loadTracesConfig(args.config)
     : undefined
-  const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
+  const analystModel = analystModelFor(args)
+  const engine = args.llm ? llmAnalysisEngine(args, analystModel) : undefined
   return runTraceInvestigation(mergeTracesConfig({
     sourceBundle: args.sourceBundle ? { path: args.sourceBundle } : undefined,
     spans,
@@ -1230,8 +1259,8 @@ async function cmdImprove(args: Args): Promise<void> {
   const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
-  const analystModel = args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-  const engine = args.llm ? buildAnalysisEngine(analystModel, args.budget) : undefined
+  const analystModel = analystModelFor(args)
+  const engine = args.llm ? llmAnalysisEngine(args, analystModel) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
       sourceBundle: args.sourceBundle ? { path: args.sourceBundle } : undefined,
@@ -1258,7 +1287,86 @@ async function cmdImprove(args: Args): Promise<void> {
     `improvement artifacts → ${dir}  ` +
       `(${result.findings.length} findings with actions and checks, OTLP: ${result.otlpPath})`,
   )
-  assertAgenticAnalystsRan(args, result.agenticPerAnalyst)
+  assertRequestedAnalysesRan(args, result)
+}
+
+/**
+ * `traces ask`: free-form questions over the selected sessions. Every question
+ * is its own recursive investigation; they run concurrently under one shared
+ * ledger, so `--budget` bounds the whole run and `--question-budget` bounds
+ * each question. The answers, their citation checks, and per-question cost and
+ * time are written before the exit code is decided, so a failed question never
+ * costs the others' answers.
+ */
+async function cmdAsk(args: Args): Promise<void> {
+  if (args.out) throw new Error('ask writes a directory of artifacts; pass --dir <dir> instead of --out')
+  if (args.llm) throw new Error('ask always uses the model-backed engine; drop --llm')
+  const questions: TraceQuestion[] = [
+    ...(args.questionsFile ? await loadTraceQuestionsFile(args.questionsFile) : []),
+    ...args.questions.map((question) => ({ question })),
+  ]
+  if (questions.length === 0) {
+    throw new Error('ask needs --question "<text>" (repeatable) or --questions <questions.json>')
+  }
+  // Reject a bad question before any session is parsed or process started.
+  normalizeTraceQuestions(questions)
+  if (args.questionBudget !== undefined && (!Number.isFinite(args.questionBudget) || args.questionBudget <= 0)) {
+    throw new Error('--question-budget must be a positive number of USD')
+  }
+  if (args.budget !== undefined && (!Number.isFinite(args.budget) || args.budget <= 0)) {
+    throw new Error('--budget must be a positive number of USD')
+  }
+  const collected = await collectSpans(args)
+  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  const engine = analysisEngineFromEnv({
+    model: analystModelFor(args),
+    maxCostUsd: args.questionBudget ?? Math.min(args.budget ?? Infinity, DEFAULT_QUESTION_MAX_COST_USD),
+    log: analystLog,
+  })
+  const directory = resolve(args.dir ?? await mkdtemp(join(tmpdir(), 'traces-ask-')))
+  await mkdir(directory, { recursive: true })
+  const controller = new AbortController()
+  const interrupt = () => controller.abort(new Error('ask interrupted'))
+  process.once('SIGINT', interrupt)
+  let result: TraceQuestionsResult
+  try {
+    result = await runTraceQuestions({
+      questions,
+      spans: collected.spans,
+      engine,
+      harness: collected.harness,
+      concurrency: args.concurrency,
+      ...(args.budget !== undefined ? { budgetUsd: args.budget } : {}),
+      ...(args.sourceBundle ? { sourceBundle: { path: args.sourceBundle } } : {}),
+      otlpOutPath: args.otlpOut ?? join(directory, 'traces.otlp.jsonl'),
+      signal: controller.signal,
+      log: analystLog,
+    })
+  } finally {
+    process.removeListener('SIGINT', interrupt)
+  }
+  const artifacts = await writeTraceQuestionsArtifacts(result, directory)
+  process.stdout.write(result.report)
+  for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`)
+  process.stderr.write(
+    `ask artifacts → ${artifacts.directory}  (${result.totals.answered}/${result.totals.questions} answered, ` +
+      `wall ${(result.totals.wallTimeMs / 1000).toFixed(1)} s, answers: ${artifacts.result})\n`,
+  )
+  if (!result.ok) {
+    const failed = result.questions.filter((answer) => answer.status === 'failed')
+    const lines = [
+      `${failed.length} of ${result.questions.length} question(s) failed; the answers file holds every result.`,
+      ...failed.map((answer) => `  ${answer.id}: ${answer.failure?.kind}: ${answer.failure?.message.slice(0, 300)}`),
+    ]
+    if (failed.some((answer) => answer.failure?.kind === 'error' && isBridgeMismatchError(answer.failure.message))) {
+      lines.push(
+        'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
+          `agent-eval-rpc[dspy]==${requiredBridgeVersion()} (matching this package's @tangle-network/agent-eval).`,
+      )
+    }
+    throw new Error(lines.join('\n'))
+  }
 }
 
 function summarizeFindingEvidence(finding: TraceLiveFinding): string {
@@ -1615,6 +1723,17 @@ Commands:
             (--supervisor-run-dir <dir> reports a supervision tree instead)
   investigate Run typed investigation flow, including BYO config + evidence-backed actions
   improve   Write findings, evidence, report, and canonical trace artifacts
+  ask       Answer free-form questions over the selected sessions with the
+            model-backed engine: questions run concurrently under one budget,
+            every trace:// citation is checked, and answers.json + report.md
+            are written to --dir (exit 1 when any question fails)
+  facts     Print the deterministic session-facts sheet for the selected
+            sessions: tool calls excluding synthesized spans, subagent spawns
+            with task names, human turns in order, the final message per task,
+            changed paths, first/last record times, and the harness token total.
+            No model call, no budget, $0. Every fact names the span ids it came
+            from; a fact the spans cannot support is null with its reason.
+            --format json (default) or text (exit 1 when a session cannot be read)
   convert   Emit OTLP-JSONL only, to --otlp-out (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
   bundle    Assemble one session's durable evidence directory: transcript +
@@ -1667,19 +1786,20 @@ Options:
                    agent-runtime createFileRunContext journal, and OTLP span files.
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
-  --dir <path>     improve: write artifacts to this directory
+  --dir <path>     improve/ask: write artifacts to this directory
   --otlp <file|dir>  READ OTLP-JSONL emitted by any system, skipping the adapters.
                    A directory reads the OTLP files under it — only the otlp/
                    subdirectory when the producer made one — and names the JSONL
                    that is not OTLP instead of reading it as broken spans.
-                   Supported by: validate, analyze, investigate, improve, stream.
+                   Supported by: validate, analyze, investigate, improve, ask, stream.
                    On a WRITING command it is the deprecated spelling of
                    --otlp-out; it still works, with a warning, until 0.12.
   --source-bundle <dir>  Analyze a retained full bundle; explicitly grant source-field reads.
-                   Available for analyze, investigate, and improve.
+                   Available for analyze, investigate, improve, and ask.
   --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
                    provenance / dry-run upload preview)
   --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans | chat-trajectory
+                   facts: json (default) | text
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --mode <kind>    stream: visualizer | findings | agent (default visualizer)
@@ -1696,10 +1816,20 @@ Options:
                    agent-eval-rpc[dspy] (TRACES_PYTHON selects the interpreter),
                    version-matched to this package's @tangle-network/agent-eval.
                    Exits 1 when every agentic analyst fails, with each reason.
+                   ask uses the same engine and credentials without --llm.
   --model <id>     Model for --llm, HALO, and Hodoscope (default for --llm: ${DEFAULT_ANALYST_MODEL})
   --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
-  --budget <usd>   USD cap for agentic analysts
-  --analyzer <id>  analyze: also run halo, hodoscope, prime, or an installed command (repeatable)
+  --budget <usd>   USD cap for agentic analysts; ask: one ceiling shared by every question
+  --question <text> ask: a question (repeatable, at most ${MAX_TRACE_QUESTION_CHARS} characters)
+  --questions <file> ask: JSON array of questions, strings or
+                   { id?, question, instructions?, answerSchema? }
+  --question-budget <usd>
+                   ask: provider ceiling for one question (default: the smaller
+                   of --budget and $${DEFAULT_QUESTION_MAX_COST_USD})
+  --concurrency <n> ask: questions running at once (default 4);
+                   import-codetracebench: trajectories imported at once
+  --analyzer <id>  analyze: also run halo, hodoscope, prime, or an installed command (repeatable);
+                   exits 1 after writing the report when any requested analyzer fails
                    prime posts the full span projection to an OpenAI-compatible bridge
                    (TRACES_PRIME_BRIDGE_URL, default http://localhost:4181;
                    TRACES_PRIME_MODEL, default prime/zai/glm-5.2; TRACES_PRIME_TIMEOUT_MS)
@@ -1776,6 +1906,8 @@ async function main(): Promise<void> {
     case 'validate': await cmdValidate(args); break
     case 'investigate': await cmdInvestigate(args); break
     case 'improve': await cmdImprove(args); break
+    case 'ask': await cmdAsk(args); break
+    case 'facts': await cmdFacts(args); break
     case 'convert': await cmdConvert(args); break
     case 'index': await cmdIndex(args); break
     case 'bundle': await cmdBundle(args); break

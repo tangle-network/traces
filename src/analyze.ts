@@ -22,12 +22,11 @@ import {
   type TraceAnalysisEngine,
   type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
-import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
+import { openAgenticTraceStore, openDeterministicTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
 import { normalizeAnalystCitations } from './analyst-citations.js'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
-import { writeOtlpFile } from './otlp.js'
-import { assertOutsideSourceBundle, createBundleSourceReader } from './bundle-source.js'
+import { withSessionFactsContext } from './session-facts.js'
 
 export interface AnalyzeOptions {
   /** Explicitly authorize original source reads from this full session bundle. */
@@ -53,6 +52,16 @@ export interface AnalyzeOptions {
   agenticRegistry?: AnalystRegistry
   /** Select a subset of agent-eval's maintained trace analyst kinds. */
   agenticKinds?: readonly TraceAnalystDefinition[]
+  /**
+   * Supply the deterministic session-facts sheet to the agentic kinds as
+   * prepared context (default true). It costs nothing and removes the guessing
+   * the bounded trace tools force on a model that needs an exact count. Set
+   * false to measure an analyst without it.
+   *
+   * It applies only to definitions this call builds a registry from; a caller
+   * who brings `agenticRegistry` owns its own prepared context.
+   */
+  sessionFactsContext?: boolean
   /** Compact deterministic findings that agents receive before reading spans. */
   agenticPriorFindings?: readonly AnalystFinding[]
   /** Where to write the OTLP-JSONL artifact. Defaults to a temp file. */
@@ -76,16 +85,6 @@ export interface AnalyzeResult {
   agenticPerAnalyst?: readonly AnalystRunSummary[]
 }
 
-/**
- * `viewTrace` and generated-file ceiling for the deterministic pass. The
- * default 150KB cap exists to protect an LLM's context window — the
- * deterministic behavioral analyst has none, and a single coding session is one trace whose full
- * span list routinely exceeds 150KB (→ oversized summary → zero spans →
- * zero findings). The fixed ceiling covers large sessions without disabling
- * agent-eval's file-size guard.
- */
-const GENERATED_TRACE_FILE_CEILING = 512 * 1024 * 1024
-
 function mergeCostProvenance(
   first: RunCostProvenance | undefined,
   second: RunCostProvenance | undefined,
@@ -102,11 +101,12 @@ function mergeCostProvenance(
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
-  if (opts.sourceBundle && opts.otlpOutPath) await assertOutsideSourceBundle(opts.sourceBundle.path, opts.otlpOutPath)
-  const sourceReader = opts.sourceBundle
-    ? await createBundleSourceReader(opts.sourceBundle.path, spans, { signal: opts.signal, maxRecordBytes: opts.sourceBundle.maxRecordBytes })
-    : undefined
-  const otlpPath = await writeOtlpFile(spans, opts.otlpOutPath)
+  const traceFile = await writeAnalysisTraceFile(spans, {
+    sourceBundle: opts.sourceBundle,
+    otlpOutPath: opts.otlpOutPath,
+    signal: opts.signal,
+  })
+  const { otlpPath } = traceFile
   opts.signal?.throwIfAborted()
   const runId = opts.runId ?? `traces-${Date.now()}`
   const execution = summarizeSpanExecution(spans, {
@@ -116,13 +116,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   // Deterministic pass — high ceiling so the behavioral analyst sees the whole
   // trace. No LLM context to protect here. A caller-supplied registry (custom
   // analysts / their own agents) runs here instead of the built-in suite.
-  const detStore = new OtlpFileTraceStore({
-    path: otlpPath,
-    maxFileBytes: GENERATED_TRACE_FILE_CEILING,
-    perCallByteCeiling: GENERATED_TRACE_FILE_CEILING,
-    ...(sourceReader ? { sourceReader } : {}),
-  })
-  await detStore.ensureIndexed()
+  const detStore = await openDeterministicTraceStore(traceFile)
   opts.signal?.throwIfAborted()
   const detRegistry = opts.registry ?? buildDefaultAnalystRegistry({ registry: { log: opts.log } })
   const result = await detRegistry.run(runId, { traceStore: detStore }, { signal: opts.signal })
@@ -132,16 +126,24 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
   let agenticPerAnalyst: readonly AnalystRunSummary[] | undefined
   if (opts.engine || opts.agenticRegistry) {
-    const agStore = new OtlpFileTraceStore({ path: otlpPath, maxFileBytes: GENERATED_TRACE_FILE_CEILING, ...(sourceReader ? { sourceReader } : {}) })
-    await agStore.ensureIndexed()
-    const agRegistry = opts.agenticRegistry ?? buildDefaultAnalystRegistry({
-      engine: opts.engine!,
+    const agStore = await openAgenticTraceStore(traceFile)
+    // The sheet reaches the model through each definition's `prepareContext`,
+    // which runs before the first model call. Its facts are exact where the
+    // bounded trace tools force a guess, and it costs nothing to compute. A
+    // caller-supplied agentic registry owns its own prepared context, so the
+    // sheet is built only when this call builds the registry.
+    const buildRegistry = (): AnalystRegistry => {
       // The store above is written from these spans, so citations are
       // normalized against exactly the content the evidence gate re-reads.
-      definitions: normalizeAnalystCitations(opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS, spans),
-      includeBehavioral: false,
-      registry: { log: opts.log },
-    })
+      const kinds = normalizeAnalystCitations(opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS, spans)
+      return buildDefaultAnalystRegistry({
+        engine: opts.engine!,
+        definitions: opts.sessionFactsContext === false ? kinds : withSessionFactsContext(kinds, spans),
+        includeBehavioral: false,
+        registry: { log: opts.log },
+      })
+    }
+    const agRegistry = opts.agenticRegistry ?? buildRegistry()
     const agResult = await agRegistry.run(runId, { traceStore: agStore }, {
       budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
       chainFindings: true,

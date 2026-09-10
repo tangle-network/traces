@@ -1896,8 +1896,16 @@ describe('codex current tool and subagent events', () => {
       'traces.codex.task_scope': 'fork-current',
       'traces.codex.turn_id': currentTurnId,
     })
-    expect(spans.filter((item) => item.name === 'user.prompt').map((item) => item.attributes.content))
+    const prompts = spans.filter((item) => item.name === 'user.prompt')
+    expect(prompts.filter((item) => item.attributes['traces.session.inherited'] !== true)
+      .map((item) => item.attributes.content))
       .toEqual(['current child prompt'])
+    // The pre-fork prefix is kept, marked, and left out of this turn's identity.
+    const inherited = prompts.filter((item) => item.attributes['traces.session.inherited'] === true)
+    expect(inherited.map((item) => item.attributes.content)).toEqual(['inherited parent prompt'])
+    expect(inherited[0]?.attributes['traces.session.inherited_source']).toBe('pre-task-prefix')
+    expect(inherited[0]?.attributes['traces.codex.turn_id']).toBeUndefined()
+    expect(spans[0]?.attributes['traces.session.inherited_span_count']).toBe(1)
   })
 
   it('uses task timestamps when older child events omit started_at', async () => {
@@ -2461,7 +2469,9 @@ describe('codex current tool and subagent events', () => {
 
     const spans = await new CodexAdapter().parse(refFor(path, 'codex'))
     const tools = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
-    expect(tools).toHaveLength(10)
+    // The two subagent lifecycles are AGENT spans, not calls the model made.
+    expect(tools).toHaveLength(8)
+    expect(tools.every((item) => item.attributes['traces.span.synthesized'] === undefined)).toBe(true)
     const verifications = tools.filter((item) => item.attributes['tool.name'] === 'exec_command.verify')
     expect(verifications).toHaveLength(2)
     const failedVerification = verifications.find((item) => item.status.code === 'ERROR')
@@ -2497,8 +2507,12 @@ describe('codex current tool and subagent events', () => {
     expect(writeStdin?.attributes['traces.expected_blocking']).toBe(true)
     expect(writeStdin?.status.code).toBe('OK')
 
-    const agents = tools.filter((item) => item.attributes['tool.name'] === 'Agent')
+    const agents = spans.filter((item) => item.attributes['traces.span.synthesized'] === true)
     expect(agents).toHaveLength(2)
+    expect(agents.every((item) => item.name === 'subagent.lifecycle')).toBe(true)
+    expect(agents.every((item) => item.attributes['openinference.span.kind'] === 'AGENT')).toBe(true)
+    expect(agents.every((item) => item.attributes['tool.name'] === undefined)).toBe(true)
+    expect(agents.every((item) => item.attributes['traces.span.synthesized_from'] === 'codex.sub_agent_activity')).toBe(true)
     const agent = agents.find((item) => String(item.attributes['input.value']).includes('paper_audit'))
     expect(JSON.parse(String(agent?.attributes['input.value']))).toEqual({
       subagent_type: 'paper_audit',

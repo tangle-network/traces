@@ -655,6 +655,21 @@ export function runExternalAnalyzers(
   }))
 }
 
+/**
+ * Operator-facing message naming every external analyzer that failed, or
+ * undefined when all succeeded. A caller that requested an engine should
+ * treat its failure as a failed run: the report still carries the error, but
+ * exit 0 would read as "the engine ran and found nothing".
+ */
+export function externalFailureMessage(results: readonly ExternalAnalysisResult[]): string | undefined {
+  const failed = results.filter((result) => !result.ok)
+  if (failed.length === 0) return undefined
+  return [
+    `${failed.length} of ${results.length} external analyzer(s) failed; the report contains the other results.`,
+    ...failed.map((result) => `  ${result.analyzer}: ${(result.error ?? 'failed without an error message').replace(/\s+/g, ' ').trim().slice(0, 400)}`),
+  ].join('\n')
+}
+
 // ──────────────────────────────── redactors ────────────────────────────────
 
 /** An external PII/secret scrubber for free-form text — catches what regex

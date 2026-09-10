@@ -79,6 +79,19 @@ export {
   textIsSynthetic,
 } from './adapters/actor.js'
 export type { Reaction } from './adapters/actor.js'
+// Span provenance: which spans an adapter synthesized, and which carry context
+// from outside the parsed scope. A count of what the agent DID excludes both.
+export {
+  INHERITED_SOURCE_ATTR,
+  INHERITED_SPAN_ATTR,
+  INHERITED_SPAN_COUNT_ATTR,
+  INHERITED_SPANS_OMITTED_ATTR,
+  isInheritedSpan,
+  isSynthesizedSpan,
+  SYNTHESIZED_SOURCE_ATTR,
+  SYNTHESIZED_SPAN_ATTR,
+} from './adapters/provenance.js'
+export type { InheritedSpanSource } from './adapters/provenance.js'
 
 // ── Detection / analysis (built-in, or bring your own analysts) ───────────
 export * from './failure-followup.js' // classifyFailureFollowUps() — blind vs adapted retry split
@@ -98,6 +111,14 @@ export * from './inspect.js' // inspectSessionIndex() — ranked findings from a
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
 export * from './chat-trajectory.js' // generic chat trajectory to stable step spans
 export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
+export * from './ask.js' // runTraceQuestions(): concurrent free-form questions, answers kept and citations checked
+export * from './session-facts.js' // computeSessionFacts(): the deterministic, free session-facts sheet
+export * from './pull-request-facts.js' // readPullRequests(): the pull requests the command spans show
+export * from './shell-commands.js' // shellCommands(): the simple commands one script would run
+export * from './answer-schema.js' // the JSON Schema subset an ask answer may be held to
+export * from './finding-rejections.js' // evidence-gate rejections counted per analyst and reason
+export { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL } from './analyst-model-call.js'
+export type { AnalysisEngineFromEnvOptions } from './analyst-model-call.js'
 
 // ── External engines (NOT bundled — shell out to tools you install) ────────
 export * from './external.js' // haloAnalyzer / commandAnalyzer; commandRedactor
