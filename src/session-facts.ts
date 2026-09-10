@@ -143,7 +143,10 @@ export interface FinalMessageFact {
 /** One path a tool call changed, and how. */
 export interface ChangedFileFact {
   readonly path: string
-  /** `add`, `update`, `delete`, or `move`, in the order first observed. */
+  /**
+   * `add`, `update`, `delete`, or `move`, in the order first observed. A kind a
+   * harness reports under another name is kept verbatim rather than mapped.
+   */
   readonly operations: readonly string[]
   readonly spanIds: readonly string[]
 }
@@ -264,9 +267,11 @@ function inputTruncated(span: OtlpSpan): boolean {
   return span.attributes['traces.input.truncated'] === true
 }
 
-// `apply_patch` envelopes name every path they touch in a header line. The
-// adapter keeps the patch verbatim in `input.value`, so the headers survive
-// unless the value exceeded the adapter's own 16 KiB I/O cap.
+// The fallback source: `apply_patch` envelopes name every path they touch in a
+// header line, and the adapter keeps the patch verbatim in `input.value`, so
+// the headers survive unless the value exceeded the adapter's own 16 KiB I/O
+// cap. A header is the text the caller wrote, not a path the harness resolved,
+// so it is read only for edits no `file.change` span already states.
 //
 // The patch reaches the span either as raw text or as a JSON-encoded tool
 // argument, where the line breaks are the two characters `\` and `n`. The
@@ -280,6 +285,28 @@ const PATCH_OPERATION: Readonly<Record<string, string>> = {
   Delete: 'delete',
   'Move to': 'move',
 }
+
+/**
+ * A span the harness wrote for one path its own patch machinery changed.
+ *
+ * Codex's adapter emits one `file.change` span per changed path from the
+ * `FileChange` item the harness records after it applies a patch, carrying the
+ * path the edit actually reached and the kind of change. That is a better
+ * source than the patch text below: the harness resolved the path, so a patch a
+ * script generated is named correctly even when its header still held the
+ * script's own variable.
+ */
+const FILE_CHANGE_SPAN = 'file.change'
+const FILE_CHANGE_KIND_ATTR = 'traces.codex.file_change_kind'
+
+/**
+ * A path that still holds an unexpanded variable: `${path}` from a template
+ * literal, or `$FILE` from a shell. A script that builds a patch writes its own
+ * text into the header, so the header can name a variable rather than a file.
+ * It names no file, so it is dropped and counted rather than emitted as a path
+ * the session never touched.
+ */
+const UNRESOLVED_PATH = /(?:^|\/)\$/
 
 /** Tools whose arguments name one edited file directly rather than in a patch. */
 const FILE_PATH_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'write'])
@@ -311,12 +338,72 @@ function recordChangedPath(
   into.set(path, entry)
 }
 
-function changedFilesOf(toolSpans: readonly OtlpSpan[]): {
+/** The paths one `file.change` span states, with `move_path` as its own path. */
+function harnessChangedPaths(span: OtlpSpan): { path: string; operation: string }[] {
+  const input = inputValue(span)
+  if (input === null) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(input)
+  } catch {
+    return []
+  }
+  if (parsed === null || typeof parsed !== 'object') return []
+  const record = parsed as Record<string, unknown>
+  const path = typeof record.path === 'string' ? record.path.trim() : ''
+  if (path.length === 0) return []
+  const kind = stringAttr(span, FILE_CHANGE_KIND_ATTR) ?? (typeof record.kind === 'string' ? record.kind : '')
+  const movePath = typeof record.move_path === 'string' ? record.move_path.trim() : ''
+  return [
+    { path, operation: kind.length > 0 ? kind : 'update' },
+    ...(movePath.length > 0 ? [{ path: movePath, operation: 'move' }] : []),
+  ]
+}
+
+/**
+ * Record a path recovered from a tool's own arguments, deferring to the
+ * harness's record of the same edit.
+ *
+ * A header that names a file the harness already recorded joins that entry
+ * rather than opening a second one, so an edit both sources saw is one changed
+ * file carrying both spans as evidence — including when the header wrote the
+ * path relative to the directory the harness resolved it against. When several
+ * recorded paths end that way, the harness has the edit and which of them this
+ * header names cannot be decided, so no entry claims the span.
+ *
+ * Returns false when the path was dropped for holding an unexpanded variable.
+ */
+function recordRecoveredPath(
+  into: Map<string, ChangedPath>,
+  resolved: readonly string[],
+  path: string,
+  operation: string,
+  spanId: string,
+): boolean {
+  if (UNRESOLVED_PATH.test(path)) return false
+  const known = resolved.filter((candidate) => candidate === path || candidate.endsWith(`/${path}`))
+  if (known.length > 1) return true
+  recordChangedPath(into, known[0] ?? path, operation, spanId)
+  return true
+}
+
+function changedFilesOf(toolSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]): {
   files: ChangedFileFact[]
   truncatedInputs: number
+  unresolvedPaths: number
 } {
   const paths = new Map<string, ChangedPath>()
+  // The harness's own record first, so the recovery below can defer to it. A
+  // record the harness marked failed or declined changed no file.
+  for (const span of spans) {
+    if (span.name !== FILE_CHANGE_SPAN || span.status.code === 'ERROR') continue
+    for (const change of harnessChangedPaths(span)) {
+      recordChangedPath(paths, change.path, change.operation, span.span_id)
+    }
+  }
+  const resolved = [...paths.keys()]
   let truncatedInputs = 0
+  let unresolvedPaths = 0
   for (const span of toolSpans) {
     const input = inputValue(span)
     if (input === null) continue
@@ -326,14 +413,14 @@ function changedFilesOf(toolSpans: readonly OtlpSpan[]): {
       const path = match[2]?.trim()
       if (!operation || !path) continue
       matched = true
-      recordChangedPath(paths, path, operation, span.span_id)
+      if (!recordRecoveredPath(paths, resolved, path, operation, span.span_id)) unresolvedPaths += 1
     }
     if (!matched && FILE_PATH_TOOLS.has(toolName(span))) {
       for (const match of input.matchAll(FILE_PATH_KEY)) {
         const path = decodeJsonString(match[1] ?? '')
         if (!path) continue
         matched = true
-        recordChangedPath(paths, path, 'update', span.span_id)
+        if (!recordRecoveredPath(paths, resolved, path, 'update', span.span_id)) unresolvedPaths += 1
       }
     }
     if (matched && inputTruncated(span)) truncatedInputs += 1
@@ -341,7 +428,7 @@ function changedFilesOf(toolSpans: readonly OtlpSpan[]): {
   const files = [...paths]
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([path, entry]) => ({ path, operations: entry.operations, spanIds: entry.spanIds }))
-  return { files, truncatedInputs }
+  return { files, truncatedInputs, unresolvedPaths }
 }
 
 function subagentsOf(spans: readonly OtlpSpan[]): SubagentSpawnFact[] {
@@ -406,6 +493,31 @@ function capList<T>(items: readonly T[]): { kept: readonly T[]; partial?: string
 function listFact<T>(items: readonly T[], spanIds: readonly string[]): SessionFact<readonly T[]> {
   const { kept, partial } = capList(items)
   return { value: kept, spanIds: [...new Set(spanIds)], unavailable: null, ...(partial ? { partial } : {}) }
+}
+
+/** The changed-files fact, stating every way the list is known to be short. */
+function changedFilesFact(
+  files: readonly ChangedFileFact[],
+  truncatedInputs: number,
+  unresolvedPaths: number,
+): SessionFact<readonly ChangedFileFact[]> {
+  const fact = listFact(files, files.flatMap((entry) => entry.spanIds))
+  const gaps = [
+    ...(fact.partial ? [fact.partial] : []),
+    ...(truncatedInputs > 0
+      ? [
+          `${truncatedInputs} contributing tool span(s) had truncated input; ` +
+            'paths named after the cut are not in this list',
+        ]
+      : []),
+    ...(unresolvedPaths > 0
+      ? [
+          `${unresolvedPaths} recovered path(s) still held an unexpanded variable and were dropped; ` +
+            'each names a file only if the harness also recorded that change',
+        ]
+      : []),
+  ]
+  return { ...fact, ...(gaps.length > 0 ? { partial: gaps.join('; ') } : {}) }
 }
 
 /**
@@ -553,7 +665,7 @@ function sessionFactsForTrace(
     actorCounts.set(actor, [...(actorCounts.get(actor) ?? []), span.span_id])
   }
   const finalMessages = finalMessagesOf(spans)
-  const { files, truncatedInputs } = changedFilesOf(invoked)
+  const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, spans)
 
   const starts = spans.filter((span) => Number.isFinite(Date.parse(span.start_time)))
   const ends = spans.filter((span) => Number.isFinite(Date.parse(span.end_time)))
@@ -627,16 +739,7 @@ function sessionFactsForTrace(
       promptSpans.map((span) => span.span_id),
     ),
     finalMessages: listFact(finalMessages, finalMessages.map((entry) => entry.spanId)),
-    changedFiles: {
-      ...listFact(files, files.flatMap((entry) => entry.spanIds)),
-      ...(truncatedInputs > 0
-        ? {
-            partial:
-              `${truncatedInputs} contributing tool span(s) had truncated input; ` +
-              'paths named after the cut are not in this list',
-          }
-        : {}),
-    },
+    changedFiles: changedFilesFact(files, truncatedInputs, unresolvedPaths),
     firstRecordAt: firstSpan
       ? { value: firstSpan.start_time, spanIds: [firstSpan.span_id], unavailable: null }
       : { value: null, spanIds: [], unavailable: 'no span in this trace carries a parseable start time' },
