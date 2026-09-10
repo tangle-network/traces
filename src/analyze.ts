@@ -23,6 +23,7 @@ import {
   type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
 import { openAgenticTraceStore, openDeterministicTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
+import { normalizeAnalystCitations } from './analyst-citations.js'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { withSessionFactsContext } from './session-facts.js'
@@ -132,7 +133,9 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     // caller-supplied agentic registry owns its own prepared context, so the
     // sheet is built only when this call builds the registry.
     const buildRegistry = (): AnalystRegistry => {
-      const kinds = opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS
+      // The store above is written from these spans, so citations are
+      // normalized against exactly the content the evidence gate re-reads.
+      const kinds = normalizeAnalystCitations(opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS, spans)
       return buildDefaultAnalystRegistry({
         engine: opts.engine!,
         definitions: opts.sessionFactsContext === false ? kinds : withSessionFactsContext(kinds, spans),

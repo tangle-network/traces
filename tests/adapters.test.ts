@@ -307,6 +307,102 @@ describe('JSONL adapter streaming', () => {
     expect(result.maxRssKb).toBeLessThan(maxRssMb * 1024)
   })
 
+  it('parses a 100 MB Codex rollout of command items within a bounded heap', () => {
+    const path = join(dir, 'large-codex-items.jsonl')
+    const output = 'y'.repeat(1024 * 1024)
+    const itemCount = 101
+    const at = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString()
+    const file = openSync(path, 'w')
+    try {
+      writeSync(file, `${JSON.stringify({
+        type: 'session_meta',
+        timestamp: at(0),
+        payload: { id: 'large-codex', cwd: '/workspace/demo' },
+      })}\n`)
+      writeSync(file, `${JSON.stringify({
+        type: 'response_item',
+        timestamp: at(1),
+        payload: { type: 'custom_tool_call', call_id: 'call-0', name: 'exec', input: 'await tools.exec_command({ cmd: "pnpm test" })' },
+      })}\n`)
+      for (let index = 0; index < itemCount; index += 1) {
+        writeSync(file, `${JSON.stringify({
+          type: 'event_msg',
+          timestamp: at(2 + index),
+          payload: {
+            type: 'item_completed',
+            item: {
+              id: `item-${index}`,
+              type: 'CommandExecution',
+              command: ['pnpm', 'test', `--shard=${index}`],
+              cwd: '/workspace/demo',
+              status: 'completed',
+              exit_code: 0,
+              aggregated_output: `${index}:${output}`,
+            },
+          },
+        })}\n`)
+      }
+      writeSync(file, `${JSON.stringify({
+        type: 'response_item',
+        timestamp: at(2 + itemCount),
+        payload: { type: 'custom_tool_call_output', call_id: 'call-0', output: 'Process exited with code 0' },
+      })}\n`)
+    } finally {
+      closeSync(file)
+    }
+    expect(statSync(path).size).toBeGreaterThan(100 * 1024 * 1024)
+
+    const adapterUrl = pathToFileURL(join(process.cwd(), 'src/adapters/codex.ts')).href
+    const childSource = `
+      import { CodexAdapter } from ${JSON.stringify(adapterUrl)}
+      const ref = {
+        harness: 'codex',
+        sessionId: 'large-codex',
+        path: ${JSON.stringify(path)},
+        cwd: null,
+        mtimeMs: 0,
+      }
+      const spans = await new CodexAdapter().parse(ref)
+      const commands = spans.filter((span) => span.attributes['traces.codex.item_type'] === 'CommandExecution')
+      process.stdout.write(JSON.stringify({
+        spanCount: spans.length,
+        commandCount: commands.length,
+        joinedToCall: commands.filter((span) => span.attributes['traces.codex.item_join'] === 'call').length,
+        maxRssKb: process.resourceUsage().maxRSS,
+        bounded: commands.every((span) =>
+          span.attributes['traces.output.truncated'] === true &&
+          Buffer.byteLength(String(span.attributes['input.value'])) <= 16 * 1024 &&
+          Buffer.byteLength(String(span.attributes['output.value'])) <= 16 * 1024
+        ),
+      }))
+    `
+    const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' }
+    delete env.NODE_OPTIONS
+    // Retaining the parsed items instead of the built spans exhausts this cap.
+    const childHeapLimitMb = 64
+    const maxRssMb = 224
+    const child = spawnSync(
+      process.execPath,
+      [`--max-old-space-size=${childHeapLimitMb}`, '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      { cwd: process.cwd(), encoding: 'utf8', env, timeout: 60_000 },
+    )
+
+    expect(child.status, child.stderr || child.error?.message).toBe(0)
+    const result = JSON.parse(child.stdout) as {
+      spanCount: number
+      commandCount: number
+      joinedToCall: number
+      maxRssKb: number
+      bounded: boolean
+    }
+    expect(result).toMatchObject({
+      commandCount: itemCount,
+      joinedToCall: itemCount,
+      bounded: true,
+    })
+    expect(result.maxRssKb).toBeLessThan(maxRssMb * 1024)
+  })
+
   it('customer session parsing retains valid Codex records and stamps a degraded receipt', async () => {
     const path = join(dir, 'codex-recovered-session.jsonl')
     const rawSecret = 'secret-corrupt-codex-record'

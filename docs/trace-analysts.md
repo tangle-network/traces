@@ -278,6 +278,27 @@ The runtime span projection leaves its optional status absent for `UNSET` spans.
 Use the execution report for terminal run outcomes.
 The older runtime store's required run status cannot represent unknown and is not completion evidence.
 
+## Model-assisted citations
+
+agent-eval's evidence gate accepts a model finding only when each cited span exists and each excerpt appears in that span.
+Before the gate runs, `traces` normalizes the citations of the built-in `--llm` analysts against the analyzed spans.
+
+- An excerpt copied from a `searchTrace` hit carries JSON escapes such as `\"` and `\n`.
+  It is replaced by its decoded form only when the cited span contains that decoded text.
+- A citation of a readable harness ID, such as `tool:<call_id>` or the Codex session ID, is replaced by the hex OTLP span ID.
+  The readable ID must name exactly one span through its `traces.<harness>.source_*` attributes.
+- A subject from another analyst's vocabulary is removed, because the subject is optional.
+  The claim and its citations still go through the gate.
+
+The gate itself is unchanged and checks every rewritten finding.
+A fabricated excerpt, an unknown ID, or an ambiguous ID remains rejected.
+Normalization never adds a citation, so a failure-mode finding still needs two distinct spans.
+A subject outside the subject grammar is rejected before normalization runs.
+Wrapped analysts report a version ending in `+traces-citations-1`.
+
+A custom analyst built with `createTraceAnalyst` gets the same behavior through `normalizeAnalystCitations(definitions, spans)`.
+Pass the spans that the analyst's trace store was written from.
+
 ## External engines
 
 External engines are optional tools that you install separately.
