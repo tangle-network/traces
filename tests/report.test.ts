@@ -655,6 +655,22 @@ describe('analystRunDetail', () => {
     expect(detail).toContain(' … ')
   })
 
+  it('keeps the cell inside its length budget when a rejection summary shares it', () => {
+    const detail = analystRunDetail({
+      analyst_id: 'failure-mode',
+      status: 'failed',
+      findings_count: 0,
+      latency_ms: 1,
+      usage,
+      error: { class: 'Error', message: 'DSPy RLM trace analysis exited 1. stderr='.repeat(20) },
+    }, { [`the cited span holds no text matching the excerpt ${'x'.repeat(400)}`]: 3 })
+    // Both parts survive, and the cell keeps the same bound a lone condensed
+    // error keeps: ANALYST_DETAIL_MAX_CHARS plus the ' … ' join.
+    expect(detail).toContain('DSPy RLM trace analysis exited 1.')
+    expect(detail).toContain('3 finding(s) rejected:')
+    expect([...detail].length).toBeLessThanOrEqual(243)
+  })
+
   it('renders a whitespace-only error as the empty-cell dash', () => {
     expect(analystRunDetail({
       analyst_id: 'failure-mode',

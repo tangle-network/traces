@@ -17,6 +17,9 @@ Check live analysts separately only for `traces stream`.
 Extend an existing analyst when it already emits the target with usable evidence.
 Do not inspect bundled `dist` or `node_modules`.
 
+Answer a one-off question with `traces ask --question "<text>"` instead.
+Build an analyst when the question repeats and its answer must be scored, not read.
+
 ## Implement
 
 - Use `Analyst`, `AnalystRegistry`, `TraceAnalysisStore`, and `makeFinding` from `@tangle-network/traces`.

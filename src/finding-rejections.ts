@@ -37,14 +37,36 @@ export function findingRejection(
   return match[1] ? { analystId: match[1], reason } : { reason }
 }
 
-/** One-line detail for a rejection log event, or undefined for any other event. */
+/**
+ * The cause an event carries in its fields: `reason` for the gate's own
+ * rejections and the dspy engine's bridge-row rejection, `issues` for a schema
+ * failure. Undefined when the event names no cause beyond its kind.
+ */
+function rejectionCause(fields?: Readonly<Record<string, unknown>>): string | undefined {
+  if (typeof fields?.reason === 'string' && fields.reason) return fields.reason
+  const issues = fields?.issues
+  if (typeof issues === 'string' && issues) return issues
+  if (Array.isArray(issues) && issues.length > 0) return issues.map((issue) => String(issue)).join('; ')
+  return undefined
+}
+
+/**
+ * What a rejection log event carries beyond its own message: the cause, the
+ * offending URI, the citation counts, the subject. Empty when the message
+ * already says everything known — the kind is in the message, so repeating it
+ * would print "finding rejected: schema failure — schema failure". Undefined
+ * for an event that is not a rejection at all.
+ */
 export function findingRejectionDetail(
   message: string,
   fields?: Readonly<Record<string, unknown>>,
 ): string | undefined {
   const rejection = findingRejection(message, fields)
   if (!rejection) return undefined
-  const parts = [rejection.reason]
+  // The cause when the fields name one, the kind otherwise — and only when the
+  // message does not already end with it.
+  const lead = rejectionCause(fields) ?? rejection.reason
+  const parts = message.endsWith(lead) ? [] : [lead]
   if (typeof fields?.uri === 'string' && fields.uri) parts.push(`uri ${fields.uri}`)
   if (typeof fields?.required === 'number' && typeof fields?.distinct === 'number') {
     parts.push(`${fields.distinct} of ${fields.required} required distinct citation(s)`)

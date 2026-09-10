@@ -9,7 +9,9 @@
  *
  * Supported keywords: `type`, `properties`, `required`, `additionalProperties`
  * (boolean), `items` (one schema), `enum`, `const`, and the annotations
- * `title` and `description`.
+ * `title` and `description`. The four keywords that constrain one JSON type
+ * must declare that type: `required` without `"type": "object"`, or `items`
+ * without `"type": "array"`, checks nothing against an answer of another shape.
  */
 
 export type AnswerSchema = Readonly<Record<string, unknown>>
@@ -50,6 +52,22 @@ export function assertAnswerSchema(schema: unknown, path = 'answerSchema', depth
     if (types.length === 0 || !types.every((type) => typeof type === 'string' && JSON_TYPES.has(type))) {
       throw new TypeError(`${path}.type must be one of ${[...JSON_TYPES].join(', ')}, or an array of them`)
     }
+  }
+  // `properties`, `required`, `additionalProperties` and `items` constrain one
+  // JSON type each and are skipped for every other type. A schema that carries
+  // one without declaring that type checks nothing at all against an answer of
+  // the wrong shape — `{ required: ['a'] }` would accept the answer `5` — so it
+  // is rejected here rather than passing a wrong answer as checked.
+  const declared = schema.type === undefined
+    ? undefined
+    : (Array.isArray(schema.type) ? schema.type : [schema.type]) as string[]
+  for (const keyword of ['properties', 'required', 'additionalProperties'] as const) {
+    if (schema[keyword] !== undefined && !declared?.includes('object')) {
+      throw new TypeError(`${path}: "${keyword}" is checked only for an object; declare "type": "object" alongside it`)
+    }
+  }
+  if (schema.items !== undefined && !declared?.includes('array')) {
+    throw new TypeError(`${path}: "items" is checked only for an array; declare "type": "array" alongside it`)
   }
   if (schema.properties !== undefined) {
     if (!isRecord(schema.properties)) throw new TypeError(`${path}.properties must be an object`)
