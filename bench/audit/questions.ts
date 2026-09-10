@@ -56,8 +56,8 @@ export const QUESTIONS: readonly Question[] = [
     id: 'op.pull-requests',
     session: 'codex-operator',
     probes: ['F2', 'F3', 'F4'],
-    text: 'Which pull requests did the session create? For each one, give its number, the time of the tool call that issued the create command, the time of the tool call that issued the successful merge command, and whether the session was shown a review of it before that merge.',
-    paraphrases: ['List every pull request this session opened. For each, report the PR number, when the session opened it and when it merged it (use the times of the tool calls that ran those commands), and whether any review of it was visible to the session before the merge.'],
+    text: 'Which pull requests did the session create? For each one, give its number, the time of the tool call that issued the create command, the time of the tool call that issued the successful merge command, and whether the session was shown a review of it before that merge. A review listing that came back empty is not a review.',
+    paraphrases: ['List every pull request this session opened. For each, report the PR number, when the session opened it and when it merged it (use the times of the tool calls that ran those commands), and whether any review of it was visible to the session before the merge, counting an empty review list as none.'],
     schema: {
       prs: {
         kind: 'records',

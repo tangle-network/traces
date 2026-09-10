@@ -197,6 +197,11 @@ describe('answers files', () => {
     const file = parseAnswersFile({ arm: 'baseline', answers: [{ question: 'op.runs', answer: null, cost_usd: 0.01, cost_basis: 'estimated' }] })
     expect(file.arm).toBe('baseline')
   })
+
+  it('validates the file scoreArm is handed, not only the one the CLI reads', () => {
+    expect(() => scoreArm({ arm: 'unchecked', answers: [{ question: 'op.nope', answer: null }] }, bench.gold, index))
+      .toThrow(/not a known question id/)
+  })
 })
 
 describe('arm scores', () => {

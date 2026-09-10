@@ -98,6 +98,93 @@ function startedRuns(calls: readonly CodexCall[]): StartedRun[] {
 const mergedIn = (text: string): number[] =>
   [...text.matchAll(/Squashed and merged pull request [^#]+#(\d+)/g)].map((match) => Number(match[1]))
 
+/** The shell command a call ran, or the source of the script it ran; empty for any other call. */
+const sourceOf = (call: CodexCall): string =>
+  call.name === 'exec_command' ? commandOf(call) : call.name === 'exec' ? call.argument : ''
+
+/** The process a call left running, when its output reports a session id instead of an exit. */
+function backgroundedSession(call: CodexCall): number | undefined {
+  const match = /^Process running with session ID (\d+)$/m.exec(call.output)
+  return match ? Number(match[1]) : undefined
+}
+
+/** The background session a `write_stdin` call polled, or undefined for any other call. */
+function polledSession(call: CodexCall): number | undefined {
+  if (call.name !== 'write_stdin') return undefined
+  return Number((JSON.parse(call.argument) as { session_id: number }).session_id)
+}
+
+/**
+ * Everything a call ended up reporting: its own output, plus the output of every later poll
+ * of the process it backgrounded. A `gh pr create` whose URL arrives only in a poll, and a
+ * `gh pr merge` whose confirmation does the same, are both readable only this way.
+ */
+function reported(calls: readonly CodexCall[], call: CodexCall): string {
+  const session = backgroundedSession(call)
+  if (session === undefined) return call.output
+  const polls = calls.filter((other) => other.call.line > call.call.line && polledSession(other) === session)
+  return [call.output, ...polls.map((poll) => poll.output)].join('\n')
+}
+
+/** The command's own output, below the header the shell tool prefixes to it. */
+function shellBody(output: string): string {
+  const marker = '\nOutput:\n'
+  const index = output.indexOf(marker)
+  if (index < 0) throw new Error('a shell tool output carried no body')
+  return output.slice(index + marker.length)
+}
+
+/** One pull request as the records describe it, in the shape the answer takes. */
+interface DerivedPullRequest {
+  number: number
+  created_at: string
+  merged_at?: string
+  reviewed_before_merge?: boolean
+}
+
+/**
+ * Every pull request leaf, read back out of the records with no generator bookkeeping.
+ *
+ * `created_at` and `merged_at` are the timestamps of the call records themselves, as the
+ * question asks, not of the outputs that answered them. A merge counts only when the bytes
+ * confirm it, so the merge the harness refused is not one. `reviewed_before_merge` is
+ * whether the last review listing the session saw for that pull request before the merge
+ * call named any review.
+ */
+function pullRequests(calls: readonly CodexCall[]): DerivedPullRequest[] {
+  const created = new Map<number, CodexCall>()
+  for (const call of calls) {
+    if (!sourceOf(call).includes('gh pr create')) continue
+    const numbers = [...reported(calls, call).matchAll(/\/pull\/(\d+)/g)].map((match) => Number(match[1]))
+    if (numbers.length !== 1) throw new Error(`a gh pr create call reported ${numbers.length} pull request URLs`)
+    created.set(numbers[0]!, call)
+  }
+  const merged = new Map<number, CodexCall>()
+  for (const call of calls) {
+    for (const match of sourceOf(call).matchAll(/gh pr merge (\d+)/g)) {
+      const number = Number(match[1])
+      if (!mergedIn(reported(calls, call)).includes(number)) continue
+      if (merged.has(number)) throw new Error(`two calls claim the merge of pull request ${number}`)
+      merged.set(number, call)
+    }
+  }
+  return [...created.entries()].sort(([a], [b]) => a - b).map(([number, create]) => {
+    const merge = merged.get(number)
+    if (!merge) return { number, created_at: create.call.timestamp }
+    const views = calls.filter((call) =>
+      call.call.line < merge.call.line && sourceOf(call).includes(`gh pr view ${number} --json reviews`))
+    const last = views.at(-1)
+    if (!last) throw new Error(`nothing showed a review of pull request ${number} before its merge`)
+    const { reviews } = JSON.parse(shellBody(last.output)) as { reviews: unknown[] }
+    return {
+      number,
+      created_at: create.call.timestamp,
+      merged_at: merge.call.timestamp,
+      reviewed_before_merge: reviews.length > 0,
+    }
+  })
+}
+
 const directLaunches = execCalls.filter((call) => commandOf(call).startsWith('labctl run '))
 const failedLaunches = directLaunches.filter((call) => /Process exited with code (?!0)/.test(call.output))
 const launches = startedRuns([...execCalls, ...scripts])
@@ -161,6 +248,8 @@ describe('audit benchmark generator', () => {
   it('keeps every scored time further apart than the scorer tolerates', () => {
     // The 1 s tolerance is only safe while no other record in the same file carries a time
     // within 1 s of a scored one; otherwise a neighbor's time would be accepted as correct.
+    // This says nothing about whether a scored time belongs to the right record: it proves
+    // the tolerance is safe, not the answer. Each question's own test proves the record.
     const codexTimes = [operatorPath, childPath].map((path) => codexRows(path).map((row) => Date.parse(row.timestamp)))
     expect(scoredTimes.length).toBeGreaterThan(5)
     for (const value of scoredTimes) {
@@ -223,17 +312,26 @@ describe('planted facts in the operator session', () => {
     const create43 = execCalls.find((call) => commandOf(call).includes('docs(retry): budget guide'))
     expect(create43).toBeDefined()
     expect(numbersIn(create43!.output)).toEqual([])
-    expect((bench.gold['op.pull-requests']!.prs as Array<{ number: number }>).map((pr) => pr.number)).toEqual([41, 42, 43])
   })
 
   it('merges three pull requests three different ways', () => {
     expect(execCalls.flatMap((call) => mergedIn(call.output))).toEqual([41])
     expect(operatorCalls.filter((call) => call.name === 'write_stdin').flatMap((call) => mergedIn(call.output))).toEqual([42])
     expect(scripts.flatMap((call) => mergedIn(call.output))).toEqual([43])
-    const prs = bench.gold['op.pull-requests']!.prs as Array<{ number: number; merged_at?: string }>
-    expect(prs.filter((pr) => pr.merged_at)).toHaveLength(3)
     // A merge that the harness refused must not count as the merge.
     expect(execCalls.some((call) => commandOf(call) === 'gh pr merge 41 --squash' && call.output.includes('not mergeable'))).toBe(true)
+  })
+
+  it('re-derives every pull request answer from the records', () => {
+    // Every leaf comes back out of the bytes: the create call's own timestamp, the timestamp
+    // of the call that ran the merge the records confirm, and the review listing the session
+    // last saw before that call. Two of those links exist only through a later poll of a
+    // backgrounded process, which is the F4 difficulty this question carries.
+    const derived = pullRequests(operatorCalls)
+    expect(derived.map((pr) => pr.number)).toEqual([41, 42, 43])
+    expect(derived.filter((pr) => pr.merged_at)).toHaveLength(3)
+    expect(new Set(derived.map((pr) => pr.reviewed_before_merge))).toEqual(new Set([true, false]))
+    expect(bench.gold['op.pull-requests']).toEqual({ prs: derived })
   })
 
   it('repeats and cancels run commands', () => {
@@ -355,7 +453,17 @@ describe('planted facts in the forked child session', () => {
       own_tool_calls: calls.length,
       failed_commands: failed.length,
     })
-    expect(bench.gold['child.spawned']).toEqual({ spawned_session_ids: [] })
+    // The child carries exactly one spawn_agent call, inherited at the fork timestamp, and
+    // made none of its own. Counting the inherited call is the mistake this question tests
+    // for, so the derivation reads the session ids off the child's own spawn outputs.
+    const spawnsIn = (rows: readonly CodexRow[]): CodexRow[] =>
+      rows.filter((row) => row.payload.type === 'function_call' && row.payload.name === 'spawn_agent')
+    expect(spawnsIn(child.slice(1).filter((row) => row.timestamp === child[0]!.timestamp))).toHaveLength(1)
+    expect(spawnsIn(own)).toHaveLength(0)
+    const spawned = codexCalls(own)
+      .filter((call) => call.name === 'spawn_agent')
+      .map((call) => String((JSON.parse(call.output) as { agent_id: string }).agent_id))
+    expect(bench.gold['child.spawned']).toEqual({ spawned_session_ids: spawned })
   })
 })
 

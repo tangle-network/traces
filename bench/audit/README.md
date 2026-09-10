@@ -33,14 +33,19 @@ the benchmark would score nothing.
 directly, with no adapter and no access to the generator's bookkeeping, and fails when the
 plan and the bytes disagree.
 
-Sixteen of the nineteen answers are re-derived that way, counted or read straight back out
-of the bytes: `op.status-polls`, `op.subagents`, `op.pull-requests`, `op.runs`, `op.role`,
-`op.last-human-turn`, `op.changed-files`, `op.exit-codes`, `op.tokens`, `op.time-bounds`,
-`op.large-output`, `child.lineage`, `child.own-work`, `claude.tasks`, `claude.bash` and
-`claude.first-bash-error`. Three are asserted by construction instead. `op.corrections`
-rests on a judgement the generator makes, which human messages are corrections; the test
-checks that each quoted correction is the verbatim text of the record it cites, not that
-the set is complete. `op.local-copy` and `child.spawned` are literals.
+Seventeen of the nineteen answers are re-derived that way, counted or read straight back
+out of the bytes: `op.status-polls`, `op.subagents`, `op.pull-requests`, `op.runs`,
+`op.role`, `op.last-human-turn`, `op.changed-files`, `op.exit-codes`, `op.tokens`,
+`op.time-bounds`, `op.large-output`, `child.lineage`, `child.own-work`, `child.spawned`,
+`claude.tasks`, `claude.bash` and `claude.first-bash-error`. Every leaf is covered, not
+just the keys: for `op.pull-requests` that means each create time, each merge time and each
+`reviewed_before_merge`, re-derived by pairing calls with the outputs that answered them,
+including the two links that exist only through a later poll of a backgrounded process.
+
+Two are asserted by construction instead. `op.corrections` rests on a judgement the
+generator makes, which human messages are corrections; the test checks that each quoted
+correction is the verbatim text of the record it cites, not that the set is complete.
+`op.local-copy` is a literal.
 
 ## Sessions and what they plant
 
@@ -111,7 +116,9 @@ has a value is reported separately as a false "not in trace"; a confident wrong 
 a refusal are different failures. An unreported cost stays `missing` — it never becomes
 zero. And the two aggregate rows are scored over every wording the benchmark asks, not over
 the attempts made, so an arm that answers only the easy questions reports its skips in the
-same cell a reader compares.
+same cell a reader compares. The per-question rows under them keep their own attempts as
+the denominator, so three repeats of one wording read `3/0/0 of 3`; compare arms on the
+two aggregate rows, not on those.
 
 ## Running it
 

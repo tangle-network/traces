@@ -299,7 +299,12 @@ function tally(rows: ReadonlyArray<{ row: AnswerRow; scored: ScoredAnswer }>): T
   }
 }
 
-export function scoreArm(file: AnswersFile, gold: GoldAnswers, index: CitationIndex): ArmScore {
+/**
+ * Score one answers file. The file is validated here rather than by the caller, so a
+ * malformed one reports every problem instead of crashing on the first bad row.
+ */
+export function scoreArm(input: unknown, gold: GoldAnswers, index: CitationIndex): ArmScore {
+  const file = parseAnswersFile(input)
   const scored = file.answers.map((row) => ({ row, scored: scoreAnswer(questionById(row.question)!, row, gold, index) }))
   const questions: QuestionScore[] = []
   const notAttempted: ArmScore['notAttempted'] = []
