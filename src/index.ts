@@ -88,6 +88,7 @@ export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics
 export * from './agentic-routing.js' // planTraceAgenticRoute(): deterministic LLM analyst routing
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
+export * from './analyst-citations.js' // normalizeAnalystCitations() — model citations the evidence gate can check
 export * from './execution.js' // shared execution accounting over normalized spans
 export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog

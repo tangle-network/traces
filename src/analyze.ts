@@ -18,10 +18,12 @@ import {
   type AnalystRegistry,
   type AnalystRunSummary,
   buildDefaultAnalystRegistry,
+  DEFAULT_TRACE_ANALYST_KINDS,
   type TraceAnalysisEngine,
   type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
 import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
+import { normalizeAnalystCitations } from './analyst-citations.js'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
@@ -134,7 +136,9 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     await agStore.ensureIndexed()
     const agRegistry = opts.agenticRegistry ?? buildDefaultAnalystRegistry({
       engine: opts.engine!,
-      ...(opts.agenticKinds ? { definitions: opts.agenticKinds } : {}),
+      // The store above is written from these spans, so citations are
+      // normalized against exactly the content the evidence gate re-reads.
+      definitions: normalizeAnalystCitations(opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS, spans),
       includeBehavioral: false,
       registry: { log: opts.log },
     })
