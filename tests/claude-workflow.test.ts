@@ -19,7 +19,10 @@ function refFor(path: string): SessionRef {
 
 function contents(spans: readonly OtlpSpan[]): string[] {
   return spans.flatMap((item) =>
-    typeof item.attributes.content === 'string' ? [item.attributes.content] : [])
+    // A message span mirrors the content of the llm.turn it hangs from.
+    item.name !== 'message.assistant' && typeof item.attributes.content === 'string'
+      ? [item.attributes.content]
+      : [])
 }
 
 function workflowEvents(input: {
@@ -129,13 +132,22 @@ describe('Claude Workflow subagents', () => {
       (item) => item.attributes['agent.name'] === 'subagent:workflow-subagent',
     )
 
-    expect(workflowSpans).toHaveLength(2)
-    expect(workflowSpans.every((item) => item.parent_span_id === workflowCall?.span_id)).toBe(true)
+    // The child's prompt, its llm.turn, the message that turn produced, and the
+    // lifecycle span standing for its transcript.
+    expect(workflowSpans).toHaveLength(4)
+    expect(workflowSpans.filter((item) => item.name === 'subagent.lifecycle')).toHaveLength(1)
+    const workflowTurn = workflowSpans.find((item) => item.name === 'llm.turn')
+    expect(workflowSpans.filter((item) => item.parent_span_id === workflowCall?.span_id)).toHaveLength(3)
+    expect(workflowSpans.filter((item) => item.parent_span_id === workflowTurn?.span_id)).toHaveLength(1)
     expect(workflowSpans.every(
       (item) => String(item.attributes['traces.claude.source_span_id'])
         .startsWith('workflows:wf-linked:agent-linked:'),
     )).toBe(true)
-    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:04Z')
+    // The root's window is the SESSION's records, which end when the parent
+    // recorded the Workflow result; the child ran on past that, and its spans
+    // say so rather than being folded into the parent's duration.
+    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:02Z')
+    expect(workflowSpans.some((item) => item.end_time === '2026-01-01T00:00:04Z')).toBe(true)
   })
 
   it('scopes resumed workflows by run ID with structured and text results', async () => {

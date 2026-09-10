@@ -846,8 +846,12 @@ describe('claude adapter (conversation capture)', () => {
       taskScope: 'turn',
       taskTurnId: 'turn-old',
     })
+    // A message span mirrors the content of the llm.turn it hangs from, so it
+    // is skipped here: this test is about which records each scope selected.
     const contents = (spans: OtlpSpan[]) =>
-      spans.flatMap((item) => typeof item.attributes.content === 'string' ? [item.attributes.content] : [])
+      spans.flatMap((item) => item.name !== 'message.assistant' && typeof item.attributes.content === 'string'
+        ? [item.attributes.content]
+        : [])
 
     expect(contents(all)).toEqual([
       'OLD TASK',
@@ -957,7 +961,8 @@ describe('claude adapter (conversation capture)', () => {
 
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
 
-    expect(spans).toHaveLength(2)
+    // The session root, the one turn, and the message that turn produced.
+    expect(spans).toHaveLength(3)
     expect(new Set(spans.map((span) => span.trace_id))).toEqual(
       new Set([deriveHexId('canonical-session', 16)]),
     )
@@ -1137,7 +1142,10 @@ describe('claude adapter (conversation capture)', () => {
     const child = spans.find((item) => item.attributes['agent.name'] === 'subagent:child')
     const childCall = spans.find((item) => item.attributes['tool.name'] === 'Agent' && item.attributes['agent.name'] === 'subagent:parent')
     expect(child?.parent_span_id).toBe(childCall?.span_id)
-    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:03Z')
+    // The root's window is the SESSION's own records, which end at its last
+    // one; the nested children ran on past it inside their own transcripts.
+    expect(spans[0]?.end_time).toBe('2026-01-01T00:00:01Z')
+    expect(child?.end_time).toBe('2026-01-01T00:00:03Z')
   })
 
   // Was: rejects duplicate ids by throwing. The invariant it protected is unchanged — a
@@ -1234,8 +1242,18 @@ describe('claude adapter (conversation capture)', () => {
     writeFileSync(join(subDir, 'agent-a.meta.json'), JSON.stringify({ agentType: 'Explore', toolUseId: 'agent-call' }))
 
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    expect(traceShapeDigest(spans)).toBe('58ad7bae59004e9d6d36de7c5be70ab161cb0c6cad780c2f52b60868d8a4a18c')
-    expect(spans.map((item) => item.name)).toEqual(['session', 'user.prompt', 'llm.turn', 'tool.Agent', 'user.prompt', 'llm.turn'])
+    expect(traceShapeDigest(spans)).toBe('c884fc2b20dade6475b0452ff69f3c84c4e8588e68a47454e93e4be5d569ce8d')
+    expect(spans.map((item) => item.name)).toEqual([
+      'session',
+      'user.prompt',
+      'llm.turn',
+      'message.assistant',
+      'tool.Agent',
+      'user.prompt',
+      'subagent.lifecycle',
+      'llm.turn',
+      'message.assistant',
+    ])
     expect(spans.every((item) => item.trace_id === deriveHexId('claude-trace', 16))).toBe(true)
     expect(spans[0]).toMatchObject({ start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:00:02Z' })
     const mainTurn = llm(spans)
@@ -1246,7 +1264,13 @@ describe('claude adapter (conversation capture)', () => {
     expect(agentCall).toMatchObject({ end_time: '2026-01-01T00:00:02Z', status: { code: 'OK' } })
     expect(agentCall?.attributes.content).toBeUndefined()
     expect(agentCall?.attributes['output.value']).toBe('done')
-    expect(spans.filter((item) => item.attributes['agent.name'] === 'subagent:Explore').every((item) => item.parent_span_id === agentCall?.span_id)).toBe(true)
+    // The child's own spans nest inside the child; what hangs from the Agent
+    // call is every span at the top of that child's transcript.
+    const explore = spans.filter((item) => item.attributes['agent.name'] === 'subagent:Explore')
+    const exploreIds = new Set(explore.map((item) => item.span_id))
+    expect(explore.every((item) => item.parent_span_id === agentCall?.span_id
+      || exploreIds.has(item.parent_span_id ?? ''))).toBe(true)
+    expect(explore.filter((item) => item.parent_span_id === agentCall?.span_id).length).toBeGreaterThan(0)
   })
 
   it('parses a session with more than 65k spans without array spread overflow', async () => {
@@ -1275,9 +1299,10 @@ describe('claude adapter (conversation capture)', () => {
 
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
 
-    expect(spans).toHaveLength(70_002)
+    // Each response is two spans: the call, and the message it produced.
+    expect(spans).toHaveLength(140_002)
     expect(spans[0]?.name).toBe('session')
-    expect(spans.at(-1)?.name).toBe('llm.turn')
+    expect(spans.at(-1)?.name).toBe('message.assistant')
   })
 })
 

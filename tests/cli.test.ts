@@ -712,7 +712,9 @@ describe('traces CLI', () => {
       totals: { sessions: number; spans: number }
     }
     expect(output.selection.latestTurn).toBe(true)
-    expect(output.totals).toMatchObject({ sessions: 1, spans: 4 })
+    // Root, the new task, its llm.turn, the assistant message it produced, and
+    // the task notification that followed it.
+    expect(output.totals).toMatchObject({ sessions: 1, spans: 5 })
   })
 
   it('expands the active Codex session through recursively spawned child files', async () => {

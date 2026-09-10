@@ -57,7 +57,11 @@ function writeChild(input: {
 
 function contentOrder(spans: readonly OtlpSpan[]): string[] {
   return spans.flatMap((item) =>
-    typeof item.attributes.content === 'string' ? [item.attributes.content] : [])
+    // A message span mirrors the content of the llm.turn it hangs from, so
+    // listing it as well would say nothing about the order of the records.
+    item.name !== 'message.assistant' && typeof item.attributes.content === 'string'
+      ? [item.attributes.content]
+      : [])
 }
 
 describe('Claude subagent folding', () => {
@@ -153,8 +157,13 @@ describe('Claude subagent folding', () => {
       (item) => item.attributes['agent.name'] === 'subagent:worker',
     )
 
-    expect(stale).toHaveLength(2)
-    expect(stale.every(
+    // The child's own prompt, its llm.turn, the message that turn produced, and
+    // the lifecycle span standing for its transcript.
+    expect(stale).toHaveLength(4)
+    expect(stale.filter((item) => item.name === 'subagent.lifecycle')).toHaveLength(1)
+    const staleIds = new Set(stale.map((item) => item.span_id))
+    const staleTop = stale.filter((item) => !staleIds.has(item.parent_span_id ?? ''))
+    expect(staleTop.every(
       (item) => item.attributes['traces.claude.source_parent_span_id'] === 'root:stale-child',
     )).toBe(true)
     expect(stale.every(
