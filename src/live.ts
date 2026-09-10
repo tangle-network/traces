@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isInheritedSpan, isSynthesizedSpan } from './adapters/provenance.js'
 import { isInnerToolCall } from './adapters/tool-io.js'
 import type { OtlpSpan } from './otlp.js'
 import type { PipelineReport } from './pipelines.js'
@@ -238,12 +239,20 @@ function toolSignature(span: OtlpSpan): string {
   return `${toolName(span)}:${content || span.name}`
 }
 
+/**
+ * A tool call the model issued. A synthesized span (a subagent lifecycle the
+ * adapter assembled from harness events) matches every surface heuristic below,
+ * so it is rejected first — otherwise this batch's tool count, and the error
+ * ratio derived from it, run high by one per child thread.
+ */
 function isTool(span: OtlpSpan): boolean {
+  if (isSynthesizedSpan(span.attributes)) return false
   return spanKind(span) === 'TOOL' || span.attributes['tool.name'] != null || span.name.startsWith('tool.')
 }
 
 /** Command and file-change records inside a tool call carry tool I/O, not prose. */
 function isTextSpan(span: OtlpSpan): boolean {
+  if (isSynthesizedSpan(span.attributes) || isInheritedSpan(span.attributes)) return false
   return !isTool(span) && !isInnerToolCall(span.attributes) && spanContent(span).length > 0
 }
 

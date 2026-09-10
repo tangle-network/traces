@@ -14,6 +14,7 @@ import type {
 } from '@tangle-network/agent-eval/contract'
 import type { AdoptionReport } from './adoption.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import { isInheritedSpan } from './adapters/provenance.js'
 import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { incompleteInputsNote, type UnavailableCapabilities } from './conformance.js'
 import type { LoopConvergenceReport, SteeringChainReport } from './loop-analysis.js'
@@ -91,9 +92,12 @@ export function sessionReportSource(
   sessionIdOverride?: string,
 ): ReportSource {
   const root = spans.find((item) => item.parent_span_id === null) ?? spans[0]
-  const prompt = spans.find(
+  // The subject names what THIS scope was asked to do, so an inherited turn
+  // (a fork's parent prompt, a compacted history) never supplies it.
+  const inScope = spans.filter((item) => !isInheritedSpan(item.attributes))
+  const prompt = inScope.find(
     (item) => item.name === 'user.prompt' && item.attributes[ACTOR_ATTR] === 'human',
-  ) ?? spans.find((item) => item.name === 'user.prompt') ?? spans.find(
+  ) ?? inScope.find((item) => item.name === 'user.prompt') ?? inScope.find(
     (item) => item.attributes['span.type'] === 'interaction' && typeof item.attributes.content === 'string',
   )
   const content = typeof prompt?.attributes.content === 'string' ? prompt.attributes.content : ''

@@ -79,6 +79,19 @@ export {
   textIsSynthetic,
 } from './adapters/actor.js'
 export type { Reaction } from './adapters/actor.js'
+// Span provenance: which spans an adapter synthesized, and which carry context
+// from outside the parsed scope. A count of what the agent DID excludes both.
+export {
+  INHERITED_SOURCE_ATTR,
+  INHERITED_SPAN_ATTR,
+  INHERITED_SPAN_COUNT_ATTR,
+  INHERITED_SPANS_OMITTED_ATTR,
+  isInheritedSpan,
+  isSynthesizedSpan,
+  SYNTHESIZED_SOURCE_ATTR,
+  SYNTHESIZED_SPAN_ATTR,
+} from './adapters/provenance.js'
+export type { InheritedSpanSource } from './adapters/provenance.js'
 
 // ── Detection / analysis (built-in, or bring your own analysts) ───────────
 export * from './failure-followup.js' // classifyFailureFollowUps() — blind vs adapted retry split
