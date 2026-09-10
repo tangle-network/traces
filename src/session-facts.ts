@@ -25,6 +25,15 @@
  *      filtered — a `user.prompt` turn that is not a human turn of this session
  *      — is reported beside the count with the reason, never silently dropped.
  *
+ * Every fact below is about THE SESSION'S OWN AGENT. Some harnesses fold a
+ * spawned agent's transcript into the parent's trace (Claude Code writes one
+ * file per subagent under the session directory and the adapter reads them
+ * all), so a trace can hold two kinds of record: what this session's agent did,
+ * and what a child agent it spawned did. The child's work is the child's: it is
+ * excluded from this sheet's counts, named in `subagents` and counted in
+ * `subagentToolSpans`, never added to the parent's totals. A trace with no
+ * subagent records is unaffected — every one of those counts is zero.
+ *
  * The sheet is NOT a span and cannot be cited. It is prepared context, and
  * `trace://` citations still resolve against the raw spans — which is why every
  * fact names its span ids rather than asking the reader to trust the sheet.
@@ -36,6 +45,10 @@ import { ACTOR_ATTR } from './adapters/conversation.js'
 import {
   INHERITED_SOURCE_ATTR,
   INHERITED_SPAN_ATTR,
+  SUBAGENT_SPAWN_ATTR,
+  SUBAGENT_SPAWN_TASK_ATTR,
+  SUBAGENT_TASK_ATTR,
+  isSubagentSpan,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
 import { indexSessionIdsByTrace } from './attributes.js'
@@ -99,9 +112,9 @@ export interface SessionFact<T> {
   readonly partial?: string
 }
 
-/** One `spawn_agent` call, with the task name the adapter recorded for it. */
+/** One subagent-spawning call, with the task name the adapter recorded for it. */
 export interface SubagentSpawnFact {
-  /** `traces.codex.spawn_agent_path`, verbatim. Null when the span carries none. */
+  /** The task name the spawn span carries, verbatim. Null when it carries none. */
   readonly taskName: string | null
   /** Why `taskName` is null. Null when it was recorded. */
   readonly taskNameUnavailable: string | null
@@ -181,10 +194,16 @@ export interface SessionFacts {
   readonly recordSpans: number
   /** Records the adapter could not read, from the session's integrity receipt. */
   readonly unreadRecords: SessionFact<number>
-  /** TOOL spans the agent actually invoked: synthesized lifecycle spans excluded. */
+  /**
+   * TOOL spans THIS session's agent invoked. Synthesized lifecycle spans and
+   * the tool calls of subagents it spawned are excluded, and each exclusion is
+   * counted below so the reader can add them back.
+   */
   readonly toolCalls: SessionFact<number>
   /** Every synthesized span excluded from `toolCalls`, so the exclusion is checkable. */
   readonly synthesizedToolSpans: SessionFact<number>
+  /** TOOL spans excluded because a subagent, not this agent, made the call. */
+  readonly subagentToolSpans: SessionFact<number>
   /** Tool-call counts by tool name, over the same spans `toolCalls` counted. */
   readonly toolCallsByName: SessionFact<Readonly<Record<string, number>>>
   readonly subagents: SessionFact<readonly SubagentSpawnFact[]>
@@ -199,10 +218,11 @@ export interface SessionFacts {
   /** The last message of the session's own agent, and of each subagent task. */
   readonly finalMessages: SessionFact<readonly FinalMessageFact[]>
   readonly changedFiles: SessionFact<readonly ChangedFileFact[]>
-  /** Earliest span start in the trace. Not the session file's first record when
-   *  the adapter selected a task boundary inside the file. */
+  /** Earliest span start among this session's own records. Not the session
+   *  file's first record when the adapter selected a task boundary inside the
+   *  file, and not a spawned subagent's first record. */
   readonly firstRecordAt: SessionFact<string>
-  /** Latest span end in the trace. */
+  /** Latest span end among this session's own records. */
   readonly lastRecordAt: SessionFact<string>
   /** The harness's own cumulative token total, when a span carries it. */
   readonly tokenTotal: SessionFact<number>
@@ -444,30 +464,52 @@ function changedFilesOf(toolSpans: readonly OtlpSpan[], spans: readonly OtlpSpan
   return { files, truncatedInputs, unresolvedPaths }
 }
 
-function subagentsOf(spans: readonly OtlpSpan[]): SubagentSpawnFact[] {
+/**
+ * The subagents THIS session's agent spawned, one entry per spawning call.
+ *
+ * `ownSpans` are the session's own records: a spawn a subagent itself made is
+ * that subagent's, not this session's. `spans` is the whole trace, because the
+ * lifecycle span a spawn joins to lives in the child's scope.
+ */
+function subagentsOf(ownSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]): SubagentSpawnFact[] {
   // A lifecycle span records the subagent's own path; joining it to the spawn
   // call by that path gives the reader both spans to check the task name with.
   const lifecycleByPath = new Map<string, string[]>()
+  // An adapter that folds the child's transcript in parents the child's
+  // lifecycle span under the spawn call itself, which is an exact join and
+  // needs no name: two spawns may legitimately carry the same task name.
+  const lifecycleByParent = new Map<string, string[]>()
   for (const span of spans) {
+    if (!isSynthesizedSpan(span)) continue
     const path = stringAttr(span, 'traces.codex.subagent_path')
-    if (path === null || !isSynthesizedSpan(span)) continue
-    lifecycleByPath.set(path, [...(lifecycleByPath.get(path) ?? []), span.span_id])
+    if (path !== null) {
+      lifecycleByPath.set(path, [...(lifecycleByPath.get(path) ?? []), span.span_id])
+    }
+    const parent = span.parent_span_id
+    if (parent !== null && span.attributes[SUBAGENT_TASK_ATTR] !== undefined) {
+      lifecycleByParent.set(parent, [...(lifecycleByParent.get(parent) ?? []), span.span_id])
+    }
   }
   const spawns: SubagentSpawnFact[] = []
-  for (const span of spans) {
+  for (const span of ownSpans) {
     const isSpawn =
       attr(span, 'traces.codex.agent_operation') === 'spawn_agent' ||
-      stringAttr(span, 'traces.codex.spawn_agent_path') !== null
+      stringAttr(span, 'traces.codex.spawn_agent_path') !== null ||
+      attr(span, SUBAGENT_SPAWN_ATTR) === true
     if (!isSpawn || isSynthesizedSpan(span)) continue
-    const taskName = stringAttr(span, 'traces.codex.spawn_agent_path')
+    const taskName = stringAttr(span, 'traces.codex.spawn_agent_path') ?? stringAttr(span, SUBAGENT_SPAWN_TASK_ATTR)
     spawns.push({
       taskName,
       taskNameUnavailable: taskName === null
-        ? 'the spawn span carries no traces.codex.spawn_agent_path; the harness returned no task name for this call'
+        ? 'the spawn span carries no task name; the harness recorded none for this call'
         : null,
       startedAt: span.start_time,
       status: span.status.code,
-      spanIds: [span.span_id, ...(taskName ? lifecycleByPath.get(taskName) ?? [] : [])],
+      spanIds: [
+        span.span_id,
+        ...(taskName ? lifecycleByPath.get(taskName) ?? [] : []),
+        ...(lifecycleByParent.get(span.span_id) ?? []),
+      ],
     })
   }
   return spawns
@@ -477,8 +519,13 @@ function finalMessagesOf(spans: readonly OtlpSpan[]): FinalMessageFact[] {
   const last = new Map<string | null, OtlpSpan>()
   for (const span of spans) {
     let task: string | null | undefined
-    if (span.name === 'message.assistant') task = null
-    else if (span.name.startsWith('message.agent.')) {
+    if (span.name === 'message.assistant') {
+      // A folded subagent's transcript carries the same span name; the message
+      // is that subagent's last word, not the session agent's.
+      task = isSubagentSpan(span.attributes)
+        ? stringAttr(span, SUBAGENT_TASK_ATTR) ?? 'unattributed subagent'
+        : null
+    } else if (span.name.startsWith('message.agent.')) {
       task = stringAttr(span, 'traces.codex.agent_message_author') ?? 'unattributed subagent'
     }
     if (task === undefined) continue
@@ -562,6 +609,10 @@ const DUPLICATE_TURN_REASON =
   'a second record of the turn before it: the same text at the same instant, with no model call, tool call ' +
   'or assistant message between them'
 
+const SUBAGENT_TURN_REASON =
+  'a turn inside a subagent this session spawned, not a turn of this session: the person addressed the ' +
+  'session, and the brief and notifications the subagent received are the parent agent talking to it'
+
 /** Spans that mean the agent acted: a person cannot have typed twice across one. */
 function isAgentActivity(span: OtlpSpan): boolean {
   if (span.name === 'user.prompt') return false
@@ -596,6 +647,12 @@ function humanTurnsOf(spans: readonly OtlpSpan[]): {
   const kept: OtlpSpan[] = []
   let sinceKept: OtlpSpan[] = []
   for (const span of spans) {
+    // A subagent's records are not this session's: its prompts are not human
+    // turns here, and its activity does not separate two turns of this session.
+    if (isSubagentSpan(span.attributes)) {
+      if (span.name === 'user.prompt') drop(SUBAGENT_TURN_REASON, span.span_id)
+      continue
+    }
     if (span.name !== 'user.prompt') {
       sinceKept.push(span)
       continue
@@ -662,14 +719,21 @@ function sessionFactsForTrace(
   const spans = [...unordered].sort(byTraceOrder)
   const harness = spans.map((span) => stringAttr(span, 'service.name')).find((name) => name !== null) ?? null
 
+  // The session's own records. A spawned subagent's transcript may be folded
+  // into this trace; what it did is reported as the subagent's, never added to
+  // the totals below.
+  const ownSpans = spans.filter((span) => !isSubagentSpan(span.attributes))
   const toolSpans = spans.filter(isToolSpan)
   const synthesized = toolSpans.filter(isSynthesizedSpan)
-  const invoked = toolSpans.filter((span) => !isSynthesizedSpan(span))
+  const invoked = ownSpans.filter((span) => isToolSpan(span) && !isSynthesizedSpan(span))
+  const subagentTools = toolSpans.filter(
+    (span) => isSubagentSpan(span.attributes) && !isSynthesizedSpan(span),
+  )
   const byName: Record<string, number> = {}
   for (const span of invoked) byName[toolName(span)] = (byName[toolName(span)] ?? 0) + 1
 
-  const subagents = subagentsOf(spans)
-  const pullRequests = readPullRequests(spans)
+  const subagents = subagentsOf(ownSpans, spans)
+  const pullRequests = readPullRequests(ownSpans)
   const promptSpans = spans.filter((span) => span.name === 'user.prompt')
   const { turns: humanTurns, excluded: excludedTurns } = humanTurnsOf(spans)
   const actorCounts = new Map<string, string[]>()
@@ -678,10 +742,10 @@ function sessionFactsForTrace(
     actorCounts.set(actor, [...(actorCounts.get(actor) ?? []), span.span_id])
   }
   const finalMessages = finalMessagesOf(spans)
-  const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, spans)
+  const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, ownSpans)
 
-  const starts = spans.filter((span) => Number.isFinite(Date.parse(span.start_time)))
-  const ends = spans.filter((span) => Number.isFinite(Date.parse(span.end_time)))
+  const starts = ownSpans.filter((span) => Number.isFinite(Date.parse(span.start_time)))
+  const ends = ownSpans.filter((span) => Number.isFinite(Date.parse(span.end_time)))
   const firstSpan = starts.reduce<OtlpSpan | null>(
     (best, span) => (best === null || Date.parse(span.start_time) < Date.parse(best.start_time) ? span : best),
     null,
@@ -729,6 +793,11 @@ function sessionFactsForTrace(
       spanIds: synthesized.map((span) => span.span_id),
       unavailable: null,
     },
+    subagentToolSpans: {
+      value: subagentTools.length,
+      spanIds: subagentTools.map((span) => span.span_id),
+      unavailable: null,
+    },
     toolCallsByName: {
       value: byName,
       spanIds: invoked.map((span) => span.span_id),
@@ -755,10 +824,10 @@ function sessionFactsForTrace(
     changedFiles: changedFilesFact(files, truncatedInputs, unresolvedPaths),
     firstRecordAt: firstSpan
       ? { value: firstSpan.start_time, spanIds: [firstSpan.span_id], unavailable: null }
-      : { value: null, spanIds: [], unavailable: 'no span in this trace carries a parseable start time' },
+      : { value: null, spanIds: [], unavailable: "no span of this session's own records carries a parseable start time" },
     lastRecordAt: lastSpan
       ? { value: lastSpan.end_time, spanIds: [lastSpan.span_id], unavailable: null }
-      : { value: null, spanIds: [], unavailable: 'no span in this trace carries a parseable end time' },
+      : { value: null, spanIds: [], unavailable: "no span of this session's own records carries a parseable end time" },
     tokenTotal: tokenSpan
       ? {
           value: tokenSpan.attributes[SESSION_TOKEN_TOTAL_ATTR] as number,
@@ -807,7 +876,8 @@ export function renderSessionFacts(report: SessionFactsReport): string {
       factLine(
         'tool calls',
         facts.toolCalls,
-        `${facts.toolCalls.value} (${facts.synthesizedToolSpans.value ?? 0} synthesized span(s) excluded)`,
+        `${facts.toolCalls.value} (${facts.synthesizedToolSpans.value ?? 0} synthesized span(s) excluded` +
+          `${(facts.subagentToolSpans.value ?? 0) > 0 ? `, ${facts.subagentToolSpans.value} made by subagents` : ''})`,
       ),
     )
     lines.push(
@@ -971,7 +1041,12 @@ interface CompactFacts {
   session_id: string | null
   trace_id: string
   spans: number
-  tool_calls: { count: number | null; synthesized_excluded: number | null; span_ids: readonly string[] }
+  tool_calls: {
+    count: number | null
+    synthesized_excluded: number | null
+    subagent_excluded: number | null
+    span_ids: readonly string[]
+  }
   tool_calls_by_name?: Readonly<Record<string, number>> | null
   subagents: { count: number; entries?: readonly unknown[] }
   pull_requests: CompactPullRequests
@@ -1017,6 +1092,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
     tool_calls: {
       count: facts.toolCalls.value,
       synthesized_excluded: facts.synthesizedToolSpans.value,
+      subagent_excluded: facts.subagentToolSpans.value,
       span_ids: facts.toolCalls.spanIds,
     },
     tool_calls_by_name: facts.toolCallsByName.value,

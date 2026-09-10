@@ -302,7 +302,13 @@ describe('claude transcript → spans', () => {
     const toolSpans = spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
     expect(llmSpans).toHaveLength(1)
     expect(toolSpans).toHaveLength(1)
-    expect(nextStep).toBe(2)
+    // One response, so one message span too: the text fragments merge into it
+    // rather than each opening another message.
+    const messageSpans = spans.filter((item) => item.name === 'message.assistant')
+    expect(messageSpans).toHaveLength(1)
+    expect(messageSpans[0]?.attributes.content).toBe('running the check')
+    expect(messageSpans[0]?.parent_span_id).toBe(llmSpans[0]?.span_id)
+    expect(nextStep).toBe(3)
     expect(llmSpans[0]).toMatchObject({
       start_time: '2026-01-01T00:00:00Z',
       end_time: '2026-01-01T00:00:02Z',

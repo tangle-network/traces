@@ -192,21 +192,23 @@ The sheet is that extraction, made part of the tool.
 
 | Field | Value |
 | --- | --- |
-| `toolCalls` | TOOL spans the agent invoked. Synthesized subagent lifecycle spans are excluded and counted in `synthesizedToolSpans` |
+| `toolCalls` | TOOL spans **this session's agent** invoked. Synthesized lifecycle spans are excluded and counted in `synthesizedToolSpans`; calls made by a spawned subagent are excluded and counted in `subagentToolSpans` |
 | `toolCallsByName` | the same calls by tool name |
-| `subagents` | every `spawn_agent` call with the task name from `traces.codex.spawn_agent_path` |
+| `subagentToolSpans` | TOOL spans excluded because a subagent, not this agent, made the call |
+| `subagents` | every subagent-spawning call, with the task name the call recorded |
 | `pullRequests` | pull requests the commands created and merged, each named by number or head branch, with the command span and the join evidence |
 | `humanTurns` | `user.prompt` turns a person typed into this session, in order, with timestamps |
 | `excludedTurns` | every `user.prompt` turn `humanTurns` left out, grouped by the reason, with the span ids |
 | `turnsByActor` | every `user.prompt` turn by actor, so the human filter is checkable |
 | `finalMessages` | the last message of the session's own agent, and of each subagent task, separately |
-| `changedFiles` | paths from `*** Add/Update/Delete/Move to File:` patch headers and from file-editing tool arguments |
-| `firstRecordAt`, `lastRecordAt` | the trace's earliest span start and latest span end |
+| `changedFiles` | paths the harness recorded for its own file changes, plus paths from `*** Add/Update/Delete/Move to File:` patch headers and from file-editing tool arguments |
+| `firstRecordAt`, `lastRecordAt` | the earliest span start and latest span end among this session's own records |
 | `unreadRecords` | records the session reader could not parse |
 | `tokenTotal` | the harness's cumulative total, when a span carries `traces.session.total_tokens` |
 
-Two rules hold for every field.
+Three rules hold for every field.
 
+- **Every fact is about this session's own agent.** Some harnesses fold a spawned agent's transcript into the parent's trace — Claude Code writes one file per subagent under the session directory and the adapter reads them all — so a trace can carry both what this agent did and what a child it spawned did. The child's work is named in `subagents` and counted in `subagentToolSpans`, never added to the parent's totals. On a trace with no subagent records every one of those counts is zero.
 - **Every fact names the span ids it came from.** A reader can open those spans and check the number. The sheet is not a span and cannot be cited.
 - **A fact the spans cannot support is `null` with a stated reason.** It is never guessed and never a silent zero. `partial` marks a measured value known to be incomplete.
 

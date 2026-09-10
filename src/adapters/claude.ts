@@ -50,12 +50,73 @@ import {
   type WorkflowRunBinding,
   type WorkflowRunReference,
 } from './claude-workflow.js'
-import { capText, userPromptSpan } from './conversation.js'
+import { ACTOR_ATTR, capText, userPromptSpan, type Actor } from './conversation.js'
+import {
+  SUBAGENT_SPAN_ATTR,
+  SUBAGENT_SPAN_COUNT_ATTR,
+  SUBAGENT_SPAWN_ATTR,
+  SUBAGENT_SPAWN_TASK_ATTR,
+  SUBAGENT_TASK_ATTR,
+  SYNTHESIZED_SOURCE_ATTR,
+  SYNTHESIZED_SPAN_ATTR,
+  isSubagentSpan,
+} from './provenance.js'
 import { toolIoAttributes } from './tool-io.js'
 import { appendSourceAttributes, sourceOf, textSources, SOURCE_ATTRIBUTE_PREFIX, type SourceReferences } from '../source-location.js'
 
 const SERVICE = 'claude-code'
 const EPOCH = new Date(0).toISOString()
+
+/**
+ * Claude Code's own label for who produced a record: `human` for a person at
+ * the keyboard, and a namespaced kind for everything the harness or another
+ * agent put in the conversation (`task-notification`, `peer`, …).
+ *
+ * This is the structural signal, so it decides on its own — it is what the
+ * harness recorded, not what the text looks like. A transcript that stamps it
+ * at all stamps it on every record a person produced, so inside such a
+ * transcript a user record WITHOUT it is not a human turn however human its
+ * text reads: `[Request interrupted by user]` is written by the CLI, and
+ * `<command-name>/login</command-name>` is the CLI's record of a session
+ * command rather than a message to the agent. {@link ORIGIN_EVIDENCE_ATTR}
+ * marks each turn the second rule reclassified, so the reading is checkable.
+ * Older transcripts carry no `origin` at all and the text heuristics in
+ * `actor.ts` answer instead.
+ */
+const HUMAN_ORIGIN = 'human'
+
+/** Why a turn that reads human was not counted as one. */
+const ORIGIN_EVIDENCE_ATTR = 'traces.claude.actor_evidence'
+
+/** `true` on a `user.prompt` span whose record carried a recorded origin. */
+const ORIGIN_RECORDED_ATTR = 'traces.claude.origin_recorded'
+
+/** Claude Code's own name for the kind of record an origin describes. */
+const ORIGIN_KIND_ATTR = 'traces.claude.origin_kind'
+
+/**
+ * A slash command as the transcript stores it: the CLI wraps the line a person
+ * typed in `<command-name>` and `<command-args>` (plus a `<command-message>`
+ * display label it did not type). Rejoining the two recovers the typed line,
+ * which is what a reader counting human turns is looking for.
+ */
+const COMMAND_NAME = /<command-name>([\s\S]*?)<\/command-name>/
+const COMMAND_ARGS = /<command-args>([\s\S]*?)<\/command-args>/
+
+/**
+ * The tool input field with which Claude Code's Task tool selects the agent to
+ * run. A tool call carrying it spawned a subagent, whatever the tool is named:
+ * the field is the harness's own signal, so no allowlist of tool names decides
+ * what counts as a spawn.
+ */
+const SPAWN_TYPE_KEY = 'subagent_type'
+
+/** The Task tool's short name for the work it hands the child. */
+const SPAWN_DESCRIPTION_KEY = 'description'
+
+const SPAWN_TYPE_ATTR = 'traces.claude.subagent_type'
+const SUBAGENT_TRANSCRIPT_ATTR = 'traces.claude.subagent_transcript'
+const SUBAGENT_AGENT_ID_ATTR = 'traces.claude.subagent_agent_id'
 
 const CLAUDE_SOURCE_TRACE_ID = 'traces.claude.source_trace_id'
 const CLAUDE_SOURCE_SPAN_ID = 'traces.claude.source_span_id'
@@ -90,6 +151,9 @@ interface ClaudeEvent {
   isSidechain?: boolean
   isMeta?: boolean
   userType?: string
+  origin?: { kind?: unknown }
+  /** `file-history-delta`: the path the harness backed up before changing it. */
+  trackingPath?: string
   message?: {
     id?: string
     role?: string
@@ -109,6 +173,10 @@ interface ClaudeEvent {
     toolName?: string
     exitCode?: number
     stderr?: string
+    /** `queued_command`: the message a person sent while the turn was running. */
+    prompt?: unknown
+    origin?: { kind?: unknown }
+    timestamp?: string
   }
   toolUseResult?: {
     runId?: unknown
@@ -174,8 +242,16 @@ interface ClaudeStreamState {
   llmSpanByMessageId: Map<string, OtlpSpan>
   llmContentByMessageId: Map<string, Set<string>>
   toolCountByMessageId: Map<string, number>
+  messageSpanByMessageId: Map<string, OtlpSpan>
   step: number
   sawUserTurn: boolean
+  /** `user.prompt` spans, so the origin rule can be applied once at the end. */
+  promptSpans: OtlpSpan[]
+  /** Whether any record in this stream carried Claude Code's `origin`. */
+  sawRecordedOrigin: boolean
+  /** Earliest and latest record timestamp consumed, span-producing or not. */
+  firstRecordAt: string | null
+  lastRecordAt: string | null
 }
 
 function createClaudeStream(startStep: number): ClaudeStreamState {
@@ -185,8 +261,13 @@ function createClaudeStream(startStep: number): ClaudeStreamState {
     llmSpanByMessageId: new Map(),
     llmContentByMessageId: new Map(),
     toolCountByMessageId: new Map(),
+    messageSpanByMessageId: new Map(),
     step: startStep,
     sawUserTurn: false,
+    promptSpans: [],
+    sawRecordedOrigin: false,
+    firstRecordAt: null,
+    lastRecordAt: null,
   }
 }
 
@@ -224,7 +305,13 @@ type ClaudeEventProjection =
       cacheWriteInputTokens: number | null
       content: string | null
       contentSource?: SourceReferences
-      tools: Array<{ id: string | null; name: string; attributes: Record<string, unknown> }>
+      tools: Array<{
+        id: string | null
+        name: string
+        attributes: Record<string, unknown>
+        /** The task a spawn call named. Absent when the call spawned nothing. */
+        spawnTask?: string | null
+      }>
     }
   | {
       kind: 'user'
@@ -234,9 +321,24 @@ type ClaudeEventProjection =
       isSidechain?: boolean
       isMeta?: boolean
       userType?: string | null
+      originKind?: string | null
       results: ToolResultProjection[]
     }
   | { kind: 'attachment'; timestamp: string; result: ToolResultProjection }
+  | {
+      /**
+       * A message a person sent while a turn was running. Claude Code does not
+       * open a conversation turn for it — it surfaces the text inside the
+       * running turn as an attachment — so it is a human turn the transcript
+       * records nowhere else, and a reader counting turns misses it entirely.
+       */
+      kind: 'queued-prompt'
+      timestamp: string
+      prompt: string
+      originKind: string | null
+      contentSource?: SourceReferences
+    }
+  | { kind: 'file-change'; timestamp: string; path: string; contentSource?: SourceReferences }
   | { kind: 'ignored' }
 
 function projectToolResult(
@@ -264,10 +366,20 @@ function projectToolResult(
 function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
   const timestamp = event.timestamp ?? EPOCH
   if (event.type === 'assistant' && event.message) {
-    const tools: Array<{ id: string | null; name: string; attributes: Record<string, unknown> }> = []
+    const tools: Array<{
+      id: string | null
+      name: string
+      attributes: Record<string, unknown>
+      spawnTask?: string | null
+    }> = []
     for (const block of asBlocks(event.message.content)) {
       if (block.type !== 'tool_use' || !block.name) continue
-      tools.push({ id: block.id || null, name: block.name, attributes: toolIoAttributes({ input: block.input, inputSource: sourceOf(block, 'input') }) })
+      tools.push({
+        id: block.id || null,
+        name: block.name,
+        attributes: toolIoAttributes({ input: block.input, inputSource: sourceOf(block, 'input') }),
+        ...(spawnsSubagent(block.input) ? { spawnTask: spawnTaskName(block.input) } : {}),
+      })
     }
     return {
       kind: 'assistant',
@@ -315,6 +427,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
             isSidechain: event.isSidechain === true,
             isMeta: event.isMeta === true,
             userType: event.userType ?? null,
+            originKind: recordedOrigin(event.origin),
           }
         : {}),
       results,
@@ -333,7 +446,93 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       ),
     }
   }
+  if (event.type === 'attachment' && event.attachment?.type === 'queued_command') {
+    // The queued text is a message body, so it arrives in either shape a
+    // message body takes: a string, or the content blocks of a message that
+    // carried an image alongside the words.
+    const prompt = textOf(event.attachment.prompt)
+    if (prompt) {
+      return {
+        kind: 'queued-prompt',
+        // The queue records when the person sent it, which is earlier than the
+        // turn that absorbed it; the sent time is the time of the turn.
+        timestamp: event.attachment.timestamp ?? timestamp,
+        prompt,
+        originKind: recordedOrigin(event.attachment.origin),
+        contentSource: sourceOf(event.attachment, 'prompt'),
+      }
+    }
+  }
+  // The harness's own record of a file it changed: it backs the file up before
+  // the edit lands, so the path here is the one the edit reached rather than
+  // the one a tool argument asked for. Claude Code states no change kind, so
+  // the span states none either.
+  if (event.type === 'file-history-delta' && typeof event.trackingPath === 'string' && event.trackingPath.length > 0) {
+    return {
+      kind: 'file-change',
+      timestamp,
+      path: event.trackingPath,
+      contentSource: sourceOf(event, 'trackingPath'),
+    }
+  }
   return { kind: 'ignored' }
+}
+
+/**
+ * Who produced a user-role record, preferring the harness's own label.
+ *
+ * `recorded` is Claude Code's `origin.kind`. When it is present it decides:
+ * `human` is a person, and any other kind is the harness or another agent
+ * putting text in the conversation. Without it the text heuristics answer, as
+ * they did before Claude Code recorded an origin at all.
+ */
+function claudeActorFromOrigin(
+  recorded: string | null | undefined,
+  fallback: () => Actor,
+): Actor {
+  if (typeof recorded === 'string' && recorded.length > 0) {
+    return recorded === HUMAN_ORIGIN ? 'human' : 'injected'
+  }
+  return fallback()
+}
+
+/**
+ * The line a person typed, for a turn stored as a slash-command wrapper.
+ *
+ * Applied only to a turn the harness attributed to a person: the wrapper is
+ * how the CLI stores what they typed, so `<command-name>` plus `<command-args>`
+ * IS the text, and reporting the tags instead reports the harness's storage
+ * format as the human's words. Text carrying no wrapper is returned unchanged,
+ * and so is a wrapper with no command name.
+ */
+function typedPromptText(text: string): string {
+  const name = COMMAND_NAME.exec(text)?.[1]?.trim()
+  if (!name) return text
+  const args = COMMAND_ARGS.exec(text)?.[1]?.trim()
+  return args ? `${name} ${args}` : name
+}
+
+/** Claude Code's `origin.kind`, when the record carries a usable one. */
+function recordedOrigin(origin: { kind?: unknown } | undefined): string | null {
+  const kind = origin?.kind
+  return typeof kind === 'string' && kind.length > 0 ? kind : null
+}
+
+/** The task name a spawn call gave its child, when the call named one. */
+function spawnTaskName(input: unknown): string | null {
+  if (input === null || typeof input !== 'object') return null
+  const record = input as Record<string, unknown>
+  const described = record[SPAWN_DESCRIPTION_KEY]
+  if (typeof described === 'string' && described.trim().length > 0) return described.trim()
+  const type = record[SPAWN_TYPE_KEY]
+  return typeof type === 'string' && type.trim().length > 0 ? type.trim() : null
+}
+
+/** Whether a tool call selected an agent to run, i.e. spawned a subagent. */
+function spawnsSubagent(input: unknown): boolean {
+  if (input === null || typeof input !== 'object') return false
+  const type = (input as Record<string, unknown>)[SPAWN_TYPE_KEY]
+  return typeof type === 'string' && type.trim().length > 0
 }
 
 function indexWorkflowProjection(
@@ -459,6 +658,7 @@ function consumeClaudeEvent(
     })
     mergeMessageContent(llmSpan, messageId, event.content, state)
     if (event.content) appendSourceAttributes(llmSpan.attributes, 'content', event.contentSource)
+    if (event.content) mergeAssistantMessage(event, messageId, llmSpan, ctx, state)
 
     for (const tool of event.tools) {
       const existingTool = tool.id ? state.toolSpanByUseId.get(tool.id) : undefined
@@ -479,7 +679,15 @@ function consumeClaudeEvent(
         agent: ctx.agent,
         tool: tool.name,
         step: state.step,
-        extra: tool.attributes,
+        extra: {
+          ...tool.attributes,
+          ...(tool.spawnTask === undefined
+            ? {}
+            : {
+                [SUBAGENT_SPAWN_ATTR]: true,
+                ...(tool.spawnTask ? { [SUBAGENT_SPAWN_TASK_ATTR]: tool.spawnTask } : {}),
+              }),
+        },
       })
       state.spans.push(toolSpan)
       if (tool.id) state.toolSpanByUseId.set(tool.id, toolSpan)
@@ -488,28 +696,33 @@ function consumeClaudeEvent(
     }
   } else if (event.kind === 'user') {
     if (event.prompt) {
-      const actor = claudeActor({
-        text: event.prompt,
+      const actor = claudeActorFromOrigin(event.originKind, () => claudeActor({
+        text: event.prompt ?? '',
         isSidechain: event.isSidechain,
         isMeta: event.isMeta,
         userType: event.userType ?? null,
         isFirstUserTurn: !state.sawUserTurn,
-      })
+      }))
       state.sawUserTurn = true
-      state.spans.push(
-        userPromptSpan({
-          traceId: ctx.traceId,
-          spanId: `${ctx.idPrefix}${uid}:user`,
-          parentSpanId: ctx.rootParent,
-          startTime: event.timestamp,
-          service: SERVICE,
-          agent: ctx.agent,
-          step: state.step,
-          content: event.prompt,
-          contentSource: event.contentSource,
-          actor,
-        }),
-      )
+      if (event.originKind) state.sawRecordedOrigin = true
+      const prompt = userPromptSpan({
+        traceId: ctx.traceId,
+        spanId: `${ctx.idPrefix}${uid}:user`,
+        parentSpanId: ctx.rootParent,
+        startTime: event.timestamp,
+        service: SERVICE,
+        agent: ctx.agent,
+        step: state.step,
+        content: actor === 'human' ? typedPromptText(event.prompt) : event.prompt,
+        contentSource: event.contentSource,
+        actor,
+      })
+      if (event.originKind) {
+        prompt.attributes[ORIGIN_RECORDED_ATTR] = true
+        prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
+      }
+      state.spans.push(prompt)
+      state.promptSpans.push(prompt)
       state.step += 1
     }
     for (const result of event.results) {
@@ -517,6 +730,103 @@ function consumeClaudeEvent(
     }
   } else if (event.kind === 'attachment') {
     backfillResult(state.toolSpanByUseId.get(event.result.toolUseId), event.timestamp, event.result)
+  } else if (event.kind === 'queued-prompt') {
+    const actor = claudeActorFromOrigin(event.originKind, () => 'injected')
+    if (event.originKind) state.sawRecordedOrigin = true
+    const prompt = userPromptSpan({
+      traceId: ctx.traceId,
+      spanId: `${ctx.idPrefix}${uid}:queued`,
+      parentSpanId: ctx.rootParent,
+      startTime: event.timestamp,
+      service: SERVICE,
+      agent: ctx.agent,
+      step: state.step,
+      content: actor === 'human' ? typedPromptText(event.prompt) : event.prompt,
+      contentSource: event.contentSource,
+      actor,
+    })
+    prompt.attributes['traces.claude.queued'] = true
+    if (event.originKind) {
+      prompt.attributes[ORIGIN_RECORDED_ATTR] = true
+      prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
+    }
+    state.spans.push(prompt)
+    state.promptSpans.push(prompt)
+    state.step += 1
+  } else if (event.kind === 'file-change') {
+    state.spans.push(span({
+      traceId: ctx.traceId,
+      spanId: `${ctx.idPrefix}${uid}:file-change`,
+      parentSpanId: ctx.rootParent,
+      name: 'file.change',
+      kind: 'CHAIN',
+      startTime: event.timestamp,
+      endTime: event.timestamp,
+      service: SERVICE,
+      agent: ctx.agent,
+      step: state.step,
+      extra: toolIoAttributes({ input: { path: event.path }, inputSource: event.contentSource }),
+    }))
+    state.step += 1
+  }
+}
+
+/**
+ * The assistant's prose as its own span, alongside the `llm.turn` that carries
+ * the call's tokens.
+ *
+ * One assistant message arrives as several records while it streams, so the
+ * span is created once per message id and its content merged, exactly as the
+ * `llm.turn` above is. A reader asking what the agent said last wants the last
+ * message, not the last call that happened to carry text.
+ */
+function mergeAssistantMessage(
+  event: Extract<ClaudeEventProjection, { kind: 'assistant' }>,
+  messageId: string,
+  llmSpan: OtlpSpan,
+  ctx: ClaudeStreamContext,
+  state: ClaudeStreamState,
+): void {
+  const existing = state.messageSpanByMessageId.get(messageId)
+  if (existing) {
+    includeSpanTimestamp(existing, event.timestamp)
+    existing.attributes.content = llmSpan.attributes.content
+    return
+  }
+  const messageSpan = span({
+    traceId: ctx.traceId,
+    spanId: `${llmSpan.span_id}:message`,
+    parentSpanId: llmSpan.span_id,
+    name: 'message.assistant',
+    kind: 'CHAIN',
+    startTime: event.timestamp,
+    endTime: event.timestamp,
+    service: SERVICE,
+    agent: ctx.agent,
+    step: state.step,
+    content: typeof llmSpan.attributes.content === 'string' ? llmSpan.attributes.content : '',
+    contentSource: event.contentSource,
+  })
+  state.spans.push(messageSpan)
+  state.messageSpanByMessageId.set(messageId, messageSpan)
+  state.step += 1
+}
+
+/**
+ * Apply Claude Code's own origin labelling across a finished stream.
+ *
+ * A transcript that records `origin` records it on every message a person
+ * sent, so inside such a transcript a user record without one is not a human
+ * turn — however human its text reads. The reclassification is stamped so a
+ * reader can see which turns it moved and disagree with it span by span.
+ */
+function applyRecordedOrigins(state: ClaudeStreamState): void {
+  if (!state.sawRecordedOrigin) return
+  for (const prompt of state.promptSpans) {
+    if (prompt.attributes[ACTOR_ATTR] !== 'human') continue
+    if (prompt.attributes[ORIGIN_RECORDED_ATTR] === true) continue
+    prompt.attributes[ACTOR_ATTR] = 'injected'
+    prompt.attributes[ORIGIN_EVIDENCE_ATTR] = 'no_human_origin'
   }
 }
 
@@ -551,15 +861,55 @@ function mergeMessageContent(
 }
 
 function finishClaudeStream(state: ClaudeStreamState): ParsedStream {
+  applyRecordedOrigins(state)
   return { spans: state.spans, toolSpanByUseId: state.toolSpanByUseId, nextStep: state.step }
 }
 
-function setRootTimeBounds(root: OtlpSpan, spans: readonly OtlpSpan[]): void {
+/**
+ * Widen the stream's record window to include one record's timestamp.
+ *
+ * The window is over RECORDS, not spans: a session's first and last record are
+ * often ones that produce no span — the file-history snapshot the CLI writes
+ * when the session opens, the `continued-in` marker it writes when the session
+ * ends. Reporting the first span instead reports when the agent started, which
+ * is a different question and a different answer.
+ */
+function includeRecordTimestamp(state: ClaudeStreamState, timestamp: string | undefined): void {
+  if (!timestamp) return
+  const time = Date.parse(timestamp)
+  if (!Number.isFinite(time)) return
+  if (state.firstRecordAt === null || time < Date.parse(state.firstRecordAt)) state.firstRecordAt = timestamp
+  if (state.lastRecordAt === null || time > Date.parse(state.lastRecordAt)) state.lastRecordAt = timestamp
+}
+
+/**
+ * The session's own record window, on the root span.
+ *
+ * A subagent's spans are folded into this trace but belong to the child's
+ * transcript, so they are not records of this session and do not move its
+ * window: one measured session ran for 3 h 28 m and its last subagent finished
+ * 8 minutes later, which is the subagent's end, not the session's.
+ * `recordWindow` is the window over the session's own records, including the
+ * ones that produce no span; the spans only widen it when it is absent.
+ */
+function setRootTimeBounds(
+  root: OtlpSpan,
+  spans: readonly OtlpSpan[],
+  recordWindow: { first: string | null; last: string | null },
+): void {
   let firstTimestamp: { value: number; source: string } | undefined
   let lastTimestamp: { value: number; source: string } | undefined
 
+  for (const source of [recordWindow.first, recordWindow.last]) {
+    if (!source) continue
+    const value = Date.parse(source)
+    if (!Number.isFinite(value)) continue
+    if (!firstTimestamp || value < firstTimestamp.value) firstTimestamp = { value, source }
+    if (!lastTimestamp || value > lastTimestamp.value) lastTimestamp = { value, source }
+  }
+
   for (const item of spans) {
-    if (item === root) continue
+    if (item === root || isSubagentSpan(item.attributes)) continue
     for (const source of [item.start_time, item.end_time]) {
       if (!source) continue
       const value = Date.parse(source)
@@ -850,7 +1200,10 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
           selectedTurnFound = true
         }
       }
-      if (active) consumeClaudeEvent(accepted.projection, accepted.uid, ctx, state)
+      if (active) {
+        includeRecordTimestamp(state, event.timestamp)
+        consumeClaudeEvent(accepted.projection, accepted.uid, ctx, state)
+      }
     }
     options.signal?.throwIfAborted()
     if (taskScope === 'latest' && !selectedTurnFound) {
@@ -897,7 +1250,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     )
     options.signal?.throwIfAborted()
     const ordered = orderClaudeSpans(root, spans)
-    setRootTimeBounds(root, ordered)
+    setRootTimeBounds(root, ordered, { first: state.firstRecordAt, last: state.lastRecordAt })
+    const subagentSpans = ordered.filter((item) => isSubagentSpan(item.attributes)).length
+    if (subagentSpans > 0) root.attributes[SUBAGENT_SPAN_COUNT_ATTR] = subagentSpans
     normalizeClaudeIds(ordered)
     return ordered
   }
@@ -1048,8 +1403,15 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       const parentAgentMissing = Boolean(
         agent.meta.parentAgentId && !parsedByAgentId.has(agent.meta.parentAgentId),
       )
-      for (const item of parsed.spans) {
+      const task = subagentTaskName(agent)
+      const lifecycle = subagentLifecycleSpan(agent, parsed, traceId, parent, task, subDir)
+      for (const item of [...parsed.spans, ...(lifecycle ? [lifecycle] : [])]) {
         if (item.parent_span_id === `root:${traceId}`) item.parent_span_id = parent
+        // Every span here came from the CHILD's transcript. Marking it says so,
+        // which is what keeps the parent's tool count, changed files, human
+        // turns and record window from absorbing work the parent never did.
+        item.attributes[SUBAGENT_SPAN_ATTR] = true
+        if (task) item.attributes[SUBAGENT_TASK_ATTR] = task
         if (agent.parentToolUseId && !parentSpan) {
           item.attributes['traces.claude.parent_tool_missing'] = true
           item.attributes['traces.claude.parent_tool_use_id'] = agent.parentToolUseId
@@ -1060,6 +1422,80 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         }
       }
       appendAll(out, parsed.spans)
+      if (lifecycle) out.push(lifecycle)
     }
   }
+}
+
+/** The task the parent's spawn call gave this child, as the harness recorded it. */
+function subagentTaskName(agent: ClaudeSubagentFile): string | null {
+  // The metadata file is untrusted input: a field that is not a string names no
+  // task, and must not take the parse down.
+  for (const value of [agent.meta.description, agent.meta.agentType]) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+  }
+  return null
+}
+
+/**
+ * One span standing for a child transcript, so the parent's `Task` call has
+ * something to point at.
+ *
+ * It is synthesized — no model issued it — and it belongs to the subagent's
+ * scope, so neither the parent's tool count nor the parent's record window
+ * absorbs it. Its value is evidence: it names the transcript the child's spans
+ * came from and the window they cover, which is what a reader checking "which
+ * subagents ran" needs and what the parent's TOOL span alone cannot say.
+ */
+function subagentLifecycleSpan(
+  agent: ClaudeSubagentFile,
+  parsed: ParsedStream,
+  traceId: string,
+  parentSpanId: string,
+  task: string | null,
+  subDir: string,
+): OtlpSpan | undefined {
+  let first: string | undefined
+  let last: string | undefined
+  for (const item of parsed.spans) {
+    for (const stamp of [item.start_time, item.end_time]) {
+      const value = Date.parse(stamp)
+      if (!Number.isFinite(value)) continue
+      if (first === undefined || value < Date.parse(first)) first = stamp
+      if (last === undefined || value > Date.parse(last)) last = stamp
+    }
+  }
+  if (first === undefined || last === undefined) return undefined
+  return span({
+    traceId,
+    // Same prefix as every other span from this transcript, so a reader
+    // grouping spans by source keeps the anchor with the spans it stands for.
+    spanId: `${agent.sourceKey}:lifecycle`,
+    parentSpanId,
+    name: 'subagent.lifecycle',
+    kind: 'AGENT',
+    startTime: first,
+    endTime: last,
+    // The transcript records what the child did, not whether the parent
+    // accepted it; the parent's own tool span carries that status.
+    status: 'UNSET',
+    service: SERVICE,
+    agent: agent.meta.agentType ? `subagent:${agent.meta.agentType}` : 'subagent',
+    extra: {
+      ...toolIoAttributes({
+        input: {
+          agent_id: agent.agentId,
+          ...(agent.meta.agentType ? { subagent_type: agent.meta.agentType } : {}),
+          ...(task ? { task } : {}),
+        },
+      }),
+      [SYNTHESIZED_SPAN_ATTR]: true,
+      [SYNTHESIZED_SOURCE_ATTR]: 'claude.subagent_transcript',
+      [SUBAGENT_SPAN_ATTR]: true,
+      ...(task ? { [SUBAGENT_TASK_ATTR]: task } : {}),
+      ...(agent.meta.agentType ? { [SPAWN_TYPE_ATTR]: agent.meta.agentType } : {}),
+      [SUBAGENT_AGENT_ID_ATTR]: agent.agentId,
+      [SUBAGENT_TRANSCRIPT_ATTR]: relative(subDir, agent.file),
+    },
+  })
 }

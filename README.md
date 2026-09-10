@@ -519,19 +519,21 @@ traces facts --otlp spans.otlp.jsonl --out facts.json
 
 | Fact | What it is |
 |---|---|
-| `toolCalls` | TOOL spans the agent actually invoked. Synthesized subagent lifecycle spans are excluded and counted separately in `synthesizedToolSpans`, so the total is not high by the number of subagents |
+| `toolCalls` | TOOL spans **this session's agent** actually invoked. Synthesized lifecycle spans are excluded and counted in `synthesizedToolSpans`, so the total is not high by the number of subagents; calls a spawned subagent made are excluded and counted in `subagentToolSpans` |
 | `toolCallsByName` | the same calls by tool name, so a category decision is the reader's, not a guess |
-| `subagents` | every `spawn_agent` call with the task name the adapter recorded |
+| `subagentToolSpans` | TOOL spans excluded because a subagent, not this agent, made the call. Zero on a trace that carries no subagent records |
+| `subagents` | every subagent-spawning call with the task name the adapter recorded |
 | `pullRequests` | the pull requests the commands created and merged, each named by number or head branch, with the command span and how the identity was joined. Scanned the way a shell reads the script, so a `gh pr create` inside a heredoc body is not a command that ran |
 | `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable |
 | `finalMessages` | the last message of the session's own agent, and of each subagent task, kept apart |
-| `changedFiles` | paths named by patch headers and file-editing tool arguments, with the operation |
-| `firstRecordAt` / `lastRecordAt` | the trace's earliest span start and latest span end |
+| `changedFiles` | paths the harness recorded for the changes it applied, plus paths named by patch headers and file-editing tool arguments, with the operation |
+| `firstRecordAt` / `lastRecordAt` | the earliest span start and latest span end among this session's own records — a subagent that outlives the session does not stretch its window |
 | `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
 | `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
 
-Two rules hold for every field:
+Three rules hold for every field:
 
+- **Every fact is about this session's own agent.** Some harnesses fold a spawned agent's transcript into the parent's trace, so a trace can carry both what this agent did and what a child it spawned did. The child's work is named in `subagents` and counted in `subagentToolSpans`; it is never added to the parent's totals.
 - **Every fact names its span ids.** `spanIds` lists the spans the value was computed from, so any number here can be opened and checked. The sheet itself is not a span and cannot be cited.
 - **A fact the spans cannot support is `null` with its reason.** It is never guessed, and never a silent zero. `partial` marks a measured value that is known to be incomplete — a truncated patch, or a list above the entry cap.
 
