@@ -8,6 +8,7 @@ Keeping them separate prevents an exploratory model output from being reported a
 | What happened? | Built-in local checks | Findings from explicit trace facts |
 | Why might it have happened? | `--llm`, HALO, or a custom analyst | Findings or a diagnosis report with cited spans |
 | What behavior should we inspect? | Hodoscope | Samples marked `needs_review` |
+| What exactly does this session say about X? | `traces ask` | An answer per question, with checked `trace://` citations |
 
 ## Start here
 
@@ -55,6 +56,120 @@ Returned directories from another resumed Claude session are parsed and included
 
 The OpenInference file is the shared input for external engines.
 The original trace and exact cited span remain available for review.
+
+## Ask free-form questions
+
+The built-in kinds ask fixed questions.
+`traces ask` asks your own.
+
+```bash
+traces ask --harness codex --session <id> \
+  --question "Which shell commands exited non-zero?" \
+  --question "Which pull requests did the session open, and were they merged?" \
+  --dir .traces/ask
+```
+
+Each question runs through agent-eval's `runTraceAnalyst` directly, not through the analyst registry.
+That matters for three reasons.
+
+- The registry keeps only findings, so it discards the engine's prose answer. `ask` keeps the answer text verbatim.
+- The registry runs analysts one at a time. `ask` runs questions concurrently, so wall time falls toward the slowest question instead of the sum.
+- One shared `CostLedger` bounds the whole run, so `--budget` means the same thing whatever the number of questions.
+
+### Questions
+
+A question stays short on purpose.
+The engine shows the model a preview of each long input: it keeps the first 500 and last 500 characters and drops the middle.
+A question inside the limit therefore reaches the model whole, and the answer rules sit in the first 500 characters of the instructions, which the preview always keeps.
+`ask` rejects an over-long question before it starts a model call and names the limit.
+Put the detail in the entry's `instructions` field instead, which the model reads after the rules.
+
+Read many questions from a file:
+
+```json
+{
+  "questions": [
+    "What was the last thing the human asked for?",
+    {
+      "id": "failed-commands",
+      "question": "Which shell commands exited non-zero?",
+      "instructions": "Report the command line and the exit code. Ignore commands the agent only proposed.",
+      "answerSchema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": { "command": { "type": "string" }, "exit_code": { "type": "integer" } },
+          "required": ["command", "exit_code"]
+        }
+      }
+    }
+  ]
+}
+```
+
+An `answerSchema` makes the answer one JSON value a scorer can compare field by field.
+The supported keywords are `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `title`, and `description`.
+Any other keyword is rejected when the run starts.
+This package carries no JSON Schema library, and a constraint that is quietly ignored would let a wrong answer pass as checked.
+
+### What the run guarantees
+
+- Every `trace://<trace_id>/span/<span_id>` URI in an answer is resolved against the store. An unresolvable citation fails that question.
+- Findings the answer submits still pass the same evidence gate as the built-in kinds. Refused findings are counted by reason in both artifacts.
+- A failed question never stops the others. Its failure is recorded on its own answer, and the remaining answers are written.
+- The artifacts are written before the exit code is decided. `ask` exits 1 when any question failed, returned no answer, broke its schema, or cited a missing span.
+
+### Budget under concurrency
+
+`--budget` is the ceiling shared by every question; `--question-budget` is the provider ceiling for one question.
+The ledger reserves each model call's maximum charge before the call runs, and releases the unused part when the call settles.
+Two consequences follow.
+
+- A budget below one call's reservation refuses the run before any model call, rather than failing every question.
+- A budget that admits fewer concurrent reservations than `--concurrency` still runs, and the report carries a warning naming how many concurrent calls it covers.
+
+A question the ledger refuses is reported as `budget-refused`, and the answers already produced are kept.
+
+### SDK
+
+```ts
+import { analysisEngineFromEnv, runTraceQuestions, writeTraceQuestionsArtifacts } from '@tangle-network/traces'
+
+const result = await runTraceQuestions({
+  questions: [
+    { id: 'failed-commands', question: 'Which shell commands exited non-zero?' },
+    { id: 'last-ask', question: 'What was the last thing the human asked for?' },
+  ],
+  spans,
+  engine: analysisEngineFromEnv({ model: 'gpt-5.6-luna', maxCostUsd: 1 }),
+  concurrency: 4,
+  budgetUsd: 2,
+})
+await writeTraceQuestionsArtifacts(result, '.traces/ask')
+if (!result.ok) process.exitCode = 1
+```
+
+`result.questions[i].answer` is the engine's prose, unedited.
+`result.totals` carries the wall time, the summed question time, the peak concurrency, and the cost with its provenance.
+
+## Evidence-gate rejections
+
+A model-backed analyst can submit a finding the evidence gate then refuses.
+Without the reason, a report showing "0 findings" reads as "the model found nothing" when the truth may be "the gate refused everything it found".
+
+`analyze`, `investigate`, `improve`, and `ask` now carry those refusals:
+
+- the CLI log prints the reason and the offending URI on each `finding rejected` line;
+- the analyst table's Detail cell names the reasons and their counts;
+- `result.findingRejections` (investigation and improvement) and `answers.json` (`ask`) hold the counts per analyst and reason.
+
+The common reasons are an excerpt the cited span does not contain, a span the trace does not hold, and too few distinct citations for the kind.
+
+## External analyzer failures exit non-zero
+
+`--analyzer halo|hodoscope|prime|<command>` promises that engine's output.
+An analyzer that fails now writes its error into the report as before, and then `analyze` exits 1 naming every analyzer that failed.
+Scripts that treated exit 0 as "the analyzer ran" were reading a report that said otherwise.
 
 ## Codex tool outcomes
 

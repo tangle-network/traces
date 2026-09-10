@@ -1231,6 +1231,158 @@ describe('traces analyze --llm failure surfacing', () => {
   }, 60_000)
 })
 
+describe('traces analyze external analyzer failure', () => {
+  it('writes the report, then exits 1 when a requested analyzer fails', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-external-fail-'))
+    const input = join(dir, 'spans.openinference.jsonl')
+    const report = join(dir, 'report.md')
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace-external-fail',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'claude-code',
+        extra: { 'session.id': 'session-external-fail' },
+      }),
+    ]), 'utf8')
+
+    const failure = await execFileAsync(process.execPath, [
+      '--import', 'tsx', 'src/cli.ts', 'analyze', input,
+      '--format', 'openinference',
+      // `false` is an installed command that exits 1 whatever its arguments.
+      '--analyzer', 'false',
+      '--out', report,
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 60_000,
+    }).then(
+      () => {
+        throw new Error('analyze exited 0 although its requested analyzer failed')
+      },
+      (error: Error & { code?: number; stdout?: string; stderr?: string }) => error,
+    )
+    expect(failure.code).toBe(1)
+    expect(failure.stderr).toContain('1 of 1 external analyzer(s) failed')
+    expect(failure.stderr).toContain('false: exit 1')
+    const reportText = await readFile(report, 'utf8')
+    expect(reportText).toContain('### false (report)')
+    expect(reportText).toContain('failed: exit 1')
+  }, 60_000)
+})
+
+describe('traces ask', () => {
+  async function writeSessionFile(dir: string): Promise<string> {
+    const input = join(dir, 'spans.openinference.jsonl')
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace-ask-cli',
+        spanId: 'root',
+        name: 'session',
+        kind: 'AGENT',
+        startTime: '2026-01-01T00:00:00.000Z',
+        service: 'codex',
+        extra: { 'session.id': 'session-ask-cli' },
+      }),
+      span({
+        traceId: 'trace-ask-cli',
+        spanId: 'turn',
+        parentSpanId: 'root',
+        name: 'llm.turn',
+        kind: 'LLM',
+        startTime: '2026-01-01T00:00:01.000Z',
+        service: 'codex',
+        step: 1,
+        content: 'Running the checks now.',
+      }),
+    ]), 'utf8')
+    return input
+  }
+
+  it('needs at least one question', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-ask-none-'))
+    const input = await writeSessionFile(dir)
+    const failure = await execFileAsync(process.execPath, [
+      '--import', 'tsx', 'src/cli.ts', 'ask', input, '--format', 'openinference',
+    ], { cwd: process.cwd(), env: { ...process.env, NO_COLOR: '1' }, timeout: 30_000 }).then(
+      () => {
+        throw new Error('ask exited 0 without a question')
+      },
+      (error: Error & { code?: number; stderr?: string }) => error,
+    )
+    expect(failure.code).toBe(1)
+    expect(failure.stderr).toContain('ask needs --question')
+  }, 30_000)
+
+  it('writes every answer and failure, then exits 1 when the engine dies at startup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-ask-fail-'))
+    const input = await writeSessionFile(dir)
+    const out = join(dir, 'ask')
+    const questions = join(dir, 'questions.json')
+    await writeFile(questions, JSON.stringify([
+      { id: 'checks', question: 'Which checks ran?' },
+      { id: 'turns', question: 'How many assistant turns were there?', answerSchema: { type: 'integer' } },
+    ]), 'utf8')
+    const fakeBridge = join(dir, 'failing-bridge.sh')
+    const bridgeReason = 'DSPY-BRIDGE-FAILURE: ValueError: synthetic startup failure'
+    await writeFile(fakeBridge, `#!/bin/sh\necho "${bridgeReason}" >&2\nexit 1\n`, { mode: 0o755 })
+
+    const failure = await execFileAsync(process.execPath, [
+      '--import', 'tsx', 'src/cli.ts', 'ask', input,
+      '--format', 'openinference',
+      '--questions', questions,
+      '--question', 'Did the session finish?',
+      '--budget', '5',
+      '--concurrency', '2',
+      '--dir', out,
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        FORCE_COLOR: '',
+        TANGLE_API_KEY: 'test-key-never-sent-upstream',
+        OPENAI_API_KEY: '',
+        OPENAI_BASE_URL: '',
+        TRACES_PYTHON: fakeBridge,
+      },
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 90_000,
+    }).then(
+      () => {
+        throw new Error('ask exited 0 although every question failed')
+      },
+      (error: Error & { code?: number; stdout?: string; stderr?: string }) => error,
+    )
+    expect(failure.code).toBe(1)
+    expect(failure.stdout).toContain('# traces ask')
+    expect(failure.stdout).toContain('**0 answered, 3 failed.**')
+    expect(failure.stderr).toContain('3 of 3 question(s) failed')
+
+    const answers = JSON.parse(await readFile(join(out, 'answers.json'), 'utf8')) as {
+      kind: string
+      ok: boolean
+      budgetUsd: number
+      questionBudgetUsd: number
+      questions: Array<{ id: string; status: string; failure?: { kind: string; message: string } }>
+    }
+    expect(answers.kind).toBe('traces.ask')
+    expect(answers.ok).toBe(false)
+    expect(answers.budgetUsd).toBe(5)
+    expect(answers.questionBudgetUsd).toBe(1)
+    expect(answers.questions.map((answer) => answer.id)).toEqual(['checks', 'turns', 'q3'])
+    for (const answer of answers.questions) {
+      expect(answer.status).toBe('failed')
+      expect(answer.failure?.kind).toBe('error')
+      expect(answer.failure?.message).toContain(bridgeReason)
+    }
+    expect(await readFile(join(out, 'report.md'), 'utf8')).toContain('failed: error')
+  }, 90_000)
+})
+
 describe('traces bundle + bundle-view', () => {
   it('assembles the full view, then projects the writer view over the same session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'traces-cli-bundle-'))

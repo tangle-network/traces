@@ -551,6 +551,50 @@ describe('agentic failure surfacing', () => {
     expect(result.report).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
   })
 
+  it('counts evidence-gate rejections per analyst and names the reason in the report', async () => {
+    const fabricating: TraceAnalysisEngine = {
+      id: 'fabricating-test-engine',
+      description: 'Submits one finding whose excerpt the cited span does not contain.',
+      model: 'test-model',
+      version: '1.0.0',
+      executionConfig: {},
+      analyze: async () => ({
+        answer: 'The agent retried a failing command.',
+        findings: [{
+          severity: 'medium',
+          claim: 'The agent retried npm test three times without changing anything.',
+          confidence: 0.8,
+          evidence: [
+            { uri: 'trace://trace-improve/span/tool-0', excerpt: 'this text is not in the span' },
+            { uri: 'trace://trace-improve/span/tool-1' },
+          ],
+        }],
+        trajectory: [],
+        modelCalls: 1,
+        toolCalls: 0,
+        runtime: {},
+      }),
+    }
+    const logged: string[] = []
+    const result = await runTraceInvestigation({
+      spans: fixtureSpans(),
+      harness: 'synthetic',
+      engine: fabricating,
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      log: (msg) => logged.push(msg),
+    })
+
+    expect(result.findingRejections?.['failure-mode']).toEqual({
+      'excerpt is not present in the cited span content': 1,
+    })
+    expect(result.findings.some((finding) => finding.analyst_id === 'failure-mode')).toBe(false)
+    expect(result.report).toMatch(
+      /\| `failure-mode` \| ok \| 0 \| \d+ms \| 1 finding\(s\) rejected: excerpt is not present in the cited span content ×1 \|/,
+    )
+    // The caller's log still receives every event the tally counted.
+    expect(logged).toContain('[failure-mode] finding rejected: unresolved evidence')
+  })
+
   it('leaves agenticPerAnalyst unset for a deterministic-only run', async () => {
     const result = await runTraceInvestigation({
       spans: fixtureSpans(),
@@ -558,6 +602,7 @@ describe('agentic failure surfacing', () => {
       generatedAt: '2026-01-01T00:00:00.000Z',
     })
     expect(result.agenticPerAnalyst).toBeUndefined()
+    expect(result.findingRejections).toBeUndefined()
     expect(totalAgenticFailureMessage(result.agenticPerAnalyst)).toBeUndefined()
   })
 
