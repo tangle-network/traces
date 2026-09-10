@@ -18,12 +18,14 @@ import {
   type AnalystRegistry,
   type AnalystRunSummary,
   buildDefaultAnalystRegistry,
+  DEFAULT_TRACE_ANALYST_KINDS,
   type TraceAnalysisEngine,
   type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
 import { openAgenticTraceStore, openDeterministicTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
+import { withSessionFactsContext } from './session-facts.js'
 
 export interface AnalyzeOptions {
   /** Explicitly authorize original source reads from this full session bundle. */
@@ -49,6 +51,16 @@ export interface AnalyzeOptions {
   agenticRegistry?: AnalystRegistry
   /** Select a subset of agent-eval's maintained trace analyst kinds. */
   agenticKinds?: readonly TraceAnalystDefinition[]
+  /**
+   * Supply the deterministic session-facts sheet to the agentic kinds as
+   * prepared context (default true). It costs nothing and removes the guessing
+   * the bounded trace tools force on a model that needs an exact count. Set
+   * false to measure an analyst without it.
+   *
+   * It applies only to definitions this call builds a registry from; a caller
+   * who brings `agenticRegistry` owns its own prepared context.
+   */
+  sessionFactsContext?: boolean
   /** Compact deterministic findings that agents receive before reading spans. */
   agenticPriorFindings?: readonly AnalystFinding[]
   /** Where to write the OTLP-JSONL artifact. Defaults to a temp file. */
@@ -114,12 +126,21 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   let agenticPerAnalyst: readonly AnalystRunSummary[] | undefined
   if (opts.engine || opts.agenticRegistry) {
     const agStore = await openAgenticTraceStore(traceFile)
-    const agRegistry = opts.agenticRegistry ?? buildDefaultAnalystRegistry({
-      engine: opts.engine!,
-      ...(opts.agenticKinds ? { definitions: opts.agenticKinds } : {}),
-      includeBehavioral: false,
-      registry: { log: opts.log },
-    })
+    // The sheet reaches the model through each definition's `prepareContext`,
+    // which runs before the first model call. Its facts are exact where the
+    // bounded trace tools force a guess, and it costs nothing to compute. A
+    // caller-supplied agentic registry owns its own prepared context, so the
+    // sheet is built only when this call builds the registry.
+    const buildRegistry = (): AnalystRegistry => {
+      const kinds = opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS
+      return buildDefaultAnalystRegistry({
+        engine: opts.engine!,
+        definitions: opts.sessionFactsContext === false ? kinds : withSessionFactsContext(kinds, spans),
+        includeBehavioral: false,
+        registry: { log: opts.log },
+      })
+    }
+    const agRegistry = opts.agenticRegistry ?? buildRegistry()
     const agResult = await agRegistry.run(runId, { traceStore: agStore }, {
       budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
       chainFindings: true,

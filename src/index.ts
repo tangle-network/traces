@@ -98,6 +98,7 @@ export * from './file-export.js' // convert evidence/events files to OpenInferen
 export * from './chat-trajectory.js' // generic chat trajectory to stable step spans
 export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
 export * from './ask.js' // runTraceQuestions(): concurrent free-form questions, answers kept and citations checked
+export * from './session-facts.js' // computeSessionFacts(): the deterministic, free session-facts sheet
 export * from './answer-schema.js' // the JSON Schema subset an ask answer may be held to
 export * from './finding-rejections.js' // evidence-gate rejections counted per analyst and reason
 export { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL } from './analyst-model-call.js'

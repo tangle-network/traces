@@ -12,6 +12,7 @@
  *   traces investigate [input.jsonl] [--format auto] [--out report.md]
  *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
  *   traces ask --harness codex --session <id> --question "..." [--questions q.json] [--dir <dir>]
+ *   traces facts [--harness codex] [--last 5] [--format json|text] [--out facts.json]
  *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces bundle  --harness claude-code --session <id|path> --out <dir>
@@ -114,6 +115,7 @@ import type {
   UnreadableSourceRows,
 } from './otlp-input.js'
 import { readOtlpInput } from './otlp-input.js'
+import { buildSessionFactsReport, renderSessionFacts } from './session-facts.js'
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
@@ -307,7 +309,7 @@ function parseArgs(argv: string[]): Args {
  * artifact with `--otlp-out`: one flag, one direction, no command where the
  * same word means read here and write there.
  */
-const OTLP_INPUT_COMMANDS = new Set(['analyze', 'investigate', 'improve', 'ask', 'stream', 'validate'])
+const OTLP_INPUT_COMMANDS = new Set(['analyze', 'facts', 'investigate', 'improve', 'ask', 'stream', 'validate'])
 
 /**
  * `--otlp` used to mean "write the artifact here" on every command. It now
@@ -345,6 +347,7 @@ function validateOtlpSelection(raw: Args): Args {
 
 const CURRENT_SESSION_COMMANDS = new Set([
   'analyze',
+  'facts',
   'investigate',
   'improve',
   'ask',
@@ -357,6 +360,7 @@ const CURRENT_SESSION_COMMANDS = new Set([
 
 const WORKFLOW_COMMANDS = new Set([
   'analyze',
+  'facts',
   'investigate',
   'improve',
   'ask',
@@ -843,6 +847,49 @@ async function cmdBundleView(args: Args): Promise<void> {
       `${manifest.excluded.length} excluded, ${leakCheck.matches} session-text match(es) against ` +
       `${leakCheck.sourceSignatures} signature(s) from ${leakCheck.comparedSources.length} excluded source(s))`,
   )
+}
+
+/**
+ * `traces facts` — the deterministic session-facts sheet, printed.
+ *
+ * No model, no engine, no budget: the numbers come out of the spans. JSON by
+ * default because the sheet's consumers are programs; `--format text` prints
+ * the short readable form. Every fact names the span ids it came from, so any
+ * number here can be checked with `traces export` or a trace tool.
+ *
+ * Exits non-zero when a selected session cannot be read: `collectSpans` throws,
+ * and an unreadable session must never be reported as a session with no facts.
+ */
+async function cmdFacts(args: Args): Promise<void> {
+  const format = args.format ?? 'json'
+  if (format !== 'json' && format !== 'text') {
+    throw new Error(`unknown facts format "${format}" (expected json or text)`)
+  }
+  const collected = await collectSpans(args)
+  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  const report = buildSessionFactsReport(collected.spans, { harness: collected.harness })
+  // A session that yielded no record spans was not read: only its root, and any
+  // integrity receipt for the bytes that failed to parse. Printing a sheet of
+  // zeros for it would state, in the sheet's own voice, that the session did
+  // nothing — which is the one thing the sheet must never do.
+  const unread = report.sessions.filter((facts) => facts.recordSpans === 0)
+  if (unread.length > 0) {
+    throw new Error(
+      `no records could be read from ${unread.length} selected session(s): ` +
+        unread
+          .map((facts) => `${facts.sessionId ?? facts.traceId} (${facts.unreadRecords.value ?? 0} unread record(s))`)
+          .join(', ') +
+        '. The facts sheet would state zeros the spans cannot support.',
+    )
+  }
+  const rendered = format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderSessionFacts(report)
+  if (args.out) {
+    await writeFile(args.out, rendered, 'utf8')
+    console.log(`session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`)
+    return
+  }
+  process.stdout.write(rendered)
 }
 
 async function cmdInspect(args: Args): Promise<void> {
@@ -1680,6 +1727,13 @@ Commands:
             model-backed engine: questions run concurrently under one budget,
             every trace:// citation is checked, and answers.json + report.md
             are written to --dir (exit 1 when any question fails)
+  facts     Print the deterministic session-facts sheet for the selected
+            sessions: tool calls excluding synthesized spans, subagent spawns
+            with task names, human turns in order, the final message per task,
+            changed paths, first/last record times, and the harness token total.
+            No model call, no budget, $0. Every fact names the span ids it came
+            from; a fact the spans cannot support is null with its reason.
+            --format json (default) or text (exit 1 when a session cannot be read)
   convert   Emit OTLP-JSONL only, to --otlp-out (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
   bundle    Assemble one session's durable evidence directory: transcript +
@@ -1745,6 +1799,7 @@ Options:
   --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
                    provenance / dry-run upload preview)
   --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans | chat-trajectory
+                   facts: json (default) | text
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --mode <kind>    stream: visualizer | findings | agent (default visualizer)
@@ -1852,6 +1907,7 @@ async function main(): Promise<void> {
     case 'investigate': await cmdInvestigate(args); break
     case 'improve': await cmdImprove(args); break
     case 'ask': await cmdAsk(args); break
+    case 'facts': await cmdFacts(args); break
     case 'convert': await cmdConvert(args); break
     case 'index': await cmdIndex(args); break
     case 'bundle': await cmdBundle(args); break
