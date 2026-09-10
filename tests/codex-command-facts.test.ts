@@ -134,12 +134,12 @@ describe('Codex command and file-change spans', () => {
     expect(files.every((item) => item.start_time === at(10.2) && item.end_time === at(10.5))).toBe(true)
   })
 
-  it('counts item shapes it cannot represent instead of guessing', async () => {
+  it('separates an item type it models no span for from an item it dropped', async () => {
     const spans = await new CodexAdapter().parse(rollout('skipped'))
     const root = spans.find((item) => item.parent_span_id === null)!
-    expect(JSON.parse(String(root.attributes['traces.codex.skipped_item_counts']))).toEqual({
+    expect(JSON.parse(String(root.attributes['traces.codex.unmodeled_item_counts']))).toEqual({ FixtureFutureItem: 1 })
+    expect(JSON.parse(String(root.attributes['traces.codex.dropped_item_counts']))).toEqual({
       'CommandExecution:malformed': 1,
-      FixtureFutureItem: 1,
     })
     expect(spans.some((item) => item.attributes['traces.codex.item_id'] === 'item-broken')).toBe(false)
   })
@@ -232,7 +232,7 @@ describe('Codex human turns', () => {
     expect(humanTurns(spans)[0]!.start_time).toBe(at(2))
     expect(humanTurns(spans)[0]!.attributes['traces.codex.user_message_event']).toBe(true)
     const root = spans.find((item) => item.parent_span_id === null)!
-    expect(root.attributes['traces.codex.skipped_item_counts']).toBeUndefined()
+    expect(root.attributes['traces.codex.dropped_item_counts']).toBeUndefined()
   })
 
   it('pairs the two records of a turn whose message record carries a context prefix', async () => {
@@ -247,6 +247,8 @@ describe('Codex human turns', () => {
     ]))
     expect(byName(spans, 'user.prompt')).toHaveLength(1)
     expect(humanTurns(spans).map((item) => [item.attributes.content, item.start_time])).toEqual([[prefixed, at(2)]])
+    // Without the pairing, this span exists but carries no record of its own.
+    expect(humanTurns(spans)[0]!.attributes['traces.codex.user_message_event']).toBe(true)
   })
 
   it('keeps text heuristics for rollouts that never recorded user_message events', async () => {

@@ -37,7 +37,6 @@ import { codexActor } from './actor.js'
 import { ACTOR_ATTR, capText, userPromptSpan } from './conversation.js'
 import {
   type CodexCommandExecution,
-  type CodexCompletedItem,
   codexCompletedItem,
   type CodexFileChange,
   type CodexLine,
@@ -386,10 +385,21 @@ function closeSpanAt(target: OtlpSpan, sourceEndTime: string): void {
   target.end_time = sourceEndTime
 }
 
-/** A completed item the adapter turns into spans; user messages take the turn path instead. */
-type CompletedItem =
-  & Extract<CodexCompletedItem, { type: 'CommandExecution' | 'FileChange' }>
-  & { readonly recordTime: string }
+/** The item types the adapter turns into inner spans; user messages take the turn path instead. */
+type InnerItemType = 'CommandExecution' | 'FileChange'
+
+/**
+ * An inner span built at the moment its item was read, waiting only for the
+ * complete map of tool-call windows to place it. Retaining the span rather than
+ * the parsed item keeps adapter memory bounded by span count instead of by
+ * total raw command output: `toolIoAttributes` already capped the command text
+ * and the command output when the span was built.
+ */
+interface PendingInnerSpan {
+  readonly span: OtlpSpan
+  readonly startMs: number
+  readonly endMs: number
+}
 
 /** The time window of a model-issued call: its call record to its output record. */
 interface ToolWindow {
@@ -447,9 +457,8 @@ function itemSources(item: object, fields: readonly string[]) {
 }
 
 function innerItemAttributes(
-  type: CompletedItem['type'],
+  type: InnerItemType,
   itemId: string,
-  join: ItemJoin,
   timeSource: string | undefined,
   status: string | undefined,
 ): Record<string, unknown> {
@@ -459,7 +468,9 @@ function innerItemAttributes(
     [TOOL_CALL_LEVEL_ATTR]: INNER_TOOL_CALL_LEVEL,
     'traces.codex.item_type': type,
     'traces.codex.item_id': itemId,
-    'traces.codex.item_join': join,
+    // `placeInnerSpans` decides the join once every tool window is known. An
+    // item that matches no window keeps this value.
+    'traces.codex.item_join': 'unmatched',
     ...(timeSource ? { 'traces.codex.item_time_source': timeSource } : {}),
     ...(status ? { 'traces.codex.item_status': status } : {}),
   }
@@ -468,21 +479,42 @@ function innerItemAttributes(
 interface ItemSpanContext {
   readonly traceId: string
   readonly rootId: string
-  readonly windows: ReadonlyMap<OtlpSpan, ToolWindow>
+}
+
+function itemCountsJson(counts: ReadonlyMap<string, number>): string {
+  return JSON.stringify(
+    Object.fromEntries([...counts].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))),
+  )
+}
+
+/**
+ * Attach each inner span to the model-issued call whose window contains it.
+ * This is the only part of an inner span that depends on records written after
+ * the item, which is why the span itself is built when the item is read.
+ */
+function placeInnerSpans(
+  pending: readonly PendingInnerSpan[],
+  windows: ReadonlyMap<OtlpSpan, ToolWindow>,
+): OtlpSpan[] {
+  return pending.map((entry) => {
+    const { parent, join } = joinItem(windows, entry.startMs, entry.endMs)
+    if (parent) entry.span.parent_span_id = parent.span_id
+    entry.span.attributes['traces.codex.item_join'] = join
+    return entry.span
+  })
 }
 
 /**
  * One CHAIN span per command. Command text, cwd, and output stay in the tool
  * I/O keys, which metadata-only upload strips and external redactors scrub.
  */
-function commandSpan(context: ItemSpanContext, item: object, command: CodexCommandExecution, recordTime: string): OtlpSpan {
+function commandSpan(context: ItemSpanContext, item: object, command: CodexCommandExecution, recordTime: string): PendingInnerSpan {
   const { start, end, timeSource } = itemTimes(command, recordTime)
-  const { parent, join } = joinItem(context.windows, Date.parse(start), Date.parse(end))
   const status = itemStatus(command.status, 'command', command.exitCode)
   const commandSpan = span({
     traceId: context.traceId,
     spanId: `command:${command.itemId}`,
-    parentSpanId: parent?.span_id ?? context.rootId,
+    parentSpanId: context.rootId,
     name: 'command.execution',
     kind: 'CHAIN',
     startTime: start,
@@ -497,26 +529,27 @@ function commandSpan(context: ItemSpanContext, item: object, command: CodexComma
         output: command.output,
         outputSource: itemSources(item, command.outputFields),
       }),
-      ...innerItemAttributes('CommandExecution', command.itemId, join, timeSource, command.status),
+      ...innerItemAttributes('CommandExecution', command.itemId, timeSource, command.status),
       ...(command.exitCode === undefined ? {} : { 'process.exit_code': command.exitCode }),
       ...(command.processId ? { 'traces.codex.process_id': command.processId } : {}),
       ...(command.source ? { 'traces.codex.command_source': command.source } : {}),
     },
   })
   closeSpanAt(commandSpan, end)
-  return commandSpan
+  return { span: commandSpan, startMs: Date.parse(start), endMs: Date.parse(end) }
 }
 
 /** One CHAIN span per changed path; the path stays in `input.value` for the same reason as commands. */
-function fileChangeSpans(context: ItemSpanContext, item: object, fileChange: CodexFileChange, recordTime: string): OtlpSpan[] {
+function fileChangeSpans(context: ItemSpanContext, item: object, fileChange: CodexFileChange, recordTime: string): PendingInnerSpan[] {
   const { start, end, timeSource } = itemTimes(fileChange, recordTime)
-  const { parent, join } = joinItem(context.windows, Date.parse(start), Date.parse(end))
   const status = itemStatus(fileChange.status, 'file change')
+  const startMs = Date.parse(start)
+  const endMs = Date.parse(end)
   return fileChange.changes.map((change, index) => {
     const changeSpan = span({
       traceId: context.traceId,
       spanId: `file-change:${fileChange.itemId}:${index}`,
-      parentSpanId: parent?.span_id ?? context.rootId,
+      parentSpanId: context.rootId,
       name: 'file.change',
       kind: 'CHAIN',
       startTime: start,
@@ -529,12 +562,12 @@ function fileChangeSpans(context: ItemSpanContext, item: object, fileChange: Cod
           input: { path: change.path, kind: change.kind, ...(change.movePath ? { move_path: change.movePath } : {}) },
           inputSource: sourceOf(item, 'changes'),
         }),
-        ...innerItemAttributes('FileChange', fileChange.itemId, join, timeSource, fileChange.status),
+        ...innerItemAttributes('FileChange', fileChange.itemId, timeSource, fileChange.status),
         'traces.codex.file_change_kind': change.kind,
       },
     })
     closeSpanAt(changeSpan, end)
-    return changeSpan
+    return { span: changeSpan, startMs, endMs }
   })
 }
 
@@ -856,11 +889,16 @@ export class CodexAdapter implements HarnessTraceAdapter {
     let lastTimestamp: string | undefined
     const awaitingModel = model ? [] : [root]
     const toolWindows = new Map<OtlpSpan, ToolWindow>()
-    const completedItems: CompletedItem[] = []
+    const itemContext: ItemSpanContext = { traceId, rootId }
+    const pendingInnerSpans: PendingInnerSpan[] = []
     const completedItemKeys = new Set<string>()
-    const skippedItemCounts = new Map<string, number>()
-    const countSkippedItem = (label: string): void => {
-      skippedItemCounts.set(label, (skippedItemCounts.get(label) ?? 0) + 1)
+    // Two separate censuses: item types this adapter models no span for, and
+    // items of a modeled type that produced none. Only the second reads as
+    // lost facts, so they never share one count.
+    const unmodeledItemCounts = new Map<string, number>()
+    const droppedItemCounts = new Map<string, number>()
+    const countItem = (counts: Map<string, number>, label: string): void => {
+      counts.set(label, (counts.get(label) ?? 0) + 1)
     }
     // Pairs the two records of one typed turn. A task index scopes the pairing,
     // so the same short reply in two turns stays two turns.
@@ -1119,16 +1157,22 @@ export class CodexAdapter implements HarnessTraceAdapter {
         if (!activity) {
           const completed = codexCompletedItem(l)
           if (completed?.type === 'skipped') {
-            countSkippedItem(completed.label)
+            countItem(completed.reason === 'unmodeled' ? unmodeledItemCounts : droppedItemCounts, completed.label)
           } else if (completed?.type === 'UserMessage') {
             recordSubmittedTurn(completed.userMessage.text, ts, textSources(completed.item, 'content'))
           } else if (completed) {
             const itemId = completed.type === 'CommandExecution' ? completed.command.itemId : completed.fileChange.itemId
-            const itemKey = `${completed.type}:${itemId}`
-            if (completedItemKeys.has(itemKey)) countSkippedItem(`${completed.type}:duplicate`)
+            // Scoped by task: Codex item ids are UUIDs today, but a turn-scoped
+            // id scheme must not make a later turn's command a `:duplicate`.
+            const itemKey = `${completed.type}:${taskIndex}:${itemId}`
+            if (completedItemKeys.has(itemKey)) countItem(droppedItemCounts, `${completed.type}:duplicate`)
             else {
               completedItemKeys.add(itemKey)
-              completedItems.push({ ...completed, recordTime: ts })
+              if (completed.type === 'CommandExecution') {
+                pendingInnerSpans.push(commandSpan(itemContext, completed.item, completed.command, ts))
+              } else {
+                pendingInnerSpans.push(...fileChangeSpans(itemContext, completed.item, completed.fileChange, ts))
+              }
             }
           }
           continue
@@ -1280,18 +1324,12 @@ export class CodexAdapter implements HarnessTraceAdapter {
       candidate.span.attributes[ACTOR_ATTR] = 'injected'
       candidate.span.attributes['traces.codex.actor_evidence'] = 'no_user_message_event'
     }
-    const itemContext: ItemSpanContext = { traceId, rootId, windows: toolWindows }
-    for (const completed of completedItems) {
-      if (completed.type === 'CommandExecution') {
-        spans.push(commandSpan(itemContext, completed.item, completed.command, completed.recordTime))
-      } else {
-        spans.push(...fileChangeSpans(itemContext, completed.item, completed.fileChange, completed.recordTime))
-      }
+    spans.push(...placeInnerSpans(pendingInnerSpans, toolWindows))
+    if (unmodeledItemCounts.size > 0) {
+      root.attributes['traces.codex.unmodeled_item_counts'] = itemCountsJson(unmodeledItemCounts)
     }
-    if (skippedItemCounts.size > 0) {
-      root.attributes['traces.codex.skipped_item_counts'] = JSON.stringify(
-        Object.fromEntries([...skippedItemCounts].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))),
-      )
+    if (droppedItemCounts.size > 0) {
+      root.attributes['traces.codex.dropped_item_counts'] = itemCountsJson(droppedItemCounts)
     }
     if (selectedBoundary?.turnId) {
       for (const item of spans) item.attributes['traces.codex.turn_id'] ??= selectedBoundary.turnId

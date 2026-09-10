@@ -162,15 +162,24 @@ export interface CodexUserMessage {
 }
 
 /**
- * One `item_completed` event, normalized. `skipped` carries the label the adapter
- * counts when an item produces no span: the item type, or `<type>:malformed`
- * when a required field is missing.
+ * One `item_completed` event, normalized.
+ *
+ * `skipped` separates the two reasons an item produces no span, because they
+ * carry opposite meanings for a reader counting facts:
+ *
+ * - `unmodeled` — the adapter builds no span from this item type. The rollout
+ *   records the same work as a `response_item` (reasoning, assistant messages,
+ *   tool calls), and that record is what becomes a span, so the count is a
+ *   census of item types, not missing facts.
+ * - `dropped` — an item of a modeled type produced no span: a required field
+ *   was missing or mistyped, the item repeats one already recorded, or a user
+ *   message carried no text. This count is the one that reads as lost facts.
  */
 export type CodexCompletedItem =
   | { readonly type: 'CommandExecution'; readonly item: object; readonly command: CodexCommandExecution }
   | { readonly type: 'FileChange'; readonly item: object; readonly fileChange: CodexFileChange }
   | { readonly type: 'UserMessage'; readonly item: object; readonly userMessage: CodexUserMessage }
-  | { readonly type: 'skipped'; readonly label: string }
+  | { readonly type: 'skipped'; readonly reason: 'unmodeled' | 'dropped'; readonly label: string }
 
 type JsonRecord = Record<string, unknown>
 
@@ -259,13 +268,13 @@ export function codexCompletedItem(line: CodexLine): CodexCompletedItem | undefi
   const item = recordValue(payload.item)
   const type = nonEmptyString(item?.type) ?? 'unknown'
   if (!item || (type !== 'CommandExecution' && type !== 'FileChange' && type !== 'UserMessage')) {
-    return { type: 'skipped', label: type }
+    return { type: 'skipped', reason: 'unmodeled', label: type }
   }
   const itemId = nonEmptyString(item.id)
   if (type === 'UserMessage') {
     const text = userMessageText(item.content)
     // An image-only or audio-only turn carries no text to record as a turn span.
-    if (!itemId || !text) return { type: 'skipped', label: `${type}:${itemId ? 'no_text' : 'malformed'}` }
+    if (!itemId || !text) return { type: 'skipped', reason: 'dropped', label: `${type}:${itemId ? 'no_text' : 'malformed'}` }
     return { type, item, userMessage: { itemId, text } }
   }
   const startedAtMs = epochMs(payload.started_at_ms) ?? epochMs(item.started_at_ms)
@@ -277,11 +286,11 @@ export function codexCompletedItem(line: CodexLine): CodexCompletedItem | undefi
   }
   if (type === 'FileChange') {
     const changes = fileChangeEntries(item.changes)
-    if (!itemId || !changes) return { type: 'skipped', label: `${type}:malformed` }
+    if (!itemId || !changes) return { type: 'skipped', reason: 'dropped', label: `${type}:malformed` }
     return { type, item, fileChange: { itemId, changes, ...(status ? { status } : {}), ...times } }
   }
   const command = commandValue(item.command)
-  if (!itemId || !command) return { type: 'skipped', label: `${type}:malformed` }
+  if (!itemId || !command) return { type: 'skipped', reason: 'dropped', label: `${type}:malformed` }
   const cwd = nonEmptyString(item.cwd)
   const processId = typeof item.process_id === 'number' && Number.isSafeInteger(item.process_id)
     ? String(item.process_id)

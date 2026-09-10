@@ -302,6 +302,9 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       pending.span.attributes['traces.codex.exec_item_status'] = item.status
       if (result.exitCode !== undefined) {
         pending.span.attributes['traces.codex.exec_exit_code'] = result.exitCode
+        // One spelling for one fact: the rollout adapter's command spans use
+        // this key, so a reader of exit codes needs no per-adapter branch.
+        pending.span.attributes['process.exit_code'] = result.exitCode
       }
       if (type === 'command_execution') {
         recordToolOutput(pending.span, typeof item.aggregated_output === 'string' ? item.aggregated_output : undefined, sourceOf(item, 'aggregated_output'))
