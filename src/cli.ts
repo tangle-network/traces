@@ -1249,7 +1249,9 @@ async function cmdImprove(args: Args): Promise<void> {
  * ledger, so `--budget` bounds the whole run and `--question-budget` bounds
  * each question. The answers, their citation checks, and per-question cost and
  * time are written before the exit code is decided, so a failed question never
- * costs the others' answers.
+ * costs the others' answers. Ctrl-C is one of those failures: `runTraceQuestions`
+ * records it on the questions the run never reached and still returns, so the
+ * artifacts below are written for the answers already paid for.
  */
 async function cmdAsk(args: Args): Promise<void> {
   if (args.out) throw new Error('ask writes a directory of artifacts; pass --dir <dir> instead of --out')

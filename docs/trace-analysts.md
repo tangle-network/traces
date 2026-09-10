@@ -117,7 +117,9 @@ This package carries no JSON Schema library, and a constraint that is quietly ig
 - Every `trace://<trace_id>/span/<span_id>` URI in an answer is resolved against the store. An unresolvable citation fails that question.
 - Findings the answer submits still pass the same evidence gate as the built-in kinds. Refused findings are counted by reason in both artifacts.
 - A failed question never stops the others. Its failure is recorded on its own answer, and the remaining answers are written.
+- Ctrl-C keeps what the run already bought. The signal reaches the engine, not the checks that follow it: an answer that came back is kept with its citations resolved, and each question the run never reached is recorded as `aborted`.
 - The artifacts are written before the exit code is decided. `ask` exits 1 when any question failed, returned no answer, broke its schema, or cited a missing span.
+- `totals.wallTimeMs` covers the whole run, including writing and indexing the trace file; `totals.setupTimeMs` names that part. `result.effectiveConcurrency` is the number of workers the run created, `min(--concurrency, questions)`, and `totals.peakConcurrency` is how many actually overlapped.
 
 ### Budget under concurrency
 
@@ -129,6 +131,10 @@ Two consequences follow.
 - A budget that admits fewer concurrent reservations than `--concurrency` still runs, and the report carries a warning naming how many concurrent calls it covers.
 
 A question the ledger refuses is reported as `budget-refused`, and the answers already produced are kept.
+That kind is decided from the accounting, not only from the error text.
+The refusal happens inside the model proxy, behind the DSPy bridge, whose HTTP error handling can replace the Node error with its own message.
+So a failed question is reported as `budget-refused` whenever the shared ledger's settled spend left less than one model call's reservation at the time it failed, whatever the message says.
+The message itself is kept verbatim on the answer.
 
 ### SDK
 
@@ -168,8 +174,12 @@ The common reasons are an excerpt the cited span does not contain, a span the tr
 ## External analyzer failures exit non-zero
 
 `--analyzer halo|hodoscope|prime|<command>` promises that engine's output.
-An analyzer that fails now writes its error into the report as before, and then `analyze` exits 1 naming every analyzer that failed.
+An analyzer that fails now writes its error into the report as before, and then the command exits 1 naming every analyzer that failed.
 Scripts that treated exit 0 as "the analyzer ran" were reading a report that said otherwise.
+
+The check runs on `analyze`, `investigate`, and `improve`, and it covers every analyzer the run requested, not only the ones named on the command line.
+`investigate` and `improve` load the default traces config file, so an analyzer declared in `externalAnalyzers` there is a requested analyzer too, and a flaky one now turns those two commands red.
+`analyze` does not load a default config, so only its own `--analyzer` flags reach the check.
 
 ## Codex tool outcomes
 

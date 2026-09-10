@@ -118,8 +118,10 @@ export interface TraceQuestionsTotals {
   readonly providerCalls: number
   /** Total spend with its provenance; `uncaptured` carries a null amount, never 0. */
   readonly cost: CostProvenance
-  /** Wall time of the whole run. */
+  /** Wall time of the whole run, from the first span written to the last answer. */
   readonly wallTimeMs: number
+  /** Part of `wallTimeMs` spent writing and indexing the trace file, before any question ran. */
+  readonly setupTimeMs: number
   /** Sum of the questions' own latencies; above `wallTimeMs` when questions overlapped. */
   readonly questionTimeMs: number
   /** Most questions observed running at the same time. */
@@ -132,7 +134,10 @@ export interface TraceQuestionsResult {
   readonly generatedAt: string
   readonly harness: string
   readonly engine: { readonly id: string; readonly version: string; readonly model: string | null }
+  /** Questions the run was allowed to overlap, as requested. */
   readonly concurrency: number
+  /** Workers the run actually created: `min(concurrency, questions)`. */
+  readonly effectiveConcurrency: number
   /** Shared ceiling across every question; null when uncapped. */
   readonly budgetUsd: number | null
   /** The engine's own ceiling for one question, when it declares one. */
@@ -215,16 +220,29 @@ const QUESTION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 const QUESTION_KEYS = new Set(['id', 'question', 'instructions', 'answerSchema'])
 
+/** The first `q<n>` from `index + 1` that no explicit or earlier default ID holds. */
+function defaultQuestionId(index: number, reserved: ReadonlySet<string>, taken: ReadonlySet<string>): string {
+  let n = index + 1
+  while (reserved.has(`q${n}`) || taken.has(`q${n}`)) n += 1
+  return `q${n}`
+}
+
 /**
  * Validate questions and assign default IDs. Throws on an empty list, a
  * duplicate or malformed ID, a question too long for the preview, or an answer
  * schema outside the supported subset.
+ *
+ * Explicit IDs are reserved before any default is assigned, so a file entry
+ * named `q2` plus a positional question cannot collide and kill the run before
+ * it starts. A default keeps its own position where it can: it starts at
+ * `q<index + 1>` and takes the next free number only when that one is spoken for.
  */
 export function normalizeTraceQuestions(questions: readonly TraceQuestion[]): Array<TraceQuestion & { id: string }> {
   if (questions.length === 0) throw new Error('ask needs at least one question')
+  const reserved = new Set(questions.flatMap((entry) => (typeof entry.id === 'string' ? [entry.id] : [])))
   const seen = new Set<string>()
   return questions.map((entry, index) => {
-    const id = entry.id ?? `q${index + 1}`
+    const id = entry.id ?? defaultQuestionId(index, reserved, seen)
     if (!QUESTION_ID.test(id)) {
       throw new Error(`question ID "${id}" must match ${QUESTION_ID} (letters, digits, dot, underscore, hyphen)`)
     }
@@ -379,11 +397,14 @@ export function traceCitationsInText(text: string): Array<{ uri: string; traceId
   return out
 }
 
-async function verifyCitations(
-  text: string,
-  store: TraceAnalysisStore,
-  signal: AbortSignal | undefined,
-): Promise<TraceQuestionCitation[]> {
+/**
+ * Resolve every citation in an answer against the store.
+ *
+ * No signal: the index is built before the first question runs, so this is an
+ * in-memory lookup, and forwarding an aborted run signal here would make
+ * `store.hasSpans` throw and discard an answer that was already paid for.
+ */
+async function verifyCitations(text: string, store: TraceAnalysisStore): Promise<TraceQuestionCitation[]> {
   const citations = traceCitationsInText(text)
   const wanted = new Map<string, Set<string>>()
   for (const citation of citations) {
@@ -394,7 +415,7 @@ async function verifyCitations(
   }
   const found = new Map<string, Set<string>>()
   for (const [traceId, spanIds] of wanted) {
-    const existing = await store.hasSpans({ trace_id: traceId, span_ids: [...spanIds] }, signal ? { signal } : undefined)
+    const existing = await store.hasSpans({ trace_id: traceId, span_ids: [...spanIds] })
     found.set(traceId, new Set(existing))
   }
   return citations.map((citation) => ({
@@ -409,6 +430,22 @@ function isBudgetRefusal(error: unknown): boolean {
   // The DSPy engine crosses a process boundary, so the class does not survive;
   // these are the ledger's and the model proxy's own refusal texts.
   return /would exceed ceiling|model cost limit reached/.test(message)
+}
+
+/**
+ * True when the shared ledger could no longer admit one model call at the time
+ * the question failed.
+ *
+ * Message matching alone is not enough: the refusal happens inside the model
+ * proxy, behind the bridge, and the bridge's HTTP error handling can replace
+ * the Node error text with its own. Reconciling against the ledger's settled
+ * spend names the cause from the accounting rather than from the wording, so
+ * an exhausted budget reads as `budget-refused` however the failure surfaced.
+ */
+function ledgerIsExhausted(ledger: CostLedger, budgetUsd: number | undefined, floorUsd: number | undefined): boolean {
+  if (budgetUsd === undefined || floorUsd === undefined) return false
+  const settled = ledger.summary({ channel: 'analyst' }).totalCostUsd
+  return Number.isFinite(settled) && budgetUsd - settled < floorUsd
 }
 
 function errorMessage(error: unknown): string {
@@ -436,6 +473,32 @@ function formatUsd(value: number): string {
   return `$${value < 0.01 && value > 0 ? value.toPrecision(2) : value.toFixed(2)}`
 }
 
+/** A question the pool never reached, recorded so the run still accounts for it. */
+function unrunAnswer(
+  question: TraceQuestion & { id: string },
+  failure: NonNullable<TraceQuestionAnswer['failure']>,
+  model: string | null,
+): TraceQuestionAnswer {
+  const at = new Date().toISOString()
+  return {
+    id: question.id,
+    question: question.question,
+    status: 'failed',
+    failure,
+    answer: null,
+    citations: [],
+    findings: [],
+    rejectedFindings: {},
+    model,
+    modelCalls: null,
+    toolCalls: null,
+    usage: null,
+    startedAt: at,
+    endedAt: at,
+    latencyMs: 0,
+  }
+}
+
 function sumOrNull(values: ReadonlyArray<number | null>): number | null {
   return values.some((value) => value === null) ? null : values.reduce<number>((sum, value) => sum + (value ?? 0), 0)
 }
@@ -443,8 +506,11 @@ function sumOrNull(values: ReadonlyArray<number | null>): number | null {
 /**
  * Ask every question of the spans, concurrently, under one shared cost
  * ledger. Never throws for a failed question: each failure is recorded on its
- * answer and `ok` turns false. Throws before any model call for invalid
- * questions, options, or a budget below one call's reservation.
+ * answer and `ok` turns false. An aborted run is one of those failures, not an
+ * exception: answers already bought are kept and the questions the run never
+ * reached are recorded as `aborted`, so the caller can still write both
+ * artifacts. Throws before any model call for invalid questions, options, or a
+ * budget below one call's reservation.
  */
 export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<TraceQuestionsResult> {
   if (opts.spans.length === 0) throw new Error('runTraceQuestions: no spans to ask about')
@@ -475,6 +541,10 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   }
   opts.signal?.throwIfAborted()
 
+  // The clock covers the whole command's work, not only the questions: writing
+  // and indexing a large session's OTLP file is part of the wall time `ask`
+  // exists to shorten, and `setupTimeMs` says how much of it that was.
+  const runStarted = performance.now()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
   const traceFile = await writeAnalysisTraceFile(opts.spans, {
     sourceBundle: opts.sourceBundle,
@@ -536,7 +606,11 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
         })
       } catch (error) {
         failure = {
-          kind: opts.signal?.aborted ? 'aborted' : isBudgetRefusal(error) ? 'budget-refused' : 'error',
+          kind: opts.signal?.aborted
+            ? 'aborted'
+            : isBudgetRefusal(error) || ledgerIsExhausted(ledger, budgetUsd, floor)
+              ? 'budget-refused'
+              : 'error',
           message: errorMessage(error),
         }
       } finally {
@@ -548,28 +622,40 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
     let parsedAnswer: unknown
     let hasParsedAnswer = false
     let citations: TraceQuestionCitation[] = []
-    if (answer !== null) {
-      citations = await verifyCitations(answer, store, opts.signal)
-      if (question.answerSchema) {
-        const parsed = parseJsonAnswer(answer)
-        const problems = parsed.ok ? answerSchemaErrors(parsed.value, question.answerSchema) : [parsed.error]
-        if (parsed.ok) {
-          parsedAnswer = parsed.value
-          hasParsedAnswer = true
+    // Everything after the engine call is checking, not paying. It runs inside
+    // its own guard so no check can throw an answer away: a question that has
+    // been answered keeps its answer, and the run keeps its artifacts.
+    try {
+      if (answer !== null) {
+        citations = await verifyCitations(answer, store)
+        if (question.answerSchema) {
+          const parsed = parseJsonAnswer(answer)
+          const problems = parsed.ok ? answerSchemaErrors(parsed.value, question.answerSchema) : [parsed.error]
+          if (parsed.ok) {
+            parsedAnswer = parsed.value
+            hasParsedAnswer = true
+          }
+          if (problems.length > 0 && !failure) {
+            failure = { kind: 'invalid-answer', message: problems.slice(0, 5).join('; ') }
+          }
         }
-        if (problems.length > 0 && !failure) {
-          failure = { kind: 'invalid-answer', message: problems.slice(0, 5).join('; ') }
+        const unresolved = citations.filter((citation) => !citation.resolved)
+        if (unresolved.length > 0 && !failure) {
+          failure = {
+            kind: 'unresolved-citations',
+            message: `${unresolved.length} cited span(s) do not exist: ${unresolved.slice(0, 3).map((c) => c.uri).join(', ')}`,
+          }
         }
+      } else if (completed && !failure) {
+        failure = { kind: 'no-answer', message: 'the engine returned an empty answer' }
       }
-      const unresolved = citations.filter((citation) => !citation.resolved)
-      if (unresolved.length > 0 && !failure) {
+    } catch (error) {
+      if (!failure) {
         failure = {
-          kind: 'unresolved-citations',
-          message: `${unresolved.length} cited span(s) do not exist: ${unresolved.slice(0, 3).map((c) => c.uri).join(', ')}`,
+          kind: opts.signal?.aborted ? 'aborted' : 'error',
+          message: `checking the answer failed: ${errorMessage(error)}`,
         }
       }
-    } else if (completed && !failure) {
-      failure = { kind: 'no-answer', message: 'the engine returned an empty answer' }
     }
     const endedAt = new Date()
     return {
@@ -598,15 +684,32 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   // one failed question never stops the others; its failure is its answer.
   const answers = new Array<TraceQuestionAnswer>(questions.length)
   let next = 0
-  const runStarted = performance.now()
-  await Promise.all(Array.from({ length: effectiveConcurrency }, async () => {
-    while (next < questions.length) {
-      const index = next
-      next += 1
-      answers[index] = await askOne(questions[index]!)
-    }
-  }))
+  const setupTimeMs = Math.round(performance.now() - runStarted)
+  let poolError: unknown
+  try {
+    await Promise.all(Array.from({ length: effectiveConcurrency }, async () => {
+      while (next < questions.length) {
+        const index = next
+        next += 1
+        answers[index] = await askOne(questions[index]!)
+      }
+    }))
+  } catch (error) {
+    poolError = error
+  }
   const wallTimeMs = Math.round(performance.now() - runStarted)
+  // `askOne` records every failure on its own answer, so the pool is not
+  // expected to reject. If it ever does, the answers already bought are still
+  // returned and written rather than lost with the exception: the caller sees
+  // the cause in the warnings and in each question the pool never reached.
+  if (poolError !== undefined) {
+    const message = errorMessage(poolError)
+    warnings.push(`the question pool stopped early: ${message}`)
+    const kind: TraceQuestionFailureKind = opts.signal?.aborted ? 'aborted' : 'error'
+    for (const [index, question] of questions.entries()) {
+      answers[index] ??= unrunAnswer(question, { kind, message }, opts.engine.model ?? null)
+    }
+  }
 
   const summary = ledger.summary({ channel: 'analyst' })
   const answered = answers.filter((answer) => answer.status === 'answered').length
@@ -619,6 +722,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
     providerCalls: summary.totalCalls + summary.pendingCalls,
     cost: summary.costProvenance,
     wallTimeMs,
+    setupTimeMs,
     questionTimeMs: answers.reduce((sum, answer) => sum + answer.latencyMs, 0),
     peakConcurrency,
   }
@@ -629,6 +733,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
     harness: opts.harness ?? 'unknown',
     engine: { id: opts.engine.id, version: opts.engine.version, model: opts.engine.model ?? null },
     concurrency,
+    effectiveConcurrency,
     budgetUsd: budgetUsd ?? null,
     questionBudgetUsd: typeof opts.engine.executionConfig.max_cost_usd === 'number'
       ? opts.engine.executionConfig.max_cost_usd
@@ -661,19 +766,54 @@ function countText(value: number | null): string {
   return value === null ? 'unknown' : String(value)
 }
 
+/** Heading level the question's own `## <id>: <question>` section sits at. */
+const ANSWER_SECTION_LEVEL = 2
+
+/**
+ * Demote the answer's own Markdown headings below the question's section.
+ *
+ * An answer is model prose that may itself be Markdown. Embedded verbatim, its
+ * `# Heading` would close the question's section and reflow the rest of the
+ * report under the model's outline. Fenced blocks are left alone: a `#` there
+ * is content, not a heading.
+ */
+function nestAnswerHeadings(text: string): string {
+  let fence: { marker: string; length: number } | null = null
+  return text.split('\n').map((line) => {
+    const fenced = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+    if (fenced) {
+      const marker = fenced[1]![0]!
+      const length = fenced[1]!.length
+      if (fence === null) fence = { marker, length }
+      else if (fence.marker === marker && length >= fence.length) fence = null
+      return line
+    }
+    if (fence !== null) return line
+    const heading = /^(#{1,6})(?=\s)/.exec(line)
+    if (!heading) return line
+    const level = Math.min(6, Math.max(ANSWER_SECTION_LEVEL + 1, heading[1]!.length))
+    return `${'#'.repeat(level)}${line.slice(heading[1]!.length)}`
+  }).join('\n')
+}
+
 /** Readable Markdown for a result; the JSON result carries every field. */
 export function renderTraceQuestionsReport(result: Omit<TraceQuestionsResult, 'report'>): string {
   const { totals } = result
   const lines = ['# traces ask', '']
+  // The requested limit and the workers actually created differ whenever there
+  // are fewer questions than the limit, and only the second one bounds overlap.
+  const effective = result.effectiveConcurrency === result.concurrency ? '' : ` (${result.effectiveConcurrency} effective)`
   lines.push(
     `${totals.questions} question(s) over ${result.traces.length} trace(s) (${result.spanCount} spans, ${result.harness}). ` +
       `Engine \`${result.engine.id}\`${result.engine.model ? `, model \`${result.engine.model}\`` : ''}; ` +
-      `concurrency ${result.concurrency}; budget ${result.budgetUsd === null ? 'uncapped' : `${formatUsd(result.budgetUsd)} shared`}` +
+      `concurrency ${result.concurrency}${effective}; ` +
+      `budget ${result.budgetUsd === null ? 'uncapped' : `${formatUsd(result.budgetUsd)} shared`}` +
       `${result.questionBudgetUsd === null ? '' : `, ${formatUsd(result.questionBudgetUsd)} per question`}.`,
   )
   lines.push('')
   lines.push(
     `**${totals.answered} answered, ${totals.failed} failed.** Wall time ${seconds(totals.wallTimeMs)} ` +
+      `(${seconds(totals.setupTimeMs)} of it writing and indexing the trace file) ` +
       `against ${seconds(totals.questionTimeMs)} of question time (peak ${totals.peakConcurrency} at once). ` +
       `Cost ${costText(totals.cost)} over ${totals.providerCalls} provider call(s); ` +
       `${countText(totals.modelCalls)} model call(s), ${countText(totals.toolCalls)} tool call(s).`,
@@ -703,7 +843,7 @@ export function renderTraceQuestionsReport(result: Omit<TraceQuestionsResult, 'r
       lines.push('')
     }
     if (answer.answer !== null) {
-      lines.push(answer.answer.trim())
+      lines.push(nestAnswerHeadings(answer.answer.trim()))
       lines.push('')
     }
     const notes: string[] = []

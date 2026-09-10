@@ -294,9 +294,10 @@ See [Replay verification](./docs/replay-verify.md) for setup, semantics, and hon
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory; `ask`: write `answers.json` + `report.md` there |
-| `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `analyze`, `investigate`, `improve`, `stream` |
+| `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `analyze`, `investigate`, `improve`, `ask`, `stream` |
 | `--otlp-out <path>` | **WRITE** the OTLP artifact here (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
+| `--source-bundle <dir>` | `analyze` / `investigate` / `improve` / `ask`: read a retained full bundle and explicitly grant source-field reads |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `TANGLE_API_KEY` + Python with `agent-eval-rpc[dspy]`) / cap their spend |
 | `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
 | `--questions <file>` | `ask`: JSON array of questions — strings, or `{ id?, question, instructions?, answerSchema? }` |
@@ -495,7 +496,8 @@ What it checks, and what it costs:
 - **Citations.** Every `trace://<trace_id>/span/<span_id>` URI in an answer is looked up in the trace. An answer that cites a span the trace does not hold fails.
 - **Budget.** `--budget` is one ceiling shared by every question. `--question-budget` bounds one question. The run refuses to start when the budget cannot cover a single model call, and warns when the budget admits fewer concurrent calls than `--concurrency`.
 - **Cost.** Each cost carries its provenance: `observed` from a provider receipt, `estimated` from token counts, or `uncaptured`. An uncaptured cost stays null; it never becomes zero.
-- **Exit code.** `ask` writes both artifacts first, then exits 1 when any question failed, returned no answer, broke its schema, or cited a span that does not exist. A failed question never costs the other answers.
+- **Exit code.** `ask` writes both artifacts first, then exits 1 when any question failed, returned no answer, broke its schema, or cited a span that does not exist. A failed question never costs the other answers, and neither does Ctrl-C: the answers already bought are recorded, the questions the run never reached are recorded as `aborted`, and both artifacts are still written.
+- **Wall time.** `totals.wallTimeMs` covers the whole run, including writing and indexing the trace file; `totals.setupTimeMs` says how much of it that setup was. `totals.peakConcurrency` is how many questions actually overlapped, which is at most `min(--concurrency, questions)`.
 
 `ask` uses the same engine and credentials as `--llm`, so it needs `TANGLE_API_KEY` and a Python interpreter with `agent-eval-rpc[dspy]`.
 Do not pass `--llm`; the command is model-backed by definition.

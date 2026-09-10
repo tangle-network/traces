@@ -229,7 +229,10 @@ describe('runTraceQuestions', () => {
     expect(result.totals.questionTimeMs).toBeGreaterThanOrEqual(1_200)
     expect(result.totals.wallTimeMs).toBeLessThan(result.totals.questionTimeMs / 2)
     expect(result.totals.peakConcurrency).toBe(6)
-    expect(result.report).toMatch(/Wall time \d+\.\d s against \d+\.\d s of question time \(peak 6 at once\)/)
+    expect(result.report).toMatch(
+      /Wall time \d+\.\d s \(\d+\.\d s of it writing and indexing the trace file\) against \d+\.\d s of question time \(peak 6 at once\)/,
+    )
+    expect(result.totals.setupTimeMs).toBeLessThanOrEqual(result.totals.wallTimeMs)
   })
 
   it('reports questions the shared ledger refused while the others keep their answers', async () => {
@@ -324,6 +327,124 @@ describe('runTraceQuestions', () => {
     expect(failed.modelCalls).toBeNull()
     expect(result.questions.filter((answer) => answer.id !== 'q3').map((answer) => answer.answer))
       .toEqual(['answer q1', 'answer q2', 'answer q4', 'answer q5'])
+  })
+
+  it('keeps an answer bought before an abort, and writes both artifacts', async () => {
+    const controller = new AbortController()
+    let aborted = false
+    const { engine } = scriptedEngine(async () => {
+      // Ctrl-C lands once the first answer is back, before the next question starts.
+      if (!aborted) {
+        aborted = true
+        queueMicrotask(() => controller.abort(new Error('ctrl-c')))
+      }
+      return { answer: `The command ran (trace://${TRACE}/span/tool-1).` }
+    })
+    const dir = await mkdtemp(join(tmpdir(), 'traces-ask-abort-'))
+    const result = await runTraceQuestions({
+      questions: [{ question: 'Which commands ran?' }, { question: 'Which failed?' }, { question: 'What was last?' }],
+      spans: fixtureSpans(),
+      engine,
+      concurrency: 1,
+      otlpOutPath: join(dir, 'traces.otlp.jsonl'),
+      signal: controller.signal,
+    })
+
+    // The citation check must not carry the run signal: it is an in-memory
+    // lookup, and throwing there would discard an answer already paid for.
+    expect(result.questions.map((answer) => [answer.id, answer.status, answer.failure?.kind ?? null])).toEqual([
+      ['q1', 'answered', null],
+      ['q2', 'failed', 'aborted'],
+      ['q3', 'failed', 'aborted'],
+    ])
+    expect(result.questions[0]!.citations).toEqual([
+      { uri: `trace://${TRACE}/span/tool-1`, traceId: TRACE, spanId: 'tool-1', resolved: true },
+    ])
+    expect(result.ok).toBe(false)
+
+    const artifacts = await writeTraceQuestionsArtifacts(result, dir)
+    const saved = JSON.parse(await readFile(artifacts.result, 'utf8')) as typeof result
+    expect(saved.questions.map((answer) => answer.status)).toEqual(['answered', 'failed', 'failed'])
+    expect(await readFile(artifacts.report, 'utf8')).toContain(result.questions[0]!.answer!)
+  })
+
+  it('names an exhausted shared budget from the ledger when the failure text does not', async () => {
+    const { engine } = scriptedEngine(async (request) => {
+      if (questionId(request) === 'q1') {
+        const paid = await request.costLedger.runPaidCall({
+          channel: 'analyst',
+          phase: request.costPhase,
+          actor: request.analystId,
+          ...(request.costTags ? { tags: request.costTags } : {}),
+          maximumCharge: { externallyEnforcedMaximumUsd: 0.7 },
+          execute: async () => 'ok',
+          receipt: () => ({ model: 'test-model', inputTokens: 100, outputTokens: 50, actualCostUsd: 0.7 }),
+        })
+        if (!paid.succeeded) throw paid.error
+        return { answer: 'answer q1' }
+      }
+      // The bridge's own HTTP error handling replaces the Node error text, so
+      // nothing in the message names the ceiling that actually stopped the call.
+      throw new Error('DSPY-BRIDGE-FAILURE: HTTPError: 500 Server Error for url: http://127.0.0.1/call')
+    }, {
+      pricing: { inputUsdPerMillion: 1.25, outputUsdPerMillion: 10 },
+      max_output_tokens: 8_192,
+      max_reasoning_tokens: 32_768,
+    })
+    const result = await runTraceQuestions({
+      questions: [{ question: 'Which commands ran?' }, { question: 'Which failed?' }],
+      spans: fixtureSpans(),
+      engine,
+      concurrency: 1,
+      budgetUsd: 1,
+    })
+
+    // $0.70 settled leaves $0.30, below the $0.41 one call reserves.
+    expect(result.questions[0]!.status).toBe('answered')
+    expect(result.questions[1]!.failure).toEqual({
+      kind: 'budget-refused',
+      message: expect.stringContaining('500 Server Error'),
+    })
+    expect(result.report).toContain('failed: budget-refused')
+  })
+
+  it('nests an answer\'s own headings under its question section, leaving fenced text alone', async () => {
+    const answer = [
+      '# traces ask',
+      '',
+      '| command | exit |',
+      '| --- | --- |',
+      '| pnpm test | 0 |',
+      '',
+      '```sh',
+      '# not a heading',
+      '```',
+    ].join('\n')
+    const { engine } = scriptedEngine(async () => ({ answer }))
+    const result = await runTraceQuestions({
+      questions: [{ id: 'commands', question: 'Which commands ran?' }],
+      spans: fixtureSpans(),
+      engine,
+    })
+    // The model's own `#` heading would otherwise close the question's section
+    // and pull the rest of the report under the answer's outline.
+    expect(result.report).toContain('## commands: Which commands ran?')
+    expect(result.report).toContain('### traces ask')
+    expect(result.report).not.toContain('\n# traces ask\n\n| command | exit |')
+    expect(result.report).toContain('```sh\n# not a heading\n```')
+  })
+
+  it('reports the effective concurrency next to the requested one', async () => {
+    const { engine } = scriptedEngine(async () => ({ answer: 'one worker was enough' }))
+    const result = await runTraceQuestions({
+      questions: [{ question: 'Which commands ran?' }],
+      spans: fixtureSpans(),
+      engine,
+      concurrency: 8,
+    })
+    expect(result.concurrency).toBe(8)
+    expect(result.effectiveConcurrency).toBe(1)
+    expect(result.report).toContain('concurrency 8 (1 effective)')
   })
 
   it('fails an answer that cites a span the trace does not hold', async () => {
@@ -465,6 +586,11 @@ describe('question input', () => {
   it('assigns default IDs and rejects duplicates', () => {
     expect(normalizeTraceQuestions([{ question: ' a? ' }, { question: 'b?' }]).map((entry) => [entry.id, entry.question]))
       .toEqual([['q1', 'a?'], ['q2', 'b?']])
+    // A file entry named q2 and a positional question must not both claim q2.
+    expect(normalizeTraceQuestions([{ id: 'q2', question: 'a?' }, { question: 'b?' }]).map((entry) => entry.id))
+      .toEqual(['q2', 'q3'])
+    expect(normalizeTraceQuestions([{ question: 'a?' }, { id: 'q1', question: 'b?' }]).map((entry) => entry.id))
+      .toEqual(['q2', 'q1'])
     expect(() => normalizeTraceQuestions([{ id: 'x', question: 'a?' }, { id: 'x', question: 'b?' }]))
       .toThrow('duplicate question ID "x"')
     expect(() => normalizeTraceQuestions([])).toThrow('at least one question')

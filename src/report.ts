@@ -193,6 +193,9 @@ function tableCell(value: string): string {
 
 const ANALYST_DETAIL_MAX_CHARS = 240
 
+/** Room the condensed engine error keeps when a rejection summary shares the cell. */
+const ANALYST_DETAIL_MIN_ERROR_CHARS = 120
+
 /**
  * Failure-reason marker printed by newer (currently unreleased) agent-eval
  * bridges. The pinned agent-eval-rpc release never emits it, so the head+tail
@@ -234,11 +237,22 @@ export function analystRunDetail(summary: AnalystRunSummary, rejections?: Findin
     : summary.status === 'skipped' && summary.reason
       ? summary.reason
       : ''
-  const detail = condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS)
-  // The rejection text is short and bounded by the gate's reason vocabulary,
-  // so it is appended after the condensed error rather than competing for it.
-  const cell = tableCell([detail, formatFindingRejections(rejections)].filter(Boolean).join('; '))
+  // One budget for the whole cell. The gate's reason text comes from the
+  // engine and is not bounded at its source, so it is capped first and the
+  // condensed error takes what is left; the cell keeps the length
+  // ANALYST_DETAIL_MAX_CHARS names whether or not both parts are present.
+  const rejectionRoom = raw ? ANALYST_DETAIL_MAX_CHARS - ANALYST_DETAIL_MIN_ERROR_CHARS - 2 : ANALYST_DETAIL_MAX_CHARS
+  const rejected = truncateChars(formatFindingRejections(rejections), rejectionRoom)
+  const detail = condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS - (rejected ? rejected.length + 2 : 0))
+  const cell = tableCell([detail, rejected].filter(Boolean).join('; '))
   return cell === '' ? '—' : cell
+}
+
+/** Code-point-safe truncation, so a boundary never splits a surrogate pair. */
+function truncateChars(text: string, maxChars: number): string {
+  const chars = [...text]
+  if (chars.length <= maxChars) return text
+  return `${chars.slice(0, Math.max(0, maxChars - 1)).join('')}…`
 }
 
 function count(value: number): string {
