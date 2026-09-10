@@ -40,6 +40,9 @@ function at(second: number): string {
 
 export const FIXTURE_FIRST_RECORD_AT = at(0)
 
+/** The cumulative harness total the fixture's `token_count` event reports. */
+export const FIXTURE_TOKEN_TOTAL = 980
+
 /**
  * Records of the fixture session.
  *

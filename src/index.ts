@@ -112,6 +112,8 @@ export * from './chat-trajectory.js' // generic chat trajectory to stable step s
 export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
 export * from './ask.js' // runTraceQuestions(): concurrent free-form questions, answers kept and citations checked
 export * from './session-facts.js' // computeSessionFacts(): the deterministic, free session-facts sheet
+export * from './pull-request-facts.js' // readPullRequests(): the pull requests the command spans show
+export * from './shell-commands.js' // shellCommands(): the simple commands one script would run
 export * from './answer-schema.js' // the JSON Schema subset an ask answer may be held to
 export * from './finding-rejections.js' // evidence-gate rejections counted per analyst and reason
 export { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL } from './analyst-model-call.js'

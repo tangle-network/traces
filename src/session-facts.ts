@@ -1,10 +1,11 @@
 /**
  * The deterministic session-facts sheet.
  *
- * Seven facts about a session decide most audit questions — how many tools ran,
- * which subagents were spawned, what the human actually typed, what the agent
- * said last, which files changed, when the session started and ended, and how
- * many tokens it burned. Every one of them is already carried by the normalized
+ * A handful of facts about a session decide most audit questions — how many
+ * tools ran, which subagents were spawned, which pull requests were opened and
+ * merged, what the human actually typed, what the agent said last, which files
+ * changed, when the session started and ended, and how many tokens it burned.
+ * Every one of them is already carried by the normalized
  * spans, but no trace tool returns any of them: `viewTrace` degrades to a
  * 20-entry name histogram above its byte ceiling, `countTraces` counts traces
  * rather than spans, `viewSpans` needs span ids the reader does not have, and
@@ -20,7 +21,9 @@
  *   1. Every field carries the span ids it was computed from, so a reader can
  *      open those spans and check the number.
  *   2. A field the spans cannot support is `null` with a stated `unavailable`
- *      reason. It is never guessed, and never silently zero.
+ *      reason. It is never guessed, and never silently zero. A value the sheet
+ *      filtered — a `user.prompt` turn that is not a human turn of this session
+ *      — is reported beside the count with the reason, never silently dropped.
  *
  * The sheet is NOT a span and cannot be cited. It is prepared context, and
  * `trace://` citations still resolve against the raw spans — which is why every
@@ -30,8 +33,14 @@
 import type { TraceAnalystDefinition } from '@tangle-network/agent-eval/analyst'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { ACTOR_ATTR } from './adapters/conversation.js'
+import {
+  INHERITED_SOURCE_ATTR,
+  INHERITED_SPAN_ATTR,
+  isSynthesizedSpan as isSynthesizedByProvenance,
+} from './adapters/provenance.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
+import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
 
 /**
  * The cumulative harness token total for a whole session, when the adapter
@@ -44,8 +53,10 @@ import type { OtlpSpan } from './otlp.js'
 export const SESSION_TOKEN_TOTAL_ATTR = 'traces.session.total_tokens'
 
 /**
- * Set by an adapter on a span it created to describe a lifecycle, not to record
- * an invocation the agent made. A synthesized span never counts as a tool call.
+ * The first marker an adapter used for a span it created to describe a
+ * lifecycle rather than an invocation the agent made. The current marker is
+ * `traces.span.synthesized` (see `adapters/provenance.ts`); this one is still
+ * recognized so a trace exported before the rename keeps counting correctly.
  */
 export const SPAN_SYNTHESIZED_ATTR = 'traces.codex.span_synthesized'
 
@@ -103,6 +114,18 @@ export interface TurnActorCount {
   readonly spanIds: readonly string[]
 }
 
+/**
+ * `user.prompt` turns {@link SessionFacts.humanTurns} did not count, grouped by
+ * the reason they were not counted. Nothing is dropped silently: every excluded
+ * span is named here, so a reader who disagrees with a reason can open the span
+ * and count it back in.
+ */
+export interface ExcludedTurnFact {
+  readonly reason: string
+  readonly turns: number
+  readonly spanIds: readonly string[]
+}
+
 /** The last thing one agent said, for the main session or for one subagent. */
 export interface FinalMessageFact {
   /**
@@ -149,8 +172,12 @@ export interface SessionFacts {
   /** Tool-call counts by tool name, over the same spans `toolCalls` counted. */
   readonly toolCallsByName: SessionFact<Readonly<Record<string, number>>>
   readonly subagents: SessionFact<readonly SubagentSpawnFact[]>
-  /** `user.prompt` turns a person typed, in order. */
+  /** Pull requests this session created and merged, each with its evidence. */
+  readonly pullRequests: SessionFact<PullRequestFacts>
+  /** `user.prompt` turns a person typed into THIS session, in order. */
   readonly humanTurns: SessionFact<readonly SessionTurnFact[]>
+  /** Every `user.prompt` turn `humanTurns` left out, with the reason. */
+  readonly excludedTurns: SessionFact<readonly ExcludedTurnFact[]>
   /** Every `user.prompt` turn by actor, so the human filter is checkable. */
   readonly turnsByActor: SessionFact<readonly TurnActorCount[]>
   /** The last message of the session's own agent, and of each subagent task. */
@@ -212,6 +239,7 @@ function byTraceOrder(left: OtlpSpan, right: OtlpSpan): number {
  * and the subagent thread/path attribute pair only that span carries.
  */
 export function isSynthesizedSpan(span: OtlpSpan): boolean {
+  if (isSynthesizedByProvenance(span.attributes)) return true
   if (attr(span, SPAN_SYNTHESIZED_ATTR) === true) return true
   return (
     stringAttr(span, 'traces.codex.subagent_thread_id') !== null &&
@@ -381,6 +409,111 @@ function listFact<T>(items: readonly T[], spanIds: readonly string[]): SessionFa
 }
 
 /**
+ * Why a `user.prompt` turn is not a human turn of this session.
+ *
+ * The actors come from the adapters, which classify each turn from the
+ * harness's own signals; the reasons here say, in the sheet's own voice, what
+ * each classification means for the count. They match the audit rule a person
+ * would apply by hand: a user message is one the human typed, and instruction
+ * files, environment-context blocks, system reminders, tool results, subagent
+ * notifications, turn-aborted markers and skill or slash-command expansions are
+ * the harness feeding the model.
+ */
+const TURN_EXCLUSION_REASONS: Readonly<Record<string, string>> = {
+  injected:
+    'harness-injected content rather than typed text: an instruction file, an environment-context block, ' +
+    'a system reminder, a subagent notification, a turn-aborted marker, or a skill or slash-command expansion',
+  agent: 'a parent agent sent this prompt to this session; no person typed it',
+  'subagent-spawn': 'the brief that spawned this run, written by the agent that spawned it',
+  'tool-result': 'a tool result the harness surfaced as a user turn',
+  unclassified: 'the span carries no actor, so whether a person typed it cannot be read from the spans',
+}
+
+const INHERITED_TURN_REASON =
+  'context this session carries but did not receive: history copied from the parent when the session forked, ' +
+  'or the turns a compaction retained. The person typed it into the parent thread, not into this session'
+
+const DUPLICATE_TURN_REASON =
+  'a second record of the turn before it: the same text at the same instant, with no model call, tool call ' +
+  'or assistant message between them'
+
+/** Spans that mean the agent acted: a person cannot have typed twice across one. */
+function isAgentActivity(span: OtlpSpan): boolean {
+  if (span.name === 'user.prompt') return false
+  const kind = attr(span, OPENINFERENCE_SPAN_KIND)
+  return kind === 'TOOL' || kind === 'LLM' || span.name === 'message.assistant' || span.name.startsWith('message.agent.')
+}
+
+function turnText(span: OtlpSpan): string {
+  return capText(typeof span.attributes.content === 'string' ? span.attributes.content : '')
+}
+
+function normalizedTurnText(span: OtlpSpan): string {
+  return turnText(span).replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * The human turns of one session, and every `user.prompt` span left out of them.
+ *
+ * Three filters, in order: a turn the session inherited rather than received, a
+ * turn whose actor is not a person, and a second record of the turn before it.
+ * `spans` is the whole trace in order, because the duplicate test asks what
+ * happened between two turns.
+ */
+function humanTurnsOf(spans: readonly OtlpSpan[]): {
+  turns: SessionTurnFact[]
+  excluded: ExcludedTurnFact[]
+} {
+  const excluded = new Map<string, string[]>()
+  const drop = (reason: string, spanId: string): void => {
+    excluded.set(reason, [...(excluded.get(reason) ?? []), spanId])
+  }
+  const kept: OtlpSpan[] = []
+  let sinceKept: OtlpSpan[] = []
+  for (const span of spans) {
+    if (span.name !== 'user.prompt') {
+      sinceKept.push(span)
+      continue
+    }
+    if (span.attributes[INHERITED_SPAN_ATTR] === true) {
+      const source = stringAttr(span, INHERITED_SOURCE_ATTR)
+      drop(source === null ? INHERITED_TURN_REASON : `${INHERITED_TURN_REASON} (${source})`, span.span_id)
+      continue
+    }
+    const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
+    if (actor !== 'human') {
+      drop(TURN_EXCLUSION_REASONS[actor] ?? `the adapter classified this turn as "${actor}", not as a person typing`, span.span_id)
+      continue
+    }
+    const previous = kept[kept.length - 1]
+    // Two records of ONE submission describe one instant, so they carry the
+    // same start time; a person who sends the same short message twice is
+    // seconds apart. Pairing records that are merely close is the adapter's
+    // job, where the records themselves say which log each came from — a sheet
+    // that guessed from the spans collapsed a measured "continue, continue"
+    // typed 1.8 s apart into one turn.
+    const duplicate =
+      previous !== undefined &&
+      previous.start_time === span.start_time &&
+      normalizedTurnText(previous) === normalizedTurnText(span) &&
+      normalizedTurnText(span).length > 0 &&
+      !sinceKept.some(isAgentActivity)
+    if (duplicate) {
+      drop(DUPLICATE_TURN_REASON, span.span_id)
+      continue
+    }
+    kept.push(span)
+    sinceKept = []
+  }
+  return {
+    turns: kept.map((span) => ({ actor: 'human', at: span.start_time, text: turnText(span), spanId: span.span_id })),
+    excluded: [...excluded]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([reason, spanIds]) => ({ reason, turns: spanIds.length, spanIds })),
+  }
+}
+
+/**
  * Compute the facts sheet for every trace in `spans`. One trace is one session.
  * Deterministic and free: the same spans always produce the same sheet, and no
  * model, network call, or budget is involved.
@@ -411,8 +544,9 @@ function sessionFactsForTrace(
   for (const span of invoked) byName[toolName(span)] = (byName[toolName(span)] ?? 0) + 1
 
   const subagents = subagentsOf(spans)
+  const pullRequests = readPullRequests(spans)
   const promptSpans = spans.filter((span) => span.name === 'user.prompt')
-  const humanTurnSpans = promptSpans.filter((span) => stringAttr(span, ACTOR_ATTR) === 'human')
+  const { turns: humanTurns, excluded: excludedTurns } = humanTurnsOf(spans)
   const actorCounts = new Map<string, string[]>()
   for (const span of promptSpans) {
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
@@ -476,15 +610,16 @@ function sessionFactsForTrace(
       unavailable: null,
     },
     subagents: listFact(subagents, subagents.flatMap((entry) => entry.spanIds)),
-    humanTurns: listFact(
-      humanTurnSpans.map((span) => ({
-        actor: 'human',
-        at: span.start_time,
-        text: capText(typeof span.attributes.content === 'string' ? span.attributes.content : ''),
-        spanId: span.span_id,
-      })),
-      humanTurnSpans.map((span) => span.span_id),
-    ),
+    pullRequests: pullRequests.facts
+      ? {
+          value: pullRequests.facts,
+          spanIds: pullRequests.spanIds,
+          unavailable: null,
+          ...(pullRequests.partial ? { partial: pullRequests.partial } : {}),
+        }
+      : { value: null, spanIds: [], unavailable: pullRequests.unavailable ?? 'unread' },
+    humanTurns: listFact(humanTurns, humanTurns.map((turn) => turn.spanId)),
+    excludedTurns: listFact(excludedTurns, excludedTurns.flatMap((entry) => entry.spanIds)),
     turnsByActor: listFact(
       [...actorCounts]
         .sort(([left], [right]) => left.localeCompare(right))
@@ -570,7 +705,25 @@ export function renderSessionFacts(report: SessionFactsReport): string {
         }`,
       ),
     )
+    lines.push(
+      factLine(
+        'pull requests',
+        facts.pullRequests,
+        `${facts.pullRequests.value?.created.length ?? 0} created${
+          facts.pullRequests.value?.created.length
+            ? ` (${facts.pullRequests.value.created.map((entry) => entry.identifier ?? 'unidentified').join(', ')})`
+            : ''
+        }, ${facts.pullRequests.value?.merged.length ?? 0} merged${
+          facts.pullRequests.value?.merged.length
+            ? ` (${facts.pullRequests.value.merged.map((entry) => entry.identifier ?? 'unidentified').join(', ')})`
+            : ''
+        }`,
+      ),
+    )
     lines.push(factLine('human turns', facts.humanTurns, String(facts.humanTurns.value?.length ?? 0)))
+    for (const entry of facts.excludedTurns.value ?? []) {
+      lines.push(`  turns not counted: ${entry.turns} — ${entry.reason}`)
+    }
     lines.push(
       factLine(
         'turns by actor',
@@ -634,10 +787,28 @@ export function renderSessionFactsContext(
   const sheds: Array<[string, (facts: CompactFacts) => void]> = [
     ['human_turn_text', (facts) => { for (const turn of facts.human_turns) delete turn.text }],
     ['final_message_text', (facts) => { for (const message of facts.final_messages) delete message.text }],
+    ['pull_request_commands', (facts) => {
+      for (const entry of [...(facts.pull_requests.created ?? []), ...(facts.pull_requests.merged ?? [])]) {
+        delete entry.command
+        delete entry.span_ids
+      }
+    }],
     ['tool_call_span_ids', (facts) => { facts.tool_calls.span_ids = [] }],
     ['tool_calls_by_name', (facts) => { delete facts.tool_calls_by_name }],
+    ['excluded_turn_span_ids', (facts) => {
+      facts.excluded_turns = facts.excluded_turns?.map((entry) => {
+        const { span_ids: _dropped, ...rest } = entry as { span_ids?: readonly string[] }
+        return rest
+      })
+    }],
     ['changed_files', (facts) => { facts.changed_files = { count: facts.changed_files.count } }],
     ['turns_by_actor', (facts) => { delete facts.turns_by_actor }],
+    ['pull_request_evidence', (facts) => {
+      for (const entry of [...(facts.pull_requests.created ?? []), ...(facts.pull_requests.merged ?? [])]) {
+        delete entry.evidence
+      }
+    }],
+    ['excluded_turns', (facts) => { delete facts.excluded_turns }],
     ['subagents', (facts) => { facts.subagents = { count: facts.subagents.count } }],
     ['final_messages', (facts) => { facts.final_messages = [] }],
     ['human_turns', (facts) => { facts.human_turns = [] }],
@@ -661,6 +832,25 @@ export function renderSessionFactsContext(
   return Buffer.byteLength(refusal) <= ceiling ? refusal : ''
 }
 
+interface CompactPullRequest {
+  id: string | null
+  number: string | null
+  head_branch: string | null
+  evidence?: string
+  command?: string
+  span_ids?: readonly string[]
+  unavailable?: string
+}
+
+/** Either the two lists, or a null reading with the reason. Never both. */
+interface CompactPullRequests {
+  created?: CompactPullRequest[]
+  merged?: CompactPullRequest[]
+  value?: null
+  unavailable?: string
+  partial?: string
+}
+
 interface CompactFacts {
   session_id: string | null
   trace_id: string
@@ -668,7 +858,9 @@ interface CompactFacts {
   tool_calls: { count: number | null; synthesized_excluded: number | null; span_ids: readonly string[] }
   tool_calls_by_name?: Readonly<Record<string, number>> | null
   subagents: { count: number; entries?: readonly unknown[] }
+  pull_requests: CompactPullRequests
   human_turns: Array<{ at: string; span_id: string; text?: string }>
+  excluded_turns?: readonly unknown[] | null
   turns_by_actor?: readonly unknown[] | null
   final_messages: Array<{ task: string | null; at: string; span_id: string; text?: string }>
   changed_files: { count: number; paths?: readonly unknown[]; partial?: string }
@@ -681,6 +873,24 @@ function factJson(fact: SessionFact<unknown>): unknown {
   return fact.value === null
     ? { value: null, unavailable: fact.unavailable }
     : { value: fact.value, span_ids: fact.spanIds }
+}
+
+function compactPullRequests(fact: SessionFact<PullRequestFacts>): CompactPullRequests {
+  if (fact.value === null) return { value: null, unavailable: fact.unavailable ?? 'unread' }
+  const entry = (pr: PullRequestFacts['created'][number]): CompactPullRequest => ({
+    id: pr.identifier,
+    number: pr.number,
+    head_branch: pr.headBranch,
+    evidence: pr.evidence,
+    command: pr.command,
+    span_ids: pr.spanIds,
+    ...(pr.unavailable ? { unavailable: pr.unavailable } : {}),
+  })
+  return {
+    created: fact.value.created.map(entry),
+    merged: fact.value.merged.map(entry),
+    ...(fact.partial ? { partial: fact.partial } : {}),
+  }
 }
 
 function compactFacts(facts: SessionFacts): CompactFacts {
@@ -704,10 +914,16 @@ function compactFacts(facts: SessionFacts): CompactFacts {
         span_ids: entry.spanIds,
       })),
     },
+    pull_requests: compactPullRequests(facts.pullRequests),
     human_turns: (facts.humanTurns.value ?? []).map((turn) => ({
       at: turn.at,
       span_id: turn.spanId,
       text: turn.text,
+    })),
+    excluded_turns: facts.excludedTurns.value?.map((entry) => ({
+      reason: entry.reason,
+      turns: entry.turns,
+      span_ids: entry.spanIds,
     })),
     turns_by_actor: facts.turnsByActor.value?.map((entry) => ({
       actor: entry.actor,

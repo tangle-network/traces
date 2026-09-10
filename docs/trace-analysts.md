@@ -186,7 +186,9 @@ The sheet is that extraction, made part of the tool.
 | `toolCalls` | TOOL spans the agent invoked. Synthesized subagent lifecycle spans are excluded and counted in `synthesizedToolSpans` |
 | `toolCallsByName` | the same calls by tool name |
 | `subagents` | every `spawn_agent` call with the task name from `traces.codex.spawn_agent_path` |
-| `humanTurns` | `user.prompt` turns with `tangle.actor` `human`, in order, with timestamps |
+| `pullRequests` | pull requests the commands created and merged, each named by number or head branch, with the command span and the join evidence |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with timestamps |
+| `excludedTurns` | every `user.prompt` turn `humanTurns` left out, grouped by the reason, with the span ids |
 | `turnsByActor` | every `user.prompt` turn by actor, so the human filter is checkable |
 | `finalMessages` | the last message of the session's own agent, and of each subagent task, separately |
 | `changedFiles` | paths from `*** Add/Update/Delete/Move to File:` patch headers and from file-editing tool arguments |
@@ -200,6 +202,26 @@ Two rules hold for every field.
 - **A fact the spans cannot support is `null` with a stated reason.** It is never guessed and never a silent zero. `partial` marks a measured value known to be incomplete.
 
 `facts` exits non-zero when a selected session produced no record spans, rather than printing a sheet of zeros for a session it could not read.
+
+#### Pull requests
+
+The command spans carry the script, the exit code and the output.
+`pullRequests` scans each script the way a shell would, so a `gh pr create` inside a heredoc body or a commit message is not counted as a command that ran.
+A pull request is named by its number when the command or an output that joins to it shows one, and by its head branch when neither does.
+A create whose stdout was redirected away takes the number a later output states for the same branch on the same line, and names the span that stated it.
+A failed `git push && gh pr create` counts only when the output shows `gh` itself answering; otherwise the shell never reached it.
+A trace whose spans carry no executed command returns `null` with that reason, because "no pull requests" and "the spans cannot say" are different answers.
+
+#### Human turns
+
+A user message is one the human typed into this session.
+Three filters run in order, and each excluded span is listed in `excludedTurns` with its reason, never silently dropped:
+
+- history the session carries but did not receive — the prefix a fork copies from its parent, and the turns a compaction replays;
+- turns whose actor is not a person — an instruction file, an environment-context block, a system reminder, a subagent notification, a turn-aborted marker, or a skill or slash-command expansion;
+- a second record of the turn before it, meaning the same text at the same instant with no model call, tool call or assistant message between them.
+
+For Codex the actor comes from the harness's own per-item labelling (`internal_chat_message_metadata_passthrough.content_item_kinds`) whenever the record carries it: a message is the person's exactly when every item in it is a `user.` kind.
 
 ### Session facts as prepared context
 

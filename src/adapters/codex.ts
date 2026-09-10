@@ -984,6 +984,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       contentSource: SourceReferences,
       source: InheritedSpanSource,
       blocks?: readonly string[],
+      kinds?: readonly unknown[],
     ): void => {
       const prompt = capText(raw)
       if (!prompt) return
@@ -992,7 +993,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       if (inheritedTurnKeys.has(dedupKey)) return
       if (!claimInheritedSpan()) return
       inheritedTurnKeys.add(dedupKey)
-      const actor = codexActor({ text: prompt, blocks, isFirstUserTurn: !sawInheritedTurn })
+      const actor = codexActor({ text: prompt, blocks, isFirstUserTurn: !sawInheritedTurn, kinds })
       sawInheritedTurn = true
       const turnSpan = userPromptSpan({
         traceId,
@@ -1054,6 +1055,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
             textSources(item, 'content'),
             'compacted',
             contentTextBlocks(item.content),
+            item.internal_chat_message_metadata_passthrough?.content_item_kinds,
           )
         }
         return
@@ -1065,6 +1067,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
           textSources(l.payload, 'content'),
           'pre-task-prefix',
           contentTextBlocks(l.payload.content),
+          l.payload.internal_chat_message_metadata_passthrough?.content_item_kinds,
         )
         return
       }
@@ -1434,7 +1437,12 @@ export class CodexAdapter implements HarnessTraceAdapter {
           if (takeUserTurn(unpairedUserEvents, key, taskIndex)) continue
           const actor = sessionRole === 'child'
             ? 'agent'
-            : codexActor({ text: prompt, blocks: contentTextBlocks(l.payload.content), isFirstUserTurn: !sawUserTurn })
+            : codexActor({
+                text: prompt,
+                blocks: contentTextBlocks(l.payload.content),
+                isFirstUserTurn: !sawUserTurn,
+                kinds: l.payload.internal_chat_message_metadata_passthrough?.content_item_kinds,
+              })
           sawUserTurn = true
           const turnSpan = userPromptSpan({
             traceId,

@@ -35,6 +35,7 @@ import {
   sessionFactsContext,
   withSessionFactsContext,
 } from '../src/session-facts.js'
+import { SYNTHESIZED_SPAN_ATTR } from '../src/adapters/provenance.js'
 import { analyzeSpans } from '../src/analyze.js'
 import { serializeSpans } from '../src/otlp.js'
 import {
@@ -46,6 +47,7 @@ import {
   FIXTURE_HUMAN_TURNS,
   FIXTURE_LAST_RECORD_AT,
   FIXTURE_SESSION_ID,
+  FIXTURE_TOKEN_TOTAL,
   fixtureRecords,
   fixtureSpans,
 } from './session-facts-fixture.js'
@@ -121,13 +123,22 @@ describe('session facts', () => {
 
   it('says why a fact the spans cannot support is null, instead of guessing', async () => {
     const spans = await fixtureSpans()
+    // A trace from an adapter that does not record the harness's cumulative
+    // total. Summing the per-turn deltas would answer a different question, so
+    // the sheet says so rather than reporting the smaller number.
+    for (const span of spans) delete span.attributes[SESSION_TOKEN_TOTAL_ATTR]
     const [facts] = computeSessionFacts(spans)
-    // The adapter reads Codex's cumulative `total_token_usage` only as a
-    // de-duplication signature, so no span carries the session total. Summing
-    // the per-turn deltas would answer a different question.
     expect(facts!.tokenTotal.value).toBeNull()
     expect(facts!.tokenTotal.unavailable).toContain(SESSION_TOKEN_TOTAL_ATTR)
     expect(facts!.tokenTotal.spanIds).toEqual([])
+  })
+
+  it('reports the harness token total the adapter recorded', async () => {
+    const spans = await fixtureSpans()
+    const [facts] = computeSessionFacts(spans)
+    expect(facts!.tokenTotal.value).toBe(FIXTURE_TOKEN_TOTAL)
+    expect(facts!.tokenTotal.unavailable).toBeNull()
+    expect(facts!.tokenTotal.spanIds).toHaveLength(1)
   })
 
   it('reports the harness token total once a span carries it', async () => {
@@ -142,17 +153,31 @@ describe('session facts', () => {
 
   it('does not let a synthesized subagent span inflate the tool count', async () => {
     const spans = await fixtureSpans()
+    // The adapter now marks a subagent's lifecycle span as synthesized and
+    // keeps it out of the TOOL kind, so a plain span-kind count is already
+    // right here: four calls, four TOOL spans.
     const toolSpans = spans.filter((span) => span.attributes['openinference.span.kind'] === 'TOOL')
-    // The adapter gives a subagent's lifecycle span `kind: TOOL` and
-    // `tool.name: Agent`, so a plain span-kind count is high by exactly one here.
-    expect(toolSpans).toHaveLength(5)
-    expect(toolSpans.filter((span) => span.name === 'tool.Agent')).toHaveLength(1)
+    expect(toolSpans).toHaveLength(4)
+    const lifecycle = spans.find((span) => span.attributes[SYNTHESIZED_SPAN_ATTR] === true)!
+    expect(lifecycle.attributes['openinference.span.kind']).not.toBe('TOOL')
 
     const [facts] = computeSessionFacts(spans)
     expect(facts!.toolCalls.value).toBe(4)
-    expect(facts!.synthesizedToolSpans.value).toBe(1)
-    expect(facts!.toolCallsByName.value).not.toHaveProperty('Agent')
-    expect(facts!.toolCalls.spanIds).not.toContain(facts!.synthesizedToolSpans.spanIds[0])
+    expect(facts!.synthesizedToolSpans.value).toBe(0)
+
+    // A trace exported before that fix still carries the lifecycle span as a
+    // TOOL call named `Agent`. The sheet must keep counting it out, which is
+    // the whole reason the exclusion is a field rather than an adapter detail.
+    const legacy = [
+      ...spans,
+      { ...lifecycle, span_id: `${lifecycle.span_id}-legacy`, name: 'tool.Agent',
+        attributes: { ...lifecycle.attributes, 'openinference.span.kind': 'TOOL', 'tool.name': 'Agent' } },
+    ]
+    const [legacyFacts] = computeSessionFacts(legacy)
+    expect(legacyFacts!.toolCalls.value).toBe(4)
+    expect(legacyFacts!.synthesizedToolSpans.value).toBe(1)
+    expect(legacyFacts!.toolCallsByName.value).not.toHaveProperty('Agent')
+    expect(legacyFacts!.toolCalls.spanIds).not.toContain(legacyFacts!.synthesizedToolSpans.spanIds[0])
   })
 
   it('stays exact on a session larger than the trace tools can return', async () => {
@@ -163,7 +188,7 @@ describe('session facts', () => {
 
     const [facts] = computeSessionFacts(spans)
     expect(facts!.toolCalls.value).toBe(404)
-    expect(facts!.synthesizedToolSpans.value).toBe(1)
+    expect(facts!.synthesizedToolSpans.value).toBe(0)
     expect(facts!.toolCallsByName.value).toEqual({
       'apply_patch': 1,
       'exec_command': 401,
@@ -184,10 +209,11 @@ describe('session facts', () => {
     expect(JSON.parse(JSON.stringify(report))).toMatchObject({ schemaVersion: 1, harness: 'codex' })
 
     const text = renderSessionFacts(report)
-    expect(text).toContain('tool calls: 4 (1 synthesized span(s) excluded)')
+    expect(text).toContain('tool calls: 4 (0 synthesized span(s) excluded)')
     expect(text).toContain(`subagents: 1: ${FIXTURE_AGENT_PATH}`)
     expect(text).toContain('human turns: 2')
-    expect(text).toContain('token total: unavailable —')
+    expect(text).toContain(`token total: ${FIXTURE_TOKEN_TOTAL}`)
+    expect(text).toContain('pull requests: 0 created, 0 merged')
   })
 })
 
@@ -203,7 +229,7 @@ describe('session facts as prepared context', () => {
       omitted_fields?: string[]
     }
     expect(body.sessions[0]!.tool_calls.count).toBe(404)
-    expect(body.sessions[0]!.tool_calls.synthesized_excluded).toBe(1)
+    expect(body.sessions[0]!.tool_calls.synthesized_excluded).toBe(0)
   })
 
   it('holds an arbitrarily tight ceiling, and reports every shed', async () => {
@@ -281,7 +307,7 @@ describe('analyzeSpans', () => {
     const prepared = requests[0]!.instructions.split('PREPARED CONTEXT:\n')[1]!
     expect(prepared).toContain('SESSION FACTS')
     expect(JSON.parse(prepared.slice(prepared.indexOf('\n') + 1).split('\n\n')[0]!))
-      .toMatchObject({ sessions: [{ tool_calls: { count: 4, synthesized_excluded: 1 } }] })
+      .toMatchObject({ sessions: [{ tool_calls: { count: 4, synthesized_excluded: 0 } }] })
 
     requests.length = 0
     await analyzeSpans(spans, {

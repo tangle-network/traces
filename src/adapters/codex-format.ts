@@ -57,6 +57,9 @@ export interface CodexLine {
       id?: string
       role?: string
       content?: unknown
+      internal_chat_message_metadata_passthrough?: {
+        content_item_kinds?: readonly unknown[]
+      }
     }>
     window_id?: string
     previous_window_id?: string
@@ -74,6 +77,9 @@ export interface CodexLine {
     }
     internal_chat_message_metadata_passthrough?: {
       turn_id?: string
+      /** What each content item of a user-role message is: `user.text` for the
+       *  person's own words, a namespaced kind for anything the harness added. */
+      content_item_kinds?: readonly unknown[]
     }
     source?: {
       subagent?: {

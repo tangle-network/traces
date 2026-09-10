@@ -519,7 +519,8 @@ traces facts --otlp spans.otlp.jsonl --out facts.json
 | `toolCalls` | TOOL spans the agent actually invoked. Synthesized subagent lifecycle spans are excluded and counted separately in `synthesizedToolSpans`, so the total is not high by the number of subagents |
 | `toolCallsByName` | the same calls by tool name, so a category decision is the reader's, not a guess |
 | `subagents` | every `spawn_agent` call with the task name the adapter recorded |
-| `humanTurns` | `user.prompt` turns a person typed, in order, with the timestamp; `turnsByActor` shows every turn by actor so the human filter is checkable |
+| `pullRequests` | the pull requests the commands created and merged, each named by number or head branch, with the command span and how the identity was joined. Scanned the way a shell reads the script, so a `gh pr create` inside a heredoc body is not a command that ran |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable |
 | `finalMessages` | the last message of the session's own agent, and of each subagent task, kept apart |
 | `changedFiles` | paths named by patch headers and file-editing tool arguments, with the operation |
 | `firstRecordAt` / `lastRecordAt` | the trace's earliest span start and latest span end |
