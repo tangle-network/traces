@@ -44,7 +44,7 @@
 
 import { assertOutsideSourceBundle } from './bundle-source.js'
 import { readFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
@@ -87,12 +87,12 @@ import {
 import {
   analyzeSupervisorRun,
   findSupervisorRunDirs,
-  isUnavailable,
+  isRuntimeSupervisorRunDir,
   renderSupervisorRollupMarkdown,
   renderSupervisorRunMarkdown,
   rollupSupervisorRuns,
 } from '@tangle-network/agent-eval/supervisor-run'
-import { fileRunContextSupervisorRunReader, isFileRunContextDir } from './supervisor-run-context.js'
+import { fileRunContextSupervisorRunReader } from './supervisor-run-context.js'
 import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
 import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 import { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL, DEFAULT_QUESTION_MAX_COST_USD } from './analyst-model-call.js'
@@ -1069,77 +1069,30 @@ async function verifyAnalyzeFindings(args: Args, result: TraceInvestigationResul
  * idle wall, cost by role, accepted vs rejected), as opposed to the rest of
  * this CLI, which reports what happened inside one harness session.
  *
- * Every metric comes from `@tangle-network/agent-eval/supervisor-run` — this
- * function only picks a READER, then single-run vs rollup, then prints. No
- * analysis is duplicated here, and none may be added.
- *
- * Two on-disk layouts reach the same analyzer through the same port: the loops
- * supervisor's `<runDir>/ws/.agent/supervisor/<id>`, and agent-runtime's
- * `createFileRunContext` directory (`spawn-journal.jsonl` at the top level).
- * The run-context layout is checked first because it is identified by a file
- * that is actually there, rather than by the absence of another layout.
+ * Eval owns Runtime run discovery and analysis. Traces adds coordination-log
+ * evidence through its reader, then prints a single report or a rollup.
  */
 async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
-  const runContextDirs = await findFileRunContextDirs(runDir)
-  const nested = runContextDirs.length > 0 ? [] : await findSupervisorRunDirs(runDir)
-  let markdown: string
-  if (runContextDirs.length > 1) {
-    markdown = renderSupervisorRollupMarkdown(
-      rollupSupervisorRuns(
-        await Promise.all(
-          runContextDirs.map((dir) => analyzeSupervisorRun(fileRunContextSupervisorRunReader(dir))),
-        ),
-      ),
-      `Supervisor rollup — ${runDir}`,
+  const single = await isRuntimeSupervisorRunDir(runDir)
+  const runDirs = single ? [runDir] : await findSupervisorRunDirs(runDir)
+  if (runDirs.length === 0) {
+    throw new Error(
+      `no supervisor run found at ${runDir} — expected a Runtime run containing ` +
+        'spawn-journal.jsonl, observer.jsonl, or failure.json, or a parent directory containing such runs',
     )
-  } else if (runContextDirs.length === 1) {
-    markdown = renderSupervisorRunMarkdown(
-      await analyzeSupervisorRun(fileRunContextSupervisorRunReader(runContextDirs[0] as string)),
-    )
-  } else if (nested.length > 0) {
-    markdown = renderSupervisorRollupMarkdown(
-      rollupSupervisorRuns(await Promise.all(nested.map((dir) => analyzeSupervisorRun(dir)))),
-      `Supervisor rollup — ${runDir}`,
-    )
-  } else {
-    const report = await analyzeSupervisorRun(runDir)
-    // A path with no supervision journal analyzes cleanly into a report whose
-    // every metric is unavailable. Printing that reads as "the supervisor did
-    // nothing" rather than "you pointed me at the wrong directory".
-    if (isUnavailable(report.orchestration.workersSpawned)) {
-      throw new Error(
-        `no supervisor run found at ${runDir} — expected <runDir>/spawn-journal.jsonl ` +
-          '(agent-runtime createFileRunContext), <runDir>/ws/.agent/supervisor/<id> ' +
-          '(or the pre-rename <runDir>/ws/.loops/supervisor/<id>), ' +
-          'or a parent directory containing such runs',
-      )
-    }
-    markdown = renderSupervisorRunMarkdown(report)
   }
-  const runs = Math.max(runContextDirs.length, nested.length, 1)
+  const reports = await Promise.all(
+    runDirs.map((dir) => analyzeSupervisorRun(fileRunContextSupervisorRunReader(dir))),
+  )
+  const markdown = single
+    ? renderSupervisorRunMarkdown(reports[0]!)
+    : renderSupervisorRollupMarkdown(rollupSupervisorRuns(reports), `Supervisor rollup — ${runDir}`)
   if (args.out) {
     await saveReport(args.out, markdown)
-    console.log(`supervisor report → ${args.out}  (${runs === 1 ? '1 run' : `${runs} runs`})`)
+    console.log(`supervisor report → ${args.out}  (${runDirs.length === 1 ? '1 run' : `${runDirs.length} runs`})`)
   } else {
     console.log(markdown)
   }
-}
-
-/**
- * The run-context directories at or immediately under `dir`. One level only:
- * a run directory is the unit a caller names, and a deep walk would sweep up
- * unrelated runs that merely share a parent.
- */
-async function findFileRunContextDirs(dir: string): Promise<string[]> {
-  if (await isFileRunContextDir(dir)) return [dir]
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
-  const found: string[] = []
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const child = join(dir, entry.name)
-    if (await isFileRunContextDir(child)) found.push(child)
-  }
-  return found.sort()
 }
 
 async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
@@ -1788,8 +1741,8 @@ Options:
                    analyze: report a SUPERVISION TREE instead of harness sessions —
                    steers, spawn waves, concurrency, idle wall, cost by role,
                    accepted vs rejected. Rolls up when the dir holds many runs.
-                   watch: same directory, live. Reads the loops layout, the
-                   agent-runtime createFileRunContext journal, and OTLP span files.
+                   analyze reads Runtime journals and recorded startup failures.
+                   watch reads a live Runtime journal and OTLP span files.
   --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
   --out <path>     Write report to a file
   --dir <path>     improve/ask: write artifacts to this directory
