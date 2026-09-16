@@ -416,7 +416,10 @@ RESULT no-winner · budget-exhausted
 ```
 
 `traces analyze --supervisor-run-dir <dir>` writes the full report for the same run.
-Every metric there comes from `@tangle-network/agent-eval/supervisor-run`; this package contributes a reader, never an analysis.
+It also reads `failure.json` when Runtime fails before the first spawn.
+Pass a parent directory to combine reports from its Runtime runs.
+Eval owns discovery, normalization, and analysis; Traces adds recorded coordination requests and delivery receipts.
+Old Loops directories are unsupported.
 
 Replay and resume are a separate concern: they belong to the durable spawn journal, and nothing here routes them through telemetry.
 

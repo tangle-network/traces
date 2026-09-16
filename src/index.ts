@@ -133,9 +133,8 @@ export * from './observer.js' // watchSessions({ onLoop, onReport, signal })
 // Two sources behind one view. The GENERAL one folds OTLP spans by
 // trace_id/span_id/parent_span_id, so any emitter is watchable. The SPECIFIC
 // one reads agent-runtime's durable spawn journal, which carries the authored
-// budget and settlement telemetry does not, and is also a second implementation
-// of agent-eval's SupervisorRunReader port. All ANALYSIS stays in agent-eval:
-// pass the reader to `analyzeSupervisorRun` / `rollupSupervisorRuns`.
+// budget and settlement telemetry does not. Its report reader adds coordination
+// evidence to agent-eval's Runtime reader; analysis stays in agent-eval.
 export * from './run-span-tree.js' // general: OTLP spans → tree
 export * from './supervisor-run-context.js' // specific: spawn journal → tree + reader
 export * from './supervisor-run-watch.js' // the journal view

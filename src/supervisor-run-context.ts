@@ -1,43 +1,8 @@
 /**
- * A SECOND implementation of agent-eval's `SupervisorRunReader` port, over the
- * run directory that agent-runtime's `createFileRunContext(dir)` writes:
- *
- *   <runDir>/spawn-journal.jsonl     required — the append-only SpawnEvent log
- *   <runDir>/coordination-log.jsonl  optional — steer / delivery / question / settled
- *   <runDir>/blobs/                  optional — content-addressed settled results
- *   <runDir>/result.json             optional — the terminal outcome document
- *
- * `loopsSupervisorRunReader` is the other implementation, over a completely
- * different layout. Neither knows about the other, and NOTHING here analyzes:
- * `analyzeSupervisorRun` / `parseSupervisorTree` / `rollupSupervisorRuns` in
- * `@tangle-network/agent-eval/supervisor-run` compute every metric, and
- * `materializeTreeView` in `@tangle-network/agent-runtime/kernel` folds the
- * event log into the tree. This file is translation only.
- *
- * ## Two translations, both faithful
- *
- * 1. **The envelope.** agent-runtime's `FileSpawnJournal` writes each event
- *    wrapped as `{kind:'event', root, event:{…}}` after one `{kind:'begin'}`
- *    record. agent-eval's parser reads `kind` at the TOP level, so an
- *    un-translated file parses as zero spawns AND zero malformed rows — a run
- *    that reads as "the supervisor did nothing" rather than "I cannot read
- *    this". The reader unwraps the envelope and re-emits flat JSONL.
- *
- * 2. **`role`.** `SupervisorRunSources.journal` documents
- *    `role: 'supervisor' | 'worker'` on spawned rows for recursive readers.
- *    agent-runtime's `SpawnEvent` has no such field, so it is INFERRED
- *    structurally and exactly: a node that appears as another spawn's `parent`
- *    is a supervisor; the root is a supervisor because it has no parent;
- *    everything else is a worker. No new upstream field is needed for this,
- *    and no depth limit applies — `<root>:s0:s0` classifies its parent
- *    `<root>:s0` as a supervisor by the same rule that classifies the root.
- *
- * Steer traffic is translated the same way: this layout records steers in
- * `coordination-log.jsonl` rather than per-worker inbox files, and each
- * recorded field maps 1:1 onto the per-worker artifacts the analyzer reads.
- * Nothing is synthesized from an absent fact — an artifact this layout does
- * not keep is declared in `SourceLimits`, which is what turns the dependent
- * metric into `unavailable` instead of 0.
+ * Runtime journal snapshots for the live view, plus report-reader enrichment.
+ * Eval owns report normalization, terminal records, and evidence accounting.
+ * This module adds coordination-log steers and questions to those sources.
+ * The live view uses Runtime's tree fold and keeps partial journal tails visible.
  */
 
 import { readFile, stat } from 'node:fs/promises'
@@ -45,7 +10,7 @@ import { basename, join } from 'node:path'
 import type { Budget, NodeStatus, Runtime, Spend, SpawnEvent, TreeView } from '@tangle-network/agent-runtime/kernel'
 import { materializeTreeView } from '@tangle-network/agent-runtime/kernel'
 import {
-  NO_SOURCE_LIMITS,
+  readRuntimeSupervisorRun,
   type SupervisorRunNodeRole,
   type SupervisorRunReader,
   type SupervisorRunSources,
@@ -318,7 +283,7 @@ function parseInstant(v: unknown): number | null {
 // ---------------------------------------------------------------------------
 
 export interface FileRunContextReaderOptions {
-  /** Override the run identity used for rollup grouping (default: the journal root). */
+  /** Override the recorded Runtime identity used for rollup grouping. */
   readonly instanceId?: string | null
   /** Which arm of a comparison this run is (default: the run directory's basename). */
   readonly arm?: string | null
@@ -326,44 +291,26 @@ export interface FileRunContextReaderOptions {
 
 /**
  * Read a `createFileRunContext` run directory into `SupervisorRunSources`.
- * Never throws on a missing artifact: an absent file becomes a `null` field or
- * a declared `SourceLimits` reason, which is what makes the dependent metric
- * `unavailable` rather than 0.
+ * Eval preserves missing evidence and rejects malformed Runtime records.
+ * Coordination-log evidence extends the normalized worker sources.
  */
 export async function readFileRunContext(
   runDir: string,
   opts: FileRunContextReaderOptions = {},
 ): Promise<SupervisorRunSources> {
-  const journalText = await readMaybe(join(runDir, SPAWN_JOURNAL_FILE))
-  const journal = readRunContextJournal(journalText)
+  const sources = await readRuntimeSupervisorRun(runDir)
   const coordination = readCoordinationLog(await readMaybe(join(runDir, COORDINATION_LOG_FILE)))
-  const result = await readMaybe(join(runDir, RESULT_FILE))
-
   return {
-    runRef: runDir,
-    instanceId: opts.instanceId !== undefined ? opts.instanceId : journal.root,
+    ...sources,
+    instanceId: opts.instanceId !== undefined ? opts.instanceId : sources.instanceId,
     arm: opts.arm !== undefined ? opts.arm : basename(runDir),
-    // The journal is the store, and it lives directly in the run directory —
-    // this layout has no separate supervisor sub-directory.
-    supRunDir: journal.present ? runDir : null,
-    journal: journal.present ? flattenJournal(journal) : null,
-    // Per-brain-call taps and progress streams are loops artifacts; this layout
-    // writes neither, so truncation genuinely cannot be ruled out.
-    brainLog: null,
-    state: journal.present ? runState(journal, result) : null,
-    progress: null,
-    ...workerSources(journal, coordination),
-    result,
-    judge: null,
-    judgeSource: null,
-    patch: null,
-    driverLog: null,
-    harnessWorkerTokens: null,
-    harnessMissingReason:
-      'the file run context journals each child’s own settled spend, so no external harness join is used',
-    limits: sourceLimits(journal, coordination),
-    rootTranscriptRef: journal.present ? join(runDir, SPAWN_JOURNAL_FILE) : null,
-    traceCommand: `traces watch ${runDir}`,
+    workers: sources.workers !== null && coordination.present
+      ? workerSources(sources.workers, coordination)
+      : sources.workers,
+    ...(sources.journal !== null ? {
+      rootTranscriptRef: join(runDir, SPAWN_JOURNAL_FILE),
+      traceCommand: `traces watch ${runDir}`,
+    } : {}),
   }
 }
 
@@ -382,43 +329,6 @@ export async function isFileRunContextDir(runDir: string): Promise<boolean> {
     .catch(() => false)
 }
 
-/** The unwrapped events, re-emitted flat with the structurally inferred `role`. */
-function flattenJournal(journal: RunContextJournal): string {
-  return journal.events
-    .map((event) => {
-      if (event.kind !== 'spawned') return JSON.stringify(event)
-      return JSON.stringify({
-        ...event,
-        role: inferRole(event.id, event.parent, journal.supervisorIds),
-      })
-    })
-    .join('\n')
-}
-
-/**
- * The run's own state document, translated from the two records that hold it:
- * `begin.at` is when the tree started, and `result.json`'s typed `kind` /
- * `reason` are its status and verdict. Field renaming only — nothing is
- * computed, and `spentUsd` is carried across only when the run said its dollar
- * accounting was known.
- */
-function runState(journal: RunContextJournal, resultText: string | null): string {
-  const result = parseJsonObject(resultText)
-  const state: Record<string, unknown> = {}
-  if (journal.begunAt !== null) state.startedAt = journal.begunAt
-  if (result !== null) {
-    const kind = str(result.kind)
-    const reason = str(result.reason)
-    if (kind !== null) state.status = kind
-    if (reason !== null) state.verdict = reason
-    const spentTotal = asRecord(result.spentTotal)
-    if (typeof spentTotal.usd === 'number' && spentTotal.usdKnown !== false) {
-      state.result = { spentUsd: spentTotal.usd }
-    }
-  }
-  return JSON.stringify(state)
-}
-
 function parseJsonObject(text: string | null): Record<string, unknown> | null {
   if (text === null) return null
   try {
@@ -431,124 +341,31 @@ function parseJsonObject(text: string | null): Record<string, unknown> | null {
   }
 }
 
-/**
- * One `WorkerLogSource` per spawned non-root node.
- *
- * This layout keeps no per-worker log files; it records the same steer/question
- * traffic in the coordination log, keyed by node id. Each translated row is a
- * recorded fact renamed, never a fact invented: a steer becomes its inbox
- * request, a delivery receipt becomes its acknowledgement, a question becomes
- * an upward message. `started`/`finished` events are deliberately NOT
- * synthesized from spawn/settle instants — that would report queue time as
- * worker wall time — so the wall distribution stays `unavailable`.
- *
- * When the coordination log is absent, `events` and `inbox` stay `null`, which
- * makes the steer counts `unavailable`. An absent log does not mean zero
- * steers.
- */
+/** Add recorded steer requests, delivery receipts, and upward questions. */
 function workerSources(
-  journal: RunContextJournal,
+  workers: readonly WorkerLogSource[],
   coordination: CoordinationLog,
-): Pick<SupervisorRunSources, 'workers' | 'workersMissingReason'> {
-  if (!journal.present) {
-    return { workers: null, workersMissingReason: `${SPAWN_JOURNAL_FILE} absent` }
-  }
-  const view = safeTreeView(journal.events)
-  if (view === null) {
-    return { workers: null, workersMissingReason: 'spawn journal could not be folded into a tree' }
-  }
+): WorkerLogSource[] {
   const deliveredById = new Map<string, boolean | null>()
   for (const receipt of coordination.deliveries) {
     if (receipt.messageId !== null) deliveredById.set(receipt.messageId, receipt.delivered)
   }
-  const spendById = settledSpendById(journal.events)
-
-  const workers: WorkerLogSource[] = []
-  for (const node of view.nodes) {
-    if (node.parent === undefined) continue
-    const steers = coordination.steers.filter((s) => s.toWorker === node.id)
-    const questions = coordination.questions.filter((q) => q.from === node.id)
-    const spend = spendById.get(node.id) ?? null
-    workers.push({
-      workerId: node.id,
-      label: node.label,
-      events: coordination.present
-        ? [
-            ...steers.map((s) =>
-              JSON.stringify({
-                kind: 'message',
-                requestId: s.messageId,
-                delivered: s.messageId === null ? null : (deliveredById.get(s.messageId) ?? null),
-              }),
-            ),
-            ...questions.map((q) => JSON.stringify({ kind: 'message', direction: 'up', id: q.id })),
-          ].join('\n')
-        : null,
-      inbox: coordination.present
-        ? steers.map((s) => JSON.stringify({ id: s.messageId, message: s.instruction })).join('\n')
-        : null,
-      // Content-addressed result blobs are not patches; this layout retains no
-      // per-worker diff, so byte counts would be a fabricated zero.
-      patchBytes: null,
-      transcriptRef: null,
-      patchPath: null,
-      tokensIn: spend?.tokens.input ?? null,
-      tokensOut: spend?.tokens.output ?? null,
-    })
-  }
-  return { workers, workersMissingReason: null }
-}
-
-function settledSpendById(events: readonly SpawnEvent[]): Map<string, Spend> {
-  const out = new Map<string, Spend>()
-  for (const event of events) {
-    if (event.kind !== 'settled') continue
-    out.set(event.id, event.spent)
-  }
-  return out
-}
-
-/**
- * What this store structurally cannot record. Each non-null reason is what the
- * analyzer reports instead of a number it would otherwise compute as 0.
- */
-function sourceLimits(
-  journal: RunContextJournal,
-  coordination: CoordinationLog,
-): SupervisorRunSources['limits'] {
-  const unpriced = unpricedNodes(journal.events)
-  const verdicts = journal.events.filter(
-    (event) => event.kind === 'settled' && event.verdict !== undefined,
-  ).length
-  const settlements = journal.events.filter((event) => event.kind === 'settled').length
-  return {
-    ...NO_SOURCE_LIMITS,
-    // Both are journaled per node: `metered` for a driver's own inference,
-    // `settled.spent` for what a child consumed.
-    managerTokens: null,
-    workerTokens: null,
-    spendUsd:
-      unpriced.length === 0
-        ? null
-        : `${unpriced.length} spend record(s) carry usdKnown:false (${unpriced
-            .slice(0, 4)
-            .join(', ')}${unpriced.length > 4 ? ', …' : ''}) — the run’s dollar total is unknown, not $0`,
-    workerVerdicts:
-      settlements === 0 || verdicts > 0
-        ? null
-        : 'no settled event carried a verdict; this layout records a done/down status only',
-    deliverables: `${BLOBS_DIR}/ holds content-addressed result artifacts, not patches`,
-  }
-}
-
-/** Node ids whose journaled spend explicitly declared its dollar value unknown. */
-function unpricedNodes(events: readonly SpawnEvent[]): string[] {
-  const ids: string[] = []
-  for (const event of events) {
-    const spend = event.kind === 'settled' ? event.spent : event.kind === 'metered' ? event.spend : null
-    if (spend?.usdKnown === false) ids.push(event.id)
-  }
-  return [...new Set(ids)]
+  return workers.map((worker) => {
+    const steers = coordination.steers.filter((steer) => steer.toWorker === worker.workerId)
+    const questions = coordination.questions.filter((question) => question.from === worker.workerId)
+    return {
+      ...worker,
+      events: [
+        ...steers.map((steer) => JSON.stringify({
+          kind: 'message',
+          requestId: steer.messageId,
+          delivered: steer.messageId === null ? null : (deliveredById.get(steer.messageId) ?? null),
+        })),
+        ...questions.map((question) => JSON.stringify({ kind: 'message', direction: 'up', id: question.id })),
+      ].join('\n'),
+      inbox: steers.map((steer) => JSON.stringify({ id: steer.messageId, message: steer.instruction })).join('\n'),
+    }
+  })
 }
 
 // ---------------------------------------------------------------------------
