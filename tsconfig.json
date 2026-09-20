@@ -10,7 +10,6 @@
     "skipLibCheck": true,
     "noEmit": true,
     "types": ["node"],
-    "baseUrl": ".",
     "paths": {
       "@tangle-network/traces": ["./src/index.ts"]
     }
