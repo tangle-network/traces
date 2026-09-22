@@ -113,6 +113,8 @@ traces analyze  --harness codex --session <id>     # pin one ID printed by `list
 traces analyze  --harness codex --current          # this session, even when a child wrote later
 traces analyze --harness codex --current --latest-turn --workflow  # current turn plus workers
 traces analyze --harness claude-code --session <path> --latest-turn # latest task plus its subagents
+traces analyze --supervisor-run-dir <run>              # Runtime tree + journal-linked native sessions
+traces analyze --supervisor-run-dir <old-run> --session-map <sessions.json> # historical fallback
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
 traces analyze  --all --since 2026-06-18 --out report.md
@@ -141,10 +143,20 @@ traces upload   --since 24h                        # upload last day to the Inte
 | `--session <id\|path>` | One listed session ID or explicit session file |
 | `--workflow` | Expand selected files through stable parent and child session IDs |
 | `--max-workflow-sessions <n>` | Stop workflow expansion before parsing more than `n` files; default `100` |
+| `--supervisor-run-dir <dir>` | Analyze one agent-runtime supervision journal or roll up a directory of runs |
+| `--session-map <json>` | Historical fallback for a Runtime run that predates journal-native provider-session receipts; Runtime node ids remain canonical |
 | `--cwd <dir>` | Filter by working directory |
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory |
+
+Current Runtime journals carry provider-session receipts automatically.
+Each provider receipt reports `nativePromptCount`, while `controllerTurns` contains only prompts with an exact one-based ordinal, Bridge run id, full-request digest, prompt SHA-256, and Unix-millisecond start/end timestamps.
+The report shows exact/total prompt coverage and every missing ordinal.
+Only spans inside a verified controller-turn window are attributed to the Runtime node, and the window stops before the next native prompt.
+An empty `controllerTurns` list locates historical provenance only; it does not become analyzed Runtime work.
+Missing node receipts remain explicit coverage gaps while known Runtime relationships are preserved.
+Historical maps with missing or empty receipts still locate and relate sessions, but never rewrite actor provenance.
 | `--otlp <path>` | OTLP artifact path (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `OPENAI_API_KEY`) / cap their spend |
