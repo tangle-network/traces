@@ -1,6 +1,6 @@
 {
   "name": "@tangle-network/traces",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "description": "Point it at your coding-agent session traces (Claude Code, Codex, OpenCode, Gemini, Pi, …) and get failure-mode + efficiency findings. CLI + SDK over the @tangle-network/agent-eval analyst suite — observe live sessions, run your own analysts, redact, and upload to the Tangle Intelligence Platform.",
   "type": "module",
   "license": "MIT",
@@ -61,18 +61,18 @@
   },
   "dependencies": {
     "@tangle-network/agent-eval": "0.182.0",
-    "@tangle-network/agent-interface": "2.6.1",
-    "@tangle-network/agent-runtime": "0.231.1",
+    "@tangle-network/agent-interface": "2.10.0",
+    "@tangle-network/agent-runtime": "0.246.0",
     "@tangle-network/agent-trace-contract": "1.0.2",
-    "@tangle-network/sandbox": "0.40.2"
+    "@tangle-network/sandbox": "0.45.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "postcss": "^8.5.26",
-    "tsup": "^8.0.0",
-    "tsx": "^4.23.13",
-    "typescript": "^5.7.0",
-    "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "@types/node": "^22.20.4",
+    "postcss": "^8.5.28",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
   }
 }
