@@ -124,11 +124,16 @@ whenever there is a measure, and rejects evidence span ids that do not resolve i
 guessing them. Those four properties are what make the report checkable, so if a future
 version drops one, the report has to change with it.
 
-**Availability check before you promise this to a customer.** It needs agent-eval
-0.185.0. At the time of writing that version is not published and the engine is still in
-review as tangle-network/agent-eval#786. Confirm `npm view @tangle-network/agent-eval
-version` is at least 0.185.0 before quoting an engagement that depends on it. Until then,
-days 2 and 3 above are the diagnosis, and they are enough to run a first engagement.
+Requires agent-eval 0.185.0 or later, which this repository now pins. Verified against
+the published package on a real session: the document validates against
+`templates/findings.schema.json`, all seven capabilities are reported, and `notes` comes
+back empty for a customer subject as the contract requires.
+
+A customer context carrying `topology` throws by design. That field is for internal
+mining runs and passing it on a customer engagement is a bug, not a shortcut.
+
+`model.usage` tokens of `null` mean unknown, not zero. Do not print a zero cost from a
+null; say the cost was not reported.
 
 ## Day 4 — write the page
 
