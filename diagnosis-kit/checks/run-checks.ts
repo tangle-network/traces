@@ -15,25 +15,7 @@
  */
 
 import { readOtlpInput, redactSpans, runPipelines, TRACES_REDACTION_RULES } from '../../src/index.js'
-import { TOOL_IO_VALUE_KEYS } from '../../src/adapters/tool-io.js'
-import type { OtlpSpan } from '../../src/otlp.js'
-
-/** Attributes that carry customer prose. Dropped unless content capture was opted into. */
-function stripContent(spans: readonly OtlpSpan[]): { spans: OtlpSpan[]; dropped: string[] } {
-  const dropped = new Set<string>()
-  const out = spans.map((s) => {
-    const attributes: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(s.attributes ?? {})) {
-      if ((TOOL_IO_VALUE_KEYS as readonly string[]).includes(k) || k.endsWith('.content')) {
-        dropped.add(k)
-        continue
-      }
-      attributes[k] = v
-    }
-    return { ...s, attributes }
-  })
-  return { spans: out, dropped: [...dropped].sort() }
-}
+import { stripContent } from './metadata-only.js'
 
 async function main() {
   const [input, ...flags] = process.argv.slice(2)
@@ -70,6 +52,9 @@ async function main() {
             byRule: redaction.byRule,
             droppedAttributes: dropped,
           },
+          skipped: !contentOptIn && spans.some((span) => span.attributes['openinference.span.kind'] === 'TOOL')
+            ? [{ analysis: 'argument-based stuck-loop and follow-up comparisons', reason: 'tool arguments are withheld or absent in metadata-only mode, so repeated calls cannot be compared' }]
+            : [],
         },
         measures: {
           stuckLoops: pipelines.stuckLoops,

@@ -46,16 +46,19 @@ Strip content on receipt instead, before anything reads the spans:
 
 ```ts
 import { readOtlpInput, redactSpans, TRACES_REDACTION_RULES } from '@tangle-network/traces'
+import { stripContent } from './checks/metadata-only.js'
 
 const spans = await readOtlpInput('customer/spans.otlp.jsonl')
-const { spans: scrubbed, report } = redactSpans(spans, TRACES_REDACTION_RULES)
-// report.redactionCount and report.byRule go in the appendix: what we removed, by rule.
+const { spans: metadataOnly, dropped } = stripContent(spans.spans)
+const { spans: scrubbed, report } = redactSpans(metadataOnly, TRACES_REDACTION_RULES)
+// Report dropped, report.redactionCount and report.byRule in the appendix.
 ```
 
-Under the metadata-only default, also drop the prose-bearing attributes outright rather
-than trusting regex over them: `input.value` and `output.value` (exported as
-`TOOL_IO_VALUE_KEYS`), plus any `*.content` attribute. Regex redaction is a second line
-of defence, not the first.
+Under the metadata-only default, `stripContent` drops every content key recognized by the shared diagnosis filter.
+It also drops tool argument aliases, structured attribute values, tool I/O digests, lengths, MIME types, provenance, `tool.args_captured`, and free-form error and status messages.
+The kit's `run-checks.ts` uses this same helper before redaction or analysis.
+It reports argument-based stuck-loop and follow-up comparisons as skipped when arguments were removed, instead of treating distinct calls as identical.
+Without content opt-in, failure follow-ups still count, but whether the agent adapted its arguments remains unknown.
 
 If the customer opted into content, keep the values, run `redactSpans`, and then compose
 `applyRedactor()` with an external PII redactor on top. The doc comment on `src/redact.ts`
@@ -110,7 +113,7 @@ call GitHub, or send secrets to the model. Those properties are the engagement's
 story and they do not exist if you call the function directly.
 
 ```bash
-trace-mine engagement --id <id> --expires <ISO date>   # creates ~/diagnosis/engagements/<id>/
+trace-mine engagement --id <id> --label "<customer words>" --days 30   # creates ~/diagnosis/engagements/<id>/
 cp customer/scrubbed.otlp.jsonl ~/diagnosis/engagements/<id>/bundle/
 trace-mine diagnose --id <id>
 ```
@@ -122,7 +125,9 @@ validates against `templates/findings.schema.json`.
 For a customer who refused third-party model processing in intake section 4:
 
 ```bash
-trace-mine diagnose --id <id> --no-third-party
+trace-mine engagement --id <id> --label "<customer words>" --days 30 --no-third-party
+cp customer/scrubbed.otlp.jsonl ~/diagnosis/engagements/<id>/bundle/
+trace-mine diagnose --id <id>
 ```
 
 That runs deterministic mode and makes no model call at all.
