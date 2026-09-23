@@ -55,7 +55,7 @@ const { spans: scrubbed, report } = redactSpans(metadataOnly, TRACES_REDACTION_R
 ```
 
 Under the metadata-only default, `stripContent` drops every content key recognized by the shared diagnosis filter.
-It also drops tool I/O digests, lengths, MIME types, provenance, `tool.args_captured`, and free-form error and status messages.
+It also drops tool argument aliases, structured attribute values, tool I/O digests, lengths, MIME types, provenance, `tool.args_captured`, and free-form error and status messages.
 The kit's `run-checks.ts` uses this same helper before redaction or analysis.
 It reports argument-based stuck-loop and follow-up comparisons as skipped when arguments were removed, instead of treating distinct calls as identical.
 Without content opt-in, failure follow-ups still count, but whether the agent adapted its arguments remains unknown.
