@@ -98,6 +98,38 @@ For a repeat engagement, record to a scorecard and diff it. `diffScorecard` runs
 t-test and returns `improved | regressed | flat | new`, which is what "no regressions"
 has to mean if the claim is going to survive the customer checking it.
 
+## Day 3 — the model pass, if the customer allowed it
+
+Skip this entirely when intake section 4 came back as deterministic-only. Everything
+above and below still runs; what the customer loses is model-written findings, not the
+measurement.
+
+```ts
+import { diagnoseSpans } from '@tangle-network/agent-eval/diagnosis'
+
+const result = await diagnoseSpans(scrubbed, {
+  subject: 'customer',
+  label: '<engagement id>',
+  focus: '<their question from intake section 2>',
+})
+// result.document validates against templates/findings.schema.json
+```
+
+`mode: 'deterministic'` makes no model call at all, which is the second way to honour a
+refusal if you would rather keep one code path.
+
+The engine populates `coverage.capabilities` from the trace's own validator rather than
+from the model, marks every finding `observed` or `inferred`, sets `measure.denominator`
+whenever there is a measure, and rejects evidence span ids that do not resolve instead of
+guessing them. Those four properties are what make the report checkable, so if a future
+version drops one, the report has to change with it.
+
+**Availability check before you promise this to a customer.** It needs agent-eval
+0.185.0. At the time of writing that version is not published and the engine is still in
+review as tangle-network/agent-eval#786. Confirm `npm view @tangle-network/agent-eval
+version` is at least 0.185.0 before quoting an engagement that depends on it. Until then,
+days 2 and 3 above are the diagnosis, and they are enough to run a first engagement.
+
 ## Day 4 — write the page
 
 Fill `templates/report.md`. One page. The rules that matter:
