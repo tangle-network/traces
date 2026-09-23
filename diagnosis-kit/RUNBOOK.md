@@ -104,19 +104,37 @@ Skip this entirely when intake section 4 came back as deterministic-only. Everyt
 above and below still runs; what the customer loses is model-written findings, not the
 measurement.
 
-```ts
-import { diagnoseSpans } from '@tangle-network/agent-eval/diagnosis'
+Run it through `trace-mine`, not through the library. The CLI is what carries retention
+and expiry, and its isolation test proves a customer run cannot reach an internal sink,
+call GitHub, or send secrets to the model. Those properties are the engagement's safety
+story and they do not exist if you call the function directly.
 
-const result = await diagnoseSpans(scrubbed, {
-  subject: 'customer',
-  label: '<engagement id>',
-  focus: '<their question from intake section 2>',
-})
-// result.document validates against templates/findings.schema.json
+```bash
+trace-mine engagement --id <id> --expires <ISO date>   # creates ~/diagnosis/engagements/<id>/
+cp customer/scrubbed.otlp.jsonl ~/diagnosis/engagements/<id>/bundle/
+trace-mine diagnose --id <id>
 ```
 
-`mode: 'deterministic'` makes no model call at all, which is the second way to honour a
-refusal if you would rather keep one code path.
+It reads only `~/diagnosis/engagements/<id>/bundle/*.jsonl`, accepting flat spans or OTLP,
+and writes only `report/findings.json` and `report/diagnosis.json`. The findings document
+validates against `templates/findings.schema.json`.
+
+For a customer who refused third-party model processing in intake section 4:
+
+```bash
+trace-mine diagnose --id <id> --no-third-party
+```
+
+That runs deterministic mode and makes no model call at all.
+
+Expiry is not optional. Every engagement carries `expiresAt`, a purge runs at 05:30, and
+`retain: true` is set only on the customer's written request. If you find yourself wanting
+to skip the expiry, you are about to keep a customer's traces without their consent.
+
+The library path, `diagnoseSpans` from `@tangle-network/agent-eval/diagnosis`, exists and
+this repository pins a version that has it. Use it for building tooling, not for running
+an engagement, because it gives you the engine without the retention and isolation that
+make the engagement safe.
 
 The engine populates `coverage.capabilities` from the trace's own validator rather than
 from the model, marks every finding `observed` or `inferred`, sets `measure.denominator`
