@@ -52,8 +52,8 @@ async function main() {
             byRule: redaction.byRule,
             droppedAttributes: dropped,
           },
-          skipped: !contentOptIn && dropped.some((key) => key === 'tool.args_captured' || key === 'input.value' || key === 'input' || key === 'traces.input.sha256')
-            ? [{ analysis: 'argument-based stuck-loop and follow-up comparisons', reason: 'tool arguments and their digests were removed by the metadata-only boundary, so repeated calls cannot be compared' }]
+          skipped: !contentOptIn && spans.some((span) => span.attributes['openinference.span.kind'] === 'TOOL')
+            ? [{ analysis: 'argument-based stuck-loop and follow-up comparisons', reason: 'tool arguments are withheld or absent in metadata-only mode, so repeated calls cannot be compared' }]
             : [],
         },
         measures: {

@@ -26,7 +26,7 @@ describe('diagnosis kit metadata boundary', () => {
           'openinference.span.kind': 'TOOL',
           'tool.name': 'read',
           'input.value': `${canary}:file-${i}.md`,
-          ...(i === 0 ? { input: canary, 'output.value': canary, result: canary, text: canary, thinking: canary, prompt: canary, request: canary, response: canary, command: canary, 'chat.content': canary, 'error.message': canary, 'exception.message': canary, 'traces.source_record.input.value': canary } : {}),
+          ...(i === 0 ? { input: canary, 'output.value': canary, result: canary, text: canary, thinking: canary, prompt: canary, request: canary, response: canary, command: canary, args: canary, tool_arguments: canary, full_command: canary, 'chat.content': canary, 'error.message': canary, error_message: canary, 'error.inner.message': canary, events: [{ message: canary }], 'exception.message': canary, 'traces.source_record.input.value': canary } : {}),
         },
       }))
       writeFileSync(file, `${[root, ...tools].map(row => JSON.stringify(row)).join('\n')}\n`)
@@ -37,7 +37,7 @@ describe('diagnosis kit metadata boundary', () => {
       const { spans: metadataOnly, dropped } = stripContent(ingested.spans)
       const { spans: scrubbed } = redactSpans(metadataOnly, TRACES_REDACTION_RULES)
       expect(JSON.stringify(scrubbed)).not.toContain(canary)
-      expect(dropped).toEqual(expect.arrayContaining(['input.value', 'output.value', 'input', 'result', 'text', 'thinking', 'prompt', 'request', 'response', 'command', 'chat.content', 'error.message', 'exception.message', 'status.message', 'tool.args_captured', 'traces.input.sha256', 'traces.output.sha256', 'traces.source_record.input.value']))
+      expect(dropped).toEqual(expect.arrayContaining(['input.value', 'output.value', 'input', 'result', 'text', 'thinking', 'prompt', 'request', 'response', 'command', 'args', 'tool_arguments', 'full_command', 'chat.content', 'error.message', 'error_message', 'error.inner.message', 'events', 'exception.message', 'status.message', 'tool.args_captured', 'traces.input.sha256', 'traces.output.sha256', 'traces.source_record.input.value']))
       expect(scrubbed[1]?.attributes['tool.args_captured']).toBeUndefined()
       expect(scrubbed[1]?.attributes['traces.input.sha256']).toBeUndefined()
 
