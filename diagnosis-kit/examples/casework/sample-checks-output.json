@@ -1,0 +1,92 @@
+{
+  "subject": {
+    "spanCount": 8,
+    "contentIncluded": false
+  },
+  "coverage": {
+    "validation": {
+      "ok": true,
+      "findings": [],
+      "capabilities": [
+        {
+          "name": "token-accounting",
+          "available": true
+        },
+        {
+          "name": "cost-attribution",
+          "available": false,
+          "reason": "no spans carry gen_ai.usage.cost_usd (or any accepted alias); model and token counts are present, so a price table applied downstream could still derive it"
+        },
+        {
+          "name": "tool-usage",
+          "available": false,
+          "reason": "no spans carry gen_ai.tool.name (or any accepted alias), and no span resolves to kind TOOL"
+        },
+        {
+          "name": "loop-convergence",
+          "available": false,
+          "reason": "no spans carry agent.loop.iteration"
+        },
+        {
+          "name": "tree-comparison",
+          "available": false,
+          "reason": "no spans carry agent.branch.id or agent.branch.arm"
+        },
+        {
+          "name": "steering-chain",
+          "available": false,
+          "reason": "no spans carry links, so causality between rounds was never recorded"
+        },
+        {
+          "name": "latency-analysis",
+          "available": true
+        }
+      ]
+    },
+    "unreadableRows": {
+      "rows": 0,
+      "kinds": [],
+      "inherited": 0
+    },
+    "redaction": {
+      "redactionCount": 1,
+      "byRule": {
+        "email": 1
+      },
+      "droppedAttributes": []
+    }
+  },
+  "measures": {
+    "stuckLoops": {
+      "findings": [],
+      "affectedRunRatio": 0,
+      "totalRuns": 1
+    },
+    "failureClusters": {
+      "clusters": [],
+      "totalFailures": 0,
+      "totalRuns": 1
+    },
+    "toolUse": [
+      {
+        "runId": "97879d753424494baad31578230ace47",
+        "totalCalls": 0,
+        "callsWithCapturedArgs": 0,
+        "byTool": {},
+        "errorRate": 0,
+        "duplicateRate": 0,
+        "retryRate": 0
+      }
+    ],
+    "failureFollowUps": {
+      "failures": 0,
+      "followed": 0,
+      "blind": 0,
+      "adapted": 0,
+      "argsUnknown": 0,
+      "followUpSucceeded": 0,
+      "blindByTool": {},
+      "items": []
+    }
+  }
+}
