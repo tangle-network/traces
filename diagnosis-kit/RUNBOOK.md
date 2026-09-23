@@ -46,16 +46,22 @@ Strip content on receipt instead, before anything reads the spans:
 
 ```ts
 import { readOtlpInput, redactSpans, TRACES_REDACTION_RULES } from '@tangle-network/traces'
+import { isContentAttribute } from '@tangle-network/agent-eval/diagnosis'
 
 const spans = await readOtlpInput('customer/spans.otlp.jsonl')
-const { spans: scrubbed, report } = redactSpans(spans, TRACES_REDACTION_RULES)
+const metadataOnly = spans.spans.map((span) => ({
+  ...span,
+  attributes: Object.fromEntries(
+    Object.entries(span.attributes ?? {}).filter(([key]) => !isContentAttribute(key)),
+  ),
+}))
+const { spans: scrubbed, report } = redactSpans(metadataOnly, TRACES_REDACTION_RULES)
 // report.redactionCount and report.byRule go in the appendix: what we removed, by rule.
 ```
 
-Under the metadata-only default, also drop the prose-bearing attributes outright rather
-than trusting regex over them: `input.value` and `output.value` (exported as
-`TOOL_IO_VALUE_KEYS`), plus any `*.content` attribute. Regex redaction is a second line
-of defence, not the first.
+Under the metadata-only default, drop every content key recognized by the shared diagnosis filter.
+This includes `input`, `result`, `text`, `thinking`, `prompt`, `input.value`, `output.value`, and `*.content`.
+The kit's `run-checks.ts` uses the same filter before redaction or analysis.
 
 If the customer opted into content, keep the values, run `redactSpans`, and then compose
 `applyRedactor()` with an external PII redactor on top. The doc comment on `src/redact.ts`
