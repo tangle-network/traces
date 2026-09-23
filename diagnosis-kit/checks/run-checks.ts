@@ -15,25 +15,7 @@
  */
 
 import { readOtlpInput, redactSpans, runPipelines, TRACES_REDACTION_RULES } from '../../src/index.js'
-import { isContentAttribute } from '@tangle-network/agent-eval/diagnosis'
-import type { OtlpSpan } from '../../src/otlp.js'
-
-/** Attributes that carry customer prose. Dropped unless content capture was opted into. */
-function stripContent(spans: readonly OtlpSpan[]): { spans: OtlpSpan[]; dropped: string[] } {
-  const dropped = new Set<string>()
-  const out = spans.map((s) => {
-    const attributes: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(s.attributes ?? {})) {
-      if (isContentAttribute(k)) {
-        dropped.add(k)
-        continue
-      }
-      attributes[k] = v
-    }
-    return { ...s, attributes }
-  })
-  return { spans: out, dropped: [...dropped].sort() }
-}
+import { stripContent } from './metadata-only.js'
 
 async function main() {
   const [input, ...flags] = process.argv.slice(2)
@@ -70,6 +52,9 @@ async function main() {
             byRule: redaction.byRule,
             droppedAttributes: dropped,
           },
+          skipped: !contentOptIn && dropped.some((key) => key === 'tool.args_captured' || key === 'input.value' || key === 'input' || key === 'traces.input.sha256')
+            ? [{ analysis: 'argument-based stuck-loop and follow-up comparisons', reason: 'tool arguments and their digests were removed by the metadata-only boundary, so repeated calls cannot be compared' }]
+            : [],
         },
         measures: {
           stuckLoops: pipelines.stuckLoops,
