@@ -23,6 +23,8 @@ Point 3 is not a disclaimer. It is the part that makes the other two trustworthy
 
 **Metadata-only by default.** Span names, timings, token counts, costs, tool names,
 model ids, error statuses and the trace shape. No prompt or response content.
+The customer removes content on their own machine before transfer.
+The operator rejects a received file that still contains recognized content fields or structured secrets.
 
 Content capture requires the customer to opt in, in writing, per engagement.
 
@@ -39,11 +41,15 @@ runs on metadata and says what it could not see is a stronger position than one 
 quietly ingested privileged content. If metadata proves too thin to find anything, that is
 a finding we report, not a reason to widen capture.
 
-**Customer traces never enter our systems.** They are not mined for our own improvement,
-never become GitHub issues in our repositories, never join a training corpus, and are not
-retained past the engagement unless the customer asks in writing. Any internal
-trace-mining pipeline must keep its own storage and its own issue filer. Sharing either
-one with this kit is a defect, not an optimisation.
+Customer traces stay in a separate engagement store on the operator's host.
+They do not enter internal trace mining, GitHub issues, or a training corpus.
+With third-party processing enabled, the diagnosis sends filtered spans through our router to the model provider.
+The metadata-only model receives a fixed label and no free-form intake question.
+Check span names and other retained metadata for sensitive prose before model processing.
+The operator deletes the engagement after handoff with `trace-mine close --id <id>`.
+The daily purge deletes expired engagements if the handoff close did not run.
+Written customer consent is required to retain traces past the engagement.
+The internal trace pipeline keeps its own storage and issue filer.
 
 ## Running an engagement
 

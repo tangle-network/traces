@@ -48,6 +48,8 @@ and you keep it.
 
 Default is **metadata only**: timings, token counts, costs, tool names, model ids, error
 statuses, and the shape of each run. No prompt or response content leaves your control.
+Run the supplied metadata-only export step on your machine before sending any trace.
+Keep the raw trace with you; send only the exported file.
 
 **Does your agent handle regulated, privileged or personal data?**
 (Client matters, health records, financial accounts, anything under GDPR, HIPAA or legal
@@ -64,7 +66,10 @@ safe to share.
 **Third-party model processing.** Analysis runs a model over your spans. That model is
 hosted by a third-party provider and reached through our router, so your spans leave our
 infrastructure during analysis. Under the metadata-only default, what leaves is span
-names, timings, token counts, costs, tool names, model ids and error statuses. If you opt
+names, timings, token counts, costs, tool names, model ids and error statuses.
+Check that your span and tool names do not contain client names or privileged details.
+Free-form intake labels and questions stay local in metadata-only mode.
+If you opt
 into content capture, prose from your runs leaves too.
 
 If that is unacceptable for your data, say so here and we will scope the engagement to
