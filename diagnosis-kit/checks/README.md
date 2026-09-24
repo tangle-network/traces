@@ -4,8 +4,11 @@
 attributes, redacts structured secrets, turns spans into runs and scores them.
 
 ```bash
-# from the repository root
-./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts customer/spans.otlp.jsonl
+# On the customer's machine, from the merged traces checkout with locked dependencies installed:
+./node_modules/.bin/tsx diagnosis-kit/checks/scrub-export.ts raw.otlp.jsonl metadata-only.otlp.jsonl
+# On the operator host, after receiving that export inside the engagement:
+./node_modules/.bin/tsx diagnosis-kit/checks/prepare-bundle.ts "$ENGAGEMENT_DIR"
+./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl"
 ```
 
 Add one check per symptom the customer named in intake section 2, so every complaint

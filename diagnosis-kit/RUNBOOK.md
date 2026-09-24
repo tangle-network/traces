@@ -13,18 +13,50 @@ substitute `./node_modules/.bin/tsx src/cli.ts` for `traces` in every command.
 Send `intake.md`. Do not accept traces until section 4 comes back signed, because
 that section is what decides whether content may be read at all.
 
+For metadata-only intake, give the customer the merged `traces` repository URL and its exact commit.
+The export script imports other repository files and needs its locked dependencies.
+They run these commands on their own machine before transfer, or use an equivalent metadata-only exporter:
+
+```bash
+git clone https://github.com/tangle-network/traces.git
+cd traces
+git checkout <kit-commit>
+corepack pnpm install --frozen-lockfile
+./node_modules/.bin/tsx diagnosis-kit/checks/scrub-export.ts raw.otlp.jsonl metadata-only.otlp.jsonl
+```
+
+The raw file stays with the customer.
+Ask them to inspect retained span and tool names for privileged prose before sending the exported file.
+If they cannot make that inspection, pause receipt until they remove those names or agree a different data scope.
+
 Read the answer to "name the number that would have to move". If it is blank, the
 engagement can still run, but say in the kickoff that you will propose the number
 and that the before-and-after will be weaker for it.
 
 ## Day 1 — take delivery and find out what the trace can answer
 
-Ask for OTLP JSONL. If the customer runs one of the adapters, their own store works
-instead. If they emit something else, `--format` reads policy-evidence,
-sandbox-events, openinference, intelligence-spans and chat-trajectory.
+Ask for OTLP JSONL. The standard preparation command accepts that format.
+Convert any other source format to OTLP before using this runbook, and keep the
+conversion output inside the engagement.
+
+Create the engagement before receiving any trace.
+Use `--no-third-party` if intake section 4 selected deterministic-only.
+Use an opaque ID and a nonsensitive label; the label stays in the local engagement record.
 
 ```bash
-traces validate customer/spans.otlp.jsonl
+# Add --no-third-party only when intake section 4 selected deterministic-only.
+trace-mine engagement --id <id> --label "Customer agent" --days 30
+ENGAGEMENT_DIR="${TRACE_MINE_CUSTOMER_STORE:-$HOME/diagnosis}/engagements/<id>"
+mkdir -m 700 "$ENGAGEMENT_DIR/incoming" "$ENGAGEMENT_DIR/work"
+```
+
+Arrange delivery of the customer's metadata-only export directly to `"$ENGAGEMENT_DIR/incoming/spans.otlp.jsonl"`.
+Do not accept the raw export under metadata-only intake.
+Do not stage another operator-side copy outside this engagement directory.
+If the customer delivered a separate copy earlier, inventory and delete it at handoff.
+
+```bash
+traces validate "$ENGAGEMENT_DIR/incoming/spans.otlp.jsonl"
 ```
 
 `validate` never throws on a foreign trace. It reports conformance, then a capability
@@ -39,20 +71,20 @@ seven capabilities are unavailable, say so that day rather than at the end.
 
 ## Day 1 — enforce the data boundary
 
-`--no-content` is an **upload** flag. It does not gate local analysis, and this kit
-never uploads customer traces anywhere, so it is not the control you need.
+`--no-content` controls the `traces` upload command.
+This kit does not use that command; the flag does not control `trace-mine` model processing.
 
-Strip content on receipt instead, before anything reads the spans:
+Strip content into the engagement's bundle before analysis:
 
-```ts
-import { readOtlpInput, redactSpans, TRACES_REDACTION_RULES } from '@tangle-network/traces'
-import { stripContent } from './checks/metadata-only.js'
-
-const spans = await readOtlpInput('customer/spans.otlp.jsonl')
-const { spans: metadataOnly, dropped } = stripContent(spans.spans)
-const { spans: scrubbed, report } = redactSpans(metadataOnly, TRACES_REDACTION_RULES)
-// Report dropped, report.redactionCount and report.byRule in the appendix.
+```bash
+./node_modules/.bin/tsx diagnosis-kit/checks/prepare-bundle.ts "$ENGAGEMENT_DIR"
 ```
+
+The command refuses an incoming file that still has content-bearing attributes or structured secrets.
+Delete that file and request a new customer-side export if it refuses.
+On success, it writes `bundle/spans.flat.jsonl` with mode 0600.
+Record its span count, dropped attribute names and redaction counts in the appendix.
+The raw incoming file remains inside the engagement until close deletes both.
 
 Under the metadata-only default, `stripContent` drops every content key recognized by the shared diagnosis filter.
 It also drops tool argument aliases, structured attribute values, tool I/O digests, lengths, MIME types, provenance, `tool.args_captured`, and free-form error and status messages.
@@ -60,38 +92,31 @@ The kit's `run-checks.ts` uses this same helper before redaction or analysis.
 It reports argument-based stuck-loop and follow-up comparisons as skipped when arguments were removed, instead of treating distinct calls as identical.
 Without content opt-in, failure follow-ups still count, but whether the agent adapted its arguments remains unknown.
 
-If the customer opted into content, keep the values, run `redactSpans`, and then compose
-`applyRedactor()` with an external PII redactor on top. The doc comment on `src/redact.ts`
-is explicit that regex alone does not catch names, addresses or account numbers in prose.
+This command refuses content opt-in.
+For an opted-in engagement, run a separately approved content and PII redaction flow before analysis.
+The regex redactor alone does not catch names, addresses or account numbers in prose.
 
 ## Day 2 — the deterministic pass
 
 ```bash
-traces analyze --otlp customer/scrubbed.otlp.jsonl --out work/analysis.md
+traces analyze --otlp "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --out "$ENGAGEMENT_DIR/work/analysis.md" --otlp-out "$ENGAGEMENT_DIR/work/analysis.otlp.jsonl"
 ```
 
 Costs nothing and calls no model. It produces the conformance table, the capability
 matrix, an explicit "analyses skipped and why" section, execution facts, token usage and
 cost coverage. Read "skipped and why" first; it is the honest boundary of the diagnosis.
 
-For the reviewable artifact pack, with `result.json`, `evidence.jsonl`, `report.md` and
-the OTLP trace beside them:
-
-```bash
-traces improve --otlp customer/scrubbed.otlp.jsonl --dir work/improvement
-```
+Keep every analysis artifact under `"$ENGAGEMENT_DIR/work"`.
+The standard deterministic pass does not call `traces improve`, which can load a local
+`traces.config.*` and invoke external analyzers.
 
 ## Day 3 — the measurable check
 
-This is the part the customer re-runs themselves, and the reason the report is worth
-paying for. `fromOtelSpans` turns spans into runs; `analyzeRuns` scores them.
+This is the check set the customer can re-run themselves.
+Run it against the prepared bundle and keep its measured output with the report.
 
-```ts
-import { analyzeRuns, fromOtelSpans } from '@tangle-network/agent-eval/contract'
-
-const runs = fromOtelSpans({ spans: scrubbed })
-const report = await analyzeRuns({ runs })
-// report.n, report.composite.mean, report.cost.mean, report.recommendations
+```bash
+./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" > "$ENGAGEMENT_DIR/work/checks.json"
 ```
 
 `checks/` holds the set to start from. Add one check per symptom the customer named in
@@ -101,40 +126,32 @@ For a repeat engagement, record to a scorecard and diff it. `diffScorecard` runs
 t-test and returns `improved | regressed | flat | new`, which is what "no regressions"
 has to mean if the claim is going to survive the customer checking it.
 
-## Day 3 — the model pass, if the customer allowed it
+## Day 3 — the diagnosis pass
 
-Skip this entirely when intake section 4 came back as deterministic-only. Everything
-above and below still runs; what the customer loses is model-written findings, not the
-measurement.
+Run this pass for either intake choice.
+An engagement created with `--no-third-party` runs the deterministic engine with zero model calls.
+The other mode adds model-written findings.
 
-Run it through `trace-mine`, not through the library. The CLI is what carries retention
-and expiry, and its isolation test proves a customer run cannot reach an internal sink,
-call GitHub, or send secrets to the model. Those properties are the engagement's safety
-story and they do not exist if you call the function directly.
+Run it through `trace-mine`, which carries retention and expiry.
+Its isolation test checks that the customer caller does not reach internal sinks or GitHub,
+and that tested content and structured-secret values stay out of the model prompt.
+Inspect retained metadata before third-party processing; span names can contain sensitive prose.
 
 ```bash
-trace-mine engagement --id <id> --label "<customer words>" --days 30   # creates ~/diagnosis/engagements/<id>/
-cp customer/scrubbed.otlp.jsonl ~/diagnosis/engagements/<id>/bundle/
 trace-mine diagnose --id <id>
 ```
 
-It reads only `~/diagnosis/engagements/<id>/bundle/*.jsonl`, accepting flat spans or OTLP,
+It reads only `"$ENGAGEMENT_DIR/bundle"/*.jsonl`, accepting flat spans or OTLP,
 and writes only `report/findings.json` and `report/diagnosis.json`. The findings document
 validates against `templates/findings.schema.json`.
+In metadata-only mode, the model receives a fixed label and no free-form intake focus.
+Span names and other remaining metadata still need inspection for customer prose.
 
-For a customer who refused third-party model processing in intake section 4:
-
-```bash
-trace-mine engagement --id <id> --label "<customer words>" --days 30 --no-third-party
-cp customer/scrubbed.otlp.jsonl ~/diagnosis/engagements/<id>/bundle/
-trace-mine diagnose --id <id>
-```
-
-That runs deterministic mode and makes no model call at all.
-
-Expiry is not optional. Every engagement carries `expiresAt`, a purge runs at 05:30, and
-`retain: true` is set only on the customer's written request. If you find yourself wanting
-to skip the expiry, you are about to keep a customer's traces without their consent.
+Expiry is not optional.
+Every engagement carries `expiresAt`, and a purge runs at 05:30.
+The 30-day expiry in the commands above is a fallback, not the handoff deletion date.
+Close the engagement when you deliver its report.
+Set `retain: true` only on the customer's written request.
 
 The library path, `diagnoseSpans` from `@tangle-network/agent-eval/diagnosis`, exists and
 this repository pins a version that has it. Use it for building tooling, not for running
@@ -147,7 +164,7 @@ whenever there is a measure, and rejects evidence span ids that do not resolve i
 guessing them. Those four properties are what make the report checkable, so if a future
 version drops one, the report has to change with it.
 
-Requires agent-eval 0.185.0 or later, which this repository now pins. Verified against
+Requires agent-eval 0.185.0 or later; this repository now pins 0.186.2. Verified against
 the published package on a real session: the document validates against
 `templates/findings.schema.json`, all seven capabilities are reported, and `notes` comes
 back empty for a customer subject as the contract requires.
@@ -173,11 +190,27 @@ Then read it back as the buyer and ask the five gate questions in
 
 ## Day 5 — hand over and delete
 
-Send the report, the checks, and the raw artifact pack. The checks are theirs to keep
+Send the report, the checks, and the sanitized artifact pack. The checks are theirs to keep
 and re-run; that is the deliverable that outlives the engagement.
 
-Delete their traces unless they asked in writing for them to be kept. Confirm the
-deletion in the handover mail, naming what was deleted.
+Delete the engagement unless the customer asked in writing to keep it:
+
+```bash
+trace-mine close --id <id> --dry-run
+trace-mine close --id <id>
+```
+
+Confirm that the returned action is `deleted` and that its directory is absent.
+The supported customer transport keeps its temporary model prompt under that directory,
+so close also removes a prompt left by a killed model call.
+Check for any operator-side trace copies created outside the engagement and delete them.
+Finish every preparation, analysis and check process before close; none may still write into this engagement.
+If close reports an operation lock, wait for the diagnosis to finish.
+Close and purge automatically reclaim locks whose recorded owner process is provably gone.
+If recovery still refuses, inspect the lock owner and process identity before retrying; do not remove an unverified active lock.
+Name the deleted incoming trace, bundle, work files, report and temporary prompt in the handover mail.
+Inspect `/tmp/trace-mine-prime-*` from any runs made before the engagement-local transport deployed.
+Check ownership and active processes before removing a legacy prompt copy.
 
 ---
 
@@ -186,7 +219,5 @@ deletion in the handover mail, naming what was deleted.
 - The `--llm` agentic analyst path needs `TANGLE_API_KEY` and the Python
   `agent-eval-rpc[dspy]` extra. Unverified here. The deterministic pass needs neither
   and is what days 2 and 3 rely on.
-- `traces improve` was read from source and docs, not executed, because it writes files.
-  Run it once against a throwaway input before the first paid engagement.
 - Casework has never run a campaign, so the worked example in `examples/casework/`
   documents the seam rather than a completed run. See its README.
