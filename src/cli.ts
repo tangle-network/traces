@@ -128,7 +128,7 @@ import {
   type SessionWorkflowIssue,
   type SessionWorkflowSummary,
 } from './session-workflow.js'
-import { assembleSessionBundle, type SessionBundleView } from './bundle.js'
+import { assembleSessionBundle, type SessionBundleView, verifySessionBundle } from './bundle.js'
 import { projectSessionBundle } from './bundle-view.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { sessionReportSource } from './report.js'
@@ -823,6 +823,38 @@ async function cmdBundle(args: Args): Promise<void> {
     `session bundle (${manifest.view} view) → ${result.directory}  (${manifest.files.length} file(s), ` +
       `${manifest.ledgerSlices.length} ledger slice(s), ${manifest.absent.length} recorded absent)`,
   )
+}
+
+/**
+ * `traces bundle verify <dir> [--format json|text]`: every listed file is on
+ * disk with its recorded size and SHA-256, and nothing unlisted sits beside
+ * them. Exit 0 when the bundle verifies, 1 when it does not.
+ */
+async function cmdBundleVerify(argv: readonly string[]): Promise<void> {
+  let dir: string | undefined
+  let format = 'text'
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    if (arg === '--format') format = argv[++i] ?? ''
+    else if (arg.startsWith('--')) throw new Error(`bundle verify: unknown flag ${arg}`)
+    else if (dir === undefined) dir = arg
+    else throw new Error(`bundle verify: unexpected argument ${arg}`)
+  }
+  if (!dir) throw new Error('bundle verify needs the bundle directory: traces bundle verify <dir>')
+  if (format !== 'json' && format !== 'text') throw new Error(`bundle verify: --format must be json or text, got "${format}"`)
+  const result = await verifySessionBundle(dir)
+  if (format === 'json') {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+  } else {
+    const lines = [
+      `${result.ok ? 'VERIFIED' : 'FAILED'}  ${result.view} bundle ${result.directory}`,
+      `  ${result.matched}/${result.listed} listed file(s) match their recorded size and SHA-256`,
+      ...result.issues.map((issue) => `  ${issue.kind.padEnd(11)} ${issue.path}: ${issue.detail}`),
+    ]
+    if (result.source) lines.push(`  source bundle manifest: ${result.source.status} (${result.source.directory})`)
+    process.stdout.write(`${lines.join('\n')}\n`)
+  }
+  if (!result.ok) process.exitCode = 1
 }
 
 const PROJECTABLE_VIEWS: readonly SessionBundleView[] = ['evidence-only']
@@ -1703,6 +1735,11 @@ Commands:
             ledger sliced to the session window, git log, and a sha256 manifest
             (needs --session <id|path> and --out <new-dir>). This is the FULL
             view: it holds the session's own words, for a reader who cites them
+  bundle verify <bundle-dir>
+            Check a bundle against its manifest: every listed file present with
+            its recorded size and SHA-256, no unlisted or non-regular file beside
+            them, and for a view, the source manifest it was projected from.
+            Exit 1 on any difference (--format text|json)
   bundle-view <bundle-dir>
             Project an assembled bundle into a narrower view for a consumer that
             must NOT read the session's own words. --view evidence-only carries
@@ -1840,6 +1877,10 @@ async function main(): Promise<void> {
   }
   if (rawArgs[0] === 'verify-findings') {
     await cmdVerifyFindings(rawArgs.slice(1))
+    return
+  }
+  if (rawArgs[0] === 'bundle' && rawArgs[1] === 'verify') {
+    await cmdBundleVerify(rawArgs.slice(2))
     return
   }
   const parsedArgs = parseArgs(rawArgs)
