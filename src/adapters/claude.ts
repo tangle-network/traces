@@ -1296,6 +1296,14 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     if (runResult) {
       root.attributes[RUN_STATUS_ATTR] = runResult.failed ? 'failed' : 'completed'
       root.status = runResult.failed ? { code: 'ERROR', message: `the run ended with ${runResult.subtype}` } : { code: 'OK' }
+    } else {
+      // The stream ended (or was cut) with no `result` record, so whether the
+      // run actually finished is unknown to this reader. Declare `running`
+      // explicitly rather than leaving the root span's status unset: an
+      // unset `run.status` reads as unknown to a trace-contract `run` rule
+      // either way, but a stated `running` gives a truthful reason instead
+      // of an opaque "unknown".
+      root.attributes[RUN_STATUS_ATTR] = 'running'
     }
     const spans: OtlpSpan[] = [root]
     appendAll(spans, main.spans)
