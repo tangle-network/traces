@@ -22,7 +22,6 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { copyFile, cp, lstat, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence } from './evidence.js'
@@ -37,6 +36,7 @@ import {
 import { collectSessionSelection, fileSha256 } from './session-selection.js'
 import { sourceFileId } from './source-location.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
+import { tracesVersion } from './version.js'
 
 export interface SessionBundleFile {
   /** Opaque source identity when this file backs native span attributes. */
@@ -585,7 +585,7 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
       transcriptPath: resolve(ref.path),
       transcriptSha256,
       contextRoot,
-      tracesVersion: tracesPackageVersion(),
+      tracesVersion: tracesVersion(),
       sessionWindow: { firstSpanAt, lastSpanAt, padMs: SESSION_WINDOW_PAD_MS },
     },
     files,
@@ -798,16 +798,4 @@ export async function verifySessionBundle(bundleDir: string): Promise<SessionBun
     issues,
     ...(source ? { source } : {}),
   }
-}
-
-let cachedVersion: string | undefined
-
-function tracesPackageVersion(): string {
-  if (cachedVersion) return cachedVersion
-  const pkg = JSON.parse(
-    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-  ) as { version?: unknown }
-  if (typeof pkg.version !== 'string' || !pkg.version) throw new Error('package.json is missing version')
-  cachedVersion = pkg.version
-  return cachedVersion
 }

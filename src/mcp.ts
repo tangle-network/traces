@@ -18,7 +18,6 @@
  *   redaction rule in either, so no boundary redaction can make it safe.
  */
 
-import { readFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { buildTraceAnalysisToolDescriptors, redact, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
@@ -26,17 +25,13 @@ import { createStdioToolServer, type McpToolDescriptor } from '@tangle-network/a
 import { openAgenticTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
 import type { OtlpSpan } from './otlp.js'
 import { redactSpans } from './redact.js'
+import { tracesVersion } from './version.js'
 
 /** Serialized bytes one tool result may carry. The store's own per-call ceiling is lower. */
 export const MCP_RESULT_BYTE_CAP = 512 * 1024
 
 export interface TraceMcpServerOptions {
   readonly spans: readonly OtlpSpan[]
-}
-
-function tracesVersion(): string {
-  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string }
-  return pkg.version ?? '0.0.0'
 }
 
 /** Build the MCP tools over the selected spans, and the redacted span file they read. */

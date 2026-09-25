@@ -131,6 +131,7 @@ import {
 import { assembleSessionBundle, type SessionBundleView, verifySessionBundle } from './bundle.js'
 import { projectSessionBundle } from './bundle-view.js'
 import { diffRuns, renderRunDiff } from './diff.js'
+import { tracesVersion } from './version.js'
 import { serveTraceMcp } from './mcp.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { sessionReportSource } from './report.js'
@@ -204,12 +205,6 @@ interface Args {
   questionsFile?: string
   /** ask: provider ceiling for one question; `--budget` bounds all of them together. */
   questionBudget?: number
-}
-
-function packageVersion(): string {
-  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
-  if (typeof pkg.version !== 'string' || !pkg.version) throw new Error('package.json is missing version')
-  return pkg.version
 }
 
 function parseArgs(argv: string[]): Args {
@@ -1928,7 +1923,7 @@ Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KE
 async function main(): Promise<void> {
   const rawArgs = process.argv.slice(2)
   if (rawArgs[0] === '--version' || rawArgs[0] === '-v' || rawArgs[0] === 'version') {
-    console.log(`traces ${packageVersion()}`)
+    console.log(`traces ${tracesVersion()}`)
     return
   }
   // replay-verify and replay-verify-batch own their flag sets; dispatch before the shared parser.
