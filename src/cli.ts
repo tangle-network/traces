@@ -3,6 +3,7 @@
  * `traces`: analyze agent traces — yours, or any system's.
  *
  *   traces validate <file|dir>
+ *   traces check   <trace> --contract contract.json [--junit out.xml] [--evidence dir]
  *   traces analyze --otlp <file|dir> [--out report.md] [--llm]
  *   traces list    [--harness claude-code] [--last 20] [--all]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
@@ -132,6 +133,17 @@ import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
+import {
+  AmbiguousTraceInputError,
+  CHECK_EXIT,
+  type CheckInputKind,
+  loadContract,
+  renderCheckText,
+  renderGithubAnnotations,
+  renderJUnit,
+  runCheck,
+  sniffCheckInput,
+} from './check.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload } from './upload.js'
 
@@ -200,6 +212,14 @@ interface Args {
   questionsFile?: string
   /** ask: provider ceiling for one question; `--budget` bounds all of them together. */
   questionBudget?: number
+  /** check: the declarative contract file. */
+  contract?: string
+  /** check: JUnit XML output path. */
+  junit?: string
+  /** check: where evidence for a trace that did not pass is written. */
+  evidence?: string
+  /** check: print GitHub workflow annotations (also on when GITHUB_ACTIONS=true). */
+  annotations: boolean
 }
 
 function packageVersion(): string {
@@ -238,6 +258,7 @@ function parseArgs(argv: string[]): Args {
     verifyFindings: false,
     replayCorpora: [],
     questions: [],
+    annotations: false,
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -291,6 +312,10 @@ function parseArgs(argv: string[]): Args {
       case '--question-budget': a.questionBudget = Number(next()); break
       case '--redactor': a.redactorCmd = next(); break
       case '--format': a.format = next(); break
+      case '--contract': a.contract = next(); break
+      case '--junit': a.junit = next(); break
+      case '--evidence': a.evidence = next(); break
+      case '--annotations': a.annotations = true; break
       case '--help':
       case '-h': a.help = true; break
       case '--yes':
@@ -309,7 +334,7 @@ function parseArgs(argv: string[]): Args {
  * artifact with `--otlp-out`: one flag, one direction, no command where the
  * same word means read here and write there.
  */
-const OTLP_INPUT_COMMANDS = new Set(['analyze', 'facts', 'investigate', 'improve', 'ask', 'stream', 'validate'])
+const OTLP_INPUT_COMMANDS = new Set(['analyze', 'check', 'facts', 'investigate', 'improve', 'ask', 'stream', 'validate'])
 
 /**
  * `--otlp` used to mean "write the artifact here" on every command. It now
@@ -498,7 +523,7 @@ async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTra
         'run `traces list` to select an ID, or pass an explicit session path',
     )
   }
-  throw new Error(
+  throw new AmbiguousTraceInputError(
     `session ID "${args.session}" is ambiguous across ${matches.length} files; ` +
       'select one harness or pass its explicit session path',
   )
@@ -702,6 +727,63 @@ async function cmdValidate(args: Args): Promise<void> {
   }
   // `validate` is read by CI: an error finding must not exit 0.
   process.exitCode = validationExitCode(validation)
+}
+
+const EVIDENCE_FORMATS = new Set(['policy-evidence', 'sandbox-events', 'openinference', 'intelligence-spans', 'chat-trajectory'])
+
+/** Route a positional trace to the reader it needs; `--format` overrides the sniff. */
+async function checkInputArgs(args: Args): Promise<Args> {
+  if (!args.input) return args
+  if (args.otlp || args.session) throw new Error('name the trace once: a positional path, --otlp, or --session')
+  const info = await stat(args.input)
+  let kind: CheckInputKind
+  if (args.format && EVIDENCE_FORMATS.has(args.format)) kind = 'evidence'
+  else if (args.format === 'otlp' || args.format === 'claude-code' || args.format === 'codex') kind = args.format
+  else if (args.format) throw new Error(`unknown --format "${args.format}" (otlp, claude-code, codex, or an evidence format)`)
+  else kind = info.isDirectory() ? 'otlp' : await sniffCheckInput(args.input)
+  if (kind === 'otlp') return { ...args, otlp: args.input, input: undefined }
+  if (kind === 'evidence') return args
+  return { ...args, harness: kind, harnessExplicit: true, session: args.input, input: undefined }
+}
+
+/**
+ * `traces check` — gate a run on a trace contract. Exit 0 pass, 1 fail, 2 bad
+ * contract or a rule that could not run, 3 unreadable trace, 4 ambiguous trace
+ * reference. Evidence for every trace that did not pass goes to `--evidence`.
+ */
+async function cmdCheck(args: Args): Promise<void> {
+  if (!args.contract) {
+    process.stderr.write('error: check needs --contract <contract.json>\n')
+    process.exitCode = CHECK_EXIT.badContract
+    return
+  }
+  let loaded: Awaited<ReturnType<typeof loadContract>>
+  try {
+    loaded = await loadContract(args.contract)
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exitCode = CHECK_EXIT.badContract
+    return
+  }
+  for (const warning of loaded.warnings) process.stderr.write(`warning: ${warning}\n`)
+  let spans: OtlpSpan[]
+  try {
+    spans = (await collectSpans(await checkInputArgs(args))).spans
+    if (spans.length === 0) throw new Error('the trace holds no spans')
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exitCode = error instanceof AmbiguousTraceInputError ? CHECK_EXIT.ambiguous : CHECK_EXIT.unreadable
+    return
+  }
+  const report = await runCheck(loaded.contract, spans, { evidenceRoot: args.evidence ?? join('.traces', 'check') })
+  console.log(renderCheckText(report))
+  if (args.junit) await writeFile(args.junit, renderJUnit(report), 'utf8')
+  if (args.out) await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+  if (args.annotations || process.env.GITHUB_ACTIONS === 'true') {
+    const annotations = renderGithubAnnotations(report)
+    if (annotations) console.log(annotations)
+  }
+  process.exitCode = report.exitCode
 }
 
 async function cmdConvert(args: Args): Promise<void> {
@@ -1676,6 +1758,12 @@ Two ways in:
 
 Commands:
   validate  Report what a trace can and cannot answer (exit 1 on error findings)
+  check     Gate a run on a trace contract: check <trace> --contract <file.json>
+            [--junit out.xml] [--out report.json] [--evidence dir] [--annotations].
+            <trace> is OTLP spans (file or dir), a Claude Code or Codex session
+            file, or trace evidence; --format names it when the sniff cannot.
+            Exit 0 pass, 1 fail, 2 bad contract or a rule could not run,
+            3 unreadable trace, 4 ambiguous trace reference
   list      List discovered sessions
   analyze   Run analyst suite + loop/waste pipelines over OTLP (--otlp), sessions,
             or an input file; names every analysis the spans could not support
@@ -1863,6 +1951,7 @@ async function main(): Promise<void> {
     case 'list': await cmdList(args); break
     case 'analyze': await cmdAnalyze(args); break
     case 'validate': await cmdValidate(args); break
+    case 'check': await cmdCheck(args); break
     case 'investigate': await cmdInvestigate(args); break
     case 'improve': await cmdImprove(args); break
     case 'ask': await cmdAsk(args); break
@@ -1884,5 +1973,6 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
-  process.exitCode = 1
+  // A check that did not complete is neither a pass nor a proven failure.
+  process.exitCode = process.argv[2] === 'check' ? CHECK_EXIT.badContract : 1
 })

@@ -23,6 +23,7 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Gate CI on a trace contract](#gate-ci-on-a-trace-contract)
 - [Integrate your own system](#integrate-your-own-system)
 - [What it finds](#what-it-finds)
 - [Supported harnesses](#supported-harnesses)
@@ -62,6 +63,7 @@ Requires Node ≥ 22.
 traces validate spans.otlp.jsonl                  # what can this trace answer?
 traces analyze  --otlp spans.otlp.jsonl           # analyse it, no adapter involved
 traces analyze --harness claude-code --last 1     # or read a coding agent's own log
+traces check session.jsonl --contract contract.json # gate CI on the path the run took
 traces improve --harness claude-code --last 5 --dir .traces/improvement
 traces watch --all
 traces stream --all --mode findings
@@ -81,6 +83,39 @@ See [Trace analysts](#trace-analysts).
 `traces improve` is the reviewable action path.
 It writes one typed result, one report, flattened evidence rows, and the canonical OTLP trace.
 Each finding already contains the claim, evidence, recommended action, confidence, and validation plan.
+
+## Gate CI on a trace contract
+
+Two runs can give the same answer while one of them calls a forbidden tool.
+An output check passes both; a trace contract fails the wrong one.
+
+```json
+{
+  "name": "refund-desk",
+  "run": { "requireCompleted": true, "maxDurationMs": 300000 },
+  "tools": { "required": ["Read"], "forbidden": ["Bash"], "allowed": ["Read", "Grep", "Glob"], "maxCalls": 10 },
+  "llm": { "maxCalls": 10 }
+}
+```
+
+```bash
+traces check ~/.claude/projects/<project>/<session>.jsonl --contract refund-desk.json --junit contract.xml
+```
+
+The trace is OTLP spans (a file or a directory), a Claude Code or Codex session file, or trace evidence; `--format` names it when the file could be read as more than one.
+Every rule prints `pass`, `fail`, `error`, or `skipped` (a rule of an alternative path that did not decide the result).
+
+| Exit | Meaning |
+|---|---|
+| 0 | Every rule passed. |
+| 1 | A rule failed. |
+| 2 | The contract is malformed or contradicts itself, or a rule could not be evaluated. |
+| 3 | The trace could not be read. |
+| 4 | The trace reference is ambiguous. |
+
+`--junit` writes one test case per rule, and GitHub annotations print under `GITHUB_ACTIONS=true` or `--annotations`.
+For a trace that does not pass, the verdict, the contract, its plain-language statement, and the redacted spans the violations cite go to `--evidence` (default `.traces/check`).
+The contract keys and rule semantics are in [agent-eval's trace-contract guide](https://github.com/tangle-network/agent-eval/blob/main/docs/trace-contracts.md).
 
 ## Integrate your own system
 
@@ -249,6 +284,7 @@ traces improve --all --last 10 --dir .traces/improvement
 traces ask --harness codex --session <id> --question "Which commands failed?"
 traces facts --harness codex --session <id>        # the deterministic facts sheet, $0
 traces analyze  --all --since 2026-06-18 --out report.md
+traces check   spans.otlp.jsonl --contract c.json --junit c.xml  # exit 0 pass, 1 fail, 2 bad contract, 3 unreadable, 4 ambiguous
 traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
 traces validate results/sessions --out conformance.md  # a whole directory of exports
 traces analyze  --otlp spans.otlp.jsonl            # analyse foreign OTLP, no adapter
@@ -297,7 +333,11 @@ See [Replay verification](./docs/replay-verify.md) for setup, semantics, and hon
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory; `ask`: write `answers.json` + `report.md` there |
-| `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `analyze`, `investigate`, `improve`, `ask`, `stream` |
+| `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `check`, `analyze`, `investigate`, `improve`, `ask`, `stream` |
+| `--contract <file>` | `check`: the declarative trace contract (JSON) |
+| `--junit <file>` | `check`: write JUnit XML, one test case per rule |
+| `--evidence <dir>` | `check`: where evidence for a trace that did not pass goes (default `.traces/check`) |
+| `--annotations` | `check`: print GitHub workflow annotations (on by default under `GITHUB_ACTIONS=true`) |
 | `--otlp-out <path>` | **WRITE** the OTLP artifact here (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
 | `--source-bundle <dir>` | `analyze` / `investigate` / `improve` / `ask`: read a retained full bundle and explicitly grant source-field reads |
