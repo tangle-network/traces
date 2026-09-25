@@ -121,6 +121,7 @@ Every rule prints `pass`, `fail`, `error`, or `skipped` (a rule of an alternativ
 | 4 | The trace reference is ambiguous. |
 
 `--junit` writes one test case per rule, and GitHub annotations print under `GITHUB_ACTIONS=true` or `--annotations`.
+`traces check --contract <file> --explain` prints what each compiled rule checks and reads no trace.
 For a trace that does not pass, the verdict, the contract, its plain-language statement, and the redacted spans the violations cite go to `--evidence` (default `.traces/check`).
 The contract keys and rule semantics are in [agent-eval's trace-contract guide](https://github.com/tangle-network/agent-eval/blob/main/docs/trace-contracts.md).
 

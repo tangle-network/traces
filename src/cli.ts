@@ -135,6 +135,7 @@ import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
+import { explainTraceContract } from '@tangle-network/agent-eval'
 import {
   AmbiguousTraceInputError,
   CHECK_EXIT,
@@ -222,6 +223,8 @@ interface Args {
   evidence?: string
   /** check: print GitHub workflow annotations (also on when GITHUB_ACTIONS=true). */
   annotations: boolean
+  /** check: print what the contract checks, one rule per line, and read no trace. */
+  explain: boolean
 }
 
 function packageVersion(): string {
@@ -261,6 +264,7 @@ function parseArgs(argv: string[]): Args {
     replayCorpora: [],
     questions: [],
     annotations: false,
+    explain: false,
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -318,6 +322,7 @@ function parseArgs(argv: string[]): Args {
       case '--junit': a.junit = next(); break
       case '--evidence': a.evidence = next(); break
       case '--annotations': a.annotations = true; break
+      case '--explain': a.explain = true; break
       case '--help':
       case '-h': a.help = true; break
       case '--yes':
@@ -768,6 +773,10 @@ async function cmdCheck(args: Args): Promise<void> {
     return
   }
   for (const warning of loaded.warnings) process.stderr.write(`warning: ${warning}\n`)
+  if (args.explain) {
+    console.log(explainTraceContract(loaded.contract))
+    return
+  }
   let spans: OtlpSpan[]
   try {
     spans = (await collectSpans(await checkInputArgs(args))).spans
@@ -1795,8 +1804,10 @@ Commands:
   validate  Report what a trace can and cannot answer (exit 1 on error findings)
   check     Gate a run on a trace contract: check <trace> --contract <file.json>
             [--junit out.xml] [--out report.json] [--evidence dir] [--annotations].
-            <trace> is OTLP spans (file or dir), a Claude Code or Codex session
-            file, or trace evidence; --format names it when the sniff cannot.
+            check --contract <file.json> --explain prints what the contract checks.
+            <trace> is claude -p stream-json output, OTLP spans (file or dir),
+            a Claude Code or Codex session file, or trace evidence; --format
+            names it when the sniff cannot.
             Exit 0 pass, 1 fail, 2 bad contract or a rule could not run,
             3 unreadable trace, 4 ambiguous trace reference
   list      List discovered sessions
