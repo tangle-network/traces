@@ -214,7 +214,7 @@ not the way to integrate a system you own — for that, [emit the contract](#int
 
 | Harness (aliases) | Reads from | Status |
 |---|---|---|
-| `claude-code` (`claude`, `claudish`, `openclaw`, `nanoclaw`) | `~/.claude/projects/<cwd>/*.jsonl` (+ subagent sidechains) | verified |
+| `claude-code` (`claude`, `claudish`, `openclaw`, `nanoclaw`) | `~/.claude/projects/<cwd>/*.jsonl` (+ subagent sidechains), or an explicit `claude -p --output-format stream-json --verbose` JSONL file | verified |
 | `codex` (`codex-acp`) | `~/.codex/sessions/**/rollout-*.jsonl` | verified |
 | `codex-exec` (`codex-json`) | explicit `codex exec --json` JSONL file | fixture |
 | `opencode` | `~/.local/share/opencode/storage/` | verified |
@@ -228,6 +228,8 @@ not the way to integrate a system you own — for that, [emit the contract](#int
 
 Every adapter captures the conversation stored in one session file: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage.
 Claude Code's nested subagent files are folded into the parent trace.
+Claude Code's stream-json output also records the tools the harness offered the model and whether the run failed.
+The root span keeps them as `gen_ai.tool.definitions` and `run.status`, so a trace contract can check what the harness enforced.
 Claude source UUIDs remain searchable in `traces.claude.source_*` attributes, while exported OTLP IDs use deterministic `deriveHexId` values.
 The Claude transcript proves turns and tool calls, but does not prove loop iterations or causal links, so those fields remain absent.
 Codex stores each worker in a separate session file; add `--workflow` to resolve the connected coordinator and worker files.
@@ -678,7 +680,7 @@ halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 `traces export` accepts:
 
 - compact `traces.policy_evidence.session` JSONL from `traces evidence`
-- JSON arrays with `start`, `raw`, `result`, `done`, and `error` events
+- JSON arrays with `start`, `raw`, `result`, `done`, and `error` events. A tool call becomes one span, keyed by its message part id, however many events report on that part. The Sandbox SDK records each call as a `message.part.updated` event and again as the harness's raw `tool_use` event. The span takes its start from the part's first event, its final state from the last, and `ERROR` if any event reported one. The root span's `traces.event.tool_part_updates_merged` counts the events folded in.
 - existing OpenInference JSONL, rewritten through the local redaction path
 - chat message arrays and objects with a `messages` array
 
