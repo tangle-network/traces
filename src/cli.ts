@@ -130,6 +130,8 @@ import {
 } from './session-workflow.js'
 import { assembleSessionBundle, type SessionBundleView, verifySessionBundle } from './bundle.js'
 import { projectSessionBundle } from './bundle-view.js'
+import { diffRuns, renderRunDiff } from './diff.js'
+import { serveTraceMcp } from './mcp.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
@@ -311,33 +313,16 @@ function parseArgs(argv: string[]): Args {
  * artifact with `--otlp-out`: one flag, one direction, no command where the
  * same word means read here and write there.
  */
-const OTLP_INPUT_COMMANDS = new Set(['analyze', 'facts', 'investigate', 'improve', 'ask', 'stream', 'validate'])
+const OTLP_INPUT_COMMANDS = new Set(['analyze', 'facts', 'investigate', 'improve', 'ask', 'stream', 'validate', 'mcp'])
 
-/**
- * `--otlp` used to mean "write the artifact here" on every command. It now
- * means "read this" — so on a WRITING command the old spelling is honoured for
- * one minor with a warning, rather than turning a working script into a hard
- * error at the moment the reader was introduced. Removed in 0.12.
- */
-function migrateWritingOtlpFlag(args: Args): Args {
-  if (args.otlp === undefined || OTLP_INPUT_COMMANDS.has(args.command)) return args
-  if (args.otlpOut !== undefined) {
+function validateOtlpSelection(args: Args): Args {
+  if (args.otlp === undefined) return args
+  if (!OTLP_INPUT_COMMANDS.has(args.command)) {
     throw new Error(
-      `${args.command} was given both --otlp and --otlp-out. --otlp is the deprecated spelling of ` +
-        '--otlp-out on writing commands; pass only --otlp-out.',
+      `${args.command} does not read --otlp. --otlp reads OTLP-JSONL on ${[...OTLP_INPUT_COMMANDS].join(', ')}; ` +
+        'use --otlp-out <path> to write the artifact.',
     )
   }
-  console.error(
-    `warning: --otlp is deprecated on \`${args.command}\` and will be removed in 0.12. ` +
-      '--otlp now READS OTLP-JSONL; use --otlp-out <path> to write the artifact. ' +
-      'Treating it as --otlp-out for this run.',
-  )
-  return { ...args, otlpOut: args.otlp, otlp: undefined }
-}
-
-function validateOtlpSelection(raw: Args): Args {
-  const args = migrateWritingOtlpFlag(raw)
-  if (args.otlp === undefined) return args
   if (args.input) throw new Error('--otlp cannot be combined with an input file')
   if (args.session) throw new Error('--otlp reads a file and cannot be combined with --session')
   if (args.supervisorRunDir) throw new Error('--otlp cannot be combined with --supervisor-run-dir')
@@ -823,6 +808,59 @@ async function cmdBundle(args: Args): Promise<void> {
     `session bundle (${manifest.view} view) → ${result.directory}  (${manifest.files.length} file(s), ` +
       `${manifest.ledgerSlices.length} ledger slice(s), ${manifest.absent.length} recorded absent)`,
   )
+}
+
+/**
+ * `traces mcp`: serve the selected spans to an MCP client over stdio. Stdout
+ * carries the protocol, so everything else this command says goes to stderr.
+ */
+async function cmdMcp(args: Args): Promise<void> {
+  if (args.help) {
+    process.stdout.write(`traces mcp — read-only MCP server over stdio for the selected traces
+
+Usage:
+  traces mcp --otlp <file|dir>                  any OTLP-JSONL
+  traces mcp --harness claude-code --last 5     recent harness sessions (any selection flag)
+
+Register with a client, for example:
+  claude mcp add traces -- traces mcp --otlp ./spans.otlp.jsonl
+
+Every tool is read-only and idempotent and says so in its MCP annotations.
+Spans and results are redacted, each result carries an untrusted-text notice,
+and a result above 512 KiB is refused rather than truncated. readSpanSource is
+not served: windowed reads of original source bytes cannot be redacted.
+`)
+    return
+  }
+  const selected = validateOtlpSelection(validateWorkflowSelection(applyCurrentSessionSelection(args)))
+  const collected = await collectSpans(selected)
+  if (collected.spans.length === 0) throw new Error('mcp: no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  process.stderr.write(`traces mcp: serving ${collected.spans.length} span(s) over stdio\n`)
+  await serveTraceMcp({ spans: collected.spans })
+}
+
+/**
+ * `traces diff <a> <b> [--format text|json]`: pair the two runs' steps and
+ * mark where they first diverge. Exit 1 when they diverge, like diff(1).
+ */
+async function cmdDiff(argv: readonly string[]): Promise<void> {
+  const inputs: string[] = []
+  const kinds: string[] = []
+  let format = 'text'
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    if (arg === '--format') format = argv[++i] ?? ''
+    else if (arg === '--kind') kinds.push(argv[++i] ?? '')
+    else if (arg.startsWith('--')) throw new Error(`diff: unknown flag ${arg}`)
+    else inputs.push(arg)
+  }
+  if (inputs.length !== 2) throw new Error('diff needs two runs: traces diff <a> <b> (a file, a directory, or file#<trace id>)')
+  if (format !== 'json' && format !== 'text') throw new Error(`diff: --format must be json or text, got "${format}"`)
+  if (kinds.some((kind) => !kind)) throw new Error('diff: --kind needs a span kind, e.g. --kind TOOL')
+  const report = await diffRuns(inputs[0]!, inputs[1]!, { kinds })
+  process.stdout.write(format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
+  if (report.diff.firstDivergence) process.exitCode = 1
 }
 
 /**
@@ -1735,6 +1773,16 @@ Commands:
             ledger sliced to the session window, git log, and a sha256 manifest
             (needs --session <id|path> and --out <new-dir>). This is the FULL
             view: it holds the session's own words, for a reader who cites them
+  mcp       Serve the selected traces to an MCP client over stdio: 7 read-only,
+            idempotent trace tools; spans and results redacted, results capped
+            and marked untrusted (traces mcp --help)
+  diff <a> <b>
+            Pair two runs' steps (by span id, then position with the same name
+            and kind, then name and kind anywhere) and mark the first divergence:
+            changed, replaced, only-in-a, only-in-b or reordered. Each run is an
+            OTLP file or directory, any file convert reads, or file#<trace id>.
+            --kind TOOL (repeatable) keeps only steps of that span kind.
+            Exit 1 when the runs diverge (--format text|json)
   bundle verify <bundle-dir>
             Check a bundle against its manifest: every listed file present with
             its recorded size and SHA-256, no unlisted or non-regular file beside
@@ -1790,9 +1838,8 @@ Options:
                    A directory reads the OTLP files under it — only the otlp/
                    subdirectory when the producer made one — and names the JSONL
                    that is not OTLP instead of reading it as broken spans.
-                   Supported by: validate, analyze, investigate, improve, ask, stream.
-                   On a WRITING command it is the deprecated spelling of
-                   --otlp-out; it still works, with a warning, until 0.12.
+                   Supported by: validate, analyze, facts, investigate, improve, ask,
+                   stream, mcp. Writing commands take --otlp-out.
   --source-bundle <dir>  Analyze a retained full bundle; explicitly grant source-field reads.
                    Available for analyze, investigate, improve, and ask.
   --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
@@ -1877,6 +1924,14 @@ async function main(): Promise<void> {
   }
   if (rawArgs[0] === 'verify-findings') {
     await cmdVerifyFindings(rawArgs.slice(1))
+    return
+  }
+  if (rawArgs[0] === 'mcp') {
+    await cmdMcp(parseArgs(rawArgs))
+    return
+  }
+  if (rawArgs[0] === 'diff') {
+    await cmdDiff(rawArgs.slice(1))
     return
   }
   if (rawArgs[0] === 'bundle' && rawArgs[1] === 'verify') {

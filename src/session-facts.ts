@@ -41,6 +41,7 @@
 
 import type { TraceAnalystDefinition } from '@tangle-network/agent-eval/analyst'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
+import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import {
   INHERITED_SOURCE_ATTR,
@@ -226,6 +227,12 @@ export interface SessionFacts {
   readonly lastRecordAt: SessionFact<string>
   /** The harness's own cumulative token total, when a span carries it. */
   readonly tokenTotal: SessionFact<number>
+  /**
+   * The session's first failure by agent-eval's fixed precedence: the innermost
+   * ERROR span that ended first, else a failed `agent.outcome`, else `none`.
+   * Failures that ended at the same instant are `ambiguous`, never guessed.
+   */
+  readonly firstFailure: FirstFailure
 }
 
 export interface SessionFactsReport {
@@ -828,6 +835,7 @@ function sessionFactsForTrace(
     lastRecordAt: lastSpan
       ? { value: lastSpan.end_time, spanIds: [lastSpan.span_id], unavailable: null }
       : { value: null, spanIds: [], unavailable: "no span of this session's own records carries a parseable end time" },
+    firstFailure: rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans),
     tokenTotal: tokenSpan
       ? {
           value: tokenSpan.attributes[SESSION_TOKEN_TOTAL_ATTR] as number,
@@ -923,6 +931,7 @@ export function renderSessionFacts(report: SessionFactsReport): string {
     lines.push(factLine('first record', facts.firstRecordAt, String(facts.firstRecordAt.value)))
     lines.push(factLine('last record', facts.lastRecordAt, String(facts.lastRecordAt.value)))
     lines.push(factLine('token total', facts.tokenTotal, String(facts.tokenTotal.value)))
+    lines.push(`  first failure: ${renderFirstFailure(facts.firstFailure)}`)
     if ((facts.unreadRecords.value ?? 0) > 0) {
       lines.push(`  unread records: ${facts.unreadRecords.value} (the facts above are computed from the rest)`)
     }
@@ -931,6 +940,15 @@ export function renderSessionFacts(report: SessionFactsReport): string {
     }
   }
   return `${lines.join('\n')}\n`
+}
+
+function renderFirstFailure(failure: FirstFailure): string {
+  if (failure.status === 'none') return `none recorded (${failure.reason})`
+  if (failure.status === 'ambiguous') {
+    return `ambiguous ${failure.stage}: ${failure.reason} (${failure.candidates.join(', ')})`
+  }
+  const message = failure.message ? ` — ${failure.message.split('\n')[0]?.slice(0, 160)}` : ''
+  return `${failure.stage} ${failure.kind} "${failure.name}" [${failure.spanId}], blame ${failure.blame}${message}`
 }
 
 /**
@@ -1058,6 +1076,7 @@ interface CompactFacts {
   first_record_at: unknown
   last_record_at: unknown
   token_total: unknown
+  first_failure: Record<string, unknown>
 }
 
 function factJson(fact: SessionFact<unknown>): unknown {
@@ -1140,6 +1159,23 @@ function compactFacts(facts: SessionFacts): CompactFacts {
     first_record_at: factJson(facts.firstRecordAt),
     last_record_at: factJson(facts.lastRecordAt),
     token_total: factJson(facts.tokenTotal),
+    first_failure: compactFirstFailure(facts.firstFailure),
+  }
+}
+
+function compactFirstFailure(failure: FirstFailure): Record<string, unknown> {
+  if (failure.status === 'none') return { status: 'none', reason: failure.reason }
+  if (failure.status === 'ambiguous') {
+    return { status: 'ambiguous', stage: failure.stage, reason: failure.reason, span_ids: failure.candidates }
+  }
+  return {
+    status: 'found',
+    stage: failure.stage,
+    span_id: failure.spanId,
+    name: failure.name,
+    kind: failure.kind,
+    blame: failure.blame,
+    message: failure.message,
   }
 }
 
@@ -1168,7 +1204,7 @@ export function sessionFactsContext(
  * prepared context changed is a different analyst. Wrapping therefore bumps the
  * version instead of quietly changing what the same version does.
  */
-export const SESSION_FACTS_VERSION_SUFFIX = 'session-facts.1'
+export const SESSION_FACTS_VERSION_SUFFIX = 'session-facts.2'
 
 /**
  * Supply the sheet to every definition as prepared context, before the model

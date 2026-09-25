@@ -484,27 +484,6 @@ describe('traces analyze --otlp', () => {
     expect(artifactValidation.stdout).toContain('NOT a substitute for validating the source')
   })
 
-  it('accepts the deprecated --otlp on a writing command, with a warning, and still writes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-otlp-flag-'))
-    const source = await writeRows(dir, 'spans.otlp.jsonl', conformingRows())
-    const out = join(dir, 'out.jsonl')
-
-    const result = await runCli(['export', source, '--otlp', out])
-    expect(result.code).toBe(0)
-    expect(result.stderr).toContain('--otlp is deprecated')
-    expect(result.stderr).toContain('--otlp-out')
-    expect((await readFile(out, 'utf8')).trim().split('\n')).toHaveLength(4)
-  })
-
-  it('refuses --otlp AND --otlp-out together on a writing command', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-otlp-both-'))
-    const source = await writeRows(dir, 'spans.otlp.jsonl', conformingRows())
-
-    const result = await runCli(['export', source, '--otlp', join(dir, 'a.jsonl'), '--otlp-out', join(dir, 'b.jsonl')])
-    expect(result.code).toBe(1)
-    expect(result.stderr).toContain('deprecated spelling')
-  })
-
   it('fails with an actionable message when a file holds no analyzable span', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-otlp-empty-'))
     const path = join(dir, 'junk.jsonl')

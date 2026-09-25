@@ -32,6 +32,8 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Improvement engine](#improvement-engine)
 - [Ask questions](#ask-questions)
 - [Session facts](#session-facts)
+- [Diff two runs](#diff-two-runs)
+- [MCP server](#mcp-server)
 - [Session index](#session-index)
 - [Session bundle](#session-bundle) · [Two views](#two-views-two-consumers)
 - [Policy-mining evidence](#policy-mining-evidence)
@@ -125,9 +127,7 @@ files are read — every other JSONL is listed in the report with what it actual
 holds, rather than counted as several hundred broken spans. Put the exports in an
 `otlp/` subdirectory and that decides it outright.
 
-On a writing command (`convert`, `export`, `evidence`, `upload`), `--otlp` is the
-DEPRECATED spelling of `--otlp-out`. It still works, with a warning, and is
-removed in 0.12.
+Writing commands (`convert`, `export`, `evidence`, `upload`) take `--otlp-out`; they refuse `--otlp`.
 
 `parent_span_id` is CONTAINMENT — this span happened inside that one. `links` is
 CAUSALITY — that verdict caused this retry. Encoding causality as a parent claims
@@ -248,6 +248,8 @@ traces investigate --all --last 10 --out report.md  # explicit investigation ali
 traces improve --all --last 10 --dir .traces/improvement
 traces ask --harness codex --session <id> --question "Which commands failed?"
 traces facts --harness codex --session <id>        # the deterministic facts sheet, $0
+traces diff  run-a.otlp.jsonl run-b.otlp.jsonl      # where two runs of one task first diverge
+traces mcp   --otlp spans.otlp.jsonl                # read-only trace tools for an MCP client
 traces analyze  --all --since 2026-06-18 --out report.md
 traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
 traces validate results/sessions --out conformance.md  # a whole directory of exports
@@ -534,6 +536,7 @@ traces facts --otlp spans.otlp.jsonl --out facts.json
 | `firstRecordAt` / `lastRecordAt` | the earliest span start and latest span end among this session's own records — a subagent that outlives the session does not stretch its window |
 | `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
 | `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
+| `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none`. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own |
 
 Three rules hold for every field:
 
@@ -544,6 +547,41 @@ Three rules hold for every field:
 `facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
 
 The same sheet reaches the model-backed analysts as prepared context, before their first model call — see [Trace analysts](docs/trace-analysts.md#session-facts-as-prepared-context).
+
+## Diff two runs
+
+`traces diff` pairs the steps of two runs of the same task and marks where they first stop agreeing.
+
+```bash
+traces diff runs/a/otlp runs/b/otlp                     # two OTLP exports
+traces diff a.sdk-events.jsonl b.sdk-events.jsonl --kind TOOL   # any file convert reads; tool calls only
+traces diff spans.otlp.jsonl#<trace id> other.jsonl --format json
+```
+
+Steps pair by span id first, then by position with the same name and kind, then by name and kind anywhere.
+One inserted step therefore does not mark every later step as changed.
+Paired steps compare status, tool and model.
+The first divergence is `changed`, `replaced`, `only-in-a`, `only-in-b` or `reordered`, with its reason, followed by every changed and unpaired step.
+`--kind` keeps only steps of that span kind, so event noise in a raw stream does not decide the first divergence.
+The diff is agent-eval's `diffSteps`; this command reads the runs and prints it.
+It exits 1 when the runs diverge and 0 when they agree.
+
+## MCP server
+
+`traces mcp` serves the selected traces to an MCP client over stdio.
+
+```bash
+claude mcp add traces -- traces mcp --otlp ./spans.otlp.jsonl
+claude mcp add traces -- traces mcp --harness claude-code --last 5
+```
+
+It serves agent-eval's seven trace tools: `getDatasetOverview`, `queryTraces`, `countTraces`, `viewTrace`, `viewSpans`, `searchTrace` and `searchSpan`.
+Each tool declares `readOnlyHint` and `idempotentHint` in its MCP annotations, and its description says that returned trace text is untrusted.
+
+- The spans are redacted before the store is built, so a search cannot match a secret, and each result is redacted again.
+- Each result carries an `untrusted` notice beside it.
+- A result above 512 KiB is refused with an error rather than truncated.
+- `readSpanSource` is not served. It reads original source bytes in windows the caller picks, and a secret split across two windows matches no redaction rule.
 
 ## Session index
 
