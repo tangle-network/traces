@@ -258,11 +258,11 @@ const FIXTURES: readonly RoundTripFixture[] = [
     ],
     exercises: ['unknown-span-kind'],
     erased: {
-      'unknown-span-kind': 'the substitution resolves the ambiguity, not just records it: this span\'s ' +
-        'usage/model attributes are LLM-shaped, so the reader infers LLM and declares that on the export ' +
-        '(the producer\'s own word is kept verbatim under `traces.raw_attribute.openinference.span.kind`, ' +
-        'and the substitution under `traces.substituted_fields`). The artifact is a genuinely valid, ' +
-        'unambiguous LLM span, so re-validating it has nothing left to call unknown',
+      'unknown-span-kind': 'agent-trace-contract 1.2.0 classifies an unrecognised-kind span from its ' +
+        'model attribute (row 2, evidence-based inference), so the reader resolves this one to LLM — ' +
+        "the artifact's own openinference.span.kind is LLM, a recognised word, even though the producer's " +
+        'original word is still kept verbatim under traces.raw_attribute.openinference.span.kind. ' +
+        'The second hop reads a properly declared LLM span and earns no finding',
     },
   },
   {
