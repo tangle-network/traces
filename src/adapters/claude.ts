@@ -32,7 +32,7 @@ import {
   LLM_INPUT_TOKENS,
   LLM_OUTPUT_TOKENS,
 } from '@tangle-network/agent-eval/trace-attributes'
-import { deriveHexId } from '@tangle-network/agent-trace-contract'
+import { ATTR, deriveHexId, type ParentConfidence } from '@tangle-network/agent-trace-contract'
 import { sessionJsonlOptions } from '../integrity.js'
 import { appendAll } from '../arrays.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
@@ -1048,6 +1048,8 @@ interface ClaudeSubagentFile {
   agentId: string
   meta: SubagentMeta
   parentToolUseId?: string
+  /** How `parentToolUseId` was chosen; absent means the child recorded it. */
+  parentConfidence?: ParentConfidence
   parsed?: ParsedStream
 }
 
@@ -1297,6 +1299,15 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       root.attributes[RUN_STATUS_ATTR] = runResult.failed ? 'failed' : 'completed'
       root.status = runResult.failed ? { code: 'ERROR', message: `the run ended with ${runResult.subtype}` } : { code: 'OK' }
     }
+    // No `result` record: this reader cannot tell a `-p --output-format
+    // stream-json` run that was still in flight (or was killed) from an
+    // ordinary saved session transcript, which never carries one — that
+    // record type only exists in `-p` mode. Leaving `run.status` unset is
+    // truthful for both: agent-eval's trace-contract `run` rule already
+    // treats an unset status as unknown rather than completed (agent-eval
+    // fail-closed fix), so declaring it `running` here would be accurate for
+    // a truncated stream but actively wrong for a finished interactive
+    // session.
     const spans: OtlpSpan[] = [root]
     appendAll(spans, main.spans)
 
@@ -1370,13 +1381,14 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
           workflowBindings,
         )
         const parsed = await parseClaudeSubagent(ref, traceId, agent, options)
-        const binding = selectWorkflowBinding(
+        const { binding, confidence } = selectWorkflowBinding(
           basename(file),
           runBindings,
           firstSubagentTimestamp(agent, parsed),
           meta.toolUseId,
         )
         agent.parentToolUseId = binding.toolUseId
+        agent.parentConfidence = confidence
       }
       agents.push(agent)
     }
@@ -1467,10 +1479,18 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       const parentAgentMissing = Boolean(
         agent.meta.parentAgentId && !parsedByAgentId.has(agent.meta.parentAgentId),
       )
+      // A child whose parent call is missing hangs off the root only so it is not lost;
+      // the root is a placeholder, not a chosen parent.
+      const confidence: ParentConfidence = parentSpan
+        ? (agent.parentConfidence ?? 'correlated')
+        : 'unknown'
       const task = subagentTaskName(agent)
       const lifecycle = subagentLifecycleSpan(agent, parsed, traceId, parent, task, subDir)
       for (const item of [...parsed.spans, ...(lifecycle ? [lifecycle] : [])]) {
-        if (item.parent_span_id === `root:${traceId}`) item.parent_span_id = parent
+        if (item.parent_span_id === `root:${traceId}` || item === lifecycle) {
+          item.parent_span_id = parent
+          item.attributes[ATTR.parentConfidence] = confidence
+        }
         // Every span here came from the CHILD's transcript. Marking it says so,
         // which is what keeps the parent's tool count, changed files, human
         // turns and record window from absorbing work the parent never did.

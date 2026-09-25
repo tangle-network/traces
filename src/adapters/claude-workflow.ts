@@ -190,12 +190,20 @@ export function bindWorkflowSubagent(
   return localBindings
 }
 
+/**
+ * The Workflow call a subagent transcript belongs to, and how it was chosen.
+ *
+ * `correlated` when an id both sides recorded decides it: the child's own
+ * tool-use id, or a run id only one call returned. A resumed Workflow returns
+ * the same run id from several calls; a child that names no tool-use id then
+ * goes to the latest call that started before it, which is `heuristic`.
+ */
 export function selectWorkflowBinding(
   file: string,
   bindings: readonly WorkflowRunBinding[],
   childStartedAt: string,
   explicitToolUseId?: string,
-): WorkflowRunBinding {
+): { binding: WorkflowRunBinding; confidence: 'correlated' | 'heuristic' } {
   const childStartedMs = Date.parse(childStartedAt)
   if (!Number.isFinite(childStartedMs)) {
     throw new ClaudeTaskScopeError(
@@ -234,5 +242,8 @@ export function selectWorkflowBinding(
       `Cannot link Claude Workflow subagent ${file}: parent call is ambiguous`,
     )
   }
-  return latest[0]!
+  return {
+    binding: latest[0]!,
+    confidence: explicitToolUseId || bindings.length === 1 ? 'correlated' : 'heuristic',
+  }
 }
