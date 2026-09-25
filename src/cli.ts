@@ -52,16 +52,18 @@ import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
-import { cmdReplayVerifyBatch } from './replay-batch.js'
-import { cmdReplayVerify } from './replay-verify.js'
 import {
+  parseCorpusFlag,
+  renderVerifiedFindingsSection,
+  type VerifyFindingsRun,
+} from '@tangle-network/agent-eval/trajectory-replay'
+import {
+  cmdReplayVerify,
+  cmdReplayVerifyBatch,
   cmdVerifyFindings,
   DEFAULT_SANDBOX_BASE_URL,
-  renderVerifiedFindingsSection,
-  verifyFindings,
-  type VerifyFindingsRun,
-} from './analyze-verify.js'
-import { parseCorpusFlag } from './replay-corpus.js'
+  verifyFindingsInSandbox,
+} from './replay.js'
 import { commandAnalyzer, commandRedactor, externalFailureMessage, haloAnalyzer } from './external.js'
 import { findingRejectionDetail } from './finding-rejections.js'
 import { hodoscopeAnalyzer } from './hodoscope.js'
@@ -1137,12 +1139,13 @@ async function verifyAnalyzeFindings(args: Args, result: TraceInvestigationResul
     throw new Error('analyze --verify-findings: the analysis produced no findings to verify')
   }
   const out = args.verifyOut ?? (args.out ? `${args.out}.verify` : 'traces-verify-findings')
-  return verifyFindings(result.findings, {
+  return verifyFindingsInSandbox(result.findings, {
     source: { kind: 'corpus', corpora: args.replayCorpora.map(parseCorpusFlag) },
     out,
-    apiKey: process.env.SANDBOX_API_KEY,
-    baseUrl: process.env.SANDBOX_API_URL ?? DEFAULT_SANDBOX_BASE_URL,
-    onProgress: (message) => process.stderr.write(`${message}\n`),
+    sandbox: {
+      apiKey: process.env.SANDBOX_API_KEY ?? '',
+      baseUrl: process.env.SANDBOX_API_URL ?? DEFAULT_SANDBOX_BASE_URL,
+    },
   })
 }
 
