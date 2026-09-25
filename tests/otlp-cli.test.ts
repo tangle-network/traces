@@ -472,7 +472,13 @@ describe('traces analyze --otlp', () => {
     expect(artifactValidation.code).toBe(sourceValidation.code)
     expect(artifactValidation.stdout).toContain('CONFORMS')
     expect(artifactValidation.stdout).toContain('🟠 WARN | `invalid-status`')
-    expect(artifactValidation.stdout).toContain('ℹ️  INFO | `unknown-span-kind`')
+    // `unknown-span-kind` does not survive this hop either, and it is not a loss:
+    // agent-trace-contract 1.2.0 classifies the TELEPATHY-kind span from its model
+    // attribute (evidence-based inference), so the exported row's own
+    // openinference.span.kind is LLM, a recognised word — the producer's original
+    // word is still kept verbatim under traces.raw_attribute.openinference.span.kind,
+    // it is just no longer the row's DECLARED kind for a second reader to flag.
+    expect(artifactValidation.stdout).not.toContain('ℹ️  INFO | `unknown-span-kind`')
     // `missing-trace-id` is the ONE finding a re-export cannot carry: agent-eval's
     // store cannot read a row without a trace id, so the artifact must mint one.
     // It is not laundered — the substitution is stated above the findings.
