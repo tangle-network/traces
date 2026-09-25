@@ -8,6 +8,7 @@
  */
 
 import { stat } from 'node:fs/promises'
+import { ATTR } from '@tangle-network/agent-trace-contract'
 import { ingestSpans } from '@tangle-network/agent-eval/diagnosis'
 import { type DiffStep, diffSteps, diffStepsFromSpans, type StepDiff } from '@tangle-network/agent-eval/pipelines'
 import { exportTraceEvidenceFile } from './file-export.js'
@@ -15,9 +16,11 @@ import type { OtlpSpan } from './otlp.js'
 import { readOtlpInput } from './otlp-input.js'
 
 export interface RunDiffSide {
-  /** The path as given, without a `#trace` selector. */
+  /** The path as given, without its `#` selector. */
   readonly path: string
   readonly traceId: string
+  /** The arm read, when the side was given as `path#branch=<id>`. */
+  readonly branch?: string
   readonly spans: number
   readonly steps: readonly DiffStep[]
 }
@@ -50,33 +53,73 @@ export interface RunDiffOptions {
   readonly kinds?: readonly string[]
 }
 
-/** Read one side: `path` or `path#traceId` when the input holds several runs. */
+/**
+ * Spans of one arm: every span whose `agent.branch.id` or `agent.branch.arm`
+ * is `branch`, and every span below one. An arm is usually a subtree of a
+ * search or fan-out run, so the rest of that trace is not part of it.
+ */
+function branchSpans(spans: readonly OtlpSpan[], branch: string): OtlpSpan[] {
+  const children = new Map<string, OtlpSpan[]>()
+  for (const span of spans) {
+    if (!span.parent_span_id) continue
+    const list = children.get(span.parent_span_id)
+    if (list) list.push(span)
+    else children.set(span.parent_span_id, [span])
+  }
+  const selected = new Set<OtlpSpan>()
+  const stack = spans.filter(
+    (span) => span.attributes[ATTR.branchId] === branch || span.attributes[ATTR.branchArm] === branch,
+  )
+  while (stack.length > 0) {
+    const span = stack.pop()!
+    if (selected.has(span)) continue
+    selected.add(span)
+    stack.push(...(children.get(span.span_id) ?? []))
+  }
+  return spans.filter((span) => selected.has(span))
+}
+
+/**
+ * Read one side. `path` must hold one run; `path#<trace id>` picks a run from
+ * a file that holds several; `path#branch=<id>` picks one arm by its
+ * `agent.branch.id` or `agent.branch.arm`, so two arms of one run compare.
+ */
 export async function readRunSide(ref: string, options: RunDiffOptions = {}): Promise<RunDiffSide> {
   const hash = ref.lastIndexOf('#')
   const path = hash > 0 ? ref.slice(0, hash) : ref
-  const wanted = hash > 0 ? ref.slice(hash + 1) : undefined
-  const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of await readSpans(path)) {
-    const list = byTrace.get(span.trace_id)
-    if (list) list.push(span)
-    else byTrace.set(span.trace_id, [span])
-  }
-  let traceId = wanted
-  if (traceId === undefined) {
-    if (byTrace.size !== 1) {
+  const selector = hash > 0 ? ref.slice(hash + 1) : undefined
+  const branch = selector?.startsWith('branch=') ? selector.slice('branch='.length) : undefined
+  const all = await readSpans(path)
+  let spans: OtlpSpan[]
+  let traceId: string
+  if (branch !== undefined) {
+    spans = branchSpans(all, branch)
+    if (spans.length === 0) throw new Error(`${path} holds no span with ${ATTR.branchId} or ${ATTR.branchArm} "${branch}"`)
+    const traces = new Set(spans.map((span) => span.trace_id))
+    if (traces.size !== 1) throw new Error(`${path}: branch "${branch}" appears in ${traces.size} runs; export one run per file first`)
+    traceId = [...traces][0]!
+  } else {
+    const byTrace = new Map<string, OtlpSpan[]>()
+    for (const span of all) {
+      const list = byTrace.get(span.trace_id)
+      if (list) list.push(span)
+      else byTrace.set(span.trace_id, [span])
+    }
+    if (selector === undefined && byTrace.size !== 1) {
       throw new Error(
         `${path} holds ${byTrace.size} runs; pick one with ${path}#<trace id>: ${[...byTrace.keys()].slice(0, 10).join(', ')}`,
       )
     }
-    traceId = [...byTrace.keys()][0]!
+    traceId = selector ?? [...byTrace.keys()][0]!
+    const picked = byTrace.get(traceId)
+    if (!picked) throw new Error(`${path} holds no run with trace id ${traceId}`)
+    spans = picked
   }
-  const spans = byTrace.get(traceId)
-  if (!spans) throw new Error(`${path} holds no run with trace id ${traceId}`)
   // Metadata only: the diff compares name, kind, status, tool and model.
   const { spans: ingested } = ingestSpans(spans, { contentIncluded: false })
   const kinds = options.kinds?.length ? new Set(options.kinds.map((kind) => kind.toUpperCase())) : null
   const steps = diffStepsFromSpans(ingested).filter((step) => kinds === null || kinds.has(step.kind))
-  return { path, traceId, spans: spans.length, steps }
+  return { path, traceId, ...(branch === undefined ? {} : { branch }), spans: spans.length, steps }
 }
 
 export async function diffRuns(a: string, b: string, options: RunDiffOptions = {}): Promise<RunDiffReport> {
@@ -93,6 +136,11 @@ export async function diffRuns(a: string, b: string, options: RunDiffOptions = {
 /** Steps listed in text output before the rest are counted. */
 const TEXT_STEP_LIMIT = 40
 
+function sideLabel(side: RunDiffSide): string {
+  const branch = side.branch === undefined ? '' : `, branch ${side.branch}`
+  return `${side.path} (trace ${side.traceId}${branch}, ${side.steps.length} steps)`
+}
+
 function label(step: DiffStep): string {
   return `${step.kind} ${JSON.stringify(step.name)}`
 }
@@ -103,8 +151,8 @@ export function renderRunDiff(report: RunDiffReport): string {
   for (const pair of diff.pairs) byPairing[pair.pairedBy] += 1
   const lines = [
     ...(report.kinds ? [`steps limited to kind ${report.kinds.join(', ')}`] : []),
-    `A: ${a.path} (trace ${a.traceId}, ${a.steps.length} steps)`,
-    `B: ${b.path} (trace ${b.traceId}, ${b.steps.length} steps)`,
+    `A: ${sideLabel(a)}`,
+    `B: ${sideLabel(b)}`,
     `paired ${diff.pairs.length} (by id ${byPairing.id}, position ${byPairing.position}, name ${byPairing.name}), ` +
       `only in A ${diff.onlyInA.length}, only in B ${diff.onlyInB.length}, common prefix ${diff.commonPrefixLen}`,
   ]

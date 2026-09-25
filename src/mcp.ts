@@ -7,9 +7,9 @@
  *
  * - Every tool is published with `readOnlyHint` and `idempotentHint` taken from
  *   its descriptor, and `openWorldHint: false`: it reads one local trace file.
- * - Spans are redacted with the shared rules before the store is built, so a
- *   search cannot match a secret, and every result is redacted again at the
- *   boundary.
+ * - Spans are redacted with agent-eval's redaction core (`default` profile)
+ *   before the store is built, so a search cannot match a secret, and every
+ *   result is redacted again at the boundary.
  * - Every result is wrapped with the untrusted-text notice, and a result above
  *   {@link MCP_RESULT_BYTE_CAP} is refused rather than cut, so a client never
  *   reads half a record as a whole one.
@@ -21,11 +21,11 @@
 import { readFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { buildTraceAnalysisToolDescriptors, redactValue, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
+import { buildTraceAnalysisToolDescriptors, redact, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
 import { createStdioToolServer, type McpToolDescriptor } from '@tangle-network/agent-runtime/mcp'
 import { openAgenticTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
 import type { OtlpSpan } from './otlp.js'
-import { redactSpans, TRACES_REDACTION_RULES } from './redact.js'
+import { redactSpans } from './redact.js'
 
 /** Serialized bytes one tool result may carry. The store's own per-call ceiling is lower. */
 export const MCP_RESULT_BYTE_CAP = 512 * 1024
@@ -43,10 +43,11 @@ function tracesVersion(): string {
 export async function traceMcpTools(
   options: TraceMcpServerOptions,
 ): Promise<{ tools: McpToolDescriptor[]; otlpPath: string }> {
-  const { spans } = redactSpans(options.spans, TRACES_REDACTION_RULES)
+  const { spans } = redactSpans(options.spans)
   const file = await writeAnalysisTraceFile(spans)
   const store = await openAgenticTraceStore(file)
-  const tools = buildTraceAnalysisToolDescriptors({ store }).map((descriptor): McpToolDescriptor => ({
+  const descriptors = buildTraceAnalysisToolDescriptors({ store }).filter((d) => d.name !== 'readSpanSource')
+  const tools = descriptors.map((descriptor): McpToolDescriptor => ({
     name: descriptor.name,
     description: descriptor.description,
     inputSchema: descriptor.parameters,
@@ -57,7 +58,7 @@ export async function traceMcpTools(
       openWorldHint: false,
     },
     handler: async (args) => {
-      const { value } = redactValue(await descriptor.handler(args), TRACES_REDACTION_RULES)
+      const { value } = redact(await descriptor.handler(args))
       const result = { untrusted: UNTRUSTED_TRACE_TEXT, result: value }
       const bytes = Buffer.byteLength(JSON.stringify(result))
       if (bytes > MCP_RESULT_BYTE_CAP) {

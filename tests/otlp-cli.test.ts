@@ -377,22 +377,6 @@ describe('traces analyze --otlp', () => {
     expect(written).toContain('| `steering-chain` | ✅ available')
   })
 
-  it('marks tree-comparison as not yet implemented rather than claiming every analysis ran', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-unbuilt-'))
-    const rows = conformingRows() as Record<string, unknown>[]
-    rows[0] = { ...rows[0], attributes: { ...(rows[0]!.attributes as object), 'agent.branch.id': 'arm-a' } }
-    rows[3] = { ...rows[3], attributes: { ...(rows[3]!.attributes as object), 'agent.branch.id': 'arm-b' } }
-    const path = await writeRows(dir, 'spans.otlp.jsonl', rows)
-    const report = join(dir, 'report.md')
-
-    const result = await runCli(['analyze', '--otlp', path, '--out', report])
-    expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('| `tree-comparison` | ⚠️ available, unused')
-    expect(written).toContain('not yet implemented here')
-    expect(written).not.toContain('Every analysis these spans DO support ran')
-  })
-
   it('marks the sections whose inputs are incomplete, at the table, not only in the preamble', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-gate-'))
     const path = await writeRows(dir, 'spans.otlp.jsonl', [

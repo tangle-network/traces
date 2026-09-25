@@ -168,9 +168,9 @@ trace through `traces` cannot produce a clean bill of health.
 `analyze` prints the same section, plus an **analyses skipped, and why** list —
 and, crucially, carries that verdict INTO the report. A section whose inputs are
 incomplete says so in its own heading and again directly above its table, so a
-number and the reason it is wrong can never end up forty lines apart. A capability
-the trace supports that this package has no analysis for yet is listed as
-`⚠️ available, unused` rather than quietly dropped.
+number and the reason it is wrong can never end up forty lines apart. When the
+trace supports `tree-comparison`, the table names the command that compares its
+arms: `traces diff <file>#branch=<a> <file>#branch=<b>`.
 
 Two of those analyses are why the loop shape exists at all:
 
@@ -556,8 +556,10 @@ The same sheet reaches the model-backed analysts as prepared context, before the
 traces diff runs/a/otlp runs/b/otlp                     # two OTLP exports
 traces diff a.sdk-events.jsonl b.sdk-events.jsonl --kind TOOL   # any file convert reads; tool calls only
 traces diff spans.otlp.jsonl#<trace id> other.jsonl --format json
+traces diff run.otlp.jsonl#branch=arm-a run.otlp.jsonl#branch=arm-b    # two arms of one run
 ```
 
+A side is a file or directory that holds one run, `file#<trace id>` for one run of several, or `file#branch=<id>` for one arm: the spans whose `agent.branch.id` or `agent.branch.arm` is `<id>`, and every span below them.
 Steps pair by span id first, then by position with the same name and kind, then by name and kind anywhere.
 One inserted step therefore does not mark every later step as changed.
 Paired steps compare status, tool and model.

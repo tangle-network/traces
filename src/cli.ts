@@ -850,12 +850,27 @@ async function cmdDiff(argv: readonly string[]): Promise<void> {
   let format = 'text'
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
+    if (arg === '--help' || arg === '-h') {
+      process.stdout.write(`traces diff — where two runs of one task first diverge
+
+Usage:
+  traces diff <a> <b> [--kind TOOL]... [--format text|json]
+
+Each side is an OTLP file or directory, any file convert reads, file#<trace id>,
+or file#branch=<id> for one arm (agent.branch.id or agent.branch.arm, and every
+span below it). Steps pair by span id, then position with the same name and
+kind, then name and kind anywhere. Exit 1 when the runs diverge, 0 when not.
+`)
+      return
+    }
     if (arg === '--format') format = argv[++i] ?? ''
     else if (arg === '--kind') kinds.push(argv[++i] ?? '')
     else if (arg.startsWith('--')) throw new Error(`diff: unknown flag ${arg}`)
     else inputs.push(arg)
   }
-  if (inputs.length !== 2) throw new Error('diff needs two runs: traces diff <a> <b> (a file, a directory, or file#<trace id>)')
+  if (inputs.length !== 2) {
+    throw new Error('diff needs two runs: traces diff <a> <b> (a file, a directory, file#<trace id> or file#branch=<id>)')
+  }
   if (format !== 'json' && format !== 'text') throw new Error(`diff: --format must be json or text, got "${format}"`)
   if (kinds.some((kind) => !kind)) throw new Error('diff: --kind needs a span kind, e.g. --kind TOOL')
   const report = await diffRuns(inputs[0]!, inputs[1]!, { kinds })
@@ -1779,8 +1794,9 @@ Commands:
   diff <a> <b>
             Pair two runs' steps (by span id, then position with the same name
             and kind, then name and kind anywhere) and mark the first divergence:
-            changed, replaced, only-in-a, only-in-b or reordered. Each run is an
-            OTLP file or directory, any file convert reads, or file#<trace id>.
+            changed, replaced, only-in-a, only-in-b or reordered. Each side is an
+            OTLP file or directory, any file convert reads, file#<trace id>, or
+            file#branch=<id> for one arm (agent.branch.id or agent.branch.arm).
             --kind TOOL (repeatable) keeps only steps of that span kind.
             Exit 1 when the runs diverge (--format text|json)
   bundle verify <bundle-dir>
