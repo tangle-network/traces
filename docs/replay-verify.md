@@ -7,7 +7,8 @@ An analyst finding today is a cited claim: "step 37 is where the run went wrong.
 - **Arm B** executes a corrected step k and checks the failure vanishes (exit 0 and the signature absent).
 
 Each arm gets a fresh sandbox with its own prefix replay, so arm B is never contaminated by arm A's side effects.
-Under the hood each arm is an agent-eval `runCounterfactual` meta-run (`layer='meta'`, `parentRunId` = the ingested trajectory run), with the sandbox-backed `CounterfactualRunner` from `src/replay-verify.ts` supplying the `executeFrom` callback that scaffold leaves to consumers.
+Under the hood each arm is an agent-eval `runCounterfactual` meta-run (`layer='meta'`, `parentRunId` = the ingested trajectory run), with the `SandboxCounterfactualRunner` from `@tangle-network/agent-eval/trajectory-replay` supplying the `executeFrom` callback that scaffold leaves to consumers.
+The replay engine is agent-eval's; traces supplies only the Tangle Sandbox execution backend and the CLI (`src/replay.ts`).
 
 ## Usage
 
@@ -79,7 +80,7 @@ Fix generation (`--fix generate`) runs ONE chat completion per arm-A-reproduced 
 
 ### Iterative fix loop (`--fix loop`)
 
-`--fix loop` (in `src/replay-fix-loop.ts`) replaces the single shot with an execution-feedback loop of up to `--fix-attempts` attempts (default 3) per case:
+`--fix loop` (agent-eval `runFixLoop`) replaces the single shot with an execution-feedback loop of up to `--fix-attempts` attempts (default 3) per case:
 
 - Attempt 1 is byte-identical to the one-shot prompt, so the report's `fixFlipAttempt1` stays directly comparable to `--fix generate`.
 - When an arm fails (nonzero exit or the failure signature persists) or the model call itself fails, the next prompt carries every prior command with its REAL executed stdout/stderr (clipped tails), never a paraphrase.
@@ -97,14 +98,14 @@ Outputs: `batch-report.json`, `batch-report.md` (headline + exclusion + pull-fai
 
 ## Analyst wire — finding in, executed proof out
 
-`replayVerifyFinding` (exported from the package root, `src/replay-wire.ts`) is the entry point the analyst product calls:
+`replayVerifyFinding` (from `@tangle-network/agent-eval/trajectory-replay`, re-exported by this package) is the entry point the analyst product calls:
 
 ```ts
-import { replayVerifyFinding } from '@tangle-network/traces'
+import { replayVerifyFinding, sandboxReplayBackend } from '@tangle-network/traces'
 
 const { invocation, fixCommand, verdict } = await replayVerifyFinding(
   { trajId: 'miniswe-…-zstd-1733-786102c1', subject: 'incorrect-steps-37-37-unescaped-consequence-39' },
-  { corpora, out: './proof', fixCaller, baseUrl, apiKey },
+  { corpora, out: './proof', fixCaller, backendFactory: (image) => sandboxReplayBackend({ image, apiKey, baseUrl }) },
 )
 ```
 
