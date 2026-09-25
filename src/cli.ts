@@ -859,7 +859,8 @@ Usage:
 Each side is an OTLP file or directory, any file convert reads, file#<trace id>,
 or file#branch=<id> for one arm (agent.branch.id or agent.branch.arm, and every
 span below it). Steps pair by span id, then position with the same name and
-kind, then name and kind anywhere. Exit 1 when the runs diverge, 0 when not.
+kind, then name and kind anywhere. Exit 0 when the runs agree, 1 when they
+diverge, 2 when a side cannot be read.
 `)
       return
     }
@@ -1777,7 +1778,8 @@ Commands:
   facts     Print the deterministic session-facts sheet for the selected
             sessions: tool calls excluding synthesized spans, subagent spawns
             with task names, human turns in order, the final message per task,
-            changed paths, first/last record times, and the harness token total.
+            changed paths, first/last record times, the harness token total, and
+            the first failure by agent-eval's fixed precedence (or none).
             No model call, no budget, $0. Every fact names the span ids it came
             from; a fact the spans cannot support is null with its reason.
             --format json (default) or text (exit 1 when a session cannot be read)
@@ -1798,7 +1800,7 @@ Commands:
             OTLP file or directory, any file convert reads, file#<trace id>, or
             file#branch=<id> for one arm (agent.branch.id or agent.branch.arm).
             --kind TOOL (repeatable) keeps only steps of that span kind.
-            Exit 1 when the runs diverge (--format text|json)
+            Exit 0 agree, 1 diverge, 2 unreadable (--format text|json)
   bundle verify <bundle-dir>
             Check a bundle against its manifest: every listed file present with
             its recorded size and SHA-256, no unlisted or non-regular file beside
@@ -1947,7 +1949,13 @@ async function main(): Promise<void> {
     return
   }
   if (rawArgs[0] === 'diff') {
-    await cmdDiff(rawArgs.slice(1))
+    // Like diff(1): 1 means the runs differ, so trouble must not also exit 1.
+    try {
+      await cmdDiff(rawArgs.slice(1))
+    } catch (err) {
+      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
+      process.exitCode = 2
+    }
     return
   }
   if (rawArgs[0] === 'bundle' && rawArgs[1] === 'verify') {

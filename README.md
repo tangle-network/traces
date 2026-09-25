@@ -566,7 +566,7 @@ Paired steps compare status, tool and model.
 The first divergence is `changed`, `replaced`, `only-in-a`, `only-in-b` or `reordered`, with its reason, followed by every changed and unpaired step.
 `--kind` keeps only steps of that span kind, so event noise in a raw stream does not decide the first divergence.
 The diff is agent-eval's `diffSteps`; this command reads the runs and prints it.
-It exits 1 when the runs diverge and 0 when they agree.
+It exits 0 when the runs agree, 1 when they diverge and 2 when a side cannot be read.
 
 ## MCP server
 

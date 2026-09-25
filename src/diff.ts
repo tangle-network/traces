@@ -142,7 +142,8 @@ function sideLabel(side: RunDiffSide): string {
 }
 
 function label(step: DiffStep): string {
-  return `${step.kind} ${JSON.stringify(step.name)}`
+  const status = step.fields.status
+  return `${step.kind} ${JSON.stringify(step.name)}${status === 'ERROR' ? ' ERROR' : ''}`
 }
 
 export function renderRunDiff(report: RunDiffReport): string {
