@@ -1,0 +1,6 @@
+{
+  "name": "sub-required",
+  "description": "Scoped to the Agent call: the subagent's own Read call must be visible in scope (row 7 — in-stream parent_tool_use_id).",
+  "scope": { "root": { "kind": "TOOL", "tool": "Agent" } },
+  "tools": { "required": ["Read"] }
+}

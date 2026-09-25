@@ -1,0 +1,12 @@
+{
+  "name": "refund-desk",
+  "description": "Answer refund questions by reading orders.csv, never through a shell. No `run` key: this contract checks a saved session transcript, which carries no run.status (see docs/trace-contracts.md).",
+  "tools": {
+    "required": ["Read"],
+    "forbidden": ["Bash"],
+    "allowed": ["Read", "Grep", "Glob"],
+    "maxCalls": 10,
+    "arguments": [{ "tool": "Read", "pointer": "/file_path", "type": "string" }]
+  },
+  "llm": { "maxCalls": 10 }
+}

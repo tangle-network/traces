@@ -110,6 +110,7 @@ Without `--strict-mcp-config`, the run above is also offered every MCP server th
 
 The trace is `claude -p --output-format stream-json` output, a Claude Code or Codex session file, OTLP spans (a file or a directory), or trace evidence; `--format` names it when the file could be read as more than one.
 Only stream-json output records the offered tools and the run's own result.
+**A saved interactive session file carries no run status at all** (the `result` record above only exists in `-p` mode), so `run.requireCompleted`/`run.allowedStatuses` always fail on one — write a contract for a session file with no `run` key, like the `refund-desk` example above running against `run.jsonl`.
 Every rule prints `pass`, `fail`, `error`, or `skipped` (a rule of an alternative path that did not decide the result).
 
 | Exit | Meaning |

@@ -1,0 +1,11 @@
+{
+  "name": "refund-desk-paths",
+  "description": "Read the orders file or grep it; never shell out. No `run` key: see refund-desk.contract.json.",
+  "tools": { "forbidden": ["Bash"] },
+  "alternatives": {
+    "anyOf": [
+      { "id": "read-file", "tools": { "required": ["Read"] } },
+      { "id": "grep-file", "tools": { "required": ["Grep"] } }
+    ]
+  }
+}

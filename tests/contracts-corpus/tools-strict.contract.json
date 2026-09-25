@@ -1,0 +1,7 @@
+{
+  "name": "tools-strict",
+  "description": "A `-p` stream with real TOOL/LLM evidence: run + tools.enforced + a token ceiling must all evaluate normally, not error, once real capture evidence exists.",
+  "run": { "requireCompleted": true },
+  "tools": { "enforced": true, "allowed": ["Read", "Grep"] },
+  "llm": { "maxTotalTokens": 200000 }
+}

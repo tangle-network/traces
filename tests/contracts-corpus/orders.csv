@@ -1,0 +1,8 @@
+order_id,customer,amount_usd,status
+1001,acme,120.00,shipped
+1002,globex,75.50,refunded
+1003,initech,310.00,shipped
+1004,umbrella,42.00,refunded
+1005,hooli,999.99,pending
+1006,acme,15.25,refunded
+1007,stark,500.00,shipped
