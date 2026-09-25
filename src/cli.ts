@@ -821,9 +821,11 @@ Register with a client, for example:
   claude mcp add traces -- traces mcp --otlp ./spans.otlp.jsonl
 
 Every tool is read-only and idempotent and says so in its MCP annotations.
-Spans and results are redacted, each result carries an untrusted-text notice,
-and a result above 512 KiB is refused rather than truncated. readSpanSource is
-not served: windowed reads of original source bytes cannot be redacted.
+Spans (including causal links) and results are redacted, the server refuses
+to start if the redacted spans are still UNSAFE or UNKNOWN, each result
+carries an untrusted-text notice, and a result above 512 KiB is refused
+rather than truncated. readSpanSource is not served: windowed reads of
+original source bytes cannot be redacted.
 `)
     return
   }
@@ -837,7 +839,8 @@ not served: windowed reads of original source bytes cannot be redacted.
 
 /**
  * `traces diff <a> <b> [--format text|json]`: pair the two runs' steps and
- * mark where they first diverge. Exit 1 when they diverge, like diff(1).
+ * mark where they first diverge. Exit 1 when they diverge, like diff(1); exit
+ * 3 when they don't diverge but there is nothing to agree on (see below).
  */
 async function cmdDiff(argv: readonly string[]): Promise<void> {
   const inputs: string[] = []
@@ -853,9 +856,12 @@ Usage:
 
 Each side is an OTLP file or directory, any file convert reads, file#<trace id>,
 or file#branch=<id> for one arm (agent.branch.id or agent.branch.arm, and every
-span below it). Steps pair by span id, then position with the same name and
-kind, then name and kind anywhere. Exit 0 when the runs agree, 1 when they
-diverge, 2 when a side cannot be read.
+span below it — refused if the label names more than one subtree). Steps pair
+by span id, then position with the same name and kind, then name and kind
+anywhere. Exit 0 when the runs agree on outcome, 1 when they diverge, 2 when a
+side cannot be read, 3 when the steps line up with no divergence but neither
+side carries a definitive OK/ERROR status or a TOOL step — there is no
+recorded outcome to call agreement on.
 `)
       return
     }
@@ -872,6 +878,7 @@ diverge, 2 when a side cannot be read.
   const report = await diffRuns(inputs[0]!, inputs[1]!, { kinds })
   process.stdout.write(format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
   if (report.diff.firstDivergence) process.exitCode = 1
+  else if (report.caveat) process.exitCode = 3
 }
 
 /**

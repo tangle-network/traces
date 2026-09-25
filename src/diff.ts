@@ -65,8 +65,16 @@ export interface RunDiffOptions {
  * Spans of one arm: every span whose `agent.branch.id` or `agent.branch.arm`
  * is `branch`, and every span below one. An arm is usually a subtree of a
  * search or fan-out run, so the rest of that trace is not part of it.
+ *
+ * The contract lets two sibling arms share one `agent.branch.id` (each
+ * answers it for both), so a match on the label alone can name more than one
+ * subtree. Only a matched span with no matched ancestor is a root; when
+ * there is more than one, the selector is ambiguous between separate
+ * subtrees and this refuses instead of silently unioning them.
  */
 function branchSpans(spans: readonly OtlpSpan[], branch: string): OtlpSpan[] {
+  const byId = new Map<string, OtlpSpan>()
+  for (const span of spans) byId.set(span.span_id, span)
   const children = new Map<string, OtlpSpan[]>()
   for (const span of spans) {
     if (!span.parent_span_id) continue
@@ -74,10 +82,32 @@ function branchSpans(spans: readonly OtlpSpan[], branch: string): OtlpSpan[] {
     if (list) list.push(span)
     else children.set(span.parent_span_id, [span])
   }
-  const selected = new Set<OtlpSpan>()
-  const stack = spans.filter(
+  const matched = spans.filter(
     (span) => span.attributes[ATTR.branchId] === branch || span.attributes[ATTR.branchArm] === branch,
   )
+  const matchedIds = new Set(matched.map((span) => span.span_id))
+  const hasMatchedAncestor = (span: OtlpSpan): boolean => {
+    let current = span
+    while (current.parent_span_id) {
+      const parent = byId.get(current.parent_span_id)
+      if (!parent) return false
+      if (matchedIds.has(parent.span_id)) return true
+      current = parent
+    }
+    return false
+  }
+  const roots = matched.filter((span) => !hasMatchedAncestor(span))
+  if (roots.length > 1) {
+    const named = roots
+      .map((span) => `${span.span_id} (${ATTR.branchId}=${JSON.stringify(span.attributes[ATTR.branchId] ?? null)})`)
+      .join(', ')
+    throw new Error(
+      `"${branch}" matches ${roots.length} separate subtrees, not one arm: ${named}` +
+        ' — sibling arms can share a branch id; select by span id, or narrow the input to one arm first',
+    )
+  }
+  const selected = new Set<OtlpSpan>()
+  const stack = [...matched]
   while (stack.length > 0) {
     const span = stack.pop()!
     if (selected.has(span)) continue

@@ -7,11 +7,14 @@
  *
  * - Every tool is published with `readOnlyHint` and `idempotentHint` taken from
  *   its descriptor, and `openWorldHint: false`: it reads one local trace file.
- * - Spans are redacted (`redactSpans`, `default` profile: name, attributes and
- *   status message, the only span fields `openAgenticTraceStore` reads) before
- *   the store is built, and every result is redacted again at the boundary. A
- *   search cannot match a secret in a field the store indexes, because
- *   nothing indexed survives redaction unredacted.
+ * - Spans are redacted (`redactSpans`, `default` profile: name, attributes,
+ *   status message and causal links' attributes — every span field
+ *   `openAgenticTraceStore` reads) before the store is built, and every
+ *   result is redacted again at the boundary. The server then reassesses the
+ *   redacted spans (`assessSpans`) and refuses to start (throws) when the
+ *   verdict is UNSAFE or UNKNOWN, so a detector gap in `redactSpans` shows up
+ *   as a refusal instead of a leak served to a client — the same gate
+ *   `upload` applies to what it sends.
  * - Every result is wrapped with the untrusted-text notice, and a result above
  *   {@link MCP_RESULT_BYTE_CAP} is refused rather than cut, so a client never
  *   reads half a record as a whole one.
@@ -22,11 +25,11 @@
 
 import { rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { buildTraceAnalysisToolDescriptors, redact, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
+import { buildTraceAnalysisToolDescriptors, redact, shareAllowed, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
 import { createStdioToolServer, type McpToolDescriptor } from '@tangle-network/agent-runtime/mcp'
 import { openAgenticTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
 import type { OtlpSpan } from './otlp.js'
-import { redactSpans } from './redact.js'
+import { assessSpans, redactSpans } from './redact.js'
 import { tracesVersion } from './version.js'
 
 /** Serialized bytes one tool result may carry. The store's own per-call ceiling is lower. */
@@ -41,6 +44,18 @@ export async function traceMcpTools(
   options: TraceMcpServerOptions,
 ): Promise<{ tools: McpToolDescriptor[]; otlpPath: string }> {
   const { spans } = redactSpans(options.spans)
+  // Gate on what would actually be served, the same way upload gates on what
+  // would actually be sent: a detector gap in redactSpans shows up here as
+  // UNSAFE (refuse) instead of a leak served to a client.
+  const verdict = assessSpans(spans)
+  if (!shareAllowed(verdict)) {
+    const findings = verdict.findings.map((f) => `${f.category}/${f.detector} (${f.count})`).join(', ')
+    throw new Error(
+      `mcp: refusing to serve — redacted spans are still ${verdict.status}` +
+        (findings ? `: ${findings}` : '') +
+        (verdict.unreadable.length > 0 ? `; unreadable: ${verdict.unreadable.join('; ')}` : ''),
+    )
+  }
   const file = await writeAnalysisTraceFile(spans)
   const store = await openAgenticTraceStore(file)
   const descriptors = buildTraceAnalysisToolDescriptors({ store }).filter((d) => d.name !== 'readSpanSource')

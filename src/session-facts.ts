@@ -835,7 +835,14 @@ function sessionFactsForTrace(
     lastRecordAt: lastSpan
       ? { value: lastSpan.end_time, spanIds: [lastSpan.span_id], unavailable: null }
       : { value: null, spanIds: [], unavailable: "no span of this session's own records carries a parseable end time" },
-    firstFailure: rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans),
+    // rankFirstFailure throws on an empty list (distinct from "every span is
+    // UNSET", which it reports as status 'unknown'); a trace whose spans are
+    // all traces.span.subagent — every record folded into subagents' own
+    // reports — legitimately has no records of its own to rank.
+    firstFailure:
+      ownSpans.length === 0
+        ? { status: 'unknown', traceId, unsetCount: 0, reason: "no span of this session's own records" }
+        : rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans),
     tokenTotal: tokenSpan
       ? {
           value: tokenSpan.attributes[SESSION_TOKEN_TOTAL_ATTR] as number,

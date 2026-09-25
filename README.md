@@ -538,7 +538,7 @@ traces facts --otlp spans.otlp.jsonl --out facts.json
 | `firstRecordAt` / `lastRecordAt` | the earliest span start and latest span end among this session's own records — a subagent that outlives the session does not stretch its window |
 | `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
 | `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
-| `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none` — spans were observed and none of them failed. When every span is UNSET (a capture that failed before any status was written), the status is `unknown`, not `none`: the record does not say whether the run failed. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own, and is `unknown` rather than `agent` when no evidence names the agent |
+| `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none` — spans were observed and none of them failed. When every span is UNSET (a capture that failed before any status was written), or a session has no records of its own at all (every span is `traces.span.subagent` — spawned work folded into this trace, with nothing this agent recorded itself), the status is `unknown`, not `none`: the record does not say whether the run failed. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own, and is `unknown` rather than `agent` when no evidence names the agent |
 
 Three rules hold for every field:
 
@@ -561,15 +561,14 @@ traces diff spans.otlp.jsonl#<trace id> other.jsonl --format json
 traces diff run.otlp.jsonl#branch=arm-a run.otlp.jsonl#branch=arm-b    # two arms of one run
 ```
 
-A side is a file or directory that holds one run, `file#<trace id>` for one run of several, or `file#branch=<id>` for one arm: the spans whose `agent.branch.id` or `agent.branch.arm` is `<id>`, and every span below them.
+A side is a file or directory that holds one run, `file#<trace id>` for one run of several, or `file#branch=<id>` for one arm: the spans whose `agent.branch.id` or `agent.branch.arm` is `<id>` and have no matched ancestor (a root), and every span below them. Sibling arms can share a branch id or label; when `<id>` names more than one such root subtree, the command refuses (exit 2) and lists each root's span id, rather than silently comparing the union of both.
 Steps pair by span id first, then by position with the same name and kind, then by name and kind anywhere.
 One inserted step therefore does not mark every later step as changed.
 Paired steps compare status, tool and model.
 The first divergence is `changed`, `replaced`, `only-in-a`, `only-in-b` or `reordered`, with its reason, followed by every changed and unpaired step.
 `--kind` keeps only steps of that span kind, so event noise in a raw stream does not decide the first divergence.
 The diff is agent-eval's `diffSteps`; this command reads the runs and prints it.
-It exits 0 when the runs agree, 1 when they diverge and 2 when a side cannot be read.
-Exit 0 does not by itself mean the runs succeeded: when neither side has a step with a definitive OK/ERROR status (both are entirely UNSET, the common shape for a capture that failed before any status was written), or neither side has a TOOL step, the report and the text output carry a `caveat` explaining that agreement on unrecorded status or non-tool bookkeeping is not agreement on outcome.
+It exits 0 when the runs agree on outcome, 1 when they diverge, 2 when a side cannot be read (including an ambiguous `#branch=` selector), and 3 when the steps line up with no divergence but there is no recorded outcome to call agreement: neither side has a step with a definitive OK/ERROR status (both are entirely UNSET, the common shape for a capture that failed before any status was written), or neither side has a TOOL step. That case's report and text output carry a `caveat` naming which reason applies; a CI or agent gate should treat exit 3 as unknown, not as a pass.
 
 ## MCP server
 
@@ -583,7 +582,7 @@ claude mcp add traces -- traces mcp --harness claude-code --last 5
 It serves agent-eval's seven trace tools: `getDatasetOverview`, `queryTraces`, `countTraces`, `viewTrace`, `viewSpans`, `searchTrace` and `searchSpan`.
 Each tool declares `readOnlyHint` and `idempotentHint` in its MCP annotations, and its description says that returned trace text is untrusted.
 
-- The spans are redacted before the store is built — every span's name, attributes and status message, the only fields the store reads — and each result is redacted again at the boundary.
+- The spans are redacted before the store is built — every span's name, attributes, status message and causal links' attributes, every field the store reads — and each result is redacted again at the boundary. The server then reassesses the redacted spans and refuses to start when they are still UNSAFE or UNKNOWN, the same gate `upload` applies to what it sends.
 - Each result carries an `untrusted` notice beside it.
 - A result above 512 KiB is refused with an error rather than truncated.
 - `readSpanSource` is not served. It reads original source bytes in windows the caller picks, and a secret split across two windows matches no redaction rule.
