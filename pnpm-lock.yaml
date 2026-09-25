@@ -26,8 +26,8 @@ importers:
         specifier: 0.257.0
         version: 0.257.0(@tangle-network/agent-eval@0.193.2)(@tangle-network/agent-interface@2.12.0)(@tangle-network/sandbox@0.45.0)
       '@tangle-network/agent-trace-contract':
-        specifier: 1.2.0
-        version: 1.2.0
+        specifier: 1.3.0
+        version: 1.3.0
       '@tangle-network/sandbox':
         specifier: 0.45.0
         version: 0.45.0
@@ -524,9 +524,6 @@ packages:
       '@tangle-network/agent-eval': '>=0.185.0 <0.187.0'
       '@tangle-network/agent-interface': ^2.11.0
       '@tangle-network/sandbox': '>=0.36.4 <0.48.0'
-
-  '@tangle-network/agent-trace-contract@1.2.0':
-    resolution: {integrity: sha512-B1CC4tiZcpwPPj68e1s7fQsOFe8gdDnIGsLQ+eE/HplZgym/giDlpDNmjcOyPDsBREAWwSDMLJMYAiQGpFgHcw==}
 
   '@tangle-network/agent-trace-contract@1.3.0':
     resolution: {integrity: sha512-kvWKftAShL9TB8F945TII4Wj2vpH/MfCNtU2aoChqWZIB8Kt9AzqJKisZimUw7fRouLKSm1uOw9FsdX09vsXEQ==}
@@ -1442,7 +1439,7 @@ snapshots:
       '@tangle-network/agent-interface': 2.12.0
       '@tangle-network/agent-knowledge': 17.1.2(@tangle-network/agent-eval@0.193.2)(@tangle-network/agent-interface@2.12.0)
       '@tangle-network/agent-profile-materialize': 0.20.1(@tangle-network/agent-interface@2.12.0)
-      '@tangle-network/agent-trace-contract': 1.2.0
+      '@tangle-network/agent-trace-contract': 1.3.0
       '@tangle-network/sandbox': 0.45.0
       tar-stream: 3.2.1
     transitivePeerDependencies:
@@ -1450,8 +1447,6 @@ snapshots:
       - bare-abort-controller
       - bare-buffer
       - react-native-b4a
-
-  '@tangle-network/agent-trace-contract@1.2.0': {}
 
   '@tangle-network/agent-trace-contract@1.3.0': {}
 
