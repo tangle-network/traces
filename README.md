@@ -257,6 +257,7 @@ traces convert  --harness claude-code --last 1 --otlp-out spans.jsonl   # OTLP o
 traces index    --all --since 24h --out session-index.json
 traces bundle   --harness claude-code --session <id|path> --out bundle-dir   # one session's durable evidence dir
 traces bundle-view bundle-dir --view evidence-only --out writer-dir   # same session, without its own words
+traces bundle verify bundle-dir                                        # every file against its manifest SHA-256
 traces inspect  session-index.json --out inspection-report.md
 traces evidence --harness codex --last 20 --out policy-evidence.jsonl
 traces evidence --harness codex-exec --session /tmp/codex.jsonl --cwd "$PWD" --out policy-evidence.jsonl
@@ -611,6 +612,18 @@ The evidence-only view carries an explicit allow-list — `derived/session-index
 The allow-list is the structure. A content check is the proof it is right: before anything is written, every candidate is compared against every excluded file for shared 8-word runs of prose, with identifiers (paths, URLs, hashes) and this package's own constant strings scrubbed from both sides first. A shared run in a repo ledger file drops that file with `rule: "content-signature"` and the match count; a shared run in an artifact `traces` derives is a defect in the derivation and no view is written at all. `manifest.projection.leakCheck` records the width, the sources compared, and the result — always `matches: 0`, because a match means no view exists.
 
 A projected view also carries the full bundle's `manifest.json` hash, so an auditor can prove which record it came from. Projecting a view of a view is refused.
+
+### Verify a bundle
+
+```bash
+traces bundle verify bundle-dir            # VERIFIED, or FAILED with each difference; exit 1 on failure
+traces bundle verify writer-dir --format json
+```
+
+`bundle verify` checks every file the manifest lists for its recorded size and SHA-256.
+It reports a listed file that is missing, a file on disk that the manifest does not list, a manifest path that is absolute or climbs out of the directory, and any symbolic link.
+For a projected view it also checks that the full bundle it names still has the manifest bytes the view recorded; a moved or deleted source is `unavailable`, not a failure.
+It proves the bytes are the bytes `traces` wrote. It does not prove who wrote them: anyone who can rewrite a file can rewrite the manifest.
 
 ## Policy-mining evidence
 

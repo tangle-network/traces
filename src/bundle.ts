@@ -23,7 +23,7 @@
 
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { copyFile, cp, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence } from './evidence.js'
 import { runTraceInvestigation } from './improvement.js'
@@ -657,6 +657,147 @@ export async function readSessionBundleManifest(bundleDir: string): Promise<Sess
     throw new Error(`${path} has view ${JSON.stringify(manifest.view)}, expected "full" or "evidence-only"`)
   }
   return manifest as SessionBundleManifest
+}
+
+export type SessionBundleIssueKind =
+  /** Listed in the manifest, absent on disk. */
+  | 'missing'
+  /** On disk, not listed in the manifest. */
+  | 'unexpected'
+  /** Listed, present, and its bytes differ from the recorded size or SHA-256. */
+  | 'mismatch'
+  /** A manifest path that is absolute, climbs out of the bundle, or is not `/`-separated. */
+  | 'unsafe-path'
+  /** A symbolic link or other non-regular entry: the manifest can only vouch for regular files. */
+  | 'not-a-file'
+
+export interface SessionBundleIssue {
+  readonly kind: SessionBundleIssueKind
+  readonly path: string
+  readonly detail: string
+}
+
+export interface SessionBundleVerification {
+  /** True only when every listed file matches and nothing else is present. */
+  readonly ok: boolean
+  readonly directory: string
+  readonly view: SessionBundleView
+  /** Files listed in the manifest. */
+  readonly listed: number
+  /** Listed files whose size and SHA-256 matched. */
+  readonly matched: number
+  readonly issues: readonly SessionBundleIssue[]
+  /**
+   * For a projected view: whether the full bundle it names still has the
+   * manifest bytes the view recorded. `unavailable` when that directory is
+   * gone, which is not a failure of this view.
+   */
+  readonly source?: {
+    readonly directory: string
+    readonly status: 'match' | 'mismatch' | 'unavailable'
+  }
+}
+
+function unsafeBundlePath(path: string): string | null {
+  if (path.length === 0) return 'empty path'
+  if (path.includes('\\')) return 'contains a backslash'
+  if (path.startsWith('/') || /^[A-Za-z]:/.test(path)) return 'is absolute'
+  if (path.split('/').some((part) => part === '..' || part === '.' || part === '')) {
+    return 'has an empty, "." or ".." segment'
+  }
+  return null
+}
+
+/** Every entry under `root` that is not a directory or a regular file, bundle-relative. */
+async function nonRegularEntries(root: string): Promise<string[]> {
+  const out: string[] = []
+  const pending = [resolve(root)]
+  while (pending.length > 0) {
+    const dir = pending.pop()!
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) pending.push(path)
+      else if (!entry.isFile()) out.push(relative(resolve(root), path).split(sep).join('/'))
+    }
+  }
+  return out.sort()
+}
+
+/**
+ * Check a bundle directory against its own manifest: every listed file is
+ * present with the recorded size and SHA-256, and nothing unlisted sits beside
+ * them. The manifest is written last and never lists itself, so
+ * `manifest.json` is the one file exempt from both checks.
+ *
+ * This proves the bytes are the bytes the bundler wrote. It does not prove who
+ * wrote them or when: anyone who can rewrite a file can rewrite the manifest.
+ */
+export async function verifySessionBundle(bundleDir: string): Promise<SessionBundleVerification> {
+  const directory = resolve(bundleDir)
+  const manifest = await readSessionBundleManifest(directory)
+  const issues: SessionBundleIssue[] = []
+  const listed = new Set<string>()
+  let matched = 0
+  for (const file of manifest.files) {
+    const unsafe = unsafeBundlePath(file.path)
+    if (unsafe) {
+      issues.push({ kind: 'unsafe-path', path: file.path, detail: `manifest path ${unsafe}` })
+      continue
+    }
+    listed.add(file.path)
+    const info = await lstat(join(directory, file.path)).catch((error: unknown) => {
+      if (isMissingPathError(error)) return null
+      throw error
+    })
+    if (!info) {
+      issues.push({ kind: 'missing', path: file.path, detail: 'listed in the manifest, not on disk' })
+      continue
+    }
+    if (!info.isFile()) continue // reported by the non-regular scan below
+    const sha256 = await fileSha256(join(directory, file.path))
+    if (info.size !== file.bytes || sha256 !== file.sha256) {
+      issues.push({
+        kind: 'mismatch',
+        path: file.path,
+        detail: `recorded ${file.bytes} bytes sha256 ${file.sha256}, found ${info.size} bytes sha256 ${sha256}`,
+      })
+      continue
+    }
+    matched += 1
+  }
+  for (const path of await listSessionBundleFiles(directory)) {
+    if (path === 'manifest.json' || listed.has(path)) continue
+    issues.push({ kind: 'unexpected', path, detail: 'on disk, not listed in the manifest' })
+  }
+  for (const path of await nonRegularEntries(directory)) {
+    issues.push({ kind: 'not-a-file', path, detail: 'a symbolic link or special file; a bundle holds regular files only' })
+  }
+  let source: SessionBundleVerification['source']
+  if (manifest.projection) {
+    const sourceManifest = join(manifest.projection.sourceDirectory, 'manifest.json')
+    const bytes = await readFile(sourceManifest).catch((error: unknown) => {
+      if (isMissingPathError(error)) return null
+      throw error
+    })
+    source = {
+      directory: manifest.projection.sourceDirectory,
+      status:
+        bytes === null
+          ? 'unavailable'
+          : sha256Hex(bytes) === manifest.projection.sourceManifestSha256
+            ? 'match'
+            : 'mismatch',
+    }
+  }
+  return {
+    ok: issues.length === 0 && source?.status !== 'mismatch',
+    directory,
+    view: manifest.view,
+    listed: manifest.files.length,
+    matched,
+    issues,
+    ...(source ? { source } : {}),
+  }
 }
 
 let cachedVersion: string | undefined
