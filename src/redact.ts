@@ -39,9 +39,15 @@ export interface RedactSpansOptions {
   knownSecrets?: readonly string[]
 }
 
-/** Redact every span's attributes and status message with the agent-eval core. */
+/**
+ * Redact every string field that leaves the machine: name, attributes, and
+ * status message. `assessSpans` below (and the MCP search tools built on this
+ * store) all read `span.name`, so a secret left there is as reachable as one
+ * in an attribute — a search for it just works, defeating redaction.
+ */
 export function redactSpans(spans: readonly OtlpSpan[], options: RedactSpansOptions = {}): SpanRedaction {
   const parts = spans.map((span) => ({
+    name: span.name,
     attributes: stripSourceAttributes(span.attributes),
     message: span.status.message,
   }))
@@ -53,7 +59,7 @@ export function redactSpans(spans: readonly OtlpSpan[], options: RedactSpansOpti
       part.message !== undefined && part.message !== span.status.message
         ? { ...span.status, message: part.message }
         : span.status
-    return { ...span, attributes: part.attributes, status }
+    return { ...span, name: part.name, attributes: part.attributes, status }
   })
   return { spans: out, report }
 }
