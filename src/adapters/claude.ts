@@ -13,6 +13,12 @@
  *
  * Shared by the claudish / openclaw / nanoclaw forks via aliases — they
  * write the same transcript shape.
+ *
+ * The same reader takes the `claude -p --output-format stream-json --verbose`
+ * output a CI job captures. Its `system`/`init` record lists the tools the
+ * harness offered the model, which the root span keeps as the OTel
+ * `gen_ai.tool.definitions` attribute, and its `result` record states whether
+ * the run failed, which the root span keeps as `run.status`.
  */
 
 import { createHash } from 'node:crypto'
@@ -65,6 +71,35 @@ import { toolIoAttributes } from './tool-io.js'
 import { appendSourceAttributes, sourceOf, textSources, SOURCE_ATTRIBUTE_PREFIX, type SourceReferences } from '../source-location.js'
 
 const SERVICE = 'claude-code'
+
+/**
+ * Claude Code 2.1.63 renamed its subagent tool from `Task` to `Agent`, but the
+ * stream-json `init` record still lists it as `Task` while the model calls
+ * `Agent`. The offered set must use the name the model calls, or every spawn
+ * reads as a call to a tool that was never offered.
+ */
+const AGENT_TOOL_RENAMED_IN: readonly number[] = [2, 1, 63]
+
+function modelFacingToolNames(tools: readonly string[], version: unknown): string[] {
+  if (typeof version !== 'string' || !atLeast(version, AGENT_TOOL_RENAMED_IN)) return [...tools]
+  return tools.map((name) => (name === 'Task' ? 'Agent' : name))
+}
+
+/** Whether a dotted numeric version is at least `min`; an unparseable one is not. */
+function atLeast(version: string, min: readonly number[]): boolean {
+  const parts = version.split('.').map((p) => Number.parseInt(p, 10))
+  if (parts.length < min.length || parts.some((p) => !Number.isFinite(p))) return false
+  for (let i = 0; i < min.length; i++) {
+    if (parts[i]! !== min[i]!) return parts[i]! > min[i]!
+  }
+  return true
+}
+
+/** OTel GenAI: the tool definitions offered to the model. */
+const TOOL_DEFINITIONS_ATTR = 'gen_ai.tool.definitions'
+
+/** The run's terminal status, as agent-eval's trace contracts read it. */
+const RUN_STATUS_ATTR = 'run.status'
 const EPOCH = new Date(0).toISOString()
 
 /**
@@ -143,9 +178,19 @@ function normalizeClaudeIds(spans: OtlpSpan[]): void {
 
 interface ClaudeEvent {
   type?: string
+  /** `system` records in stream-json output: `init`, `hook_started`, ... */
+  subtype?: string
   uuid?: string
   parentUuid?: string | null
   sessionId?: string
+  /** Stream-json output spells the session id this way. */
+  session_id?: string
+  /** Stream-json `init`: the tools the harness offered the model. */
+  tools?: unknown
+  /** Stream-json `init`: the Claude Code release that wrote the stream. */
+  claude_code_version?: unknown
+  /** Stream-json `result`: true when the run ended in an error. */
+  is_error?: unknown
   timestamp?: string
   cwd?: string
   isSidechain?: boolean
@@ -1174,10 +1219,22 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     let selectedTurnId: string | undefined
     let selectedTurnFound = false
     let active = taskScope === 'all'
+    let offeredTools: string[] | undefined
+    let runResult: { failed: boolean; subtype: string } | undefined
 
     for await (const event of readJsonl<ClaudeEvent>(ref.path, sessionJsonlOptions(ref, options))) {
       options.signal?.throwIfAborted()
-      if (!discoveredTraceId && event.sessionId) discoveredTraceId = event.sessionId
+      const eventSessionId = event.sessionId ?? event.session_id
+      if (!discoveredTraceId && eventSessionId) discoveredTraceId = eventSessionId
+      if (event.type === 'system' && event.subtype === 'init' && Array.isArray(event.tools)) {
+        offeredTools = modelFacingToolNames(
+          event.tools.filter((t): t is string => typeof t === 'string'),
+          event.claude_code_version,
+        )
+      }
+      if (event.type === 'result' && typeof event.is_error === 'boolean') {
+        runResult = { failed: event.is_error, subtype: event.subtype ?? 'unknown' }
+      }
       const accepted = distinctClaudeEvent(event, seen, ref.path, `step${state.step}`)
       if (!accepted) continue
       indexWorkflowProjection(accepted.projection, workflowIndex)
@@ -1233,6 +1290,13 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       service: SERVICE,
       agent: SERVICE,
     })
+    if (offeredTools) {
+      root.attributes[TOOL_DEFINITIONS_ATTR] = JSON.stringify(offeredTools.map((name) => ({ type: 'function', name })))
+    }
+    if (runResult) {
+      root.attributes[RUN_STATUS_ATTR] = runResult.failed ? 'failed' : 'completed'
+      root.status = runResult.failed ? { code: 'ERROR', message: `the run ended with ${runResult.subtype}` } : { code: 'OK' }
+    }
     const spans: OtlpSpan[] = [root]
     appendAll(spans, main.spans)
 

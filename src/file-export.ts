@@ -477,6 +477,17 @@ function llmEventUsage(row: JsonObject): {
   }
 }
 
+/**
+ * The message part a sandbox tool event reports on. The Sandbox SDK records a
+ * tool call as a `message.part.updated` event and again as the harness's raw
+ * `tool_use` event, and a part can be updated several times as it runs. All of
+ * them carry the same part id, so the id is what makes one tool call one span.
+ */
+function toolPartId(row: JsonObject): string | undefined {
+  const part = objectValue(objectValue(row.data)?.part) ?? objectValue(row.part)
+  return part && part.type === 'tool' ? stringValue(part.id) : undefined
+}
+
 function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject): OtlpSpan[] {
   const context = wrapper ?? {}
   const sessionId =
@@ -517,12 +528,36 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
     }),
   ]
 
+  // One span per tool part: the part's last event carries its final state, its
+  // earliest event carries when the call started, and an error reported by any
+  // of its events stays an error.
+  const lastEventOfPart = new Map<string, number>()
+  const firstTimeOfPart = new Map<string, string>()
+  const errorOfPart = new Map<string, { status: OtlpStatusCode; message?: string }>()
+  rows.forEach((row, index) => {
+    const part = toolPartId(row)
+    if (part === undefined) return
+    lastEventOfPart.set(part, index)
+    const time = eventTimestamp(row)
+    const first = firstTimeOfPart.get(part)
+    if (time && (first === undefined || time < first)) firstTimeOfPart.set(part, time)
+    const status = eventStatus(row, eventType(row) ?? 'event')
+    if (status.status === 'ERROR') errorOfPart.set(part, status)
+  })
+  const mergedToolEvents = rows.filter((row, index) => {
+    const part = toolPartId(row)
+    return part !== undefined && lastEventOfPart.get(part) !== index
+  }).length
+  if (mergedToolEvents > 0) spans[0]!.attributes['traces.event.tool_part_updates_merged'] = mergedToolEvents
+
   let previousTime = rootStart
   rows.forEach((row, index) => {
+    const part = toolPartId(row)
+    if (part !== undefined && lastEventOfPart.get(part) !== index) return
     const type = eventType(row) ?? 'event'
-    const time = eventTimestamp(row) ?? previousTime
+    const time = (part !== undefined ? firstTimeOfPart.get(part) : undefined) ?? eventTimestamp(row) ?? previousTime
     previousTime = time
-    const { status, message } = eventStatus(row, type)
+    const { status, message } = (part !== undefined ? errorOfPart.get(part) : undefined) ?? eventStatus(row, type)
     const { kind, tool } = eventKind(row, type)
     const name = kind === 'TOOL' && tool ? `tool.${tool}` : `event.${type}`
     const toolInput = kind === 'TOOL'
@@ -541,6 +576,7 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
         : {}),
     }
     copyDefined(extra, {
+      'traces.event.part_id': part,
       'traces.event.id': stringValue(row.id),
       'traces.event.raw_type': stringValue(row.type),
       'traces.event.raw_event': stringValue(row.event),
