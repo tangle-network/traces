@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { readOtlpInput, redactSpans, runPipelines, TRACES_REDACTION_RULES } from '../../src/index.js'
+import { readOtlpInput, redactSpans, runPipelines } from '../../src/index.js'
 import { stripContent } from './metadata-only.js'
 
 describe('diagnosis kit metadata boundary', () => {
@@ -35,7 +35,7 @@ describe('diagnosis kit metadata boundary', () => {
       expect(ingested.spans[1]?.attributes['tool.args_captured']).toBe(true)
       expect(ingested.spans[1]?.attributes['traces.input.sha256']).toBeDefined()
       const { spans: metadataOnly, dropped } = stripContent(ingested.spans)
-      const { spans: scrubbed } = redactSpans(metadataOnly, TRACES_REDACTION_RULES)
+      const { spans: scrubbed } = redactSpans(metadataOnly)
       expect(JSON.stringify(scrubbed)).not.toContain(canary)
       expect(dropped).toEqual(expect.arrayContaining(['input.value', 'output.value', 'input', 'result', 'text', 'thinking', 'prompt', 'request', 'response', 'command', 'args', 'tool_arguments', 'full_command', 'chat.content', 'error.message', 'error_message', 'ERROR_MESSAGE', 'error.inner.message', 'events', 'exception.message', 'status.message', 'tool.args_captured', 'traces.input.sha256', 'traces.output.sha256', 'traces.source_record.input.value']))
       expect(scrubbed[1]?.attributes['tool.args_captured']).toBeUndefined()

@@ -377,22 +377,6 @@ describe('traces analyze --otlp', () => {
     expect(written).toContain('| `steering-chain` | ✅ available')
   })
 
-  it('marks tree-comparison as not yet implemented rather than claiming every analysis ran', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-unbuilt-'))
-    const rows = conformingRows() as Record<string, unknown>[]
-    rows[0] = { ...rows[0], attributes: { ...(rows[0]!.attributes as object), 'agent.branch.id': 'arm-a' } }
-    rows[3] = { ...rows[3], attributes: { ...(rows[3]!.attributes as object), 'agent.branch.id': 'arm-b' } }
-    const path = await writeRows(dir, 'spans.otlp.jsonl', rows)
-    const report = join(dir, 'report.md')
-
-    const result = await runCli(['analyze', '--otlp', path, '--out', report])
-    expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('| `tree-comparison` | ⚠️ available, unused')
-    expect(written).toContain('not yet implemented here')
-    expect(written).not.toContain('Every analysis these spans DO support ran')
-  })
-
   it('marks the sections whose inputs are incomplete, at the table, not only in the preamble', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-gate-'))
     const path = await writeRows(dir, 'spans.otlp.jsonl', [
@@ -438,13 +422,17 @@ describe('traces analyze --otlp', () => {
   it('does not launder a source through --otlp-out: findings survive, and dropped rows are declared', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-roundtrip-'))
     const rows = conformingRows() as Record<string, unknown>[]
-    rows[2] = { ...rows[2], status: { code: 'WEIRD', message: 'exit 2' } }
-    // A kind this contract has no word for. The reader analyses the span as
-    // something it can bucket; the export must still say TELEPATHY.
-    rows[1] = {
-      ...rows[1],
+    // A kind this contract has no word for, on the tool span: it carries no
+    // model or token attributes, so the reader cannot infer a real kind from
+    // shape and resolve the ambiguity away (unlike the LLM span at rows[1],
+    // whose usage attributes let the reader declare LLM on export — see
+    // `tests/otlp-round-trip.test.ts`'s `erased` fixture for that case). The
+    // export must still say TELEPATHY.
+    rows[2] = {
+      ...rows[2],
+      status: { code: 'WEIRD', message: 'exit 2' },
       kind: 'SPAN_KIND_TELEPATHY',
-      attributes: { ...(rows[1]!.attributes as object), 'openinference.span.kind': 'SPAN_KIND_TELEPATHY' },
+      attributes: { ...(rows[2]!.attributes as object), 'openinference.span.kind': 'SPAN_KIND_TELEPATHY' },
     }
     // No trace id at all. The reader MUST invent one to group by, and exporting
     // the invented id erased `missing-trace-id` and raised `non-hex-id` against
@@ -488,27 +476,6 @@ describe('traces analyze --otlp', () => {
     // And the one row that could not be re-emitted is declared, not hidden.
     expect(artifactValidation.stdout).toContain('1 row(s) of the ORIGINAL source are not in this file')
     expect(artifactValidation.stdout).toContain('NOT a substitute for validating the source')
-  })
-
-  it('accepts the deprecated --otlp on a writing command, with a warning, and still writes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-otlp-flag-'))
-    const source = await writeRows(dir, 'spans.otlp.jsonl', conformingRows())
-    const out = join(dir, 'out.jsonl')
-
-    const result = await runCli(['export', source, '--otlp', out])
-    expect(result.code).toBe(0)
-    expect(result.stderr).toContain('--otlp is deprecated')
-    expect(result.stderr).toContain('--otlp-out')
-    expect((await readFile(out, 'utf8')).trim().split('\n')).toHaveLength(4)
-  })
-
-  it('refuses --otlp AND --otlp-out together on a writing command', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-otlp-both-'))
-    const source = await writeRows(dir, 'spans.otlp.jsonl', conformingRows())
-
-    const result = await runCli(['export', source, '--otlp', join(dir, 'a.jsonl'), '--otlp-out', join(dir, 'b.jsonl')])
-    expect(result.code).toBe(1)
-    expect(result.stderr).toContain('deprecated spelling')
   })
 
   it('fails with an actionable message when a file holds no analyzable span', async () => {

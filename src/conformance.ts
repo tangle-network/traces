@@ -39,48 +39,18 @@ const SEVERITY_BADGE: Record<string, string> = {
 
 /**
  * The analysis each capability gates, named as it appears in the report a
- * reader is holding. Anything not listed here is analysed regardless of
- * conformance — the deterministic loop/thrash/reaction passes need only span
- * names, times and ordering.
- *
- * `built: false` means THIS package has no such analysis yet. It is stated
- * rather than omitted, because listing an analysis a reader will never find is
- * how a capability table starts describing a report that does not exist.
+ * reader is holding, or as the command that runs it. Anything not listed here
+ * is analysed regardless of conformance — the deterministic loop/thrash/reaction
+ * passes need only span names, times and ordering.
  */
-interface CapabilityAnalysis {
-  readonly analysis: string
-  readonly built: boolean
-}
-
-const CAPABILITY_ANALYSES: Record<string, CapabilityAnalysis> = {
-  'token-accounting': {
-    analysis: 'execution facts → Direct model usage (input/output/reasoning/cache token totals)',
-    built: true,
-  },
-  'cost-attribution': {
-    analysis: 'execution facts → Cost coverage (observed vs estimated USD)',
-    built: true,
-  },
-  'tool-usage': {
-    analysis: 'tool-usage table + per-tool duplicate/retry/error rates + stuck-loop detection',
-    built: true,
-  },
-  'loop-convergence': {
-    analysis: 'round-over-round convergence (did round N+1 improve on N)',
-    built: true,
-  },
-  'tree-comparison': {
-    analysis: 'arm-vs-arm comparison across branches of one run — NOT YET IMPLEMENTED in this package',
-    built: false,
-  },
-  'steering-chain': {
-    analysis: 'steering chain (which verdict caused which retry)',
-    built: true,
-  },
-  'latency-analysis': {
-    analysis: 'latency + critical-path timing distributions',
-    built: true,
-  },
+const CAPABILITY_ANALYSES: Record<string, string> = {
+  'token-accounting': 'execution facts → Direct model usage (input/output/reasoning/cache token totals)',
+  'cost-attribution': 'execution facts → Cost coverage (observed vs estimated USD)',
+  'tool-usage': 'tool-usage table + per-tool duplicate/retry/error rates + stuck-loop detection',
+  'loop-convergence': 'round-over-round convergence (did round N+1 improve on N)',
+  'tree-comparison': 'arm-vs-arm comparison: `traces diff <file>#branch=<a> <file>#branch=<b>` marks where two arms first diverge',
+  'steering-chain': 'steering chain (which verdict caused which retry)',
+  'latency-analysis': 'latency + critical-path timing distributions',
 }
 
 /**
@@ -248,16 +218,9 @@ export function skippedAnalyses(validation: TraceValidation): SkippedAnalysis[] 
     .filter((capability) => !capability.available)
     .map((capability) => ({
       capability: capability.name,
-      analysis: CAPABILITY_ANALYSES[capability.name]?.analysis ?? 'analyses keyed off this capability',
+      analysis: CAPABILITY_ANALYSES[capability.name] ?? 'analyses keyed off this capability',
       reason: capability.reason ?? 'no reason recorded',
     }))
-}
-
-/** Capabilities the trace supports that this package has no analysis for yet. */
-function unbuiltAnalyses(validation: TraceValidation): string[] {
-  return validation.capabilities
-    .filter((capability) => capability.available && CAPABILITY_ANALYSES[capability.name]?.built === false)
-    .map((capability) => capability.name)
 }
 
 function tableCell(value: string): string {
@@ -272,14 +235,10 @@ function spanIdSample(finding: ConformanceFinding): string {
 }
 
 function capabilityRow(capability: Capability): string {
-  const entry = CAPABILITY_ANALYSES[capability.name]
-  const analysis = entry?.analysis ?? '—'
-  if (!capability.available) {
-    return `| \`${capability.name}\` | ❌ unavailable | ${tableCell(analysis)} | ${tableCell(capability.reason ?? 'no reason recorded')} |`
-  }
-  return entry?.built === false
-    ? `| \`${capability.name}\` | ⚠️ available, unused | ${tableCell(analysis)} | the trace supports it; this package has no analysis for it yet |`
-    : `| \`${capability.name}\` | ✅ available | ${tableCell(analysis)} | — |`
+  const analysis = CAPABILITY_ANALYSES[capability.name] ?? '—'
+  return capability.available
+    ? `| \`${capability.name}\` | ✅ available | ${tableCell(analysis)} | — |`
+    : `| \`${capability.name}\` | ❌ unavailable | ${tableCell(analysis)} | ${tableCell(capability.reason ?? 'no reason recorded')} |`
 }
 
 export interface ConformanceRenderOptions {
@@ -480,29 +439,18 @@ function conformanceBody(
   lines.push('')
 
   const skipped = skippedAnalyses(validation)
-  const unbuilt = unbuiltAnalyses(validation)
-  if (skipped.length > 0 || unbuilt.length > 0) {
+  if (skipped.length > 0) {
     lines.push(`${heading}# analyses skipped, and why`)
     lines.push('')
-    if (skipped.length > 0) {
-      lines.push(
-        'These reported nothing because the trace never carried what they read — not because the run ' +
-          'was uneventful. Every section they feed is marked at the table, not only here.',
-      )
-      lines.push('')
-      for (const entry of skipped) {
-        lines.push(`- **${entry.analysis}** — skipped: ${entry.reason} (\`${entry.capability}\`).`)
-      }
-      lines.push('')
+    lines.push(
+      'These reported nothing because the trace never carried what they read — not because the run ' +
+        'was uneventful. Every section they feed is marked at the table, not only here.',
+    )
+    lines.push('')
+    for (const entry of skipped) {
+      lines.push(`- **${entry.analysis}** — skipped: ${entry.reason} (\`${entry.capability}\`).`)
     }
-    if (unbuilt.length > 0) {
-      lines.push(
-        `These are supported by the trace and **not yet implemented here**: ` +
-          `${unbuilt.map((name) => `\`${name}\``).join(', ')}. The spans carry what they need; the ` +
-          'analysis does not exist, so nothing about them appears below.',
-      )
-      lines.push('')
-    }
+    lines.push('')
   }
   return lines.join('\n')
 }

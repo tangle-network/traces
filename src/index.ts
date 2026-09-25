@@ -107,6 +107,7 @@ export * from './evidence.js' // policy-evidence JSONL for downstream miners
 export * from './session-index.js' // collectSessionIndex() — reusable session catalog
 export * from './bundle.js' // assembleSessionBundle() — one session's durable evidence dir
 export * from './bundle-view.js' // projectSessionBundle() — the evidence-only view for a writer
+export * from './diff.js' // diffRuns() — two runs paired step by step, first divergence marked
 export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
 export * from './chat-trajectory.js' // generic chat trajectory to stable step spans
@@ -142,7 +143,8 @@ export * from './run-view-format.js' // shared formatting; unknown is never zero
 export * from './run-watch.js' // target resolution + the tail
 
 // ── Privacy + batch collection + upload (pluggable backend) ───────────────
-export * from './redact.js' // redactSpans(), TRACES_REDACTION_RULES
+export * from './redact.js' // redactSpans(), assessSpans(), applyRedactor()
+export * from './verify-safe.js' // verifySafe(): the share-safety verdict for files
 export * from './collect.js' // collectSessions() — redacted batches
 // Replay verification is agent-eval's; traces adds the sandbox backend and CLI.
 export * from '@tangle-network/agent-eval/trajectory-replay'
@@ -166,7 +168,13 @@ export {
 export type { Analyst, AnalystContext, AnalystFinding } from '@tangle-network/agent-eval/analyst'
 export { createHostedClient, hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 export type { HostedClient } from '@tangle-network/agent-eval/hosted'
-export { DEFAULT_REDACTION_RULES, redactString, redactValue } from '@tangle-network/agent-eval/traces'
+export {
+  assessShareSafety,
+  redact,
+  redactForShare,
+  redactText,
+  shareAllowed,
+} from '@tangle-network/agent-eval/traces'
 // The span contract — emit it and `--otlp` reads you with no adapter.
 //
 // Its BUILDERS are not re-exported. A producer installs
@@ -184,7 +192,8 @@ export type {
 } from '@tangle-network/agent-trace-contract'
 export type {
   ErrorCluster,
+  RedactionProfile,
   RedactionReport,
-  RedactionRule,
+  ShareSafetyVerdict,
   TraceAnalysisStore,
 } from '@tangle-network/agent-eval/traces'

@@ -29,12 +29,12 @@ The operator rejects a received file that still contains recognized content fiel
 Content capture requires the customer to opt in, in writing, per engagement.
 
 The reason is specific rather than legal boilerplate. `src/redact.ts` in this repository
-redacts structured secrets well: GitHub tokens, JWTs, bearer headers, AWS keys, Slack
-tokens, private-key blocks, credentials in URLs, config and shell assignments. Its own
-doc comment states the limit plainly, and we repeat it to customers rather than hiding it:
+applies agent-eval's redaction core, which removes structured secrets well: provider keys,
+GitHub, Slack, AWS and Google tokens, JWTs, bearer headers, private keys, credentials in
+URLs, config and shell assignments, and email, card, SSN and phone values. We state its
+limit plainly to customers rather than hiding it:
 
-> this is best-effort regex for structured secrets and credentials. It does NOT catch
-> free-form PII — names, postal addresses, phone numbers, account numbers in prose
+> it does NOT catch names, postal addresses or account numbers written in prose
 
 A law firm's trace carries client matters in exactly those prose fields. A diagnosis that
 runs on metadata and says what it could not see is a stronger position than one that

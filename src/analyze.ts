@@ -11,7 +11,7 @@
  * same artifact, no conversion. Analysis is never locked to one engine.
  */
 
-import type { RunCostProvenance } from '@tangle-network/agent-eval'
+import type { CostProvenance } from '@tangle-network/agent-eval'
 import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   type AnalystFinding,
@@ -86,10 +86,10 @@ export interface AnalyzeResult {
 }
 
 function mergeCostProvenance(
-  first: RunCostProvenance | undefined,
-  second: RunCostProvenance | undefined,
+  first: CostProvenance | undefined,
+  second: CostProvenance | undefined,
   totalCostUsd: number,
-): RunCostProvenance {
+): CostProvenance {
   if (!first || !second || first.kind === 'uncaptured' || second.kind === 'uncaptured') {
     return { kind: 'uncaptured', usd: null }
   }

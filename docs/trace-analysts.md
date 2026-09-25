@@ -241,7 +241,7 @@ It reaches the built-in kinds run by `analyze --llm`, `investigate`, and `improv
 
 - The sheet is bounded at `PREPARED_CONTEXT_BYTE_CEILING` (30,000 bytes), a fifth of the `perCallByteCeiling` of 150,000 the trace tools work to, so the rest of the budget stays available for the tool calls the model still makes.
 - When the sheet does not fit, fields are shed from the largest downward and the shed is listed in `omitted_fields`. The tool-call counts are the last facts to go.
-- Receiving the sheet changes an analyst's behavior, so its version carries `+session-facts.1`. `createTraceAnalyst` records `prepare_context` in the exact-run identity, and a changed prepared context must not hide behind an unchanged version.
+- Receiving the sheet changes an analyst's behavior, so its version carries `+session-facts.2`. `createTraceAnalyst` records `prepare_context` in the exact-run identity, and a changed prepared context must not hide behind an unchanged version.
 - The sheet is not evidence. Citations still resolve against the raw spans, which is why every fact names its span ids rather than asking the model to trust the sheet.
 
 Pass `sessionFactsContext: false` to `analyzeSpans` to run an analyst without it.

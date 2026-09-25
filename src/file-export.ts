@@ -55,7 +55,7 @@ export interface TraceEvidenceExportResult {
   readonly format: TraceEvidenceInputFormat
   readonly spans: OtlpSpan[]
   readonly redactionCount: number
-  readonly redactionsByRule: Record<string, number>
+  readonly redactionsByDetector: Record<string, number>
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -841,7 +841,7 @@ export function exportTraceEvidenceRows(
     format,
     spans: validated,
     redactionCount: redacted.report.redactionCount,
-    redactionsByRule: redacted.report.byRule,
+    redactionsByDetector: redacted.report.byDetector,
   }
 }
 
@@ -859,7 +859,7 @@ export async function exportTraceEvidenceFile(
     const spans: OtlpSpan[] = []
     const sandboxRows: unknown[] = []
     let redactionCount = 0
-    const redactionsByRule: Record<string, number> = {}
+    const redactionsByDetector: Record<string, number> = {}
 
     for await (const row of readJsonl<unknown>(inputPath)) {
       format ??= detectFormat([row], opts.format ?? 'auto')
@@ -874,8 +874,8 @@ export async function exportTraceEvidenceFile(
       })
       appendAll(spans, converted.spans)
       redactionCount += converted.redactionCount
-      for (const [rule, count] of Object.entries(converted.redactionsByRule)) {
-        redactionsByRule[rule] = (redactionsByRule[rule] ?? 0) + count
+      for (const [rule, count] of Object.entries(converted.redactionsByDetector)) {
+        redactionsByDetector[rule] = (redactionsByDetector[rule] ?? 0) + count
       }
     }
 
@@ -891,7 +891,7 @@ export async function exportTraceEvidenceFile(
       format,
       spans: validateOtlpSpans(spans, `${format} file export`),
       redactionCount,
-      redactionsByRule,
+      redactionsByDetector,
     }
   }
   const text = await readFile(inputPath, 'utf8')

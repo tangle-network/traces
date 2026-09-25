@@ -131,6 +131,9 @@ import {
 } from './session-workflow.js'
 import { assembleSessionBundle, type SessionBundleView, verifySessionBundle } from './bundle.js'
 import { projectSessionBundle } from './bundle-view.js'
+import { diffRuns, renderRunDiff } from './diff.js'
+import { tracesVersion } from './version.js'
+import { serveTraceMcp } from './mcp.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
@@ -148,7 +151,8 @@ import {
   sniffCheckInput,
 } from './check.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
-import { executeUpload, planUpload } from './upload.js'
+import { executeUpload, planUpload, type RefusedSession } from './upload.js'
+import { formatVerdict, verdictExitCode, verifySafe } from './verify-safe.js'
 
 interface Args {
   command: string
@@ -225,12 +229,6 @@ interface Args {
   annotations: boolean
   /** check: print what the contract checks, one rule per line, and read no trace. */
   explain: boolean
-}
-
-function packageVersion(): string {
-  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
-  if (typeof pkg.version !== 'string' || !pkg.version) throw new Error('package.json is missing version')
-  return pkg.version
 }
 
 function parseArgs(argv: string[]): Args {
@@ -341,33 +339,26 @@ function parseArgs(argv: string[]): Args {
  * artifact with `--otlp-out`: one flag, one direction, no command where the
  * same word means read here and write there.
  */
-const OTLP_INPUT_COMMANDS = new Set(['analyze', 'check', 'facts', 'investigate', 'improve', 'ask', 'stream', 'validate'])
+const OTLP_INPUT_COMMANDS = new Set([
+  'analyze',
+  'check',
+  'facts',
+  'investigate',
+  'improve',
+  'ask',
+  'stream',
+  'validate',
+  'mcp',
+])
 
-/**
- * `--otlp` used to mean "write the artifact here" on every command. It now
- * means "read this" — so on a WRITING command the old spelling is honoured for
- * one minor with a warning, rather than turning a working script into a hard
- * error at the moment the reader was introduced. Removed in 0.12.
- */
-function migrateWritingOtlpFlag(args: Args): Args {
-  if (args.otlp === undefined || OTLP_INPUT_COMMANDS.has(args.command)) return args
-  if (args.otlpOut !== undefined) {
+function validateOtlpSelection(args: Args): Args {
+  if (args.otlp === undefined) return args
+  if (!OTLP_INPUT_COMMANDS.has(args.command)) {
     throw new Error(
-      `${args.command} was given both --otlp and --otlp-out. --otlp is the deprecated spelling of ` +
-        '--otlp-out on writing commands; pass only --otlp-out.',
+      `${args.command} does not read --otlp. --otlp reads OTLP-JSONL on ${[...OTLP_INPUT_COMMANDS].join(', ')}; ` +
+        'use --otlp-out <path> to write the artifact.',
     )
   }
-  console.error(
-    `warning: --otlp is deprecated on \`${args.command}\` and will be removed in 0.12. ` +
-      '--otlp now READS OTLP-JSONL; use --otlp-out <path> to write the artifact. ' +
-      'Treating it as --otlp-out for this run.',
-  )
-  return { ...args, otlpOut: args.otlp, otlp: undefined }
-}
-
-function validateOtlpSelection(raw: Args): Args {
-  const args = migrateWritingOtlpFlag(raw)
-  if (args.otlp === undefined) return args
   if (args.input) throw new Error('--otlp cannot be combined with an input file')
   if (args.session) throw new Error('--otlp reads a file and cannot be combined with --session')
   if (args.supervisorRunDir) throw new Error('--otlp cannot be combined with --supervisor-run-dir')
@@ -914,6 +905,82 @@ async function cmdBundle(args: Args): Promise<void> {
     `session bundle (${manifest.view} view) → ${result.directory}  (${manifest.files.length} file(s), ` +
       `${manifest.ledgerSlices.length} ledger slice(s), ${manifest.absent.length} recorded absent)`,
   )
+}
+
+/**
+ * `traces mcp`: serve the selected spans to an MCP client over stdio. Stdout
+ * carries the protocol, so everything else this command says goes to stderr.
+ */
+async function cmdMcp(args: Args): Promise<void> {
+  if (args.help) {
+    process.stdout.write(`traces mcp — read-only MCP server over stdio for the selected traces
+
+Usage:
+  traces mcp --otlp <file|dir>                  any OTLP-JSONL
+  traces mcp --harness claude-code --last 5     recent harness sessions (any selection flag)
+
+Register with a client, for example:
+  claude mcp add traces -- traces mcp --otlp ./spans.otlp.jsonl
+
+Every tool is read-only and idempotent and says so in its MCP annotations.
+Spans (including causal links) and results are redacted, the server refuses
+to start if the redacted spans are still UNSAFE or UNKNOWN, each result
+carries an untrusted-text notice, and a result above 512 KiB is refused
+rather than truncated. readSpanSource is not served: windowed reads of
+original source bytes cannot be redacted.
+`)
+    return
+  }
+  const selected = validateOtlpSelection(validateWorkflowSelection(applyCurrentSessionSelection(args)))
+  const collected = await collectSpans(selected)
+  if (collected.spans.length === 0) throw new Error('mcp: no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  process.stderr.write(`traces mcp: serving ${collected.spans.length} span(s) over stdio\n`)
+  await serveTraceMcp({ spans: collected.spans })
+}
+
+/**
+ * `traces diff <a> <b> [--format text|json]`: pair the two runs' steps and
+ * mark where they first diverge. Exit 1 when they diverge, like diff(1); exit
+ * 3 when they don't diverge but there is nothing to agree on (see below).
+ */
+async function cmdDiff(argv: readonly string[]): Promise<void> {
+  const inputs: string[] = []
+  const kinds: string[] = []
+  let format = 'text'
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    if (arg === '--help' || arg === '-h') {
+      process.stdout.write(`traces diff — where two runs of one task first diverge
+
+Usage:
+  traces diff <a> <b> [--kind TOOL]... [--format text|json]
+
+Each side is an OTLP file or directory, any file convert reads, file#<trace id>,
+or file#branch=<id> for one arm (agent.branch.id or agent.branch.arm, and every
+span below it — refused if the label names more than one subtree). Steps pair
+by span id, then position with the same name and kind, then name and kind
+anywhere. Exit 0 when the runs agree on outcome, 1 when they diverge, 2 when a
+side cannot be read, 3 when the steps line up with no divergence but neither
+side carries a definitive OK/ERROR status or a TOOL step — there is no
+recorded outcome to call agreement on.
+`)
+      return
+    }
+    if (arg === '--format') format = argv[++i] ?? ''
+    else if (arg === '--kind') kinds.push(argv[++i] ?? '')
+    else if (arg.startsWith('--')) throw new Error(`diff: unknown flag ${arg}`)
+    else inputs.push(arg)
+  }
+  if (inputs.length !== 2) {
+    throw new Error('diff needs two runs: traces diff <a> <b> (a file, a directory, file#<trace id> or file#branch=<id>)')
+  }
+  if (format !== 'json' && format !== 'text') throw new Error(`diff: --format must be json or text, got "${format}"`)
+  if (kinds.some((kind) => !kind)) throw new Error('diff: --kind needs a span kind, e.g. --kind TOOL')
+  const report = await diffRuns(inputs[0]!, inputs[1]!, { kinds })
+  process.stdout.write(format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
+  if (report.diff.firstDivergence) process.exitCode = 1
+  else if (report.caveat) process.exitCode = 3
 }
 
 /**
@@ -1661,17 +1728,17 @@ async function cmdUpload(args: Args): Promise<void> {
   const redactor = redactorParts[0] ? commandRedactor({ command: redactorParts[0], args: redactorParts.slice(1) }) : undefined
 
   const candidates = plan.items
-  const byRule: Record<string, number> = {}
+  const byDetector: Record<string, number> = {}
   let totalRedactions = 0
   for (const i of candidates) {
     totalRedactions += i.redaction.redactionCount
-    for (const [r, n] of Object.entries(i.redaction.byRule)) byRule[r] = (byRule[r] ?? 0) + n
+    for (const [r, n] of Object.entries(i.redaction.byDetector)) byDetector[r] = (byDetector[r] ?? 0) + n
   }
 
   const w = (s: string) => process.stderr.write(s)
   w(`\nWindow: since ${new Date(sinceMs).toISOString()}\n`)
   w(`Sessions found: ${plan.items.length}  ·  final privacy-mode dedup runs before upload\n`)
-  w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byRule).length ? ` (${Object.entries(byRule).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
+  w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byDetector).length ? ` (${Object.entries(byDetector).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
   for (const i of candidates.slice(0, 25)) {
     w(`  + [${i.ref.harness}] ${i.ref.sessionId.slice(0, 8)}  ${i.spans.length} spans  ${i.redaction.redactionCount} redacted  ${i.ref.cwd ?? ''}\n`)
   }
@@ -1684,7 +1751,8 @@ async function cmdUpload(args: Args): Promise<void> {
 
   if (args.dryRun) {
     const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlpOut, stripContent: args.noContent, redactor })
-    console.log(`dry run: ${candidates.length - res.skippedSessions} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
+    reportRefused(res.refused)
+    console.log(`dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
   }
@@ -1698,10 +1766,82 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   const res = await executeUpload(plan, { log: (m) => w(`${m}\n`), stripContent: args.noContent, redactor })
+  reportRefused(res.refused)
   console.log(
     `Uploaded ${res.uploadedSessions} session(s), ${res.acceptedSpans} spans accepted, ` +
-      `${res.redactionCount} redaction(s); ${res.skippedSessions} already-uploaded skipped.`,
+      `${res.redactionCount} redaction(s); ${res.skippedSessions} already-uploaded skipped; ${res.refused.length} refused.`,
   )
+}
+
+/** Print each refused session with its verdict (detectors and paths, never values); exit 1 when any. */
+function reportRefused(refused: readonly RefusedSession[]): void {
+  for (const { harness, sessionId, verdict } of refused) {
+    process.stderr.write(`  REFUSED [${harness}] ${sessionId.slice(0, 8)}: ${verdict.status}\n`)
+    for (const finding of verdict.findings.filter((f) => f.severity === 'error')) {
+      process.stderr.write(`    ${finding.category}/${finding.detector} x${finding.count} at ${finding.paths.join(', ')}\n`)
+    }
+    for (const entry of verdict.unreadable) process.stderr.write(`    unread ${entry}\n`)
+  }
+  if (refused.length > 0) {
+    process.stderr.write(`${refused.length} session(s) refused by the share-safety check and kept on this machine.\n`)
+    process.exitCode = 1
+  }
+}
+
+/**
+ * `traces verify-safe <file|dir> [--profile default|share|strict] [--known-secret-env NAME]... [--format text|json]`:
+ * the share-safety verdict for files, read-only. Exit 0 SAFE or
+ * SAFE_WITH_WARNINGS, 1 UNSAFE, 2 UNKNOWN.
+ */
+async function cmdVerifySafe(argv: readonly string[]): Promise<void> {
+  let target: string | undefined
+  let format = 'text'
+  let profile = 'share'
+  const knownSecrets: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    if (arg === '--format') format = argv[++i] ?? ''
+    else if (arg === '--profile') profile = argv[++i] ?? ''
+    else if (arg === '--known-secret-env') {
+      const name = argv[++i] ?? ''
+      const value = process.env[name]
+      if (!value) throw new Error(`verify-safe: environment variable ${name || '(missing name)'} is not set`)
+      knownSecrets.push(value)
+    } else if (arg === '--help' || arg === '-h') {
+      usageVerifySafe()
+      return
+    } else if (arg.startsWith('--')) throw new Error(`verify-safe: unknown flag ${arg}`)
+    else if (target === undefined) target = arg
+    else throw new Error(`verify-safe: unexpected argument ${arg}`)
+  }
+  if (!target) throw new Error('verify-safe needs a file or directory: traces verify-safe <file|dir>')
+  if (format !== 'json' && format !== 'text') throw new Error(`verify-safe: --format must be json or text, got "${format}"`)
+  if (profile !== 'default' && profile !== 'share' && profile !== 'strict') {
+    throw new Error(`verify-safe: --profile must be default, share or strict, got "${profile}"`)
+  }
+  const result = await verifySafe(target, { profile, knownSecrets })
+  process.stdout.write(format === 'json' ? `${JSON.stringify(result, null, 2)}\n` : `${formatVerdict(result)}\n`)
+  process.exitCode = verdictExitCode(result)
+}
+
+function usageVerifySafe(): void {
+  console.log(`traces verify-safe <file|dir> [--profile default|share|strict] [--known-secret-env NAME]... [--format text|json]
+
+Check whether files are safe to share, without changing them. A directory is read
+recursively. .json files are parsed whole, .jsonl and .ndjson line by line, and
+any other file is scanned as text.
+
+  SAFE                 nothing found                                   exit 0
+  SAFE_WITH_WARNINGS   only warnings (raw content, identifiers, media) exit 0
+  UNSAFE               a credential, or personal data under share/strict exit 1
+  UNKNOWN              a file, line or byte range could not be read      exit 2
+
+--profile           default | share (default) | strict; see agent-eval docs/redaction.md
+--known-secret-env  name of an environment variable holding a secret to look for in
+                    any encoding (repeatable); the value is never printed
+--format            text (default) | json
+
+Findings name the file, line and JSON Pointer, never the matched value.`)
 }
 
 function usageExport(): void {
@@ -1730,7 +1870,7 @@ Examples:
   halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 
 Safety:
-  export runs the same local regex redaction used by upload before writing spans.
+  export runs the same local redaction (agent-eval's redaction core) used by upload before writing spans.
   --metadata must be a JSON object; --attr key=value is repeatable and overrides matching metadata keys.`)
 }
 
@@ -1823,7 +1963,8 @@ Commands:
   facts     Print the deterministic session-facts sheet for the selected
             sessions: tool calls excluding synthesized spans, subagent spawns
             with task names, human turns in order, the final message per task,
-            changed paths, first/last record times, and the harness token total.
+            changed paths, first/last record times, the harness token total, and
+            the first failure by agent-eval's fixed precedence (or none).
             No model call, no budget, $0. Every fact names the span ids it came
             from; a fact the spans cannot support is null with its reason.
             --format json (default) or text (exit 1 when a session cannot be read)
@@ -1834,6 +1975,17 @@ Commands:
             ledger sliced to the session window, git log, and a sha256 manifest
             (needs --session <id|path> and --out <new-dir>). This is the FULL
             view: it holds the session's own words, for a reader who cites them
+  mcp       Serve the selected traces to an MCP client over stdio: 7 read-only,
+            idempotent trace tools; spans and results redacted, results capped
+            and marked untrusted (traces mcp --help)
+  diff <a> <b>
+            Pair two runs' steps (by span id, then position with the same name
+            and kind, then name and kind anywhere) and mark the first divergence:
+            changed, replaced, only-in-a, only-in-b or reordered. Each side is an
+            OTLP file or directory, any file convert reads, file#<trace id>, or
+            file#branch=<id> for one arm (agent.branch.id or agent.branch.arm).
+            --kind TOOL (repeatable) keeps only steps of that span kind.
+            Exit 0 agree, 1 diverge, 2 unreadable (--format text|json)
   bundle verify <bundle-dir>
             Check a bundle against its manifest: every listed file present with
             its recorded size and SHA-256, no unlisted or non-regular file beside
@@ -1863,7 +2015,11 @@ Commands:
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
             (watch <target> tails ONE run tree instead: a run directory or a span file)
-  upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
+  upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform;
+            a session whose final events are UNSAFE or UNKNOWN is refused (exit 1)
+  verify-safe <file|dir>
+            Say whether files are safe to share: SAFE, SAFE_WITH_WARNINGS, UNSAFE
+            (exit 1) or UNKNOWN (exit 2). Read-only (--help for flags)
 
 Options:
   --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
@@ -1889,9 +2045,8 @@ Options:
                    A directory reads the OTLP files under it — only the otlp/
                    subdirectory when the producer made one — and names the JSONL
                    that is not OTLP instead of reading it as broken spans.
-                   Supported by: validate, analyze, investigate, improve, ask, stream.
-                   On a WRITING command it is the deprecated spelling of
-                   --otlp-out; it still works, with a warning, until 0.12.
+                   Supported by: validate, analyze, facts, investigate, improve, ask,
+                   stream, mcp. Writing commands take --otlp-out.
   --source-bundle <dir>  Analyze a retained full bundle; explicitly grant source-field reads.
                    Available for analyze, investigate, improve, and ask.
   --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
@@ -1943,7 +2098,7 @@ Options:
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
   --no-content     upload: strip prompt/response text; send metadata only
-  --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass
+  --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the redaction core
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version
   --help, -h       Show help (use \`traces validate --help\`, \`traces export --help\`,
@@ -1962,7 +2117,7 @@ Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KE
 async function main(): Promise<void> {
   const rawArgs = process.argv.slice(2)
   if (rawArgs[0] === '--version' || rawArgs[0] === '-v' || rawArgs[0] === 'version') {
-    console.log(`traces ${packageVersion()}`)
+    console.log(`traces ${tracesVersion()}`)
     return
   }
   // replay-verify and replay-verify-batch own their flag sets; dispatch before the shared parser.
@@ -1978,8 +2133,26 @@ async function main(): Promise<void> {
     await cmdVerifyFindings(rawArgs.slice(1))
     return
   }
+  if (rawArgs[0] === 'mcp') {
+    await cmdMcp(parseArgs(rawArgs))
+    return
+  }
+  if (rawArgs[0] === 'diff') {
+    // Like diff(1): 1 means the runs differ, so trouble must not also exit 1.
+    try {
+      await cmdDiff(rawArgs.slice(1))
+    } catch (err) {
+      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
+      process.exitCode = 2
+    }
+    return
+  }
   if (rawArgs[0] === 'bundle' && rawArgs[1] === 'verify') {
     await cmdBundleVerify(rawArgs.slice(2))
+    return
+  }
+  if (rawArgs[0] === 'verify-safe') {
+    await cmdVerifySafe(rawArgs.slice(1))
     return
   }
   const parsedArgs = parseArgs(rawArgs)
