@@ -60,9 +60,9 @@
     "prepublishOnly": "pnpm check:source && pnpm build && pnpm check:package"
   },
   "dependencies": {
-    "@tangle-network/agent-eval": "file:/private/tmp/claude-501/-Users-drew-company/7e8d9fcd-425c-420c-afef-e1f286d6fe4d/scratchpad/tangle-network-agent-eval-0.187.2.tgz",
+    "@tangle-network/agent-eval": "0.188.0",
     "@tangle-network/agent-interface": "2.12.0",
-    "@tangle-network/agent-runtime": "file:/private/tmp/claude-501/-Users-drew-company/7e8d9fcd-425c-420c-afef-e1f286d6fe4d/scratchpad/tangle-network-agent-runtime-0.270.0.tgz",
+    "@tangle-network/agent-runtime": "0.271.0",
     "@tangle-network/agent-trace-contract": "1.0.2",
     "@tangle-network/sandbox": "0.45.0"
   },
