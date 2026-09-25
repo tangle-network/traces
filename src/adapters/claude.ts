@@ -72,6 +72,29 @@ import { appendSourceAttributes, sourceOf, textSources, SOURCE_ATTRIBUTE_PREFIX,
 
 const SERVICE = 'claude-code'
 
+/**
+ * Claude Code 2.1.63 renamed its subagent tool from `Task` to `Agent`, but the
+ * stream-json `init` record still lists it as `Task` while the model calls
+ * `Agent`. The offered set must use the name the model calls, or every spawn
+ * reads as a call to a tool that was never offered.
+ */
+const AGENT_TOOL_RENAMED_IN: readonly number[] = [2, 1, 63]
+
+function modelFacingToolNames(tools: readonly string[], version: unknown): string[] {
+  if (typeof version !== 'string' || !atLeast(version, AGENT_TOOL_RENAMED_IN)) return [...tools]
+  return tools.map((name) => (name === 'Task' ? 'Agent' : name))
+}
+
+/** Whether a dotted numeric version is at least `min`; an unparseable one is not. */
+function atLeast(version: string, min: readonly number[]): boolean {
+  const parts = version.split('.').map((p) => Number.parseInt(p, 10))
+  if (parts.length < min.length || parts.some((p) => !Number.isFinite(p))) return false
+  for (let i = 0; i < min.length; i++) {
+    if (parts[i]! !== min[i]!) return parts[i]! > min[i]!
+  }
+  return true
+}
+
 /** OTel GenAI: the tool definitions offered to the model. */
 const TOOL_DEFINITIONS_ATTR = 'gen_ai.tool.definitions'
 
@@ -164,6 +187,8 @@ interface ClaudeEvent {
   session_id?: string
   /** Stream-json `init`: the tools the harness offered the model. */
   tools?: unknown
+  /** Stream-json `init`: the Claude Code release that wrote the stream. */
+  claude_code_version?: unknown
   /** Stream-json `result`: true when the run ended in an error. */
   is_error?: unknown
   timestamp?: string
@@ -1202,7 +1227,10 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       const eventSessionId = event.sessionId ?? event.session_id
       if (!discoveredTraceId && eventSessionId) discoveredTraceId = eventSessionId
       if (event.type === 'system' && event.subtype === 'init' && Array.isArray(event.tools)) {
-        offeredTools = event.tools.filter((t): t is string => typeof t === 'string')
+        offeredTools = modelFacingToolNames(
+          event.tools.filter((t): t is string => typeof t === 'string'),
+          event.claude_code_version,
+        )
       }
       if (event.type === 'result' && typeof event.is_error === 'boolean') {
         runResult = { failed: event.is_error, subtype: event.subtype ?? 'unknown' }
