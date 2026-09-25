@@ -32,7 +32,7 @@ import {
   LLM_INPUT_TOKENS,
   LLM_OUTPUT_TOKENS,
 } from '@tangle-network/agent-eval/trace-attributes'
-import { deriveHexId } from '@tangle-network/agent-trace-contract'
+import { ATTR, deriveHexId, type ParentConfidence } from '@tangle-network/agent-trace-contract'
 import { sessionJsonlOptions } from '../integrity.js'
 import { appendAll } from '../arrays.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
@@ -197,6 +197,10 @@ interface ClaudeEvent {
   isMeta?: boolean
   userType?: string
   origin?: { kind?: unknown }
+  /** Set on a subagent's own stream events (in-stream, not a separate
+   *  `subagents/*.jsonl` file): the id of the `Agent`/`Task` call that
+   *  started it. Absent on the main conversation's own events. */
+  parent_tool_use_id?: string | null
   /** `file-history-delta`: the path the harness backed up before changing it. */
   trackingPath?: string
   message?: {
@@ -350,6 +354,8 @@ type ClaudeEventProjection =
       cacheWriteInputTokens: number | null
       content: string | null
       contentSource?: SourceReferences
+      /** See {@link ClaudeEvent.parent_tool_use_id}. */
+      parentToolUseId?: string | null
       tools: Array<{
         id: string | null
         name: string
@@ -363,6 +369,8 @@ type ClaudeEventProjection =
       timestamp: string
       prompt: string | null
       contentSource?: SourceReferences
+      /** See {@link ClaudeEvent.parent_tool_use_id}. */
+      parentToolUseId?: string | null
       isSidechain?: boolean
       isMeta?: boolean
       userType?: string | null
@@ -437,6 +445,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       cacheWriteInputTokens: event.message.usage?.cache_creation_input_tokens ?? null,
       content: textOf(event.message.content) || null,
       contentSource: textSources(event.message, 'content'),
+      parentToolUseId: event.parent_tool_use_id ?? null,
       tools,
     }
   }
@@ -467,6 +476,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       timestamp,
       prompt: prompt || null,
       contentSource: textSources(event.message, 'content'),
+      parentToolUseId: event.parent_tool_use_id ?? null,
       ...(prompt
         ? {
             isSidechain: event.isSidechain === true,
@@ -648,6 +658,24 @@ function consumeDistinctClaudeEvent(
   return true
 }
 
+/**
+ * The span of the `Agent`/`Task` call that started this event's sidechain, and
+ * whether that binding is certain. `parent_tool_use_id` on a stream-json event
+ * is Claude Code's own record of which call owns it — the strongest evidence
+ * this reader has — so a hit is `explicit`, matching the cross-file subagent
+ * binding's confidence vocabulary ({@link ParentConfidence}). A miss (the id
+ * names a call this reader has not seen yet, or the event carries none) falls
+ * back to the trace's root, same as before this field was read at all.
+ */
+function inStreamParent(
+  parentToolUseId: string | null | undefined,
+  state: ClaudeStreamState,
+): { span: OtlpSpan; confidence: ParentConfidence } | undefined {
+  if (!parentToolUseId) return undefined
+  const parentTool = state.toolSpanByUseId.get(parentToolUseId)
+  return parentTool ? { span: parentTool, confidence: 'explicit' } : undefined
+}
+
 function consumeClaudeEvent(
   event: ClaudeEventProjection,
   uid: string,
@@ -658,10 +686,11 @@ function consumeClaudeEvent(
     const messageId = event.messageId ?? uid
     let llmSpan = state.llmSpanByMessageId.get(messageId)
     if (!llmSpan) {
+      const parent = inStreamParent(event.parentToolUseId, state)
       llmSpan = span({
         traceId: ctx.traceId,
         spanId: `${ctx.idPrefix}${uid}`,
-        parentSpanId: ctx.rootParent,
+        parentSpanId: parent ? parent.span.span_id : ctx.rootParent,
         name: 'llm.turn',
         kind: 'LLM',
         startTime: event.timestamp,
@@ -674,6 +703,7 @@ function consumeClaudeEvent(
         cacheWriteInputTokens: event.cacheWriteInputTokens,
         step: state.step,
       })
+      if (parent) llmSpan.attributes[ATTR.parentConfidence] = parent.confidence
       state.spans.push(llmSpan)
       state.llmSpanByMessageId.set(messageId, llmSpan)
       state.step += 1
@@ -750,10 +780,11 @@ function consumeClaudeEvent(
       }))
       state.sawUserTurn = true
       if (event.originKind) state.sawRecordedOrigin = true
+      const userParent = inStreamParent(event.parentToolUseId, state)
       const prompt = userPromptSpan({
         traceId: ctx.traceId,
         spanId: `${ctx.idPrefix}${uid}:user`,
-        parentSpanId: ctx.rootParent,
+        parentSpanId: userParent ? userParent.span.span_id : ctx.rootParent,
         startTime: event.timestamp,
         service: SERVICE,
         agent: ctx.agent,
@@ -766,6 +797,7 @@ function consumeClaudeEvent(
         prompt.attributes[ORIGIN_RECORDED_ATTR] = true
         prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
       }
+      if (userParent) prompt.attributes[ATTR.parentConfidence] = userParent.confidence
       state.spans.push(prompt)
       state.promptSpans.push(prompt)
       state.step += 1
@@ -1048,6 +1080,8 @@ interface ClaudeSubagentFile {
   agentId: string
   meta: SubagentMeta
   parentToolUseId?: string
+  /** How `parentToolUseId` was chosen; absent means the child recorded it. */
+  parentConfidence?: ParentConfidence
   parsed?: ParsedStream
 }
 
@@ -1297,6 +1331,15 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       root.attributes[RUN_STATUS_ATTR] = runResult.failed ? 'failed' : 'completed'
       root.status = runResult.failed ? { code: 'ERROR', message: `the run ended with ${runResult.subtype}` } : { code: 'OK' }
     }
+    // No `result` record: this reader cannot tell a `-p --output-format
+    // stream-json` run that was still in flight (or was killed) from an
+    // ordinary saved session transcript, which never carries one — that
+    // record type only exists in `-p` mode. Leaving `run.status` unset is
+    // truthful for both: agent-eval's trace-contract `run` rule already
+    // treats an unset status as unknown rather than completed (agent-eval
+    // fail-closed fix), so declaring it `running` here would be accurate for
+    // a truncated stream but actively wrong for a finished interactive
+    // session.
     const spans: OtlpSpan[] = [root]
     appendAll(spans, main.spans)
 
@@ -1370,13 +1413,14 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
           workflowBindings,
         )
         const parsed = await parseClaudeSubagent(ref, traceId, agent, options)
-        const binding = selectWorkflowBinding(
+        const { binding, confidence } = selectWorkflowBinding(
           basename(file),
           runBindings,
           firstSubagentTimestamp(agent, parsed),
           meta.toolUseId,
         )
         agent.parentToolUseId = binding.toolUseId
+        agent.parentConfidence = confidence
       }
       agents.push(agent)
     }
@@ -1467,10 +1511,18 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       const parentAgentMissing = Boolean(
         agent.meta.parentAgentId && !parsedByAgentId.has(agent.meta.parentAgentId),
       )
+      // A child whose parent call is missing hangs off the root only so it is not lost;
+      // the root is a placeholder, not a chosen parent.
+      const confidence: ParentConfidence = parentSpan
+        ? (agent.parentConfidence ?? 'correlated')
+        : 'unknown'
       const task = subagentTaskName(agent)
       const lifecycle = subagentLifecycleSpan(agent, parsed, traceId, parent, task, subDir)
       for (const item of [...parsed.spans, ...(lifecycle ? [lifecycle] : [])]) {
-        if (item.parent_span_id === `root:${traceId}`) item.parent_span_id = parent
+        if (item.parent_span_id === `root:${traceId}` || item === lifecycle) {
+          item.parent_span_id = parent
+          item.attributes[ATTR.parentConfidence] = confidence
+        }
         // Every span here came from the CHILD's transcript. Marking it says so,
         // which is what keeps the parent's tool count, changed files, human
         // turns and record window from absorbing work the parent never did.
