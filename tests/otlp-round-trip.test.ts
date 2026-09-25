@@ -257,6 +257,13 @@ const FIXTURES: readonly RoundTripFixture[] = [
       }),
     ],
     exercises: ['unknown-span-kind'],
+    erased: {
+      'unknown-span-kind': 'agent-trace-contract 1.2.0 classifies an unrecognised-kind span from its ' +
+        'model attribute (row 2, evidence-based inference), so the reader resolves this one to LLM — ' +
+        "the artifact's own openinference.span.kind is LLM, a recognised word, even though the producer's " +
+        'original word is still kept verbatim under traces.raw_attribute.openinference.span.kind. ' +
+        'The second hop reads a properly declared LLM span and earns no finding',
+    },
   },
   {
     name: 'a declared model call with no model',
