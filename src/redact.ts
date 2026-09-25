@@ -40,16 +40,25 @@ export interface RedactSpansOptions {
 }
 
 /**
- * Redact every string field that leaves the machine: name, attributes, and
- * status message. `assessSpans` below (and the MCP search tools built on this
- * store) all read `span.name`, so a secret left there is as reachable as one
- * in an attribute — a search for it just works, defeating redaction.
+ * Redact every string field that leaves the machine: name, attributes, status
+ * message, and each causal link's own attributes. `assessSpans` below (and
+ * the MCP search tools built on this store) all read `span.name` and
+ * `span.links[].attributes` — a secret left in either is as reachable as one
+ * in an attribute — a search for it just works, defeating redaction. The core
+ * redacts nested object keys as well as values (a credential shape glued into
+ * a key name, such as an env-style attribute key carrying a token, is renamed
+ * the same as a credential-shaped value), so link attributes get that same
+ * coverage once they are part of what `redact` walks.
  */
 export function redactSpans(spans: readonly OtlpSpan[], options: RedactSpansOptions = {}): SpanRedaction {
   const parts = spans.map((span) => ({
     name: span.name,
     attributes: stripSourceAttributes(span.attributes),
     message: span.status.message,
+    links: span.links?.map((link) => ({
+      ...link,
+      ...(link.attributes ? { attributes: stripSourceAttributes(link.attributes) } : {}),
+    })),
   }))
   const { value, report } = redact(parts, options)
   const out = spans.map((span, index) => {
@@ -59,20 +68,31 @@ export function redactSpans(spans: readonly OtlpSpan[], options: RedactSpansOpti
       part.message !== undefined && part.message !== span.status.message
         ? { ...span.status, message: part.message }
         : span.status
-    return { ...span, name: part.name, attributes: part.attributes, status }
+    return {
+      ...span,
+      name: part.name,
+      attributes: part.attributes,
+      status,
+      ...(part.links ? { links: part.links } : {}),
+    }
   })
   return { spans: out, report }
 }
 
 /**
  * The share-safety verdict for spans as they would be sent. UNSAFE and UNKNOWN
- * refuse. Finding paths start with the span id.
+ * refuse. Finding paths start with the span id. Covers `links[].attributes`
+ * for the same reason {@link redactSpans} does: a secret reachable through a
+ * causal link is as live as one on the span itself.
  */
 export function assessSpans(spans: readonly OtlpSpan[], profile: RedactionProfile = 'default'): ShareSafetyVerdict {
   return combineVerdicts(
     profile,
     spans.map((span) => {
-      const verdict = assessShareSafety({ name: span.name, attributes: span.attributes, status: span.status }, { profile })
+      const verdict = assessShareSafety(
+        { name: span.name, attributes: span.attributes, status: span.status, links: span.links },
+        { profile },
+      )
       return {
         ...verdict,
         findings: verdict.findings.map((finding) => ({

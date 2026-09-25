@@ -2,6 +2,7 @@ allowBuilds:
   '@ax-llm/ax': false
   esbuild: true
 overrides:
+  '@tangle-network/agent-eval': 'file:../agent-eval-redaction'
   '@hono/node-server': '>=2.0.10'
   esbuild: ^0.28.1
   hono: '>=4.12.34'
