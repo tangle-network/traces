@@ -103,7 +103,11 @@ export async function sniffCheckInput(path: string): Promise<CheckInputKind> {
   if (objects.length === 0) throw new Error(`${path} holds no JSON rows`)
   const kinds: CheckInputKind[] = []
   if (objects.every((r) => typeof r.trace_id === 'string' && typeof r.span_id === 'string')) kinds.push('otlp')
-  if (objects.some((r) => typeof r.sessionId === 'string' && typeof r.type === 'string') && !objects.some(hasSpanId)) {
+  // A Claude Code session file spells it sessionId; `claude -p --output-format stream-json` spells it session_id.
+  if (
+    objects.some((r) => (typeof r.sessionId === 'string' || typeof r.session_id === 'string') && typeof r.type === 'string') &&
+    !objects.some(hasSpanId)
+  ) {
     kinds.push('claude-code')
   }
   if (objects.some((r) => CODEX_LINE_TYPES.has(String(r.type)) && isObject(r.payload))) kinds.push('codex')
