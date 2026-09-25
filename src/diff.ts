@@ -32,6 +32,14 @@ export interface RunDiffReport {
   readonly a: RunDiffSide
   readonly b: RunDiffSide
   readonly diff: StepDiff
+  /**
+   * Set when "the runs agree step for step" would overclaim: neither side has
+   * a step with a definitive OK/ERROR status, or neither side has a TOOL step.
+   * Agreement on unrecorded status, or on non-tool bookkeeping steps, is not
+   * evidence the runs behaved the same — a captured UNSET status means the
+   * outcome was never recorded, on either run.
+   */
+  readonly caveat?: string
 }
 
 /**
@@ -122,14 +130,36 @@ export async function readRunSide(ref: string, options: RunDiffOptions = {}): Pr
   return { path, traceId, ...(branch === undefined ? {} : { branch }), spans: spans.length, steps }
 }
 
+function hasDefiniteStatus(steps: readonly DiffStep[]): boolean {
+  return steps.some((step) => step.fields.status === 'OK' || step.fields.status === 'ERROR')
+}
+
+function hasToolStep(steps: readonly DiffStep[]): boolean {
+  return steps.some((step) => step.kind === 'TOOL')
+}
+
+function agreementCaveat(a: readonly DiffStep[], b: readonly DiffStep[]): string | undefined {
+  const reasons: string[] = []
+  if (!hasDefiniteStatus(a) && !hasDefiniteStatus(b)) {
+    reasons.push('no step on either side carries a definitive OK or ERROR status (all UNSET)')
+  }
+  if (!hasToolStep(a) && !hasToolStep(b)) {
+    reasons.push('no TOOL step on either side')
+  }
+  return reasons.length > 0 ? reasons.join('; ') : undefined
+}
+
 export async function diffRuns(a: string, b: string, options: RunDiffOptions = {}): Promise<RunDiffReport> {
   const [left, right] = await Promise.all([readRunSide(a, options), readRunSide(b, options)])
+  const diff = diffSteps(left.steps, right.steps)
+  const caveat = diff.firstDivergence ? undefined : agreementCaveat(left.steps, right.steps)
   return {
     kind: 'traces.run_diff',
     ...(options.kinds?.length ? { kinds: options.kinds.map((kind) => kind.toUpperCase()) } : {}),
     a: left,
     b: right,
-    diff: diffSteps(left.steps, right.steps),
+    diff,
+    ...(caveat ? { caveat } : {}),
   }
 }
 
@@ -159,7 +189,11 @@ export function renderRunDiff(report: RunDiffReport): string {
   ]
   const first = diff.firstDivergence
   if (!first) {
-    lines.push('no divergence: the runs agree step for step')
+    lines.push(
+      report.caveat
+        ? `same steps, same order — but this is not agreement on outcome: ${report.caveat}`
+        : 'no divergence: the runs agree step for step',
+    )
     return `${lines.join('\n')}\n`
   }
   lines.push(`first divergence [${first.kind}] at step ${first.index}: ${first.reason}`)

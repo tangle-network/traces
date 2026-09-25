@@ -7,9 +7,11 @@
  *
  * - Every tool is published with `readOnlyHint` and `idempotentHint` taken from
  *   its descriptor, and `openWorldHint: false`: it reads one local trace file.
- * - Spans are redacted with agent-eval's redaction core (`default` profile)
- *   before the store is built, so a search cannot match a secret, and every
- *   result is redacted again at the boundary.
+ * - Spans are redacted (`redactSpans`, `default` profile: name, attributes and
+ *   status message, the only span fields `openAgenticTraceStore` reads) before
+ *   the store is built, and every result is redacted again at the boundary. A
+ *   search cannot match a secret in a field the store indexes, because
+ *   nothing indexed survives redaction unredacted.
  * - Every result is wrapped with the untrusted-text notice, and a result above
  *   {@link MCP_RESULT_BYTE_CAP} is refused rather than cut, so a client never
  *   reads half a record as a whole one.

@@ -943,6 +943,7 @@ export function renderSessionFacts(report: SessionFactsReport): string {
 }
 
 function renderFirstFailure(failure: FirstFailure): string {
+  if (failure.status === 'unknown') return `unknown — not recorded whether this run failed (${failure.reason})`
   if (failure.status === 'none') return `none recorded (${failure.reason})`
   if (failure.status === 'ambiguous') {
     return `ambiguous ${failure.stage}: ${failure.reason} (${failure.candidates.join(', ')})`
@@ -1164,6 +1165,9 @@ function compactFacts(facts: SessionFacts): CompactFacts {
 }
 
 function compactFirstFailure(failure: FirstFailure): Record<string, unknown> {
+  if (failure.status === 'unknown') {
+    return { status: 'unknown', reason: failure.reason, unset_count: failure.unsetCount }
+  }
   if (failure.status === 'none') return { status: 'none', reason: failure.reason }
   if (failure.status === 'ambiguous') {
     return { status: 'ambiguous', stage: failure.stage, reason: failure.reason, span_ids: failure.candidates }
