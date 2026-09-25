@@ -416,13 +416,15 @@ describe('readOtlpInput', () => {
         start_time: '2026-01-01T00:00:00.000Z',
         end_time: '2026-01-01T00:00:00.000Z',
         status: { code: 'STATUS_CODE_ERROR', message: '3 verifier failure(s)' },
-        attributes: { [ATTR.spanKind]: 'GUARDRAIL' },
+        // Not GUARDRAIL: agent-trace-contract 1.2.0 recognizes that one now.
+        // VERIFIER stays a word no version of the contract declares.
+        attributes: { [ATTR.spanKind]: 'VERIFIER' },
       },
     ])
     const input = await readOtlpInput(path)
 
     const span = input.spans[0]!
-    expect(span.attributes['traces.raw_attribute.openinference.span.kind']).toBe('GUARDRAIL')
+    expect(span.attributes['traces.raw_attribute.openinference.span.kind']).toBe('VERIFIER')
     // UNKNOWN, not CHAIN: nothing about this span says it CONTAINS other work.
     expect(span.attributes[ATTR.spanKind]).toBe('UNKNOWN')
     expect(span.status).toEqual({ code: 'ERROR', message: '3 verifier failure(s)' })

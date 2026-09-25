@@ -257,6 +257,13 @@ const FIXTURES: readonly RoundTripFixture[] = [
       }),
     ],
     exercises: ['unknown-span-kind'],
+    erased: {
+      'unknown-span-kind': 'the substitution resolves the ambiguity, not just records it: this span\'s ' +
+        'usage/model attributes are LLM-shaped, so the reader infers LLM and declares that on the export ' +
+        '(the producer\'s own word is kept verbatim under `traces.raw_attribute.openinference.span.kind`, ' +
+        'and the substitution under `traces.substituted_fields`). The artifact is a genuinely valid, ' +
+        'unambiguous LLM span, so re-validating it has nothing left to call unknown',
+    },
   },
   {
     name: 'a declared model call with no model',

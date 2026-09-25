@@ -90,6 +90,7 @@ describe('execution accounting', () => {
       estimated: { n: 0, totalUsd: 0 },
       uncaptured: { n: 0 },
       knownFraction: 1,
+      lowerBound: { n: 0, floorUsd: 0 },
     })
   })
 
