@@ -10,7 +10,7 @@
  */
 
 import { lstat, readdir, readFile } from 'node:fs/promises'
-import { extname, join, relative } from 'node:path'
+import { basename, extname, join, relative } from 'node:path'
 import {
   assessShareSafety,
   combineVerdicts,
@@ -39,7 +39,7 @@ export async function verifySafe(target: string, options: VerifySafeOptions = {}
   const unreadable: string[] = []
   const files = await listFiles(target, unreadable)
   for (const file of files) {
-    const label = relative(target, file) || file
+    const label = relative(target, file) || basename(file)
     let bytes: Buffer
     try {
       bytes = await readFile(file)

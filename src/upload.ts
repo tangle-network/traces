@@ -21,7 +21,7 @@ import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
 import { hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 import type { TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
-import { assessShareSafety, REDACTION_VERSION, shareAllowed } from '@tangle-network/agent-eval/traces'
+import { assessShareSafety, REDACTION_VERSION, redact, shareAllowed } from '@tangle-network/agent-eval/traces'
 import type { RedactionReport, ShareSafetyVerdict } from '@tangle-network/agent-eval/traces'
 import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-io.js'
 import { ATTR, INGEST_SOURCE_CLI } from './attributes.js'
@@ -108,7 +108,9 @@ async function sessionMeta(item: UploadItem): Promise<Record<string, string | nu
   if (item.ref.cwd) meta[ATTR.CWD] = item.ref.cwd
   const branch = await gitBranch(item.ref.cwd)
   if (branch) meta[ATTR.GIT_BRANCH] = branch
-  return meta
+  // The spans were redacted before this metadata existed. A cwd can hold an
+  // email (a synced drive's mount path) or a token, so it goes through the core too.
+  return redact(meta).value
 }
 
 const msToNano = (epochMs: number): string => (BigInt(epochMs) * 1_000_000n).toString()
