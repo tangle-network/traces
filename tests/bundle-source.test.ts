@@ -138,7 +138,7 @@ describe('retained source capability', () => {
   })
 
   it('rejects redacted, changed, and cross-trace attributes', async () => {
-    expect(await createBundleSourceReader(bundle, redactSpans(spans, []).spans)).toBeUndefined()
+    expect(await createBundleSourceReader(bundle, redactSpans(spans).spans)).toBeUndefined()
     const selected = structuredClone(spans.find((span) => span.span_id === input.span_id)!)
     selected.attributes.content = 'changed'
     expect(await createBundleSourceReader(bundle, [selected])).toBeUndefined()

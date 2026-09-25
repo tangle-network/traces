@@ -2,13 +2,15 @@
  * Upload local coding-session traces to the Tangle Intelligence Platform.
  *
  * Pipeline per session: locate (time window) → parse to OTLP spans → REDACT
- * (PII/secrets) → apply the selected privacy mode → augment with metadata →
- * dedup the final events → POST via the hosted `ingestTraces` client. Redaction happens
- * before anything leaves the machine; the dedup is local-state + server
+ * (agent-eval's redaction core) → apply the selected privacy mode → augment
+ * with metadata → CHECK the final events with the share-safety verdict → dedup
+ * → POST via the hosted `ingestTraces` client. A session whose final events are
+ * UNSAFE or UNKNOWN is refused: it is not sent, not written to a dry-run
+ * preview, and not marked uploaded. The dedup is local-state + server
  * idempotency-key.
  *
- * `planUpload` is read-only (select + regex redact); `executeUpload` applies
- * final privacy options, deduplicates, and sends or writes a dry-run preview.
+ * `planUpload` is read-only (select + redact); `executeUpload` applies final
+ * privacy options, checks, deduplicates, and sends or writes a dry-run preview.
  */
 
 import { stripSourceAttributes } from './source-location.js'
@@ -19,8 +21,8 @@ import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
 import { hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 import type { TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
-import { REDACTION_VERSION } from '@tangle-network/agent-eval/traces'
-import type { RedactionReport } from '@tangle-network/agent-eval/traces'
+import { assessShareSafety, REDACTION_VERSION, shareAllowed } from '@tangle-network/agent-eval/traces'
+import type { RedactionReport, ShareSafetyVerdict } from '@tangle-network/agent-eval/traces'
 import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-io.js'
 import { ATTR, INGEST_SOURCE_CLI } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
@@ -63,7 +65,7 @@ export interface UploadPlan {
 
 export type PlanOptions = ScanOptions
 
-/** Read-only: select sessions in the window and apply the built-in regex redaction. */
+/** Read-only: select sessions in the window and redact them with the default profile. */
 export async function planUpload(opts: PlanOptions = {}): Promise<UploadPlan> {
   const state = await loadState()
   const items: UploadItem[] = []
@@ -145,6 +147,13 @@ export function toTraceSpanEvents(
   })
 }
 
+/** A session the share-safety check kept on the machine. */
+export interface RefusedSession {
+  harness: string
+  sessionId: string
+  verdict: ShareSafetyVerdict
+}
+
 export interface UploadResult {
   uploadedSessions: number
   skippedSessions: number
@@ -152,6 +161,8 @@ export interface UploadResult {
   redactionCount: number
   dryRun: boolean
   otlpPath?: string
+  /** Sessions whose final events were UNSAFE or UNKNOWN. None of them was sent. */
+  refused: RefusedSession[]
 }
 
 /** A trace sink. The hosted client satisfies this; pass your own to route
@@ -211,7 +222,7 @@ async function prepareOutbound(
   plan: UploadPlan,
   opts: ExecuteOptions,
   uploadedAt: string,
-): Promise<{ items: OutboundItem[]; skipped: number }> {
+): Promise<{ items: OutboundItem[]; skipped: number; refused: RefusedSession[] }> {
   let candidates = plan.items
   if (opts.redactor && !opts.stripContent) {
     const redactor = opts.redactor
@@ -229,6 +240,7 @@ async function prepareOutbound(
     redactionVersion: REDACTION_VERSION,
   }
   const items: OutboundItem[] = []
+  const refused: RefusedSession[] = []
   for (const item of candidates) {
     const key = uploadKey(item.ref.harness, item.ref.sessionId)
     const previous = plan.state[key]
@@ -246,15 +258,22 @@ async function prepareOutbound(
       events = eventsAt(eventTimestamp)
       hash = outboundHash(events, identity)
     }
+    // The check reads exactly what would be sent: redacted spans after the
+    // external redactor and privacy mode, plus the session metadata added above.
+    const verdict = assessShareSafety(events)
+    if (!shareAllowed(verdict)) {
+      refused.push({ harness: item.ref.harness, sessionId: item.ref.sessionId, verdict })
+      continue
+    }
     items.push({ item, events, hash })
   }
-  return { items, skipped: plan.items.length - items.length }
+  return { items, skipped: plan.items.length - items.length - refused.length, refused }
 }
 
 /** Send the final, new outbound items (or write their dry-run OTLP). */
 export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {}): Promise<UploadResult> {
   const uploadedAt = new Date().toISOString()
-  const { items, skipped } = await prepareOutbound(plan, opts, uploadedAt)
+  const { items, skipped, refused } = await prepareOutbound(plan, opts, uploadedAt)
   const redactionCount = items.reduce((n, { item }) => n + item.redaction.redactionCount, 0)
 
   if (opts.dryRun) {
@@ -267,6 +286,7 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
       redactionCount,
       dryRun: true,
       otlpPath: path,
+      refused,
     }
   }
 
@@ -277,6 +297,7 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
       acceptedSpans: 0,
       redactionCount,
       dryRun: false,
+      refused,
     }
   }
 
@@ -319,5 +340,6 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
     acceptedSpans,
     redactionCount,
     dryRun: false,
+    refused,
   }
 }

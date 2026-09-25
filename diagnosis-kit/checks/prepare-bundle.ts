@@ -1,7 +1,7 @@
 /** Prepare the metadata-only bundle inside one customer engagement. */
 import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { readOtlpInput, redactSpans, serializeSpans, TRACES_REDACTION_RULES } from '../../src/index.js'
+import { assessSpans, readOtlpInput, redactSpans, serializeSpans, shareAllowed } from '../../src/index.js'
 import { stripContent } from './metadata-only.js'
 
 const dir = process.argv[2]
@@ -24,15 +24,19 @@ async function main() {
   const ingested = await readOtlpInput(input)
   if (ingested.spans.length === 0) throw new Error('incoming/ contains no readable spans')
   const { spans: metadataOnly, dropped } = stripContent(ingested.spans)
-  const { spans, report } = redactSpans(metadataOnly, TRACES_REDACTION_RULES)
+  const { spans, report } = redactSpans(metadataOnly)
   // The OTLP reader synthesizes this marker while normalizing tool spans.
   // It contains no tool argument and is removed before writing the bundle.
   const unexpected = dropped.filter((key) => key !== 'tool.args_captured')
   if (unexpected.length || report.redactionCount) {
     throw new Error('received trace contains content-bearing attributes or structured secrets; remove the incoming file and request a customer-side metadata-only export')
   }
+  const verdict = assessSpans(spans)
+  if (!shareAllowed(verdict)) {
+    throw new Error(`redacted spans are ${verdict.status} (${verdict.findings.map((f) => `${f.detector} at ${f.paths.join(', ')}`).concat(verdict.unreadable).join('; ')}); nothing was written`)
+  }
   writeFileSync(output, serializeSpans(spans), { flag: 'wx', mode: 0o600 })
-  console.log(JSON.stringify({ output, spans: spans.length, droppedAttributes: dropped, redactionCount: report.redactionCount, byRule: report.byRule }))
+  console.log(JSON.stringify({ output, spans: spans.length, droppedAttributes: dropped, redactionCount: report.redactionCount, byDetector: report.byDetector, verdict: verdict.status }))
 }
 
 main().catch((error) => {

@@ -7,14 +7,14 @@
  * model-written findings, not the measurement.
  *
  * Boundary: content-bearing attributes are dropped before anything else touches the
- * spans. Regex redaction runs after, as a second line rather than the first, because
- * it does not catch names or account numbers written in prose.
+ * spans. agent-eval's redaction core runs after, as a second line rather than the first,
+ * because it does not catch names or account numbers written in prose.
  *
  * Usage:
  *   tsx diagnosis-kit/checks/run-checks.ts <spans.otlp.jsonl|dir> [--content]
  */
 
-import { readOtlpInput, redactSpans, runPipelines, TRACES_REDACTION_RULES } from '../../src/index.js'
+import { readOtlpInput, redactSpans, runPipelines } from '../../src/index.js'
 import { stripContent } from './metadata-only.js'
 
 async function main() {
@@ -29,7 +29,7 @@ async function main() {
   const { spans: metadataOnly, dropped } = contentOptIn
     ? { spans: [...ingested.spans], dropped: [] as string[] }
     : stripContent(ingested.spans)
-  const { spans, report: redaction } = redactSpans(metadataOnly, TRACES_REDACTION_RULES)
+  const { spans, report: redaction } = redactSpans(metadataOnly)
 
   // runPipelines consumes the normalized spans we just scrubbed, so the redaction
   // boundary sits upstream of every detector. It returns stuck loops (same tool, same
@@ -49,7 +49,7 @@ async function main() {
           unreadableRows: ingested.unreadable,
           redaction: {
             redactionCount: redaction.redactionCount,
-            byRule: redaction.byRule,
+            byRule: redaction.byDetector,
             droppedAttributes: dropped,
           },
           skipped: !contentOptIn && spans.some((span) => span.attributes['openinference.span.kind'] === 'TOOL')
