@@ -197,6 +197,10 @@ interface ClaudeEvent {
   isMeta?: boolean
   userType?: string
   origin?: { kind?: unknown }
+  /** Set on a subagent's own stream events (in-stream, not a separate
+   *  `subagents/*.jsonl` file): the id of the `Agent`/`Task` call that
+   *  started it. Absent on the main conversation's own events. */
+  parent_tool_use_id?: string | null
   /** `file-history-delta`: the path the harness backed up before changing it. */
   trackingPath?: string
   message?: {
@@ -350,6 +354,8 @@ type ClaudeEventProjection =
       cacheWriteInputTokens: number | null
       content: string | null
       contentSource?: SourceReferences
+      /** See {@link ClaudeEvent.parent_tool_use_id}. */
+      parentToolUseId?: string | null
       tools: Array<{
         id: string | null
         name: string
@@ -363,6 +369,8 @@ type ClaudeEventProjection =
       timestamp: string
       prompt: string | null
       contentSource?: SourceReferences
+      /** See {@link ClaudeEvent.parent_tool_use_id}. */
+      parentToolUseId?: string | null
       isSidechain?: boolean
       isMeta?: boolean
       userType?: string | null
@@ -437,6 +445,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       cacheWriteInputTokens: event.message.usage?.cache_creation_input_tokens ?? null,
       content: textOf(event.message.content) || null,
       contentSource: textSources(event.message, 'content'),
+      parentToolUseId: event.parent_tool_use_id ?? null,
       tools,
     }
   }
@@ -467,6 +476,7 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       timestamp,
       prompt: prompt || null,
       contentSource: textSources(event.message, 'content'),
+      parentToolUseId: event.parent_tool_use_id ?? null,
       ...(prompt
         ? {
             isSidechain: event.isSidechain === true,
@@ -648,6 +658,24 @@ function consumeDistinctClaudeEvent(
   return true
 }
 
+/**
+ * The span of the `Agent`/`Task` call that started this event's sidechain, and
+ * whether that binding is certain. `parent_tool_use_id` on a stream-json event
+ * is Claude Code's own record of which call owns it — the strongest evidence
+ * this reader has — so a hit is `explicit`, matching the cross-file subagent
+ * binding's confidence vocabulary ({@link ParentConfidence}). A miss (the id
+ * names a call this reader has not seen yet, or the event carries none) falls
+ * back to the trace's root, same as before this field was read at all.
+ */
+function inStreamParent(
+  parentToolUseId: string | null | undefined,
+  state: ClaudeStreamState,
+): { span: OtlpSpan; confidence: ParentConfidence } | undefined {
+  if (!parentToolUseId) return undefined
+  const parentTool = state.toolSpanByUseId.get(parentToolUseId)
+  return parentTool ? { span: parentTool, confidence: 'explicit' } : undefined
+}
+
 function consumeClaudeEvent(
   event: ClaudeEventProjection,
   uid: string,
@@ -658,10 +686,11 @@ function consumeClaudeEvent(
     const messageId = event.messageId ?? uid
     let llmSpan = state.llmSpanByMessageId.get(messageId)
     if (!llmSpan) {
+      const parent = inStreamParent(event.parentToolUseId, state)
       llmSpan = span({
         traceId: ctx.traceId,
         spanId: `${ctx.idPrefix}${uid}`,
-        parentSpanId: ctx.rootParent,
+        parentSpanId: parent ? parent.span.span_id : ctx.rootParent,
         name: 'llm.turn',
         kind: 'LLM',
         startTime: event.timestamp,
@@ -674,6 +703,7 @@ function consumeClaudeEvent(
         cacheWriteInputTokens: event.cacheWriteInputTokens,
         step: state.step,
       })
+      if (parent) llmSpan.attributes[ATTR.parentConfidence] = parent.confidence
       state.spans.push(llmSpan)
       state.llmSpanByMessageId.set(messageId, llmSpan)
       state.step += 1
@@ -750,10 +780,11 @@ function consumeClaudeEvent(
       }))
       state.sawUserTurn = true
       if (event.originKind) state.sawRecordedOrigin = true
+      const userParent = inStreamParent(event.parentToolUseId, state)
       const prompt = userPromptSpan({
         traceId: ctx.traceId,
         spanId: `${ctx.idPrefix}${uid}:user`,
-        parentSpanId: ctx.rootParent,
+        parentSpanId: userParent ? userParent.span.span_id : ctx.rootParent,
         startTime: event.timestamp,
         service: SERVICE,
         agent: ctx.agent,
@@ -766,6 +797,7 @@ function consumeClaudeEvent(
         prompt.attributes[ORIGIN_RECORDED_ATTR] = true
         prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
       }
+      if (userParent) prompt.attributes[ATTR.parentConfidence] = userParent.confidence
       state.spans.push(prompt)
       state.promptSpans.push(prompt)
       state.step += 1
