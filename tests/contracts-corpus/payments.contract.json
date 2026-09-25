@@ -1,0 +1,7 @@
+{
+  "name": "payments",
+  "description": "Charge each order once: a retried charge must reuse its idempotency key.",
+  "retries": {
+    "writes": [{ "tool": "mcp__payments__charge_card", "idempotencyKey": "/idempotency_key" }]
+  }
+}

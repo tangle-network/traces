@@ -23,6 +23,7 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Gate CI on a trace contract](#gate-ci-on-a-trace-contract)
 - [Integrate your own system](#integrate-your-own-system)
 - [What it finds](#what-it-finds)
 - [Supported harnesses](#supported-harnesses)
@@ -64,6 +65,7 @@ Requires Node ≥ 22.
 traces validate spans.otlp.jsonl                  # what can this trace answer?
 traces analyze  --otlp spans.otlp.jsonl           # analyse it, no adapter involved
 traces analyze --harness claude-code --last 1     # or read a coding agent's own log
+traces check session.jsonl --contract contract.json # gate CI on the path the run took
 traces improve --harness claude-code --last 5 --dir .traces/improvement
 traces watch --all
 traces stream --all --mode findings
@@ -83,6 +85,48 @@ See [Trace analysts](#trace-analysts).
 `traces improve` is the reviewable action path.
 It writes one typed result, one report, flattened evidence rows, and the canonical OTLP trace.
 Each finding already contains the claim, evidence, recommended action, confidence, and validation plan.
+
+## Gate CI on a trace contract
+
+Two runs can give the same answer while one of them calls a forbidden tool.
+An output check passes both; a trace contract fails the wrong one.
+
+```json
+{
+  "name": "refund-desk",
+  "run": { "requireCompleted": true, "maxDurationMs": 300000 },
+  "tools": { "required": ["Read"], "forbidden": ["Bash"], "allowed": ["Read", "Grep"], "maxCalls": 10, "enforced": true },
+  "retries": { "reads": ["Read", "Grep"] },
+  "llm": { "maxCalls": 10 }
+}
+```
+
+```bash
+claude -p "$TASK" --tools Read,Grep --strict-mcp-config --output-format stream-json --verbose > run.jsonl
+traces check run.jsonl --contract refund-desk.json --junit contract.xml
+```
+
+`tools.enforced` fails when the harness offered the model a tool the contract does not allow, which a flag such as `--tools` does not prove.
+Without `--strict-mcp-config`, the run above is also offered every MCP server the account or project configures.
+`retries` fails when a tool repeats a call with the same arguments and nothing proves the repeat is safe.
+
+The trace is `claude -p --output-format stream-json` output, a Claude Code or Codex session file, OTLP spans (a file or a directory), or trace evidence; `--format` names it when the file could be read as more than one.
+Only stream-json output records the offered tools and the run's own result.
+**A saved interactive session file carries no run status at all** (the `result` record above only exists in `-p` mode), so `run.requireCompleted`/`run.allowedStatuses` always fail on one — write a contract for a session file with no `run` key, like the `refund-desk` example above running against `run.jsonl`.
+Every rule prints `pass`, `fail`, `error`, or `skipped` (a rule of an alternative path that did not decide the result).
+
+| Exit | Meaning |
+|---|---|
+| 0 | Every rule passed. |
+| 1 | A rule failed. |
+| 2 | The contract is malformed or contradicts itself, or a rule could not be evaluated. |
+| 3 | The trace could not be read. |
+| 4 | The trace reference is ambiguous. |
+
+`--junit` writes one test case per rule, and GitHub annotations print under `GITHUB_ACTIONS=true` or `--annotations`.
+`traces check --contract <file> --explain` prints what each compiled rule checks and reads no trace.
+For a trace that does not pass, the verdict, the contract, its plain-language statement, and the redacted spans the violations cite go to `--evidence` (default `.traces/check`).
+The contract keys and rule semantics are in [agent-eval's trace-contract guide](https://github.com/tangle-network/agent-eval/blob/main/docs/trace-contracts.md).
 
 ## Integrate your own system
 
@@ -253,6 +297,7 @@ traces facts --harness codex --session <id>        # the deterministic facts she
 traces diff  run-a.otlp.jsonl run-b.otlp.jsonl      # where two runs of one task first diverge
 traces mcp   --otlp spans.otlp.jsonl                # read-only trace tools for an MCP client
 traces analyze  --all --since 2026-06-18 --out report.md
+traces check   spans.otlp.jsonl --contract c.json --junit c.xml  # exit 0 pass, 1 fail, 2 bad contract, 3 unreadable, 4 ambiguous
 traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
 traces validate results/sessions --out conformance.md  # a whole directory of exports
 traces analyze  --otlp spans.otlp.jsonl            # analyse foreign OTLP, no adapter
@@ -303,7 +348,11 @@ See [Replay verification](./docs/replay-verify.md) for setup, semantics, and hon
 | `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory; `ask`: write `answers.json` + `report.md` there |
-| `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `analyze`, `investigate`, `improve`, `ask`, `stream` |
+| `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `check`, `analyze`, `investigate`, `improve`, `ask`, `stream` |
+| `--contract <file>` | `check`: the declarative trace contract (JSON) |
+| `--junit <file>` | `check`: write JUnit XML, one test case per rule |
+| `--evidence <dir>` | `check`: where evidence for a trace that did not pass goes (default `.traces/check`) |
+| `--annotations` | `check`: print GitHub workflow annotations (on by default under `GITHUB_ACTIONS=true`) |
 | `--otlp-out <path>` | **WRITE** the OTLP artifact here (also evidence provenance / dry-run upload preview) |
 | `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, `intelligence-spans`, or `chat-trajectory` |
 | `--source-bundle <dir>` | `analyze` / `investigate` / `improve` / `ask`: read a retained full bundle and explicitly grant source-field reads |

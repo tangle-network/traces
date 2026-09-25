@@ -30,6 +30,8 @@ jobs:
         run: pnpm typecheck
       - name: Test
         run: pnpm test
+      - name: Verify the trace-contracts corpus
+        run: pnpm run verify:contracts-corpus
       - name: Build
         run: pnpm build
       - name: Check packed CLI
