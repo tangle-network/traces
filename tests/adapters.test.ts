@@ -1242,7 +1242,11 @@ describe('claude adapter (conversation capture)', () => {
     writeFileSync(join(subDir, 'agent-a.meta.json'), JSON.stringify({ agentType: 'Explore', toolUseId: 'agent-call' }))
 
     const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    expect(traceShapeDigest(spans)).toBe('c884fc2b20dade6475b0452ff69f3c84c4e8588e68a47454e93e4be5d569ce8d')
+    // Digest moved when fix/claude-workflow-parent-confidence added
+    // agent.parent.confidence: the subagent's spans below now carry
+    // 'correlated' (joined by the agent-call toolUseId meta), which this
+    // fixture's own subagent.meta.json declares.
+    expect(traceShapeDigest(spans)).toBe('193d7d3b3c5f5377023c98cb4ac1200455f4dd8570d07354d7d2a2727587a09d')
     expect(spans.map((item) => item.name)).toEqual([
       'session',
       'user.prompt',
