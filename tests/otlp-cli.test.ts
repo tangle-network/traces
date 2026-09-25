@@ -438,13 +438,17 @@ describe('traces analyze --otlp', () => {
   it('does not launder a source through --otlp-out: findings survive, and dropped rows are declared', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-roundtrip-'))
     const rows = conformingRows() as Record<string, unknown>[]
-    rows[2] = { ...rows[2], status: { code: 'WEIRD', message: 'exit 2' } }
-    // A kind this contract has no word for. The reader analyses the span as
-    // something it can bucket; the export must still say TELEPATHY.
-    rows[1] = {
-      ...rows[1],
+    // A kind this contract has no word for, on the tool span: it carries no
+    // model or token attributes, so the reader cannot infer a real kind from
+    // shape and resolve the ambiguity away (unlike the LLM span at rows[1],
+    // whose usage attributes let the reader declare LLM on export — see
+    // `tests/otlp-round-trip.test.ts`'s `erased` fixture for that case). The
+    // export must still say TELEPATHY.
+    rows[2] = {
+      ...rows[2],
+      status: { code: 'WEIRD', message: 'exit 2' },
       kind: 'SPAN_KIND_TELEPATHY',
-      attributes: { ...(rows[1]!.attributes as object), 'openinference.span.kind': 'SPAN_KIND_TELEPATHY' },
+      attributes: { ...(rows[2]!.attributes as object), 'openinference.span.kind': 'SPAN_KIND_TELEPATHY' },
     }
     // No trace id at all. The reader MUST invent one to group by, and exporting
     // the invented id erased `missing-trace-id` and raised `non-hex-id` against

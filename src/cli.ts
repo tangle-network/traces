@@ -135,7 +135,8 @@ import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince } from './time.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
-import { executeUpload, planUpload } from './upload.js'
+import { executeUpload, planUpload, type RefusedSession } from './upload.js'
+import { formatVerdict, verdictExitCode, verifySafe } from './verify-safe.js'
 
 interface Args {
   command: string
@@ -1570,17 +1571,17 @@ async function cmdUpload(args: Args): Promise<void> {
   const redactor = redactorParts[0] ? commandRedactor({ command: redactorParts[0], args: redactorParts.slice(1) }) : undefined
 
   const candidates = plan.items
-  const byRule: Record<string, number> = {}
+  const byDetector: Record<string, number> = {}
   let totalRedactions = 0
   for (const i of candidates) {
     totalRedactions += i.redaction.redactionCount
-    for (const [r, n] of Object.entries(i.redaction.byRule)) byRule[r] = (byRule[r] ?? 0) + n
+    for (const [r, n] of Object.entries(i.redaction.byDetector)) byDetector[r] = (byDetector[r] ?? 0) + n
   }
 
   const w = (s: string) => process.stderr.write(s)
   w(`\nWindow: since ${new Date(sinceMs).toISOString()}\n`)
   w(`Sessions found: ${plan.items.length}  ·  final privacy-mode dedup runs before upload\n`)
-  w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byRule).length ? ` (${Object.entries(byRule).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
+  w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byDetector).length ? ` (${Object.entries(byDetector).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
   for (const i of candidates.slice(0, 25)) {
     w(`  + [${i.ref.harness}] ${i.ref.sessionId.slice(0, 8)}  ${i.spans.length} spans  ${i.redaction.redactionCount} redacted  ${i.ref.cwd ?? ''}\n`)
   }
@@ -1593,7 +1594,8 @@ async function cmdUpload(args: Args): Promise<void> {
 
   if (args.dryRun) {
     const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlpOut, stripContent: args.noContent, redactor })
-    console.log(`dry run: ${candidates.length - res.skippedSessions} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
+    reportRefused(res.refused)
+    console.log(`dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
   }
@@ -1607,10 +1609,82 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   const res = await executeUpload(plan, { log: (m) => w(`${m}\n`), stripContent: args.noContent, redactor })
+  reportRefused(res.refused)
   console.log(
     `Uploaded ${res.uploadedSessions} session(s), ${res.acceptedSpans} spans accepted, ` +
-      `${res.redactionCount} redaction(s); ${res.skippedSessions} already-uploaded skipped.`,
+      `${res.redactionCount} redaction(s); ${res.skippedSessions} already-uploaded skipped; ${res.refused.length} refused.`,
   )
+}
+
+/** Print each refused session with its verdict (detectors and paths, never values); exit 1 when any. */
+function reportRefused(refused: readonly RefusedSession[]): void {
+  for (const { harness, sessionId, verdict } of refused) {
+    process.stderr.write(`  REFUSED [${harness}] ${sessionId.slice(0, 8)}: ${verdict.status}\n`)
+    for (const finding of verdict.findings.filter((f) => f.severity === 'error')) {
+      process.stderr.write(`    ${finding.category}/${finding.detector} x${finding.count} at ${finding.paths.join(', ')}\n`)
+    }
+    for (const entry of verdict.unreadable) process.stderr.write(`    unread ${entry}\n`)
+  }
+  if (refused.length > 0) {
+    process.stderr.write(`${refused.length} session(s) refused by the share-safety check and kept on this machine.\n`)
+    process.exitCode = 1
+  }
+}
+
+/**
+ * `traces verify-safe <file|dir> [--profile default|share|strict] [--known-secret-env NAME]... [--format text|json]`:
+ * the share-safety verdict for files, read-only. Exit 0 SAFE or
+ * SAFE_WITH_WARNINGS, 1 UNSAFE, 2 UNKNOWN.
+ */
+async function cmdVerifySafe(argv: readonly string[]): Promise<void> {
+  let target: string | undefined
+  let format = 'text'
+  let profile = 'share'
+  const knownSecrets: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    if (arg === '--format') format = argv[++i] ?? ''
+    else if (arg === '--profile') profile = argv[++i] ?? ''
+    else if (arg === '--known-secret-env') {
+      const name = argv[++i] ?? ''
+      const value = process.env[name]
+      if (!value) throw new Error(`verify-safe: environment variable ${name || '(missing name)'} is not set`)
+      knownSecrets.push(value)
+    } else if (arg === '--help' || arg === '-h') {
+      usageVerifySafe()
+      return
+    } else if (arg.startsWith('--')) throw new Error(`verify-safe: unknown flag ${arg}`)
+    else if (target === undefined) target = arg
+    else throw new Error(`verify-safe: unexpected argument ${arg}`)
+  }
+  if (!target) throw new Error('verify-safe needs a file or directory: traces verify-safe <file|dir>')
+  if (format !== 'json' && format !== 'text') throw new Error(`verify-safe: --format must be json or text, got "${format}"`)
+  if (profile !== 'default' && profile !== 'share' && profile !== 'strict') {
+    throw new Error(`verify-safe: --profile must be default, share or strict, got "${profile}"`)
+  }
+  const result = await verifySafe(target, { profile, knownSecrets })
+  process.stdout.write(format === 'json' ? `${JSON.stringify(result, null, 2)}\n` : `${formatVerdict(result)}\n`)
+  process.exitCode = verdictExitCode(result)
+}
+
+function usageVerifySafe(): void {
+  console.log(`traces verify-safe <file|dir> [--profile default|share|strict] [--known-secret-env NAME]... [--format text|json]
+
+Check whether files are safe to share, without changing them. A directory is read
+recursively. .json files are parsed whole, .jsonl and .ndjson line by line, and
+any other file is scanned as text.
+
+  SAFE                 nothing found                                   exit 0
+  SAFE_WITH_WARNINGS   only warnings (raw content, identifiers, media) exit 0
+  UNSAFE               a credential, or personal data under share/strict exit 1
+  UNKNOWN              a file, line or byte range could not be read      exit 2
+
+--profile           default | share (default) | strict; see agent-eval docs/redaction.md
+--known-secret-env  name of an environment variable holding a secret to look for in
+                    any encoding (repeatable); the value is never printed
+--format            text (default) | json
+
+Findings name the file, line and JSON Pointer, never the matched value.`)
 }
 
 function usageExport(): void {
@@ -1639,7 +1713,7 @@ Examples:
   halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 
 Safety:
-  export runs the same local regex redaction used by upload before writing spans.
+  export runs the same local redaction (agent-eval's redaction core) used by upload before writing spans.
   --metadata must be a JSON object; --attr key=value is repeatable and overrides matching metadata keys.`)
 }
 
@@ -1764,7 +1838,11 @@ Commands:
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
             (watch <target> tails ONE run tree instead: a run directory or a span file)
-  upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform
+  upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform;
+            a session whose final events are UNSAFE or UNKNOWN is refused (exit 1)
+  verify-safe <file|dir>
+            Say whether files are safe to share: SAFE, SAFE_WITH_WARNINGS, UNSAFE
+            (exit 1) or UNKNOWN (exit 2). Read-only (--help for flags)
 
 Options:
   --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
@@ -1844,7 +1922,7 @@ Options:
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
   --no-content     upload: strip prompt/response text; send metadata only
-  --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the regex pass
+  --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the redaction core
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version
   --help, -h       Show help (use \`traces validate --help\`, \`traces export --help\`,
@@ -1881,6 +1959,10 @@ async function main(): Promise<void> {
   }
   if (rawArgs[0] === 'bundle' && rawArgs[1] === 'verify') {
     await cmdBundleVerify(rawArgs.slice(2))
+    return
+  }
+  if (rawArgs[0] === 'verify-safe') {
+    await cmdVerifySafe(rawArgs.slice(1))
     return
   }
   const parsedArgs = parseArgs(rawArgs)

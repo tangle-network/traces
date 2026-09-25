@@ -35,7 +35,7 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Session index](#session-index)
 - [Session bundle](#session-bundle) · [Two views](#two-views-two-consumers)
 - [Policy-mining evidence](#policy-mining-evidence)
-- [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform)
+- [Upload to the Intelligence Platform](#upload-to-the-intelligence-platform) · [Check before sharing](#check-before-sharing)
 - [Trace analysts](#trace-analysts)
 - [Agent skills](#agent-skills)
 - [Library (SDK)](#library-sdk)
@@ -275,6 +275,7 @@ traces stream   --all --mode agent                 # findings + deterministic re
 traces stream   spans.openinference.jsonl --format openinference --no-spans
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
+traces verify-safe bundle-dir                      # SAFE / SAFE_WITH_WARNINGS / UNSAFE (exit 1) / UNKNOWN (exit 2)
 traces replay-verify --steps steps.json --image <docker-image> --at 37 --cwd /home --out ./replay-out \
   --fix-command "<corrected step>"                 # executed proof: replay prefix, reproduce failure, show fix
 traces verify-findings --findings findings.json --out ./receipts \
@@ -689,6 +690,8 @@ Run `traces export --help` for the full command reference.
 ## Upload to the Intelligence Platform
 
 `upload` **redacts locally before anything leaves the machine**, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host).
+It then checks the final events of each session, exactly as they would be sent, with the share-safety verdict.
+A session that is UNSAFE or UNKNOWN is refused: it is not sent, not written to the dry-run preview, and not marked uploaded, and the command exits 1.
 
 ```bash
 traces upload --since 24h --dry-run     # see exactly what would be sent; no network
@@ -700,15 +703,39 @@ It needs `TANGLE_INGEST_URL` (or `TANGLE_ORCHESTRATOR_URL`), `TANGLE_INGEST_API_
 
 ### Redaction scope: read this before uploading prose
 
-Redaction is **best-effort regex** for *structured* secrets and credentials: API keys, GitHub/cloud tokens, JWTs, bearer headers, private-key blocks, `KEY=secret` assignments, and credentials embedded in URLs. It runs over every span attribute, including the captured prompt/response text.
+Redaction is agent-eval's redaction core ([docs/redaction.md](https://github.com/tangle-network/agent-eval/blob/main/docs/redaction.md)), `default` profile.
+It finds credentials by field name (`apiKey`, `x-api-key`, `client.secret`, `refreshToken`) and by value shape (provider keys, GitHub, Slack, AWS and Google tokens, JWTs, bearer headers, private keys, `KEY=secret` assignments, credentials in URLs), and replaces the whole string.
+It replaces email, card, SSN and phone values in place.
+Token counts such as `input_tokens` and `max_tokens` are kept.
+It runs over every span attribute, including the captured prompt/response text.
 
-It does **not** catch free-form PII such as names, postal addresses, or phone numbers in prose. Those need a context-aware model. Three postures, strongest first:
+It does **not** catch names, postal addresses or account numbers written in prose. Those need a context-aware model. Three postures, strongest first:
 
 1. **`--no-content`**: upload metadata only (tool calls, tokens, timing, loop signal); no prose leaves the machine.
-2. Run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) on the platform ingest side as defense-in-depth.
-3. Default: regex redaction of structured secrets.
+2. **`--redactor <cmd>`**: run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) after the redaction core.
+3. Default: the redaction core.
 
 Always `--dry-run` first to see exactly what would be sent.
+
+### Check before sharing
+
+`verify-safe` reads files and says whether they are safe to share. It never changes them.
+
+```bash
+traces verify-safe bundle-dir                              # share profile (default)
+traces verify-safe session.jsonl --profile strict --format json
+traces verify-safe out/ --known-secret-env TANGLE_API_KEY  # also look for this exact key, in any encoding
+```
+
+| Status | Meaning | Exit |
+|---|---|---|
+| `SAFE` | Nothing found | 0 |
+| `SAFE_WITH_WARNINGS` | Only warnings: raw content, identifiers, embedded media | 0 |
+| `UNSAFE` | A credential remains, or personal data under `share` or `strict` | 1 |
+| `UNKNOWN` | A file, line or byte range could not be read, so its safety is unknown | 2 |
+
+`.json` files are parsed whole and `.jsonl` or `.ndjson` files line by line. Any other file is scanned as text.
+Each finding names the file, line and JSON Pointer, never the matched value.
 
 ## Trace analysts
 
@@ -827,7 +854,8 @@ The CLI is a thin consumer of these exports.
 | `exportTraceEvidenceFile` | `(path, opts?) → { format, spans, redactionCount }` | convert compact evidence/events/OpenInference files to redacted OpenInference spans |
 | `scanSessions` | `(ScanOptions) → AsyncIterable<ScannedSession>` | the shared locate→parse iterator |
 | `collectSessions` | `(CollectOptions) → SessionBatch[]` | redacted per-session batches for your own pipeline |
-| `redactSpans` | `(spans, rules?) → { spans, report }` | PII/secret redaction (`TRACES_REDACTION_RULES`) |
+| `redactSpans` | `(spans, { profile?, knownSecrets? }) → { spans, report }` | redact spans with agent-eval's redaction core |
+| `assessSpans` / `verifySafe` | `(spans, profile?)` / `(path, { profile?, knownSecrets? })` → verdict | share-safety verdict for spans or files |
 | `planUpload` / `executeUpload` | `(…, { backend? }) → …` | redact + dedup + send to any sink |
 | `selectAdapters` / `listAdapters` / `resolveAdapter` | adapter selection + the harness registry |
 | `PiAdapter` | `new PiAdapter({ sessionsRoot? })` | parse Pi's default session tree or an exact `PI_CODING_AGENT_SESSION_DIR` |

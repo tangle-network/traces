@@ -94,7 +94,7 @@ Without content opt-in, failure follow-ups still count, but whether the agent ad
 
 This command refuses content opt-in.
 For an opted-in engagement, run a separately approved content and PII redaction flow before analysis.
-The regex redactor alone does not catch names, addresses or account numbers in prose.
+The redaction core alone does not catch names, addresses or account numbers in prose.
 
 ## Day 2 — the deterministic pass
 
