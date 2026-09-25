@@ -32,6 +32,8 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Improvement engine](#improvement-engine)
 - [Ask questions](#ask-questions)
 - [Session facts](#session-facts)
+- [Diff two runs](#diff-two-runs)
+- [MCP server](#mcp-server)
 - [Session index](#session-index)
 - [Session bundle](#session-bundle) · [Two views](#two-views-two-consumers)
 - [Policy-mining evidence](#policy-mining-evidence)
@@ -125,9 +127,7 @@ files are read — every other JSONL is listed in the report with what it actual
 holds, rather than counted as several hundred broken spans. Put the exports in an
 `otlp/` subdirectory and that decides it outright.
 
-On a writing command (`convert`, `export`, `evidence`, `upload`), `--otlp` is the
-DEPRECATED spelling of `--otlp-out`. It still works, with a warning, and is
-removed in 0.12.
+Writing commands (`convert`, `export`, `evidence`, `upload`) take `--otlp-out`; they refuse `--otlp`.
 
 `parent_span_id` is CONTAINMENT — this span happened inside that one. `links` is
 CAUSALITY — that verdict caused this retry. Encoding causality as a parent claims
@@ -168,9 +168,9 @@ trace through `traces` cannot produce a clean bill of health.
 `analyze` prints the same section, plus an **analyses skipped, and why** list —
 and, crucially, carries that verdict INTO the report. A section whose inputs are
 incomplete says so in its own heading and again directly above its table, so a
-number and the reason it is wrong can never end up forty lines apart. A capability
-the trace supports that this package has no analysis for yet is listed as
-`⚠️ available, unused` rather than quietly dropped.
+number and the reason it is wrong can never end up forty lines apart. When the
+trace supports `tree-comparison`, the table names the command that compares its
+arms: `traces diff <file>#branch=<a> <file>#branch=<b>`.
 
 Two of those analyses are why the loop shape exists at all:
 
@@ -250,6 +250,8 @@ traces investigate --all --last 10 --out report.md  # explicit investigation ali
 traces improve --all --last 10 --dir .traces/improvement
 traces ask --harness codex --session <id> --question "Which commands failed?"
 traces facts --harness codex --session <id>        # the deterministic facts sheet, $0
+traces diff  run-a.otlp.jsonl run-b.otlp.jsonl      # where two runs of one task first diverge
+traces mcp   --otlp spans.otlp.jsonl                # read-only trace tools for an MCP client
 traces analyze  --all --since 2026-06-18 --out report.md
 traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
 traces validate results/sessions --out conformance.md  # a whole directory of exports
@@ -537,6 +539,7 @@ traces facts --otlp spans.otlp.jsonl --out facts.json
 | `firstRecordAt` / `lastRecordAt` | the earliest span start and latest span end among this session's own records — a subagent that outlives the session does not stretch its window |
 | `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
 | `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
+| `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none` — spans were observed and none of them failed. When every span is UNSET (a capture that failed before any status was written), or a session has no records of its own at all (every span is `traces.span.subagent` — spawned work folded into this trace, with nothing this agent recorded itself), the status is `unknown`, not `none`: the record does not say whether the run failed. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own, and is `unknown` rather than `agent` when no evidence names the agent |
 
 Three rules hold for every field:
 
@@ -547,6 +550,43 @@ Three rules hold for every field:
 `facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
 
 The same sheet reaches the model-backed analysts as prepared context, before their first model call — see [Trace analysts](docs/trace-analysts.md#session-facts-as-prepared-context).
+
+## Diff two runs
+
+`traces diff` pairs the steps of two runs of the same task and marks where they first stop agreeing.
+
+```bash
+traces diff runs/a/otlp runs/b/otlp                     # two OTLP exports
+traces diff a.sdk-events.jsonl b.sdk-events.jsonl --kind TOOL   # any file convert reads; tool calls only
+traces diff spans.otlp.jsonl#<trace id> other.jsonl --format json
+traces diff run.otlp.jsonl#branch=arm-a run.otlp.jsonl#branch=arm-b    # two arms of one run
+```
+
+A side is a file or directory that holds one run, `file#<trace id>` for one run of several, or `file#branch=<id>` for one arm: the spans whose `agent.branch.id` or `agent.branch.arm` is `<id>` and have no matched ancestor (a root), and every span below them. Sibling arms can share a branch id or label; when `<id>` names more than one such root subtree, the command refuses (exit 2) and lists each root's span id, rather than silently comparing the union of both.
+Steps pair by span id first, then by position with the same name and kind, then by name and kind anywhere.
+One inserted step therefore does not mark every later step as changed.
+Paired steps compare status, tool and model.
+The first divergence is `changed`, `replaced`, `only-in-a`, `only-in-b` or `reordered`, with its reason, followed by every changed and unpaired step.
+`--kind` keeps only steps of that span kind, so event noise in a raw stream does not decide the first divergence.
+The diff is agent-eval's `diffSteps`; this command reads the runs and prints it.
+It exits 0 when the runs agree on outcome, 1 when they diverge, 2 when a side cannot be read (including an ambiguous `#branch=` selector), and 3 when the steps line up with no divergence but there is no recorded outcome to call agreement: neither side has a step with a definitive OK/ERROR status (both are entirely UNSET, the common shape for a capture that failed before any status was written), or neither side has a TOOL step. That case's report and text output carry a `caveat` naming which reason applies; a CI or agent gate should treat exit 3 as unknown, not as a pass.
+
+## MCP server
+
+`traces mcp` serves the selected traces to an MCP client over stdio.
+
+```bash
+claude mcp add traces -- traces mcp --otlp ./spans.otlp.jsonl
+claude mcp add traces -- traces mcp --harness claude-code --last 5
+```
+
+It serves agent-eval's seven trace tools: `getDatasetOverview`, `queryTraces`, `countTraces`, `viewTrace`, `viewSpans`, `searchTrace` and `searchSpan`.
+Each tool declares `readOnlyHint` and `idempotentHint` in its MCP annotations, and its description says that returned trace text is untrusted.
+
+- The spans are redacted before the store is built — every span's name, attributes, status message and causal links' attributes, every field the store reads — and each result is redacted again at the boundary. The server then reassesses the redacted spans and refuses to start when they are still UNSAFE or UNKNOWN, the same gate `upload` applies to what it sends.
+- Each result carries an `untrusted` notice beside it.
+- A result above 512 KiB is refused with an error rather than truncated.
+- `readSpanSource` is not served. It reads original source bytes in windows the caller picks, and a secret split across two windows matches no redaction rule.
 
 ## Session index
 
