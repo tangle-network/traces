@@ -1,93 +1,112 @@
 /**
- * Privacy redaction for trace spans before upload.
+ * Redaction for trace spans before they leave the machine.
  *
- * Reuses agent-eval's `redactValue` + `DEFAULT_REDACTION_RULES` (email, IPs,
- * generic secret keys, …) and layers on coding-session-specific rules that the
- * defaults miss — GitHub tokens, cloud keys, JWTs, bearer headers, private-key
- * blocks, `key=secret` assignments, and credentials embedded in URLs. Redaction
- * runs over every span attribute + status message (including captured prompt /
- * response `content`), so what leaves the machine is already scrubbed.
+ * The patterns, field-name rules and profiles live in agent-eval's redaction
+ * core (`@tangle-network/agent-eval/traces`, docs/redaction.md). This module
+ * applies the core to OTLP spans: source-location attributes are removed, every
+ * span attribute and status message is redacted in one pass (so a pseudonym
+ * under the `share` profile is the same on every span), and tool I/O
+ * attributes are normalized again afterwards.
  *
- * Scope, stated honestly: this is **best-effort regex** for *structured* secrets
- * and credentials. It does NOT catch free-form PII — names, postal addresses,
- * phone numbers, account numbers in prose — which need a context-aware model.
- * For that assurance, run an ML PII scrubber (e.g. openai/privacy-filter) on the
- * ingest side of the platform, or upload metadata-only with `--no-content`.
+ * Scope: the core finds credentials by field name and value shape, and email,
+ * card, SSN and phone values. It does not find names, postal addresses or
+ * account numbers written in prose. For that, pass an external `Redactor`
+ * (`applyRedactor`) or upload metadata-only with `--no-content`.
  */
 
-import { DEFAULT_REDACTION_RULES, redactValue } from '@tangle-network/agent-eval/traces'
-import type { RedactionReport, RedactionRule } from '@tangle-network/agent-eval/traces'
+import {
+  assessShareSafety,
+  combineVerdicts,
+  type RedactionProfile,
+  type RedactionReport,
+  redact,
+  type ShareSafetyVerdict,
+} from '@tangle-network/agent-eval/traces'
 import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-io.js'
 import type { Redactor } from './external.js'
 import type { OtlpSpan } from './otlp.js'
 import { stripSourceAttributes } from './source-location.js'
-
-/** Secrets common in coding-agent traces that the substrate defaults don't cover. */
-export const CODING_REDACTION_RULES: RedactionRule[] = [
-  { id: 'github-token', pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{22,})\b/g },
-  { id: 'aws-akid', pattern: /\bAKIA[0-9A-Z]{16}\b/g },
-  { id: 'slack-token', pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
-  { id: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
-  { id: 'bearer', pattern: /\bBearer\s+[A-Za-z0-9._-]{16,}/gi },
-  {
-    id: 'private-key',
-    pattern: /-----BEGIN(?:[A-Z ]+)?PRIVATE KEY-----[\s\S]*?-----END(?:[A-Z ]+)?PRIVATE KEY-----/g,
-  },
-  // Match the whole identifier because underscores prevent a word boundary before a secret suffix.
-  {
-    id: 'assigned-secret',
-    pattern:
-      /(?<![A-Za-z0-9_-])(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)(?![A-Za-z0-9_-])\+?=(?:\$\((?:\\.|[^\\\r\n])*\)|\$\{(?:\\.|[^}\\\r\n])*\}|`(?:\\.|[^`\\\r\n])*`|\$?'(?:\\.|[^'\\\r\n])*'|\$?"(?:\\.|[^"\\\r\n])*"|\\[^\r\n]|[^\s;&|<>()"'`\\\r\n])+/gi,
-  },
-  // Config-file secrets (YAML/INI line keys, JSON quoted keys) — the coverage the shell
-  // rule above deliberately gave up to spare prose ("Narrative token: x") and type
-  // annotations ("(token: string)"). The line anchor is the discriminator: config keys
-  // start their line, prose colons never do; JSON keys are safe anywhere because both
-  // sides are quoted. Identifiers must END in a secret word, same as the shell rule.
-  {
-    id: 'config-secret',
-    pattern:
-      /(?:^[ \t]*["']?(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)(?![A-Za-z0-9_-])["']?[ \t]*[:=][ \t]*|["'](?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret)["']\s*:\s*)["']?[A-Za-z0-9._\-]{12,}["']?/gim,
-  },
-  // Credentials embedded in URLs — common when a prompt pastes a curl/clone line.
-  { id: 'url-userinfo', pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi },
-  {
-    id: 'url-secret-param',
-    pattern:
-      /[?&](?:access[_-]?token|api[_-]?key|apikey|auth|token|secret|password|sig|signature)=[^&\s"'#)]+/gi,
-  },
-]
-
-/** Defaults + coding-session rules — the rule set used for upload. */
-export const TRACES_REDACTION_RULES: RedactionRule[] = [...DEFAULT_REDACTION_RULES, ...CODING_REDACTION_RULES]
 
 export interface SpanRedaction {
   spans: OtlpSpan[]
   report: RedactionReport
 }
 
-/** Redact every span's attributes + status message. Returns scrubbed spans and
- *  an aggregate report (count + per-rule breakdown) over the whole set. */
-export function redactSpans(
-  spans: readonly OtlpSpan[],
-  rules: RedactionRule[] = TRACES_REDACTION_RULES,
-): SpanRedaction {
-  const report: RedactionReport = { redactionCount: 0, byRule: {} }
-  const out = spans.map((s) => {
-    const attributes = redactValue(stripSourceAttributes(s.attributes), rules, report).value as Record<string, unknown>
-    normalizeToolIoAttributes(attributes)
-    let status = s.status
-    if (status.message) {
-      const m = redactValue(status.message, rules, report).value
-      if (typeof m === 'string' && m !== status.message) status = { ...status, message: m }
+export interface RedactSpansOptions {
+  /** Default `default`. */
+  profile?: RedactionProfile
+  /** Exact secret values to remove in any encoding, such as the API key the run used. */
+  knownSecrets?: readonly string[]
+}
+
+/**
+ * Redact every string field that leaves the machine: name, attributes, status
+ * message, and each causal link's own attributes. `assessSpans` below (and
+ * the MCP search tools built on this store) all read `span.name` and
+ * `span.links[].attributes` — a secret left in either is as reachable as one
+ * in an attribute — a search for it just works, defeating redaction. The core
+ * redacts nested object keys as well as values (a credential shape glued into
+ * a key name, such as an env-style attribute key carrying a token, is renamed
+ * the same as a credential-shaped value), so link attributes get that same
+ * coverage once they are part of what `redact` walks.
+ */
+export function redactSpans(spans: readonly OtlpSpan[], options: RedactSpansOptions = {}): SpanRedaction {
+  const parts = spans.map((span) => ({
+    name: span.name,
+    attributes: stripSourceAttributes(span.attributes),
+    message: span.status.message,
+    links: span.links?.map((link) => ({
+      ...link,
+      ...(link.attributes ? { attributes: stripSourceAttributes(link.attributes) } : {}),
+    })),
+  }))
+  const { value, report } = redact(parts, options)
+  const out = spans.map((span, index) => {
+    const part = value[index]!
+    normalizeToolIoAttributes(part.attributes)
+    const status =
+      part.message !== undefined && part.message !== span.status.message
+        ? { ...span.status, message: part.message }
+        : span.status
+    return {
+      ...span,
+      name: part.name,
+      attributes: part.attributes,
+      status,
+      ...(part.links ? { links: part.links } : {}),
     }
-    return { ...s, attributes, status }
   })
   return { spans: out, report }
 }
 
+/**
+ * The share-safety verdict for spans as they would be sent. UNSAFE and UNKNOWN
+ * refuse. Finding paths start with the span id. Covers `links[].attributes`
+ * for the same reason {@link redactSpans} does: a secret reachable through a
+ * causal link is as live as one on the span itself.
+ */
+export function assessSpans(spans: readonly OtlpSpan[], profile: RedactionProfile = 'default'): ShareSafetyVerdict {
+  return combineVerdicts(
+    profile,
+    spans.map((span) => {
+      const verdict = assessShareSafety(
+        { name: span.name, attributes: span.attributes, status: span.status, links: span.links },
+        { profile },
+      )
+      return {
+        ...verdict,
+        findings: verdict.findings.map((finding) => ({
+          ...finding,
+          paths: finding.paths.map((path) => `span:${span.span_id}${path}`),
+        })),
+        unreadable: verdict.unreadable.map((entry) => `span:${span.span_id}${entry}`),
+      }
+    }),
+  )
+}
+
 /** Defense-in-depth: run an external {@link Redactor} over captured conversation
- *  and tool values, catching free-form PII the regex pass misses. Compose AFTER
+ *  and tool values, catching free-form PII the core misses. Compose AFTER
  *  `redactSpans`. Returns scrubbed spans and the number of fields changed. */
 export async function applyRedactor(
   spans: readonly OtlpSpan[],

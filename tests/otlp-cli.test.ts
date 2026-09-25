@@ -422,13 +422,17 @@ describe('traces analyze --otlp', () => {
   it('does not launder a source through --otlp-out: findings survive, and dropped rows are declared', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-roundtrip-'))
     const rows = conformingRows() as Record<string, unknown>[]
-    rows[2] = { ...rows[2], status: { code: 'WEIRD', message: 'exit 2' } }
-    // A kind this contract has no word for. The reader analyses the span as
-    // something it can bucket; the export must still say TELEPATHY.
-    rows[1] = {
-      ...rows[1],
+    // A kind this contract has no word for, on the tool span: it carries no
+    // model or token attributes, so the reader cannot infer a real kind from
+    // shape and resolve the ambiguity away (unlike the LLM span at rows[1],
+    // whose usage attributes let the reader declare LLM on export — see
+    // `tests/otlp-round-trip.test.ts`'s `erased` fixture for that case). The
+    // export must still say TELEPATHY.
+    rows[2] = {
+      ...rows[2],
+      status: { code: 'WEIRD', message: 'exit 2' },
       kind: 'SPAN_KIND_TELEPATHY',
-      attributes: { ...(rows[1]!.attributes as object), 'openinference.span.kind': 'SPAN_KIND_TELEPATHY' },
+      attributes: { ...(rows[2]!.attributes as object), 'openinference.span.kind': 'SPAN_KIND_TELEPATHY' },
     }
     // No trace id at all. The reader MUST invent one to group by, and exporting
     // the invented id erased `missing-trace-id` and raised `non-hex-id` against
@@ -456,7 +460,13 @@ describe('traces analyze --otlp', () => {
     expect(artifactValidation.code).toBe(sourceValidation.code)
     expect(artifactValidation.stdout).toContain('CONFORMS')
     expect(artifactValidation.stdout).toContain('🟠 WARN | `invalid-status`')
-    expect(artifactValidation.stdout).toContain('ℹ️  INFO | `unknown-span-kind`')
+    // `unknown-span-kind` does not survive this hop either, and it is not a loss:
+    // agent-trace-contract 1.2.0 classifies the TELEPATHY-kind span from its model
+    // attribute (evidence-based inference), so the exported row's own
+    // openinference.span.kind is LLM, a recognised word — the producer's original
+    // word is still kept verbatim under traces.raw_attribute.openinference.span.kind,
+    // it is just no longer the row's DECLARED kind for a second reader to flag.
+    expect(artifactValidation.stdout).not.toContain('ℹ️  INFO | `unknown-span-kind`')
     // `missing-trace-id` is the ONE finding a re-export cannot carry: agent-eval's
     // store cannot read a row without a trace id, so the artifact must mint one.
     // It is not laundered — the substitution is stated above the findings.

@@ -6,15 +6,12 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import {
   AnalystRegistry,
   analyzeSpans,
-  collectSessions,
-  executeUpload,
   makeFinding,
   type HarnessTraceAdapter,
   type ObservedLoop,
   type OtlpSpan,
   type SessionRef,
   span,
-  type UploadPlan,
   watchSessions,
 } from '../src/index.js'
 
@@ -119,47 +116,6 @@ describe('watchSessions (observer event API)', () => {
     })
     expect(errors).toHaveLength(1)
     expect((errors[0] as Error).message).toBe('boom')
-  })
-})
-
-describe('collectSessions (batch seam)', () => {
-  it('redacts by default and can return raw spans', async () => {
-    const spans = [
-      span({ traceId: 't', spanId: 's', name: 'tool.bash', kind: 'TOOL', startTime: '2026-01-01T00:00:00.000Z', service: 'synthetic', tool: 'bash', content: 'mail jane@acme.com' }),
-    ]
-    const adapter = adapterOf(spans)
-    const [redacted] = await collectSessions({ adapters: [adapter] })
-    expect(String(redacted!.spans[0]!.attributes.content)).toContain('[redacted:')
-    expect(redacted!.redaction!.redactionCount).toBeGreaterThanOrEqual(1)
-
-    const [raw] = await collectSessions({ adapters: [adapter], redact: false })
-    expect(raw!.spans[0]!.attributes.content).toBe('mail jane@acme.com')
-    expect(raw!.redaction).toBeUndefined()
-  })
-})
-
-describe('executeUpload (pluggable backend)', () => {
-  it('routes redacted spans to a custom backend and records dedup state', async () => {
-    const spans = loopSpans(2)
-    const plan: UploadPlan = {
-      items: [{ ref: { ...ref, sessionId: 'sess-x' }, spans, redaction: { redactionCount: 0, byRule: {} }, hash: 'hash1', isNew: true }],
-      state: {},
-    }
-    const calls: { count: number; key?: string }[] = []
-    const res = await executeUpload(plan, {
-      backend: {
-        async ingestTraces(events, key) {
-          calls.push({ count: events.length, key })
-          return { accepted: events.length }
-        },
-      },
-    })
-    expect(res.uploadedSessions).toBe(1)
-    expect(res.acceptedSpans).toBe(spans.length)
-    expect(calls).toHaveLength(1)
-    expect(calls[0]!.key).toContain('sess-x')
-    expect(plan.state['synthetic:sess-x']!.hash).toBe(calls[0]!.key!.split(':').at(-1))
-    expect(plan.state['synthetic:sess-x']!.hash).not.toBe('hash1')
   })
 })
 

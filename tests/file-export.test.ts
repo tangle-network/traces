@@ -162,7 +162,7 @@ describe('trace evidence export', () => {
     const tool = rows.find((row) => row.name === 'tool.bash')
     expect(tool?.attributes).toEqual(expect.objectContaining({
       'tool.args_captured': true,
-      'input.value': expect.stringContaining('[redacted'),
+      'input.value': expect.stringContaining('[REDACTED:'),
     }))
     for (const row of rows) {
       expect(row.attributes).toEqual(expect.objectContaining({
@@ -500,8 +500,8 @@ describe('trace evidence export', () => {
     expect(outputRows[2]!.parent_span_id).toBe('trace_uri:root')
     expect(outputRows[2]!.attributes).toEqual(expect.objectContaining({
       'tool.name': 'mcp__linear__linear_graphql',
-      'tool.input': expect.stringContaining('[redacted'),
-      'input.value': expect.stringContaining('[redacted'),
+      'tool.input': expect.stringContaining('[REDACTED:'),
+      'input.value': expect.stringContaining('[REDACTED:'),
     }))
     expect(outputRows[3]!.kind).toBe('CHAIN')
   })
