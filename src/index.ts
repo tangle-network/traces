@@ -144,13 +144,16 @@ export * from './run-watch.js' // target resolution + the tail
 // ── Privacy + batch collection + upload (pluggable backend) ───────────────
 export * from './redact.js' // redactSpans(), TRACES_REDACTION_RULES
 export * from './collect.js' // collectSessions() — redacted batches
-export * from './replay-verify.js' // sandbox-backed counterfactual replay + verdict
-export * from './replay-corpus.js' // corpus enumeration: replayable cases + exclusion reasons
-export * from './replay-batch.js' // batch runner: replayability + fix-flip rates
-export * from './replay-fix.js' // counterfactual patch synthesis (one LLM call per case)
-export * from './replay-fix-loop.js' // iterative fix loop: real-output feedback, fresh sandbox per attempt
-export * from './replay-wire.js' // analyst finding → replay-verify invocation
-export * from './analyze-verify.js' // proof-carrying findings: verifyFindings() + receipts
+// Replay verification is agent-eval's; traces adds the sandbox backend and CLI.
+export * from '@tangle-network/agent-eval/trajectory-replay'
+export {
+  assertSandboxReachable,
+  DEFAULT_SANDBOX_BASE_URL,
+  sandboxReplayBackend,
+  verifyFindingsInSandbox,
+  zaiChatCaller,
+} from './replay.js'
+export type { SandboxReplayBackendOptions, ZaiChatCallerOptions } from './replay.js'
 export * from './upload.js' // planUpload / executeUpload({ backend? })
 export * from './upload-state.js' // dedup state
 
