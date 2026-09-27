@@ -9,29 +9,22 @@ Use the deterministic CLI first; keep inspection local and read-only.
 
 ## Choose the way in
 
-If the trace is already OTLP (any `@tangle-network/agent-trace-contract` emitter or other
-conforming exporter), read it directly. No adapter is involved.
+Read conforming OTLP directly, including `@tangle-network/agent-trace-contract` exports.
 
 ```bash
-traces validate spans.otlp.jsonl          # what can this trace answer? exit 1 on error findings
+traces validate spans.otlp.jsonl          # exit 1 on error findings
 traces analyze --otlp spans.otlp.jsonl --out .traces/current.md
 traces analyze --otlp results/sessions --out .traces/all.md   # a directory of exports
 ```
 
-Use `--harness` only for coding agents whose on-disk format we do not control.
-Those adapters are the legacy edge, not the way to integrate a system you own.
+Use `--harness` for native coding-agent formats; integrate systems you own through OTLP.
 
-In a run directory only the OTLP files are read; other `*.jsonl` logs are listed with
-what they hold. An `otlp/` subdirectory, when present, is read on its own.
+Directories read only OTLP files, preferring an `otlp/` subdirectory; other JSONL logs are listed separately.
 
-A section headed `inputs incomplete`, or carrying an `Inputs incomplete` line above its
-table, is computed from a field the trace does not carry everywhere. Report those numbers
-as uncaptured, never as zero spend. The `trace conformance` section names each such
-capability once; the markers repeat it at the number.
+Report `Inputs incomplete` values as uncaptured, never zero spend.
+The `trace conformance` section lists missing capabilities.
 
-For a loop trace, read `round-over-round convergence` (did round N+1 improve on N) and
-`steering chain` (which verdict caused which retry) before drawing any conclusion about
-whether the agent was making progress.
+For loops, inspect `round-over-round convergence` and `steering chain` before judging progress.
 
 ## Select the workflow
 
@@ -50,8 +43,8 @@ traces facts --harness codex --current --latest-turn --workflow \
 - For Claude Code, use `--harness claude-code --session <path> --latest-turn`; nested subagents are included.
 
 Never join agents by display name or timestamp when Traces reports missing or conflicting IDs.
-Read the facts sheet before requesting analyses or rereading complete transcripts.
-Use its parent and worker counts to check that the selected task contains the work being investigated.
+Read facts before full transcripts or analysis.
+Check parent and worker counts against the task being investigated.
 Run `analyze` only for questions the facts sheet cannot answer:
 
 ```bash
@@ -62,8 +55,7 @@ traces analyze --harness codex --current --latest-turn --workflow \
 For moved evidence, keep byte-identical transcripts and record their source paths and hashes.
 Preserve Claude's `<session UUID>/subagents/workflows/<run ID>` subtree beside the copied parent JSONL file.
 Restore missing child files from the source; rewriting recorded paths loses the original evidence.
-Before reporting unfinished repository work, inspect its current branch, changes, commits, and related PR state.
-The transcript records past actions; current repository evidence establishes what still needs work.
+Check current branches, edits, commits, and PRs before reporting unfinished work; transcripts describe past actions.
 
 ## Export
 
@@ -84,41 +76,37 @@ traces improve --harness codex --current --latest-turn --workflow \
 `improve` writes findings, evidence, a report, and spans.
 It edits no agent, repository, memory store, or knowledge base.
 
-Write one session's durable evidence directory for a later reader:
+Preserve a session for later inspection:
 
 ```bash
 traces bundle --harness claude-code --session <id-or-path> --out .traces/bundle
 ```
 
-`bundle` copies the transcript, the derived report and spans, the `.evolve` ledger rows inside the session window, and a `manifest.json` with a SHA-256 per file.
-It spends no model call.
-A missing transcript stops the assembly; an absent optional input is recorded in `manifest.absent` with the probed path.
+`bundle` copies transcripts, report, spans, and session-window `.evolve` rows with per-file SHA-256 hashes.
+It uses no model calls.
+Missing transcripts stop assembly; optional missing inputs appear in `manifest.absent`.
 
 ## Pick the view for the reader
 
-That bundle is the FULL view (`manifest.view: "full"`) and holds the whole session transcript.
-Never give it to a writer that must not see an earlier conclusion: the transcript holds the text of every file the session wrote, so a check for the earlier report FILE passes while its CONTENT is still readable.
-
-Project the writer's copy instead:
+The full bundle includes transcripts containing prior reports, even when report files are removed.
+For a writer who must not see earlier conclusions, project an evidence-only copy:
 
 ```bash
 traces bundle-view .traces/bundle --view evidence-only --out .traces/writer
 ```
 
-It carries `derived/session-index.json`, `derived/evidence.jsonl`, and the structured `ledger/` records.
-It excludes the transcripts, report, spans, and every prose ledger file by name, with the rules and hashes in `manifest.excluded`.
-It also drops any carried file that repeats an 8-word run of prose from an excluded one.
-`manifest.view` names which copy you hold.
+This retains the session index, evidence JSONL, and structured ledger records.
+It excludes transcripts, reports, spans, prose ledgers, and files repeating an eight-word passage from excluded prose.
+Check `manifest.view` and the rules and hashes in `manifest.excluded`.
 
 ## Ask your own question
 
-`traces ask --last 1 --question "<text>" --budget 2 --dir .traces/ask` keeps the engine's
-prose answer, resolves every `trace://` citation in it, and spends model calls to do it.
+`traces ask --last 1 --question "<text>" --budget 2 --dir .traces/ask` spends model calls and resolves answer citations.
 
 ## Report
 
 - State the source (`--otlp <path>` or the harness), selected task boundary, session and span counts, and integrity warnings.
-- State which capabilities the trace could not support, and name the analyses that reported nothing because of it.
+- Name missing capabilities and analyses affected by them.
 - Cite each finding with its exact `trace://` reference.
 - Mark missing outcome, cost, token, skill, or relationship data unknown.
 - Do not infer task success from a completion message.
