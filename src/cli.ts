@@ -1985,7 +1985,8 @@ Commands:
             OTLP file or directory, any file convert reads, file#<trace id>, or
             file#branch=<id> for one arm (agent.branch.id or agent.branch.arm).
             --kind TOOL (repeatable) keeps only steps of that span kind.
-            Exit 0 agree, 1 diverge, 2 unreadable (--format text|json)
+            Exit 0 agree, 1 diverge, 2 unreadable, 3 no recorded outcome to
+            call agreement on (--format text|json)
   bundle verify <bundle-dir>
             Check a bundle against its manifest: every listed file present with
             its recorded size and SHA-256, no unlisted or non-regular file beside
