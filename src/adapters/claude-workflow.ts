@@ -166,6 +166,7 @@ export function bindWorkflowSubagent(
   runId: string,
   transcriptDir: string,
   bindings: ReadonlyMap<string, readonly WorkflowRunBinding[]>,
+  sourceTranscriptDir: string = transcriptDir,
 ): readonly WorkflowRunBinding[] {
   const runBindings = bindings.get(runId)
   if (!runBindings || runBindings.length === 0) {
@@ -180,7 +181,7 @@ export function bindWorkflowSubagent(
     )
   }
   const localBindings = runBindings.filter(
-    (binding) => resolve(binding.transcriptDir) === expectedDir,
+    (binding) => resolve(binding.transcriptDir) === resolve(sourceTranscriptDir),
   )
   if (localBindings.length === 0) {
     throw new ClaudeTaskScopeError(

@@ -38,8 +38,8 @@ whether the agent was making progress.
 ```bash
 traces --version
 traces list --harness codex --cwd "$PWD"
-traces analyze --harness codex --current --latest-turn --workflow \
-  --out .traces/current.md
+traces facts --harness codex --current --latest-turn --workflow \
+  --format text --out .traces/current-facts.txt
 ```
 
 - Use `--current` for the active Codex session.
@@ -50,6 +50,20 @@ traces analyze --harness codex --current --latest-turn --workflow \
 - For Claude Code, use `--harness claude-code --session <path> --latest-turn`; nested subagents are included.
 
 Never join agents by display name or timestamp when Traces reports missing or conflicting IDs.
+Read the facts sheet before requesting analyses or rereading complete transcripts.
+Use its parent and worker counts to check that the selected task contains the work being investigated.
+Run `analyze` only for questions the facts sheet cannot answer:
+
+```bash
+traces analyze --harness codex --current --latest-turn --workflow \
+  --out .traces/current.md
+```
+
+For moved evidence, keep byte-identical transcripts and record their source paths and hashes.
+Preserve Claude's `<session UUID>/subagents/workflows/<run ID>` subtree beside the copied parent JSONL file.
+Restore missing child files from the source; rewriting recorded paths loses the original evidence.
+Before reporting unfinished repository work, inspect its current branch, changes, commits, and related PR state.
+The transcript records past actions; current repository evidence establishes what still needs work.
 
 ## Export
 

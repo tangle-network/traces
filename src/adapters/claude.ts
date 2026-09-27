@@ -1411,6 +1411,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
           workflowRunId,
           workflowLocation.transcriptDir,
           workflowBindings,
+          workflowLocation.sourceTranscriptDir,
         )
         const parsed = await parseClaudeSubagent(ref, traceId, agent, options)
         const { binding, confidence } = selectWorkflowBinding(
