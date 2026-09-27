@@ -964,7 +964,7 @@ if (input.validation.ok) await analyzeSpans(input.spans)
 
 // Observe live sessions, feed findings anywhere (read-only, cancellable):
 const c = new AbortController()
-await watchSessions({ all: true, signal: c.signal, onLoop: (l) => alert(l.toolName, l.occurrences) })
+await watchSessions({ all: true, signal: c.signal, onLoop: (l) => alert(`${l.toolName} x${l.occurrences}`) })
 
 // Feed a visualizer or dashboard:
 await streamSessions({ all: true, signal: c.signal, includeSpans: false, onEvent: (event) => console.log(event) })
@@ -977,7 +977,7 @@ registry.register({
     return [makeFinding({ analyst_id: 'mine', area: 'custom', claim: '…', severity: 'info', evidence_refs: [], confidence: 0.9 })]
   },
 })
-await analyzeSpans(spans, { registry })
+await analyzeSpans(input.spans, { registry })
 ```
 
 ## Examples
