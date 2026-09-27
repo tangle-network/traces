@@ -739,6 +739,12 @@ Claude Workflow subagents are selected by the run ID and transcript directory re
 Each Workflow child attaches to the latest matching call that started before the child.
 Task selection then keeps only children attached to calls in that task.
 Returned directories from another resumed Claude session are included in parsing and source hashes.
+For a copied Claude session, preserve `<session UUID>/subagents/workflows/<run ID>` beside the parent JSONL file.
+Recorded native `.claude/projects/<project>/<session UUID>/subagents/workflows/<run ID>` paths resolve to that copied subtree when outside the selected store.
+Copy every referenced Workflow directory, including runs stored under another resumed session UUID.
+The original transcript stays unchanged, and child attribution uses its recorded Workflow identity.
+Missing copied directories, conflicting source bindings, and symlinks that change the copied session or run identity stop parsing.
+Copied Workflow directories contain regular transcript and metadata files; symlink entries stop parsing.
 Missing or conflicting Workflow identities stop the parse instead of widening the selected history.
 Cross-harness parent/child trees are not inferred.
 For a reproducible report, run `traces list` first and pass its session ID with `--session`.
