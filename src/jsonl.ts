@@ -77,9 +77,13 @@ function parseLine<T>(
   const jsonBytes = rawLine.at(-1) === 0x0d ? rawLine.subarray(0, -1) : rawLine
   if (jsonBytes.length === 0) return undefined
   if (!isUtf8(jsonBytes)) return handleCorruption(rawLine, path, lineNumber, byteOffset, options)
-  const json = jsonBytes.toString('utf8')
-  if (json.trim().length === 0) return undefined
   try {
+    // The decode and the parse are both inside the try: a row longer than
+    // V8's maximum string length cannot become a string in this runtime
+    // (RangeError), and corrupt JSON cannot parse (SyntaxError) — either way
+    // the row is unreadable, not a reason to take the session down.
+    const json = jsonBytes.toString('utf8')
+    if (json.trim().length === 0) return undefined
     const value = JSON.parse(json) as T
     if (options.captureSources) locateSourceObjects(value, path, rawLine, byteOffset)
     return value

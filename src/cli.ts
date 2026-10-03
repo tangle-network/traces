@@ -109,7 +109,7 @@ import {
   writeTraceQuestionsArtifacts,
 } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
-import { serializeSpans, writeOtlpFile } from './otlp.js'
+import { iterSerializedSpans, writeOtlpFile } from './otlp.js'
 import type {
   OtlpFieldWithheld,
   OtlpIngestIssue,
@@ -1110,7 +1110,8 @@ async function cmdExport(args: Args): Promise<void> {
     return
   }
   const result = await exportTraceEvidenceFile(args.input, { format, attributes })
-  process.stdout.write(serializeSpans(result.spans))
+  // Streamed line by line: an export can outgrow V8's maximum string length.
+  for (const line of iterSerializedSpans(result.spans)) process.stdout.write(line)
 }
 
 async function cmdImportCodeTraceBench(args: Args): Promise<void> {
