@@ -146,6 +146,88 @@ describe('claude transcript → spans', () => {
     expect(spans.filter((span) => span.name === 'user.prompt')).toHaveLength(1)
   })
 
+  it('enriches origin attribution when a re-emitted event gains an origin label', () => {
+    const event = {
+      type: 'user',
+      uuid: 'origin-gained',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        content: [{ type: 'text', text: 'continue the broker work' }],
+      },
+    }
+
+    const { spans } = parseClaudeStream(
+      [event, { ...event, origin: { kind: 'coordinator' } }, { ...event, origin: { kind: 'coordinator' } }],
+      {
+        traceId: 'sess',
+        agent: 'claude-code',
+        startStep: 0,
+        idPrefix: '',
+        rootParent: 'root',
+      },
+    )
+
+    const prompts = spans.filter((span) => span.name === 'user.prompt')
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.attributes['tangle.actor']).toBe('injected')
+    expect(prompts[0]?.attributes['traces.claude.origin_recorded']).toBe(true)
+    expect(prompts[0]?.attributes['traces.claude.origin_kind']).toBe('coordinator')
+    expect(prompts[0]?.attributes['traces.claude.actor_evidence']).toBeUndefined()
+  })
+
+  it('keeps human attribution when the re-emission labels the event human', () => {
+    const event = {
+      type: 'user',
+      uuid: 'origin-human',
+      timestamp: '2026-01-01T00:00:00Z',
+      userType: 'external',
+      message: {
+        content: [{ type: 'text', text: 'ship it' }],
+      },
+    }
+
+    const { spans } = parseClaudeStream([event, { ...event, origin: { kind: 'human' } }], {
+      traceId: 'sess',
+      agent: 'claude-code',
+      startStep: 0,
+      idPrefix: '',
+      rootParent: 'root',
+    })
+
+    const prompts = spans.filter((span) => span.name === 'user.prompt')
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.attributes['tangle.actor']).toBe('human')
+    expect(prompts[0]?.attributes['traces.claude.origin_recorded']).toBe(true)
+    expect(prompts[0]?.attributes['traces.claude.actor_evidence']).toBeUndefined()
+  })
+
+  it('rejects re-emitted events whose origin label conflicts with the recorded one', () => {
+    const event = {
+      type: 'user',
+      uuid: 'origin-conflict',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        content: [{ type: 'text', text: 'one logical prompt' }],
+      },
+    }
+
+    expect(() =>
+      parseClaudeStream(
+        [
+          { ...event, origin: { kind: 'coordinator' } },
+          { ...event, origin: { kind: 'human' } },
+        ],
+        {
+          traceId: 'sess',
+          agent: 'claude-code',
+          startStep: 0,
+          idPrefix: '',
+          rootParent: 'root',
+        },
+      ),
+    ).toThrow('conflicting payloads')
+  })
+
   it('rejects conflicting payloads for one event UUID', () => {
     const context = {
       traceId: 'sess',

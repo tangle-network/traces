@@ -296,6 +296,9 @@ interface ClaudeStreamState {
   sawUserTurn: boolean
   /** `user.prompt` spans, so the origin rule can be applied once at the end. */
   promptSpans: OtlpSpan[]
+  /** `user.prompt` spans by the event uid that produced them, so a later
+   * re-emission of the same event can enrich the span's origin attribution. */
+  promptSpanByUid: Map<string, OtlpSpan>
   /** Whether any record in this stream carried Claude Code's `origin`. */
   sawRecordedOrigin: boolean
   /** Earliest and latest record timestamp consumed, span-producing or not. */
@@ -314,13 +317,28 @@ function createClaudeStream(startStep: number): ClaudeStreamState {
     step: startStep,
     sawUserTurn: false,
     promptSpans: [],
+    promptSpanByUid: new Map(),
     sawRecordedOrigin: false,
     firstRecordAt: null,
     lastRecordAt: null,
   }
 }
 
-type SeenClaudeEvents = Map<string, string>
+/** What {@link distinctClaudeEvent} decided about one transcript event. */
+type DistinctClaudeEvent =
+  | { readonly projection: ClaudeEventProjection; readonly uid: string }
+  /** A repeat of an already-consumed event whose only new information is the
+   * `origin` label Claude Code added when it re-emitted it. */
+  | { readonly originEnrichment: string; readonly uid: string }
+
+interface SeenClaudeEvent {
+  /** Fingerprint of the span-producing fields, origin attribution excluded. */
+  readonly fingerprint: string
+  /** `origin.kind` the first copy carried, null when it carried none. */
+  readonly originKind: string | null
+}
+
+type SeenClaudeEvents = Map<string, SeenClaudeEvent>
 
 class ClaudeEventConflictError extends Error {
   readonly sourcePath: string
@@ -604,9 +622,15 @@ function indexWorkflowProjection(
 }
 
 function fingerprintClaudeEvent(event: ClaudeEventProjection): string {
-  // Duplicate events can occupy different byte ranges without changing their meaning.
+  // Duplicate events can occupy different byte ranges without changing their
+  // meaning, and a re-emission can ADD an origin label to an event that lacked
+  // one, so origin attribution is compared outside the fingerprint.
   return createHash('sha256').update(JSON.stringify(event, (key, value: unknown) =>
-    key === 'contentSource' || key.startsWith(SOURCE_ATTRIBUTE_PREFIX) ? undefined : value,
+    key === 'contentSource'
+      || key === 'originKind'
+      || key.startsWith(SOURCE_ATTRIBUTE_PREFIX)
+      ? undefined
+      : value,
   )).digest('hex')
 }
 
@@ -623,26 +647,60 @@ function startsClaudeTask(projection: ClaudeEventProjection): boolean {
  * Claude occasionally persists the same event twice. A repeated UUID with the
  * same span-producing fields is one logical event; a changed emitted field is
  * corruption that must remain visible to callers.
+ *
+ * One repeat is NOT corruption: continuing a subagent under a later prompt
+ * re-emits its earlier events with the `origin` label that the first copy
+ * predates. The re-emission is the same logical event — its span-producing
+ * fields match — so it is consumed once and only the origin attribution is
+ * enriched ({@link applyOriginEnrichment}). A repeat whose origin label
+ * conflicts with one already recorded remains an error.
  */
 function distinctClaudeEvent(
   event: ClaudeEvent,
   seen: SeenClaudeEvents,
   sourcePath: string,
   fallbackUid: string,
-): { projection: ClaudeEventProjection; uid: string } | undefined {
+): DistinctClaudeEvent | undefined {
   const projection = projectClaudeEvent(event)
   if (event.uuid) {
+    const uid = event.uuid
     const fingerprint = fingerprintClaudeEvent(projection)
-    const previous = seen.get(event.uuid)
-    if (previous !== undefined) {
-      if (previous !== fingerprint) {
-        throw new ClaudeEventConflictError(sourcePath, event.uuid)
+    const originKind = (projection.kind === 'user' || projection.kind === 'queued-prompt'
+      ? projection.originKind
+      : null) ?? null
+    const previous = seen.get(uid)
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) {
+        throw new ClaudeEventConflictError(sourcePath, uid)
+      }
+      if (previous.originKind === null && originKind !== null) return { originEnrichment: originKind, uid }
+      if (previous.originKind !== null && originKind !== null && previous.originKind !== originKind) {
+        throw new ClaudeEventConflictError(sourcePath, uid)
       }
       return undefined
     }
-    seen.set(event.uuid, fingerprint)
+    seen.set(uid, { fingerprint, originKind })
   }
   return { projection, uid: event.uuid ?? fallbackUid }
+}
+
+/**
+ * Fold a re-emitted event's gained `origin` label into the prompt span its
+ * first copy produced. The span's identity, timing, and content are unchanged
+ * — only who authored the prompt is re-attributed, exactly as it would have
+ * been recorded had the first copy carried the label.
+ */
+function applyOriginEnrichment(uid: string, originKind: string, state: ClaudeStreamState): void {
+  const prompt = state.promptSpanByUid.get(uid)
+  if (!prompt) return
+  if (prompt.attributes[ORIGIN_RECORDED_ATTR] === true) return
+  state.sawRecordedOrigin = true
+  prompt.attributes[ORIGIN_RECORDED_ATTR] = true
+  prompt.attributes[ORIGIN_KIND_ATTR] = originKind
+  prompt.attributes[ACTOR_ATTR] = claudeActorFromOrigin(
+    originKind,
+    () => prompt.attributes[ACTOR_ATTR] as Actor,
+  )
 }
 
 function consumeDistinctClaudeEvent(
@@ -654,6 +712,10 @@ function consumeDistinctClaudeEvent(
 ): boolean {
   const accepted = distinctClaudeEvent(event, seen, sourcePath, `step${state.step}`)
   if (!accepted) return false
+  if ('originEnrichment' in accepted) {
+    applyOriginEnrichment(accepted.uid, accepted.originEnrichment, state)
+    return false
+  }
   consumeClaudeEvent(accepted.projection, accepted.uid, ctx, state)
   return true
 }
@@ -800,6 +862,7 @@ function consumeClaudeEvent(
       if (userParent) prompt.attributes[ATTR.parentConfidence] = userParent.confidence
       state.spans.push(prompt)
       state.promptSpans.push(prompt)
+      state.promptSpanByUid.set(uid, prompt)
       state.step += 1
     }
     for (const result of event.results) {
@@ -829,6 +892,7 @@ function consumeClaudeEvent(
     }
     state.spans.push(prompt)
     state.promptSpans.push(prompt)
+    state.promptSpanByUid.set(uid, prompt)
     state.step += 1
   } else if (event.kind === 'file-change') {
     state.spans.push(span({
@@ -1053,7 +1117,7 @@ function orderClaudeSpans(root: OtlpSpan, spans: readonly OtlpSpan[]): OtlpSpan[
  */
 export function parseClaudeStream(events: readonly ClaudeEvent[], ctx: ClaudeStreamContext): ParsedStream {
   const state = createClaudeStream(ctx.startStep)
-  const seen = new Map<string, string>()
+  const seen: SeenClaudeEvents = new Map()
   for (const event of events) consumeDistinctClaudeEvent(event, ctx, state, seen, '<stream>')
   return finishClaudeStream(state)
 }
@@ -1090,7 +1154,7 @@ async function readClaudeWorkflowBindings(
   options: Pick<ParseOptions, 'signal'>,
 ): Promise<Map<string, WorkflowRunBinding[]>> {
   const index = createWorkflowProjectionIndex()
-  const seen = new Map<string, string>()
+  const seen: SeenClaudeEvents = new Map()
   let row = 0
   for await (const event of readJsonl<ClaudeEvent>(
     ref.path,
@@ -1099,7 +1163,7 @@ async function readClaudeWorkflowBindings(
     options.signal?.throwIfAborted()
     const accepted = distinctClaudeEvent(event, seen, ref.path, `source${row}`)
     row += 1
-    if (accepted) indexWorkflowProjection(accepted.projection, index)
+    if (accepted && 'projection' in accepted) indexWorkflowProjection(accepted.projection, index)
   }
   return bindWorkflowRuns(index)
 }
@@ -1119,7 +1183,7 @@ async function parseClaudeSubagent(
     rootParent: `root:${traceId}`,
   }
   const state = createClaudeStream(ctx.startStep)
-  const seen = new Map<string, string>()
+  const seen: SeenClaudeEvents = new Map()
   for await (const event of readJsonl<ClaudeEvent>(
     agent.file,
     sessionJsonlOptions(ref, options),
@@ -1248,7 +1312,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     }
     let state = createClaudeStream(ctx.startStep)
     let discoveredTraceId: string | undefined
-    const seen = new Map<string, string>()
+    const seen: SeenClaudeEvents = new Map()
     const workflowIndex = createWorkflowProjectionIndex()
     let selectedTurnId: string | undefined
     let selectedTurnFound = false
@@ -1270,7 +1334,10 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         runResult = { failed: event.is_error, subtype: event.subtype ?? 'unknown' }
       }
       const accepted = distinctClaudeEvent(event, seen, ref.path, `step${state.step}`)
-      if (!accepted) continue
+      if (!accepted || 'originEnrichment' in accepted) {
+        if (accepted) applyOriginEnrichment(accepted.uid, accepted.originEnrichment, state)
+        continue
+      }
       indexWorkflowProjection(accepted.projection, workflowIndex)
       const startsTask = startsClaudeTask(accepted.projection)
       if (startsTask && taskScope === 'latest') {
