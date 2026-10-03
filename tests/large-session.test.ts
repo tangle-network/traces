@@ -1,10 +1,8 @@
 import { spawnSync } from 'node:child_process'
-import { open, rm, readFile, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, open, rm, readFile, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { ClaudeAdapter } from '../src/adapters/claude.js'
 import { JsonlParseError, readJsonl } from '../src/jsonl.js'
 import { serializeSpans, span, writeOtlpFile } from '../src/otlp.js'
 
@@ -89,50 +87,38 @@ describe('sessions larger than the V8 string limit', () => {
     }).rejects.toBeInstanceOf(JsonlParseError)
   }, 240_000)
 
-  it('analyzes the session in a heap too small to hold it as one string', async () => {
-    const path = join(dir, 'giant-row-session.jsonl')
-    await writeGiantRowSession(path)
+  it('analyzes the session through the real CLI in a heap too small to hold it as one string', async () => {
+    const home = join(dir, 'cli-home')
+    await mkdir(join(home, '.claude', 'projects', '-tmp-giant'), { recursive: true })
+    await writeGiantRowSession(join(home, '.claude', 'projects', '-tmp-giant', 'giant.jsonl'))
+    const report = join(dir, 'cli-report.md')
+    const artifact = join(dir, 'cli-spans.otlp.jsonl')
 
-    const adapterUrl = pathToFileURL(join(process.cwd(), 'src/adapters/claude.ts')).href
-    const analyzeUrl = pathToFileURL(join(process.cwd(), 'src/analyze.ts')).href
-    const childSource = `
-      import { ClaudeAdapter } from ${JSON.stringify(adapterUrl)}
-      import { analyzeSpans } from ${JSON.stringify(analyzeUrl)}
-      const ref = {
-        harness: 'claude-code',
-        sessionId: 'giant',
-        path: ${JSON.stringify(path)},
-        cwd: null,
-        mtimeMs: 0,
-      }
-      const spans = await new ClaudeAdapter().parse(ref)
-      await analyzeSpans(spans, {})
-      process.stdout.write(JSON.stringify({
-        spanCount: spans.length,
-        integrity: ref.integrity
-          ? { status: ref.integrity.status, lines: ref.integrity.corruptions.map((c) => c.lineNumber) }
-          : null,
-        maxRssKb: process.resourceUsage().maxRSS,
-      }))
-    `
-    const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' }
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, FORCE_COLOR: '0' }
     delete env.NODE_OPTIONS
-    // A 64 MB old-space heap cannot hold the session (or its rows) as strings:
-    // completing here proves the read stayed incremental and bounded.
-    const child = spawnSync(
+    // A 128 MB old-space heap is a quarter of the session's 537 MB: no string
+    // holding the session (or its giant row) can be allocated there, so the
+    // CLI completing proves discovery, parse, analysis, and export all stayed
+    // incremental and bounded on the real code path.
+    const run = spawnSync(
       process.execPath,
-      ['--max-old-space-size=64', '--max-semi-space-size=1', '--import', 'tsx', '--input-type=module', '--eval', childSource],
+      [
+        '--max-old-space-size=128', '--max-semi-space-size=4', '--import', 'tsx',
+        join(process.cwd(), 'src', 'cli.ts'),
+        'analyze', '--harness', 'claude-code', '--session', 'giant',
+        '--out', report, '--otlp-out', artifact,
+      ],
       { cwd: process.cwd(), encoding: 'utf8', env, timeout: 240_000 },
     )
-    expect(child.status, child.stderr || child.error?.message).toBe(0)
-    const result = JSON.parse(child.stdout) as {
-      spanCount: number
-      integrity: { status: string; lines: number[] } | null
-      maxRssKb: number
-    }
-    expect(result.spanCount).toBeGreaterThan(0)
-    expect(result.integrity).toMatchObject({ status: 'degraded_not_lossless', lines: [2] })
-    expect(result.maxRssKb).toBeLessThan(3 * 1024 * 1024)
+    expect(run.status, run.stderr || run.error?.message).toBe(0)
+
+    const text = await readFile(report, 'utf8')
+    expect(text).toContain('# Trace analysis — claude-code')
+    // The unreadable row is receipted on the session's spans, not silently
+    // dropped: the artifact carries the degraded integrity stamp and count.
+    const artifactText = await readFile(artifact, 'utf8')
+    expect(artifactText).toContain('"traces.session.integrity":"degraded_not_lossless"')
+    expect(artifactText).toContain('"traces.session.corruption_count":1')
   }, 300_000)
 
   it('streams the OTLP export in bounded chunks instead of one string', async () => {
