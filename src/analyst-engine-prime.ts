@@ -3,26 +3,33 @@
  * one-shot RLM over the OTLP-JSONL artifact through an OpenAI-compatible
  * bridge (cli-bridge's prime backend, or any `/v1/chat/completions` endpoint).
  *
- * Protocol, in one pass with no tools:
- *   1. The FULL span projection is inlined into the prompt as JSON — prime has
- *      no REPL and no trace tools, so unlike the dspy-rlm analysts (which
- *      drill via viewSpans/searchTrace) every fact must travel in the prompt.
- *   2. The reply contract is one fenced ```json block of SHORT strings
- *      (long strings get corrupted in transport), citing span ids verbatim.
- *   3. A structurally malformed reply gets ONE bounded stateless repair turn
- *      carrying the malformed reply plus the contract — never the trajectory —
- *      mirroring the typed-adapter repair the dspy arm gets, so both arms face
- *      the same structured-output affordance.
- *   4. Cited span ids are resolved against the artifact; rows citing unknown
- *      or ambiguous ids are rejected with a recorded reason, never guessed.
- *      Zero findings from a well-formed reply is an honest null, not an error.
+ * Delivery, small traces first:
+ *   1. INLINE — the full span projection is inlined into the prompt as JSON.
+ *      Cheap and bridge-portable, but bounded: past `maxInlineChars` the
+ *      projection is re-rendered with a per-attribute character cap (the
+ *      prompt-side analog of the trace store's per-attribute byte cap).
+ *   2. FILE — when even the capped render overflows the budget, the artifact
+ *      is copied into a per-run directory and that directory is passed as
+ *      `cwd` on the chat-completions request (cli-bridge starts prime there).
+ *      Prime is a recursive language model with a REPL, so the prompt tells
+ *      it to load `trajectory.otlp.jsonl` itself and fan out with `rlm()` —
+ *      the trajectory travels as a file, not as prompt bytes. A bridged
+ *      prime must be able to READ that directory (host-mode bridges do; a
+ *      jailed or remote bridge needs the dir registered/uploaded on the
+ *      bridge side — cli-bridge's jail already covers its own dirs).
  *
- * Oversized traces: when the rendered projection exceeds the inline budget it
- * is re-rendered with a per-attribute character cap (the prompt-side analog of
- * the trace store's per-attribute byte cap); if still oversized the run fails
- * loud — inline delivery is the only delivery, so silently dropping spans
- * would understate the trajectory. The delivery decision is recorded in the
- * result output.
+ * Reply contract, both modes: one fenced ```json block of SHORT strings
+ * (long strings get corrupted in transport), citing span ids verbatim.
+ *   - A structurally malformed reply gets ONE bounded stateless repair turn
+ *     carrying the malformed reply plus the contract — never the trajectory —
+ *     mirroring the typed-adapter repair the dspy arm gets, so both arms face
+ *     the same structured-output affordance.
+ *   - Cited span ids are resolved against the artifact in BOTH delivery
+ *     modes; rows citing unknown or ambiguous ids are rejected with a recorded
+ *     reason, never guessed. Zero findings from a well-formed reply is an
+ *     honest null, not an error.
+ *
+ * The delivery decision is recorded in the result output.
  *
  * Usage (bridge-reported token counts and call count) is recorded in the
  * result output; cost stays uncaptured because the bridge reports no priced
@@ -51,7 +58,13 @@ const ANALYST_ID = 'prime'
 
 export interface PrimeTransportRequest {
   url: string
-  body: { model: string; messages: Array<{ role: 'user'; content: string }> }
+  body: {
+    model: string
+    messages: Array<{ role: 'user'; content: string }>
+    /** File delivery: the per-run directory the artifact was copied into;
+     *  cli-bridge starts prime here, so `trajectory.otlp.jsonl` resolves. */
+    cwd?: string
+  }
   /** Aborts on the analyzer's deadline AND the caller's signal. */
   signal: AbortSignal
 }
@@ -79,6 +92,11 @@ export interface PrimeAnalyzerOptions {
   maxInlineChars?: number
   /** Character cap applied to each attribute on the oversized re-render. */
   perAttributeCharCap?: number
+  /** How the trajectory reaches prime. `auto` (default) inlines when it fits
+   *  the budget and falls back to file delivery when it does not; `file`
+   *  always ships the artifact as `cwd` + `trajectory.otlp.jsonl`; `inline`
+   *  keeps the legacy refusal when the capped render still overflows. */
+  delivery?: 'auto' | 'file' | 'inline'
   /** Disable the bounded repair turn (one extra call on a malformed reply). */
   repair?: boolean
   transport?: PrimeTransport
@@ -91,18 +109,42 @@ interface PrimeUsage {
 }
 
 interface ProjectionDelivery {
-  mode: 'inline-json'
+  mode: 'inline-json' | 'file-cwd'
   perAttributeCharCap: number | null
+  /** Inline mode: the rendered prompt projection; file mode: the artifact bytes. */
   renderedChars: number
+  /** File mode only: where the artifact was copied and under what name. */
+  cwd?: string
+  fileName?: string
 }
 
 interface ArtifactProjection {
   rows: Array<Record<string, unknown>>
-  rendered: string
+  rendered: string | null
   delivery: ProjectionDelivery
   traceCount: number
   /** span_id → every trace_id it appears under; >1 entry marks an ambiguous id. */
   spanTraces: Map<string, Set<string>>
+}
+
+const TRAJECTORY_FILE_NAME = 'trajectory.otlp.jsonl'
+
+/** Copy the artifact into a fresh per-run directory and hand prime that
+ *  directory: the trajectory arrives as a readable file instead of prompt
+ *  bytes, with no inline budget to overflow. */
+async function fileDelivery(
+  otlpPath: string,
+  perAttributeCharCap: number,
+  signal?: AbortSignal,
+): Promise<ProjectionDelivery> {
+  signal?.throwIfAborted()
+  const { copyFile, mkdtemp, stat } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const cwd = await mkdtemp(join(tmpdir(), 'traces-prime-'))
+  await copyFile(otlpPath, join(cwd, TRAJECTORY_FILE_NAME))
+  const artifactBytes = (await stat(otlpPath)).size
+  return { mode: 'file-cwd', perAttributeCharCap, renderedChars: artifactBytes, cwd, fileName: TRAJECTORY_FILE_NAME }
 }
 
 interface FindingRow {
@@ -182,6 +224,7 @@ async function projectArtifact(
   otlpPath: string,
   maxInlineChars: number,
   perAttributeCharCap: number,
+  deliveryMode: 'auto' | 'file' | 'inline',
   signal?: AbortSignal,
 ): Promise<ArtifactProjection> {
   const rows: Array<Record<string, unknown>> = []
@@ -208,9 +251,19 @@ async function projectArtifact(
   if (rows.length === 0) throw new Error(`${otlpPath} contains no spans`)
   const traceCount = new Set(rows.map((row) => row.trace_id as string)).size
 
+  if (deliveryMode === 'file') {
+    return {
+      rows,
+      rendered: null,
+      delivery: await fileDelivery(otlpPath, perAttributeCharCap, signal),
+      traceCount,
+      spanTraces,
+    }
+  }
+
   let projected = rows
   let rendered = JSON.stringify(projected)
-  const delivery: ProjectionDelivery = {
+  let delivery: ProjectionDelivery = {
     mode: 'inline-json',
     perAttributeCharCap: null,
     renderedChars: rendered.length,
@@ -218,20 +271,32 @@ async function projectArtifact(
   if (rendered.length > maxInlineChars) {
     projected = rows.map((row) => capRowAttributes(row, perAttributeCharCap))
     rendered = JSON.stringify(projected)
-    delivery.perAttributeCharCap = perAttributeCharCap
-    delivery.renderedChars = rendered.length
+    delivery = {
+      mode: 'inline-json',
+      perAttributeCharCap,
+      renderedChars: rendered.length,
+    }
   }
   if (rendered.length > maxInlineChars) {
-    throw new Error(
-      `trajectory renders to ${rendered.length} chars even at per-attribute cap ` +
-        `${perAttributeCharCap} (budget ${maxInlineChars}); inline delivery impossible`,
-    )
+    if (deliveryMode === 'inline') {
+      throw new Error(
+        `trajectory renders to ${rendered.length} chars even at per-attribute cap ` +
+          `${perAttributeCharCap} (budget ${maxInlineChars}); inline delivery impossible`,
+      )
+    }
+    return {
+      rows,
+      rendered: null,
+      delivery: await fileDelivery(otlpPath, perAttributeCharCap, signal),
+      traceCount,
+      spanTraces,
+    }
   }
   return { rows: projected, rendered, delivery, traceCount, spanTraces }
 }
 
 const OUTPUT_CONTRACT_LINES = [
-  'OUTPUT CONTRACT (you have no trace tools and no REPL):',
+  'OUTPUT CONTRACT (inline delivery — the whole trajectory is in this prompt):',
   'You are a one-shot analyst. Every fact you need is in the TRAJECTORY JSON below.',
   'Do not run shell commands, do not read or write files, do not use any tools.',
   'Reply with EXACTLY one fenced ```json code block and no other fenced block. The JSON object has exactly two fields:',
@@ -248,7 +313,38 @@ const OUTPUT_CONTRACT_LINES = [
   '"findings" is [] only for a clean trajectory.',
 ]
 
+const FILE_DELIVERY_CONTRACT_LINES = [
+  'OUTPUT CONTRACT (file delivery — the trajectory is a FILE in your working directory):',
+  `You are a recursive language model with a REPL. The trajectory is ${TRAJECTORY_FILE_NAME} in your`,
+  'working directory: OpenInference JSONL, one span object per line. Load it yourself and inspect it with code',
+  '(e.g. rows = [json.loads(line) for line in open("trajectory.otlp.jsonl")]), paging rather than printing it whole;',
+  'fan out with rlm() for sub-questions when that pays for itself. Stay inside your working directory.',
+  'Reply with EXACTLY one fenced ```json code block and no other fenced block. The JSON object has exactly two fields:',
+  '  "answer": string — ONE short sentence (max 300 chars) summarizing your verdict.',
+  '  "findings": array (possibly empty) of finding rows, each exactly:',
+  '    {"span_ids": [string, ...],',
+  '     "severity": "critical"|"high"|"medium"|"low"|"info",',
+  '     "area": string (short kebab-case topic, max 40 chars),',
+  '     "claim": string (ONE short sentence, max 200 chars),',
+  '     "action": string (optional, ONE short imperative sentence, max 200 chars),',
+  '     "confidence": number 0..1}',
+  'Do NOT include a rationale field. Keep every string SHORT — long strings get corrupted in transport and void your work.',
+  `Report at most ${MAX_FINDINGS} findings; a finding cites 1..${MAX_SPAN_IDS_PER_FINDING} span_ids, each copied VERBATIM from a span in ${TRAJECTORY_FILE_NAME}.`,
+  '"findings" is [] only for a clean trajectory.',
+]
+
 function buildPrompt(question: string, projection: ArtifactProjection): string {
+  if (projection.delivery.mode === 'file-cwd') {
+    return [
+      `QUESTION: ${question}`,
+      '',
+      ...FILE_DELIVERY_CONTRACT_LINES,
+      '',
+      `TRAJECTORY (${projection.traceCount} trace(s); ${projection.rows.length} spans): ` +
+        `the file ${projection.delivery.fileName} in your working directory ` +
+        `(${projection.delivery.renderedChars} bytes). It is NOT inlined in this prompt.`,
+    ].join('\n')
+  }
   return [
     `QUESTION: ${question}`,
     '',
@@ -439,6 +535,7 @@ async function callBridge(
   timeoutMs: number,
   callerSignal: AbortSignal | undefined,
   turn: string,
+  cwd?: string,
 ): Promise<BridgeReply> {
   const controller = new AbortController()
   const timer = setTimeout(
@@ -452,7 +549,7 @@ async function callBridge(
   try {
     response = await transport({
       url,
-      body: { model, messages: [{ role: 'user', content }] },
+      body: { model, messages: [{ role: 'user', content }], ...(cwd ? { cwd } : {}) },
       signal: controller.signal,
     })
   } catch (error) {
@@ -507,6 +604,10 @@ export function primeAnalyzer(opts: PrimeAnalyzerOptions = {}): ExternalAnalyzer
     throw new RangeError('perAttributeCharCap must be a positive safe integer')
   }
   const repairEnabled = opts.repair ?? true
+  const deliveryMode = opts.delivery ?? 'auto'
+  if (deliveryMode !== 'auto' && deliveryMode !== 'file' && deliveryMode !== 'inline') {
+    throw new RangeError(`delivery must be 'auto', 'file', or 'inline', got '${String(deliveryMode)}'`)
+  }
   const transport = opts.transport ?? httpJsonTransport
   const url = `${bridgeUrl}/v1/chat/completions`
 
@@ -515,19 +616,24 @@ export function primeAnalyzer(opts: PrimeAnalyzerOptions = {}): ExternalAnalyzer
     async analyze(otlpPath, analyzeOpts: ExternalAnalyzerOptions = {}) {
       let projection: ArtifactProjection
       try {
-        projection = await projectArtifact(otlpPath, maxInlineChars, perAttributeCharCap, analyzeOpts.signal)
+        projection = await projectArtifact(
+          otlpPath, maxInlineChars, perAttributeCharCap, deliveryMode, analyzeOpts.signal)
       } catch (error) {
         return failure('', error instanceof Error ? error.message : String(error))
       }
       const question = analyzeOpts.prompt ?? opts.defaultPrompt ?? DEFAULT_QUESTION
-      const deliveryLine =
-        `delivery: ${projection.delivery.mode} (${projection.delivery.renderedChars} chars, ` +
-        `per-attribute cap ${projection.delivery.perAttributeCharCap ?? 'none'})`
+      const deliveryLine = projection.delivery.mode === 'file-cwd'
+        ? `delivery: file-cwd (${projection.rows.length} spans; ${projection.delivery.fileName} in cwd ` +
+          `${projection.delivery.cwd}, ${projection.delivery.renderedChars} bytes; per-attribute cap not applied)`
+        : `delivery: ${projection.delivery.mode} (${projection.delivery.renderedChars} chars, ` +
+          `per-attribute cap ${projection.delivery.perAttributeCharCap ?? 'none'})`
+      const deliveryCwd = projection.delivery.mode === 'file-cwd' ? projection.delivery.cwd : undefined
 
       let reply: BridgeReply
       try {
         reply = await callBridge(
-          transport, url, model, buildPrompt(question, projection), timeoutMs, analyzeOpts.signal, '')
+          transport, url, model, buildPrompt(question, projection), timeoutMs, analyzeOpts.signal, '',
+          deliveryCwd)
       } catch (error) {
         if (!(error instanceof PrimeBridgeError)) throw error
         return failure('', `${error.message}; ${deliveryLine}`)
