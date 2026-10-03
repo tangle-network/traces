@@ -332,19 +332,52 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
 
 /** Serialize spans to OpenInference JSONL (one complete span per line). This is a
  *  standard OpenInference representation: it feeds our analysts, HALO, and other
- *  OpenInference tools directly — no per-tool conversion. */
+ *  OpenInference tools directly — no per-tool conversion.
+ *
+ *  The returned string is the WHOLE export; for span counts whose export can
+ *  approach V8's maximum string length, iterate {@link iterSerializedSpans}
+ *  instead so the export never has to exist as one allocation. */
 export function serializeSpans(spans: readonly OtlpSpan[]): string {
   if (spans.length === 0) return ''
-  const validated = validateOtlpSpans(spans, 'serialized spans')
-  return `${validated.map((s) => JSON.stringify(toOpenInferenceSpan(s))).join('\n')}\n`
+  let out = ''
+  for (const line of iterSerializedSpans(spans)) out += line
+  return out
 }
 
-/** Write spans to an OTLP-JSONL file (a temp file when no path is given). */
+/** Yield the export one span line at a time (each line ends in `\n`), so a
+ *  writer stays bounded no matter how many spans it is handed. */
+export function* iterSerializedSpans(spans: readonly OtlpSpan[]): Generator<string> {
+  for (const s of validateOtlpSpans(spans, 'serialized spans')) {
+    yield `${JSON.stringify(toOpenInferenceSpan(s))}\n`
+  }
+}
+
+/** Upper bound on the string a streaming export accumulates before flushing
+ *  to the file. Small enough to bound memory, large enough to keep syscalls
+ *  rare on big exports. */
+const OTLP_WRITE_CHUNK_CHARS = 4 * 1024 * 1024
+
+/** Write spans to an OTLP-JSONL file (a temp file when no path is given), one
+ *  bounded chunk at a time — never the whole export as one string, so a
+ *  session larger than V8's string limit still exports. */
 export async function writeOtlpFile(spans: readonly OtlpSpan[], outPath?: string): Promise<string> {
-  const { mkdtemp, writeFile } = await import('node:fs/promises')
+  const { mkdtemp, open } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
   const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'traces-')), 'spans.otlp.jsonl')
-  await writeFile(path, serializeSpans(spans), 'utf8')
+  const handle = await open(path, 'w')
+  try {
+    let chunk = ''
+    for (const line of iterSerializedSpans(spans)) {
+      chunk += line
+      if (chunk.length >= OTLP_WRITE_CHUNK_CHARS) {
+        await handle.write(chunk)
+        chunk = ''
+      }
+    }
+    if (chunk.length > 0) await handle.write(chunk)
+  } finally {
+    await handle.close()
+  }
   return path
 }
