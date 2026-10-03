@@ -1,4 +1,6 @@
 import { createServer } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { describe, expect, it } from 'vitest'
 import {
@@ -275,15 +277,86 @@ describe('primeAnalyzer', () => {
     expect(prompt).toContain('…[truncated 4800 chars]')
   })
 
-  it('fails loud without calling the bridge when the capped projection is still oversized', async () => {
+  it('keeps the legacy refusal when delivery is pinned to inline and the capped projection is still oversized', async () => {
     const spans = fixtureSpans({ contentChars: 5_000 })
     const otlpPath = await writeOtlpFile(spans)
     const { transport, calls } = fakeBridge([])
-    const analyzer = primeAnalyzer({ transport, maxInlineChars: 300, perAttributeCharCap: 50 })
+    const analyzer = primeAnalyzer({
+      transport, maxInlineChars: 300, perAttributeCharCap: 50, delivery: 'inline',
+    })
     const [result] = await runExternalAnalyzers(otlpPath, [analyzer], { spans })
     expect(result!.ok).toBe(false)
     expect(result!.error).toContain('inline delivery impossible')
     expect(calls).toHaveLength(0)
+  })
+
+  it('delivers an oversized trajectory as a file in the request cwd instead of refusing', async () => {
+    const spans = fixtureSpans({ contentChars: 5_000 })
+    const otlpPath = await writeOtlpFile(spans)
+    const { transport, calls } = fakeBridge([{ text: replyBody(VALID_REPLY) }])
+    const analyzer = primeAnalyzer({ transport, maxInlineChars: 300, perAttributeCharCap: 50 })
+    const [result] = await runExternalAnalyzers(otlpPath, [analyzer], { spans })
+    expect(result!.ok).toBe(true)
+    expect(result!.kind).toBe('findings')
+    expect(result!.findings).toHaveLength(1)
+    expect(result!.output).toContain('delivery: file-cwd (3 spans; trajectory.otlp.jsonl in cwd ')
+
+    expect(calls).toHaveLength(1)
+    const request = calls[0]!.request
+    const cwd = request.body.cwd
+    expect(typeof cwd).toBe('string')
+    const shipped = await readFile(join(cwd!, 'trajectory.otlp.jsonl'), 'utf8')
+    expect(shipped).toBe(await readFile(otlpPath, 'utf8'))
+    const prompt = request.body.messages[0]!.content
+    expect(prompt).toContain('trajectory.otlp.jsonl in your working directory')
+    expect(prompt).toContain('It is NOT inlined in this prompt.')
+    expect(prompt).toContain('recursive language model with a REPL')
+    expect(prompt).not.toContain('"span_id":"tool-exec"')
+  })
+
+  it('forces file delivery when asked, even when the projection would fit inline', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    const { transport, calls } = fakeBridge([{ text: replyBody(VALID_REPLY) }])
+    const analyzer = primeAnalyzer({ transport, delivery: 'file' })
+    const [result] = await runExternalAnalyzers(otlpPath, [analyzer], { spans })
+    expect(result!.ok).toBe(true)
+    expect(result!.output).toContain('delivery: file-cwd')
+    expect(typeof calls[0]!.request.body.cwd).toBe('string')
+    const prompt = calls[0]!.request.body.messages[0]!.content
+    expect(prompt).not.toContain('full OpenInference span projection as JSON')
+  })
+
+  it('still grounds span ids against the artifact in file mode', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    const reply = [
+      '```json',
+      JSON.stringify({
+        answer: 'mixed',
+        findings: [
+          { span_ids: ['tool-exec'], severity: 'low', area: 'tool-failure', claim: 'real span', confidence: 0.5 },
+          { span_ids: ['hallucinated-span'], severity: 'low', area: 'bad', claim: 'fake span', confidence: 0.5 },
+        ],
+      }),
+      '```',
+    ].join('\n')
+    const { transport } = fakeBridge([{ text: replyBody(reply) }])
+    const [result] = await runExternalAnalyzers(
+      otlpPath,
+      [primeAnalyzer({ transport, delivery: 'file' })],
+      { spans },
+    )
+    expect(result!.ok).toBe(true)
+    expect(result!.findings).toHaveLength(1)
+    expect(result!.output).toContain('findings: 1 mapped, 1 rejected')
+    expect(result!.output).toContain("rejected[1]: span_id 'hallucinated-span' is not in the trajectory")
+  })
+
+  it('rejects an unknown delivery mode up front', () => {
+    expect(() => primeAnalyzer({ delivery: 'carrier-pigeon' as 'auto' })).toThrow(
+      /delivery must be 'auto', 'file', or 'inline'/,
+    )
   })
 
   it('aborts a call that exceeds the deadline, including on injected transports', async () => {

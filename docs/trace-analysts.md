@@ -353,8 +353,12 @@ Hodoscope always returns `discovery`, and each candidate has `status: 'needs_rev
 ### Prime engine
 
 `--analyzer prime` runs a one-shot analyst over the emitted OTLP artifact through an OpenAI-compatible bridge, such as cli-bridge's prime backend.
-Unlike the `--llm` analysts, which drill into the trace with paged tools, prime has no REPL and no trace tools: the full span projection is inlined into a single prompt as JSON.
-Oversized projections are re-rendered with a per-attribute character cap; if the projection still exceeds the inline budget the engine fails loud instead of silently dropping spans.
+Unlike the `--llm` analysts, which drill into the trace with paged tools, prime is a recursive language model with its own REPL, so the trajectory reaches it one of two ways:
+
+- **Inline (small traces):** the full span projection is inlined into a single prompt as JSON. Oversized projections are re-rendered with a per-attribute character cap.
+- **File (large traces):** when even the capped projection exceeds the inline budget, the artifact is copied into a per-run directory, that directory is sent as `cwd` on the chat-completions request (cli-bridge starts prime there), and the prompt tells prime to load `trajectory.otlp.jsonl` itself and fan out with `rlm()` — so the trajectory travels as a readable file, not prompt bytes, and no trace is refused for size. The bridge must be able to read that directory: host-mode bridges do by construction; a jailed or remote bridge needs the directory registered or uploaded on the bridge side.
+
+Span-id grounding is identical in both modes: every cited id is validated against the artifact, and the delivery decision is recorded in the result output.
 
 Prerequisites:
 
