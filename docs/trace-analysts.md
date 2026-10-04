@@ -425,10 +425,10 @@ What real runs have shown (GLM-5.3 via a coding-plan endpoint, fork at the pinne
   tokens); its first reply gets cut by the endpoint's output limit mid-JSON, and the
   truncation-aware repair turn (re-emit at most 3 findings, terse strings) recovers it — ok:true,
   findings grounded, exit 0.
-- **File, ~794 spans / 2.1 MB artifact:** ~2.2M input tokens of genuine REPL inspection, but the
-  reply never survives the endpoint's output cap even after repair — the run fails honestly
-  (exit 1, raw reply preserved, no findings invented). At that trajectory size, a model with a
-  larger output budget — or a paged finalization — is the next step, not silence about it.
+- **File, ~794 spans / 2.1 MB artifact:** the reply channel alone never survived the endpoint's
+  output cap. The findings.json payload channel finishes it — the analyzer writes the result with
+  its tools before replying — measured live at **8 findings, 0 rejected, exit 0**, 53 model calls,
+  ~3.1M input tokens of REPL inspection.
 
 ## Write one analyst
 
