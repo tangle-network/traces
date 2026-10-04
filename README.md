@@ -372,7 +372,7 @@ See [Replay verification](./docs/replay-verify.md) for setup, semantics, and hon
 | `--replay` | `stream`: scan once, then exit |
 | `--once` | `stream`: scan once; `watch <target>`: print ONE snapshot and exit |
 | `--no-spans` / `--no-findings` | `stream`: suppress raw span rows / finding rows |
-| `--no-content` | `upload`: send metadata only; strip all prompt/response text |
+| `--no-content` | `facts`: omit conversation, commands, paths and assignment text; `upload`: send metadata only |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
 
 ## Live stream
@@ -565,6 +565,21 @@ What it checks, and what it costs:
 Do not pass `--llm`; the command is model-backed by definition.
 
 ## Session facts
+
+The same facts sheet includes observed tool outcomes, captured input/output byte
+volumes, call-to-result intervals, compaction boundaries and available context
+sizes, spawn intervals, and existing skill invocation/document-read evidence.
+Each measurement carries coverage; absent telemetry remains unknown.
+`facts --no-content` withholds conversation, command, changed-file and assignment
+text while retaining measurement metadata. This is a local metadata view, not a
+share-safety certificate.
+
+SDK consumers use `buildSessionFactsReport(spans, { includeContent: false })`.
+Cache by `measurementVersion` and `sourceDigest`; `evidenceThrough` is the latest
+recorded endpoint, not current liveness. Computing the sheet parses the supplied
+spans; returning a stored sheet needs no model call or trace scan. Semantic
+judgments remain attributed analyst results.
+
 
 `traces facts` prints the deterministic session-facts sheet: the answers a session audit needs first, computed straight from the spans.
 No model call, no engine, no budget — it costs $0 and always returns the same sheet for the same spans.

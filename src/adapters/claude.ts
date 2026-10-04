@@ -194,6 +194,13 @@ interface ClaudeEvent {
   timestamp?: string
   cwd?: string
   isSidechain?: boolean
+  compactMetadata?: {
+    trigger?: unknown
+    preTokens?: unknown
+    postTokens?: unknown
+    durationMs?: unknown
+    cumulativeDroppedTokens?: unknown
+  }
   isMeta?: boolean
   userType?: string
   origin?: { kind?: unknown }
@@ -410,6 +417,7 @@ type ClaudeEventProjection =
       contentSource?: SourceReferences
     }
   | { kind: 'file-change'; timestamp: string; path: string; contentSource?: SourceReferences }
+  | { kind: 'compaction'; timestamp: string; metadata: NonNullable<ClaudeEvent['compactMetadata']>; parentToolUseId?: string | null }
   | { kind: 'ignored' }
 
 function projectToolResult(
@@ -436,6 +444,9 @@ function projectToolResult(
 
 function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
   const timestamp = event.timestamp ?? EPOCH
+  if (event.type === 'system' && event.subtype === 'compact_boundary') {
+    return { kind: 'compaction', timestamp: event.timestamp ?? '', metadata: event.compactMetadata ?? {}, parentToolUseId: event.parent_tool_use_id }
+  }
   if (event.type === 'assistant' && event.message) {
     const tools: Array<{
       id: string | null
@@ -744,6 +755,34 @@ function consumeClaudeEvent(
   ctx: ClaudeStreamContext,
   state: ClaudeStreamState,
 ): void {
+  if (event.kind === 'compaction') {
+    const extra: Record<string, unknown> = {}
+    const numericFields = {
+      preTokens: 'traces.compaction.tokens_before',
+      postTokens: 'traces.compaction.tokens_after',
+      durationMs: 'traces.compaction.latency_ms',
+      cumulativeDroppedTokens: 'traces.compaction.cumulative_dropped_tokens',
+    } as const
+    for (const [field, key] of Object.entries(numericFields)) {
+      const value = event.metadata[field as keyof typeof numericFields]
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) extra[key] = value
+    }
+    if (typeof event.metadata.trigger === 'string') extra['traces.compaction.trigger'] = event.metadata.trigger
+    const parent = inStreamParent(event.parentToolUseId, state)
+    state.spans.push(span({
+      traceId: ctx.traceId,
+      spanId: ctx.idPrefix + uid + ':compacted',
+      parentSpanId: parent ? parent.span.span_id : ctx.rootParent,
+      name: 'session.compacted',
+      kind: 'CHAIN',
+      startTime: event.timestamp,
+      service: SERVICE,
+      agent: ctx.agent,
+      step: state.step++,
+      extra,
+    }))
+    return
+  }
   if (event.kind === 'assistant') {
     const messageId = event.messageId ?? uid
     let llmSpan = state.llmSpanByMessageId.get(messageId)

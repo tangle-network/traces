@@ -1060,7 +1060,7 @@ async function cmdFacts(args: Args): Promise<void> {
   const collected = await collectSpans(args)
   if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
-  const report = buildSessionFactsReport(collected.spans, { harness: collected.harness })
+  const report = buildSessionFactsReport(collected.spans, { harness: collected.harness, includeContent: !args.noContent })
   // A session that yielded no record spans was not read: only its root, and any
   // integrity receipt for the bytes that failed to parse. Printing a sheet of
   // zeros for it would state, in the sheet's own voice, that the session did
@@ -2099,7 +2099,7 @@ Options:
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
-  --no-content     upload: strip prompt/response text; send metadata only
+  --no-content     facts: omit conversation, commands, paths and assignments;\n                   upload: strip prompt/response text; send metadata only
   --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the redaction core
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version
