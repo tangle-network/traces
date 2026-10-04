@@ -60,8 +60,12 @@ function fixtureSpans(options: { contentChars?: number } = {}): OtlpSpan[] {
 function replyBody(
   content: string,
   usage: Record<string, unknown> | undefined = { prompt_tokens: 100, completion_tokens: 20, model_requests: 1 },
+  finishReason?: string,
 ): string {
-  return JSON.stringify({ choices: [{ message: { content } }], usage })
+  return JSON.stringify({
+    choices: [{ message: { content }, ...(finishReason ? { finish_reason: finishReason } : {}) }],
+    usage,
+  })
 }
 
 const VALID_REPLY = [
@@ -92,7 +96,7 @@ interface BridgeCall {
 }
 
 type ScriptedReply =
-  | { status?: number; text: string; usage?: Record<string, unknown> }
+  | { status?: number; text: string; usage?: Record<string, unknown>; finishReason?: string }
   | { hang: true }
   | Error
 
@@ -120,7 +124,11 @@ async function startBridge(responses: ScriptedReply[]): Promise<{
       }
       if ('hang' in next) return // accept, never respond: exercises the deadline
       res.writeHead(next.status ?? 200, { 'content-type': 'application/json' })
-      res.end(next.usage === undefined ? next.text : replyBody(next.text, next.usage))
+      const needsWrap = next.usage !== undefined || next.finishReason !== undefined
+      const body = needsWrap && (next.status === undefined || next.status === 200)
+        ? replyBody(next.text, next.usage ?? { prompt_tokens: 100, completion_tokens: 20, model_requests: 1 }, next.finishReason)
+        : next.text
+      res.end(body)
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -223,6 +231,57 @@ describe('primeAnalyzer over a real HTTP bridge', () => {
     expect(repairPrompt).toContain(malformed)
     expect(repairPrompt).not.toContain('TRAJECTORY (')
     expect(repairPrompt).not.toContain('"span_id":"tool-exec"')
+  })
+
+  it('classifies a length-capped reply as truncated and repairs compact', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    // Cut mid-array: ends with a nested finding's `}` — indistinguishable from
+    // complete by tail character alone; finish_reason 'length' is authoritative.
+    const cut = '```json\n{"answer":"x","findings":[{"span_ids":["tool-exec"],"severity":"high","area":"a","claim":"c","confidence":0.9}'
+    const { url, calls } = await bridge([
+      { text: cut, usage: { prompt_tokens: 10, completion_tokens: 10, model_requests: 1 } },
+      { text: replyBody(VALID_REPLY, { prompt_tokens: 5, completion_tokens: 5, model_requests: 1 }) },
+    ])
+    const [result] = await runExternalAnalyzers(otlpPath, [primeAnalyzer({ bridgeUrl: url })], { spans })
+    expect(result!.ok).toBe(true)
+    expect(calls).toHaveLength(2)
+    const repairPrompt = calls[1]!.body.messages[0]!.content
+    expect(repairPrompt).toContain('cut off by the output limit')
+    expect(repairPrompt).toContain('at most 3 findings')
+    expect(repairPrompt).not.toContain('Preserve the span ids')
+  })
+
+  it('classifies a stopped reply as complete even when nothing parses', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    const prose = 'I analyzed it thoroughly and forgot the JSON entirely.'
+    const { url, calls } = await bridge([
+      { text: prose, usage: { prompt_tokens: 10, completion_tokens: 10, model_requests: 1 }, finishReason: 'stop' },
+      { text: replyBody(VALID_REPLY, { prompt_tokens: 5, completion_tokens: 5, model_requests: 1 }) },
+    ])
+    const [result] = await runExternalAnalyzers(otlpPath, [primeAnalyzer({ bridgeUrl: url })], { spans })
+    expect(result!.ok).toBe(true)
+    const repairPrompt = calls[1]!.body.messages[0]!.content
+    expect(repairPrompt).toContain('Preserve the span ids')
+    expect(repairPrompt).not.toContain('cut off by the output limit')
+  })
+
+  it('falls back to structure when the bridge reports no finish reason', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    // No finish_reason on the wire: a cut right after a nested `}` extracts no
+    // object, so it is treated as truncated (a tail-character check alone
+    // would have misread it as complete).
+    const cut = '```json\n{"answer":"x","findings":[{"span_ids":["tool-exec"],"severity":"high","area":"a","claim":"c","confidence":0.9}'
+    const { url, calls } = await bridge([
+      { text: cut, usage: { prompt_tokens: 10, completion_tokens: 10, model_requests: 1 } },
+      { text: replyBody(VALID_REPLY, { prompt_tokens: 5, completion_tokens: 5, model_requests: 1 }) },
+    ])
+    const [result] = await runExternalAnalyzers(otlpPath, [primeAnalyzer({ bridgeUrl: url })], { spans })
+    expect(result!.ok).toBe(true)
+    const repairPrompt = calls[1]!.body.messages[0]!.content
+    expect(repairPrompt).toContain('cut off by the output limit')
   })
 
   it('fails the case when the reply is still malformed after the repair turn', async () => {

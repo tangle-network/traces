@@ -358,11 +358,21 @@ function buildPrompt(question: string, projection: ArtifactProjection): string {
   ].join('\n')
 }
 
-function buildRepairPrompt(parseDefect: string, previousReply: string): string {
-  // A reply whose tail is not a closing brace was cut by an output-token
-  // limit mid-JSON; asking to preserve it verbatim re-runs into the same
-  // wall, so a truncated reply repairs into a COMPACT re-emit instead.
-  const truncated = !previousReply.trimEnd().endsWith('}')
+/** Was the previous reply cut off before it finished, rather than merely
+ *  malformed? The bridge's terminal reason is authoritative: `length` is the
+ *  provider's output cap, any other reported reason means the model stopped
+ *  on its own. Without a reason, fall back to structure — a reply from which
+ *  no complete JSON object can be extracted was cut (a cut can land right
+ *  after a nested finding's `}`, so the tail character alone would misread
+ *  it), while an extractable-but-wrong-shape object is complete. */
+function replyWasTruncated(previousReply: string, finishReason: string | null): boolean {
+  if (finishReason === 'length') return true
+  if (finishReason !== null) return false
+  return extractJsonObject(previousReply) === null
+}
+
+function buildRepairPrompt(parseDefect: string, previousReply: string, finishReason: string | null): string {
+  const truncated = replyWasTruncated(previousReply, finishReason)
   return [
     'Your previous reply to a trace-analysis task was structurally malformed and could not be parsed',
     `(${parseDefect}${truncated ? '; it was cut off by the output limit' : ''}). Below is your previous reply verbatim.`,
@@ -373,7 +383,7 @@ function buildRepairPrompt(parseDefect: string, previousReply: string): string {
     '   "claim": string (max 200 chars), "action": string (optional, max 200 chars), "confidence": number 0..1}',
     'No rationale field. Keep every string SHORT.',
     truncated
-      ? 'Your previous reply was TRUNCATED, so re-emit at most 3 findings — your strongest — with terse strings (claim and action under 120 chars each); do not reproduce the whole cut-off list.'
+      ? 'Your previous reply was cut off by the output limit, so re-emit at most 3 findings — your strongest — with terse strings (claim and action under 120 chars each); do not reproduce the whole cut-off list.'
       : 'Preserve the span ids and verdicts of your previous reply exactly; shorten prose freely.',
     '',
     'PREVIOUS REPLY:',
@@ -533,6 +543,10 @@ export const httpJsonTransport: PrimeTransport = ({ url, body, signal }) => {
 interface BridgeReply {
   content: string
   usage: PrimeUsage
+  /** The OpenAI-compatible terminal reason ('stop' | 'length' | …) when the
+   *  bridge reports one. 'length' is the provider's output-cap cut — the
+   *  authoritative truncation signal for the repair turn. */
+  finishReason: string | null
 }
 
 class PrimeBridgeError extends Error {}
@@ -580,12 +594,20 @@ async function callBridge(
   } catch {
     throw new PrimeBridgeError(`${turn}bridge returned unparseable JSON (${response.text.length} bytes)`)
   }
-  const record = parsed as { choices?: Array<{ message?: { content?: unknown } }>; usage?: unknown }
+  const record = parsed as {
+    choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>
+    usage?: unknown
+  }
   const replyContent = record.choices?.[0]?.message?.content
   if (typeof replyContent !== 'string' || replyContent.length === 0) {
     throw new PrimeBridgeError(`${turn}bridge reply carries no message content`)
   }
-  return { content: replyContent, usage: normalizeUsage(record.usage) }
+  const finishReason = record.choices?.[0]?.finish_reason
+  return {
+    content: replyContent,
+    usage: normalizeUsage(record.usage),
+    finishReason: typeof finishReason === 'string' && finishReason.length > 0 ? finishReason : null,
+  }
 }
 
 function failure(output: string, error: string): ExternalAnalysisResult {
@@ -658,7 +680,7 @@ export function primeAnalyzer(opts: PrimeAnalyzerOptions = {}): ExternalAnalyzer
         let repairReply: BridgeReply
         try {
           repairReply = await callBridge(
-            transport, url, model, buildRepairPrompt(parseDefect, reply.content),
+            transport, url, model, buildRepairPrompt(parseDefect, reply.content, reply.finishReason),
             timeoutMs, analyzeOpts.signal, 'repair-turn ')
         } catch (error) {
           if (!(error instanceof PrimeBridgeError)) throw error
