@@ -684,7 +684,12 @@ function distinctClaudeEvent(
       if (previous.fingerprint !== fingerprint) {
         throw new ClaudeEventConflictError(sourcePath, uid)
       }
-      if (previous.originKind === null && originKind !== null) return { originEnrichment: originKind, uid }
+      if (previous.originKind === null && originKind !== null) {
+        // Record the enrichment on the seen entry, so a later copy that
+        // contradicts the now-recorded label conflicts instead of enriching.
+        seen.set(uid, { fingerprint, originKind })
+        return { originEnrichment: originKind, uid }
+      }
       if (previous.originKind !== null && originKind !== null && previous.originKind !== originKind) {
         throw new ClaudeEventConflictError(sourcePath, uid)
       }
