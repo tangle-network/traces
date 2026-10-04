@@ -331,6 +331,9 @@ const FILE_DELIVERY_CONTRACT_LINES = [
   'Do NOT include a rationale field. Keep every string SHORT — long strings get corrupted in transport and void your work.',
   `Report at most ${MAX_FINDINGS} findings; a finding cites 1..${MAX_SPAN_IDS_PER_FINDING} span_ids, each copied VERBATIM from a span in ${TRAJECTORY_FILE_NAME}.`,
   '"findings" is [] only for a clean trajectory.',
+  'FINAL MESSAGE RULE: after your REPL work is done, send ONE last message that contains NOTHING BUT the',
+  'fenced ```json block above — no preamble, no summary, no code identifiers around it. A reply whose last',
+  'message is prose or a partial block is discarded unread.',
 ]
 
 function buildPrompt(question: string, projection: ArtifactProjection): string {
@@ -356,15 +359,22 @@ function buildPrompt(question: string, projection: ArtifactProjection): string {
 }
 
 function buildRepairPrompt(parseDefect: string, previousReply: string): string {
+  // A reply whose tail is not a closing brace was cut by an output-token
+  // limit mid-JSON; asking to preserve it verbatim re-runs into the same
+  // wall, so a truncated reply repairs into a COMPACT re-emit instead.
+  const truncated = !previousReply.trimEnd().endsWith('}')
   return [
     'Your previous reply to a trace-analysis task was structurally malformed and could not be parsed',
-    `(${parseDefect}). Below is your previous reply verbatim. Re-emit ONLY the corrected JSON — one`,
-    'fenced ```json block, no other text, no tools. The JSON object has exactly two fields:',
+    `(${parseDefect}${truncated ? '; it was cut off by the output limit' : ''}). Below is your previous reply verbatim.`,
+    'Re-emit ONLY the corrected JSON — one fenced ```json block, no other text, no tools. The JSON object has exactly two fields:',
     '  "answer": string (ONE short sentence, max 300 chars)',
     '  "findings": array (possibly empty) of {"span_ids": [string, ...],',
     '   "severity": "critical"|"high"|"medium"|"low"|"info", "area": string (max 40 chars),',
     '   "claim": string (max 200 chars), "action": string (optional, max 200 chars), "confidence": number 0..1}',
-    'No rationale field. Keep every string SHORT. Preserve the span ids and verdicts of your previous reply exactly; shorten prose freely.',
+    'No rationale field. Keep every string SHORT.',
+    truncated
+      ? 'Your previous reply was TRUNCATED, so re-emit at most 3 findings — your strongest — with terse strings (claim and action under 120 chars each); do not reproduce the whole cut-off list.'
+      : 'Preserve the span ids and verdicts of your previous reply exactly; shorten prose freely.',
     '',
     'PREVIOUS REPLY:',
     previousReply,

@@ -389,6 +389,47 @@ Output expectations:
 
 The scored prime-vs-dspy comparison — same trajectories, same scoring — lives in `@tangle-network/agent-eval`'s analyst benchmark (`runAnalystBenchmark`); this engine is the capture-side entry point, not the scoreboard.
 
+### Verifying against a real prime
+
+The suite above runs against a scripted bridge over real HTTP. A full real run — real
+prime-agent, real model, real REPL — is a manual, credentials-on-the-host affair:
+
+1. **Install prime-agent the way cli-bridge pins it.** It is a hard fork of pi that reuses
+   pi's npm name, so `npm i` gives you the WRONG agent: clone
+   `PrimeIntellect-ai/prime-agent`, `git checkout <the commit src/backends/prime.ts names>`
+   (be9e2fa0 at the time of writing), build, and expose the bundle as `prime-agent`
+   (cli-bridge's `pnpm install:harness prime` does exactly this).
+2. **Start cli-bridge with the prime backend**: `BRIDGE_BACKENDS=prime
+   PRIME_MODELS_JSON=<operator models.json> BRIDGE_PORT=4181 pnpm start`. The
+   models.json names an `apiKey` as an exported ENV VAR (not a literal — prime
+   resolves env-var-first, so an unforwarded name becomes the literal key), and the
+   bridge forwards exactly the names the file names into prime's neutral child env.
+   Mind which endpoint a key is funded on: a coding-plan GLM key only works on the
+   coding endpoint, and the same key 402s on the general one.
+3. **Give the kernel a persistent interpreter.** Prime's Python kernel bootstraps a
+   venv under its HOME, and the bridge gives every run an isolated one — a
+   uv-managed interpreter installed inside an ephemeral HOME dies with it. Pre-provision
+   a venv (ipykernel + the default rlm extras + an editable
+   `prime-agent-runtime`) from a system Python and export
+   `PRIME_AGENT_KERNEL_PYTHON=<that venv's python>` to the bridge; prime skips
+   auto-bootstrap when the named interpreter already passes its checks.
+4. Run with `TRACES_PRIME_BRIDGE_URL=http://localhost:4181 TRACES_PRIME_MODEL=prime/<provider>/<model>`.
+   The opt-in suite (`TRACES_PRIME_REAL_E2E=1` in `tests/analyst-engine-prime.test.ts`)
+   exercises the same path from vitest.
+
+What real runs have shown (GLM-5.3 via a coding-plan endpoint, fork at the pinned commit):
+
+- **Inline, small session:** clean single-call success — one fenced JSON block, five findings,
+  all grounded, exit 0.
+- **File, ~121 spans / 788 KB artifact:** the RLM loads and pages the file (14 calls, ~156k input
+  tokens); its first reply gets cut by the endpoint's output limit mid-JSON, and the
+  truncation-aware repair turn (re-emit at most 3 findings, terse strings) recovers it — ok:true,
+  findings grounded, exit 0.
+- **File, ~794 spans / 2.1 MB artifact:** ~2.2M input tokens of genuine REPL inspection, but the
+  reply never survives the endpoint's output cap even after repair — the run fails honestly
+  (exit 1, raw reply preserved, no findings invented). At that trajectory size, a model with a
+  larger output budget — or a paged finalization — is the next step, not silence about it.
+
 ## Write one analyst
 
 An analyst receives a paged trace store and returns typed findings.
