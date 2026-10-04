@@ -5,11 +5,12 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { sessionIdFromAttributes, stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
 import type { OtlpSpan } from './otlp.js'
+import { computeSessionFacts } from './session-facts.js'
 import { resolveAdapter } from './registry.js'
 import { validateOtlpSpans } from './span-validation.js'
 import type { SessionRef } from './types.js'
 
-export const RETAINED_SESSION_READER_VERSION = '1'
+export const RETAINED_SESSION_READER_VERSION = '2'
 
 export interface RetainedSessionFile {
   readonly path: string
@@ -91,6 +92,10 @@ export async function parseRetainedSession(input: {
         const identities = new Set(roots.map((span) => sessionIdFromAttributes(span.attributes)))
         if (identities.size !== 1 || !identities.has(input.nativeSessionId)) {
           unselectedFiles.push({ path: file.path, reason: 'No unambiguous matching native identity in parser output.' })
+          continue
+        }
+        if (computeSessionFacts(spans, { includeContent: false }).every((facts) => facts.recordSpans === 0)) {
+          unselectedFiles.push({ path: file.path, reason: 'Native identity was recorded without any session records.' })
           continue
         }
         stampSessionIntegrity(ref, spans)

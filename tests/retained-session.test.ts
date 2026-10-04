@@ -16,10 +16,11 @@ describe('retained session selection', () => {
     const selected = await parseRetainedSession({ harness: 'claude', nativeSessionId: sessionId, files: [
       { path: 'unrelated-name.jsonl', content: claude },
       { path: `${sessionId}.jsonl`, content: claude.replaceAll(sessionId, 'some-other-session') },
+      { path: 'mcp-debug.jsonl', content: row({ sessionId, timestamp: '2026-01-01T00:00:00Z', level: 'debug', message: 'MCP transport connected' }) },
     ] })
     expect(selected.status).toBe('selected')
     expect(selected.sourceFiles.map((file) => file.path)).toEqual(['unrelated-name.jsonl'])
-    expect(selected.unselectedFiles).toHaveLength(1)
+    expect(selected.unselectedFiles).toHaveLength(2)
     const facts = buildSessionFactsReport(selected.spans, { includeContent: false })
     expect(facts.sessions[0]?.sessionId).toBe(sessionId)
     expect(facts.sessions[0]?.toolCalls.value).toBe(1)
