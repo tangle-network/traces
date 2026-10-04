@@ -246,6 +246,7 @@ export class FactoryAdapter implements HarnessTraceAdapter {
           }
         : undefined,
     })
+    if (sessionLine?.id) root.attributes['tangle.sessionId'] = sessionLine.id
     return [root, ...spans]
   }
 }

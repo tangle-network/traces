@@ -112,6 +112,7 @@ export class AmpAdapter implements HarnessTraceAdapter {
     const spans: OtlpSpan[] = [
       span({ traceId, spanId: rootId, parentSpanId: null, name: 'session', kind: 'AGENT', startTime: start, service: SERVICE, agent: SERVICE }),
     ]
+    if (thread.id) spans[0]!.attributes['tangle.sessionId'] = thread.id
     const toolByUseId = new Map<string, OtlpSpan>()
     let step = 0
 

@@ -163,6 +163,7 @@ function normalizeClaudeIds(spans: OtlpSpan[]): void {
     const sourceTraceId = item.trace_id
     const sourceSpanId = item.span_id
     const sourceParentSpanId = item.parent_span_id
+    item.attributes['tangle.sessionId'] = sourceTraceId
     item.attributes[CLAUDE_SOURCE_TRACE_ID] = sourceTraceId
     item.attributes[CLAUDE_SOURCE_SPAN_ID] = sourceSpanId
     if (sourceParentSpanId !== null) {

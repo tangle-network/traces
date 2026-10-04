@@ -745,7 +745,7 @@ describe('factory adapter (Anthropic blocks + settings sidecar)', () => {
     )
     writeFileSync(`${base}.settings.json`, JSON.stringify({ model: 'claude-opus-4-5', tokenUsage: { inputTokens: 1234, outputTokens: 56 } }))
     const spans = await new FactoryAdapter().parse(refFor(`${base}.jsonl`, 'factory'))
-    expect(traceShapeDigest(spans)).toBe('42b7c5de678ebd16f99dd2f7e9cee292c0beea2f301f1e5de7440e6cb35ca0b5')
+    expect(traceShapeDigest(spans)).toBe('884e6dc58799624a0f36625481e540d5c3bd17b9ffed48c29f37f4ae132e3371')
     expect(llm(spans)?.attributes['llm.model_name']).toBe('claude-opus-4-5')
     expect(tool(spans)?.attributes['tool.name']).toBe('edit')
     expect(tool(spans)?.status.code).toBe('ERROR')
@@ -1246,7 +1246,7 @@ describe('claude adapter (conversation capture)', () => {
     // agent.parent.confidence: the subagent's spans below now carry
     // 'correlated' (joined by the agent-call toolUseId meta), which this
     // fixture's own subagent.meta.json declares.
-    expect(traceShapeDigest(spans)).toBe('193d7d3b3c5f5377023c98cb4ac1200455f4dd8570d07354d7d2a2727587a09d')
+    expect(traceShapeDigest(spans)).toBe('8ad485e1d2ba81502a84e3535ca1f96f9729661241e8ee7a219f57245f2a6f0b')
     expect(spans.map((item) => item.name)).toEqual([
       'session',
       'user.prompt',
@@ -1351,7 +1351,7 @@ describe('conversation capture — JSONL adapters', () => {
       writeFileSync(path, c.lines.map((l) => JSON.stringify(l)).join('\n'))
       const spans = await c.make().parse(refFor(path, c.name))
       if (c.name === 'pi') {
-        expect(traceShapeDigest(spans)).toBe('a33c1884e81287def1a9d6f55330ef7f3b2805c15aaaf6dad54d228325b1f2ce')
+        expect(traceShapeDigest(spans)).toBe('6f8d7465a20fe96b1ab0b57d69abdeb734ec22156ec6dbce4331336fcffca498')
       }
       expect(userPrompt(spans)?.attributes['content']).toBe('hello world')
       expect(hasContent(spans, 'on it')).toBe(true)

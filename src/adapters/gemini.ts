@@ -168,6 +168,7 @@ export class GeminiFamilyAdapter implements HarnessTraceAdapter {
       }),
     ]
 
+    if (session.sessionId) spans[0]!.attributes['tangle.sessionId'] = session.sessionId
     let step = 0
     for (const m of messages) {
       const mid = m.id ?? `m${step}`

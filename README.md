@@ -566,6 +566,23 @@ Do not pass `--llm`; the command is model-backed by definition.
 
 ## Session facts
 
+The SDK also accepts verified retained captures through
+`parseRetainedSession({ harness, nativeSessionId, files, signal? })`.
+Pass files as `{ path, content }` with their original relative layout.
+Runtime or the caller owns custody, digest verification and capture completeness.
+The reader uses existing adapters and selects a file only when native records
+establish the supplied session identity.
+It does not inspect the host session catalog or infer identity from filenames.
+Directory-only stores and formats without a recorded native identity remain unavailable.
+The returned source files, duplicate snapshots and unselected files explain the selection.
+Identical or append-only copies count once; divergent histories remain unavailable.
+Parsing is bounded to 1024 text files, 16 MiB per file, and 64 MiB total.
+No model calls occur.
+Call `buildSessionFactsReport(selection.spans, { includeContent: false })` to
+withhold native bodies from the resulting facts.
+The reader itself returns spans containing native content, for local trusted consumers only.
+
+
 The same facts sheet includes observed tool outcomes, captured input/output byte
 volumes, call-to-result intervals, compaction boundaries and available context
 sizes, spawn intervals, and existing skill invocation/document-read evidence.

@@ -440,6 +440,7 @@ export class PiAdapter implements HarnessTraceAdapter {
       agent: SERVICE,
       extra: { 'traces.pi.stop_reason': terminal.stopReason },
     })
+    if (sessionLine?.id) root.attributes['tangle.sessionId'] = sessionLine.id
     return [root, ...spans]
   }
 }
