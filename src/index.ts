@@ -197,3 +197,5 @@ export type {
   ShareSafetyVerdict,
   TraceAnalysisStore,
 } from '@tangle-network/agent-eval/traces'
+
+export * from './retained-session.js' // native identity selection over already retained bytes

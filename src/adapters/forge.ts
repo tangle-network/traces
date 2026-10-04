@@ -115,6 +115,7 @@ export class ForgeAdapter implements HarnessTraceAdapter {
     const spans: OtlpSpan[] = [
       span({ traceId, spanId: rootId, parentSpanId: null, name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: SERVICE, agent: SERVICE }),
     ]
+    if (ctx.conversation_id) spans[0]!.attributes['tangle.sessionId'] = ctx.conversation_id
     const toolByCallId = new Map<string, OtlpSpan>()
     let step = 0
     let lastLlm = rootId

@@ -381,6 +381,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
           service: SERVICE,
           agent: SERVICE,
           extra: {
+            'tangle.sessionId': threadId,
             'traces.codex.stream_format': 'exec-jsonl',
             'traces.session.role': 'operator',
           },
