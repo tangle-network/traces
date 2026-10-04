@@ -51,6 +51,10 @@ interface PiLine {
   parentId?: string | null
   timestamp?: string
   cwd?: string
+  summary?: unknown
+  tokensBefore?: unknown
+  firstKeptEntryId?: unknown
+  systemMessage?: unknown
   message?: {
     role?: string
     model?: string
@@ -254,6 +258,22 @@ export class PiAdapter implements HarnessTraceAdapter {
       lastTimestamp = l.timestamp
       if (!sessionLine && l.type === 'session') {
         sessionLine = { id: l.id, timestamp: l.timestamp }
+      }
+      if (l.type === 'compaction') {
+        spans.push(span({
+          traceId: sourceTraceId, spanId: 'compacted:' + (l.id ?? step), parentSpanId: sourceRootId,
+          name: 'session.compacted', kind: 'CHAIN', service: SERVICE, agent: SERVICE,
+          startTime: l.timestamp ?? '', step: step++,
+          content: typeof l.summary === 'string' ? capText(l.summary) : undefined,
+          contentSource: sourceOf(l, 'summary'),
+          extra: {
+            ...(typeof l.tokensBefore === 'number' && Number.isFinite(l.tokensBefore) && l.tokensBefore >= 0
+              ? { 'traces.compaction.tokens_before': l.tokensBefore } : {}),
+            ...(typeof l.firstKeptEntryId === 'string' ? { 'traces.pi.first_kept_entry_id': l.firstKeptEntryId } : {}),
+            ...(l.systemMessage !== undefined ? { 'gen_ai.system_instructions': JSON.stringify(l.systemMessage) } : {}),
+          },
+        }))
+        continue
       }
       if (l.type !== 'message' || !l.message) continue
 

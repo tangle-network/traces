@@ -1056,12 +1056,12 @@ export class CodexAdapter implements HarnessTraceAdapter {
      * `compacted` record anywhere in the file. A compacted record carries the
      * summary Codex replaced the context with, plus the history it retained.
      */
-    const recordInheritedContext = (l: CodexLine, ts: string): void => {
+    const recordInheritedContext = (l: CodexLine, ts: string, inScope = false): void => {
       if (l.type === 'compacted') {
         const payload = l.payload
         if (!payload) return
         const summary = capText(typeof payload.message === 'string' ? payload.message : '')
-        if (summary && claimInheritedSpan()) {
+        if (claimInheritedSpan()) {
           spans.push(span({
             traceId,
             spanId: `inherited:${step}:compacted`,
@@ -1076,7 +1076,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
             contentSource: textSources(payload, 'message'),
             extra: {
               [INHERITED_SPAN_ATTR]: true,
-              [INHERITED_SOURCE_ATTR]: 'compacted' satisfies InheritedSpanSource,
+              [INHERITED_SOURCE_ATTR]: (inScope ? 'compacted' : 'pre-task-prefix') satisfies InheritedSpanSource,
               ...(typeof payload.window_number === 'number' ? { 'traces.codex.compaction_window_number': payload.window_number } : {}),
               ...(payload.window_id ? { 'traces.codex.compaction_window_id': payload.window_id } : {}),
               ...(payload.previous_window_id ? { 'traces.codex.compaction_previous_window_id': payload.previous_window_id } : {}),
@@ -1280,7 +1280,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       } else if (l.type === 'compacted') {
         // Compaction replaces the model's context with a summary and a retained
         // history. Both are inherited context, not new turns in this scope.
-        recordInheritedContext(l, ts)
+        recordInheritedContext(l, ts, true)
       } else if (
         l.type === 'response_item' &&
         (l.payload?.type === 'function_call' || l.payload?.type === 'custom_tool_call')

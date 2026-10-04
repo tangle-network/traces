@@ -39,6 +39,11 @@
  * fact names its span ids rather than asking the reader to trust the sheet.
  */
 
+import { createHash } from 'node:crypto'
+import { canonicalJson } from './adapters/tool-io.js'
+import { computeSessionMeasurements, type SessionMeasurements } from './session-measurements.js'
+export type { SessionMeasurements, ToolMeasurement, CoveredMeasurement, CompactionMeasurement, ContentFootprint } from './session-measurements.js'
+
 import type { TraceAnalystDefinition } from '@tangle-network/agent-eval/analyst'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
@@ -64,6 +69,14 @@ import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js
  * {@link SessionFacts.tokenTotal} states that rather than summing the per-turn
  * deltas, which is a different (and smaller) number.
  */
+/** Cache invalidation key for deterministic measurements and prepared analyst context. */
+export const SESSION_FACTS_MEASUREMENT_VERSION = '3'
+
+export interface SessionFactsOptions {
+  /** Defaults to true for compatibility. False withholds conversation, commands, paths and assignment text. */
+  readonly includeContent?: boolean
+}
+
 export const SESSION_TOKEN_TOTAL_ATTR = 'traces.session.total_tokens'
 
 /**
@@ -233,12 +246,19 @@ export interface SessionFacts {
    * Failures that ended at the same instant are `ambiguous`, never guessed.
    */
   readonly firstFailure: FirstFailure
+  readonly measurements: SessionMeasurements
 }
 
 export interface SessionFactsReport {
   readonly schemaVersion: 1
   readonly kind: 'traces.session_facts_report'
   readonly generatedAt: string
+  readonly measurementVersion: typeof SESSION_FACTS_MEASUREMENT_VERSION
+  /** SHA-256 of the canonical selected spans, including content, attributes, links and timing. */
+  readonly sourceDigest: string
+  /** Latest recorded endpoint, not the last time the filesystem was checked. */
+  readonly evidenceThrough: string | null
+  readonly contentIncluded: boolean
   readonly harness: string | null
   readonly spanCount: number
   readonly sessions: readonly SessionFacts[]
@@ -707,21 +727,24 @@ function humanTurnsOf(spans: readonly OtlpSpan[]): {
  * Deterministic and free: the same spans always produce the same sheet, and no
  * model, network call, or budget is involved.
  */
-export function computeSessionFacts(spans: readonly OtlpSpan[]): SessionFacts[] {
+export function computeSessionFacts(spans: readonly OtlpSpan[], options: SessionFactsOptions = {}): SessionFacts[] {
   const { sessionByTrace } = indexSessionIdsByTrace(spans)
   const byTrace = new Map<string, OtlpSpan[]>()
   for (const span of spans) {
-    byTrace.set(span.trace_id, [...(byTrace.get(span.trace_id) ?? []), span])
+    const group = byTrace.get(span.trace_id)
+    if (group) group.push(span)
+    else byTrace.set(span.trace_id, [span])
   }
   return [...byTrace]
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .map(([traceId, traceSpans]) => sessionFactsForTrace(traceId, sessionByTrace.get(traceId) ?? null, traceSpans))
+    .map(([traceId, traceSpans]) => sessionFactsForTrace(traceId, sessionByTrace.get(traceId) ?? null, traceSpans, options))
 }
 
 function sessionFactsForTrace(
   traceId: string,
   sessionId: string | null,
   unordered: readonly OtlpSpan[],
+  options: SessionFactsOptions,
 ): SessionFacts {
   const spans = [...unordered].sort(byTraceOrder)
   const harness = spans.map((span) => stringAttr(span, 'service.name')).find((name) => name !== null) ?? null
@@ -769,7 +792,7 @@ function sessionFactsForTrace(
   ).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
 
-  return {
+  const facts: SessionFacts = {
     schemaVersion: 1,
     kind: 'traces.session_facts',
     traceId,
@@ -790,6 +813,7 @@ function sessionFactsForTrace(
             `no span carries ${CORRUPTION_COUNT_ATTR}; this trace was not read through the session ` +
             'integrity path, so whether any record was skipped is unknown',
         },
+    measurements: computeSessionMeasurements(ownSpans, invoked, sessionId, harness),
     toolCalls: {
       value: invoked.length,
       spanIds: invoked.map((span) => span.span_id),
@@ -857,20 +881,54 @@ function sessionFactsForTrace(
             'are a different quantity and summing them would not be the harness total',
         },
   }
+  if (options.includeContent !== false) return facts
+  const withheld = <T>(): SessionFact<T> => ({
+    value: null, spanIds: [], unavailable: 'Content was not requested.',
+  })
+  return {
+    ...facts,
+    humanTurns: withheld(),
+    finalMessages: withheld(),
+    changedFiles: withheld(),
+    pullRequests: withheld(),
+    subagents: {
+      ...facts.subagents,
+      value: facts.subagents.value?.map((entry) => ({
+        ...entry, taskName: null, taskNameUnavailable: 'Assignment text was not requested.',
+      })) ?? null,
+    },
+    firstFailure: facts.firstFailure.status === 'found'
+      ? { ...facts.firstFailure, message: null, classification: facts.firstFailure.classification ? { ...facts.firstFailure.classification, reason: 'Content was not requested.' } : null }
+      : facts.firstFailure,
+  }
 }
 
 /** The facts sheet for a set of spans, as one report. */
 export function buildSessionFactsReport(
   spans: readonly OtlpSpan[],
-  options: { harness?: string | null; generatedAt?: string } = {},
+  options: SessionFactsOptions & { harness?: string | null; generatedAt?: string } = {},
 ): SessionFactsReport {
+  const digest = createHash('sha256')
+  const ordered = [...spans].sort((a, b) =>
+    a.trace_id.localeCompare(b.trace_id) || a.span_id.localeCompare(b.span_id))
+  let evidenceThrough: string | null = null
+  for (const span of ordered) {
+    digest.update(canonicalJson(span)).update('\n')
+    for (const time of [span.start_time, span.end_time]) {
+      if (Number.isFinite(Date.parse(time)) && (evidenceThrough === null || Date.parse(time) > Date.parse(evidenceThrough))) evidenceThrough = time
+    }
+  }
   return {
     schemaVersion: 1,
     kind: 'traces.session_facts_report',
+    measurementVersion: SESSION_FACTS_MEASUREMENT_VERSION,
+    sourceDigest: 'sha256:' + digest.digest('hex'),
+    evidenceThrough,
+    contentIncluded: options.includeContent !== false,
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     harness: options.harness ?? null,
     spanCount: spans.length,
-    sessions: computeSessionFacts(spans),
+    sessions: computeSessionFacts(spans, options),
   }
 }
 
@@ -937,6 +995,8 @@ export function renderSessionFacts(report: SessionFactsReport): string {
     lines.push(factLine('changed files', facts.changedFiles, String(facts.changedFiles.value?.length ?? 0)))
     lines.push(factLine('first record', facts.firstRecordAt, String(facts.firstRecordAt.value)))
     lines.push(factLine('last record', facts.lastRecordAt, String(facts.lastRecordAt.value)))
+    lines.push(factLine('compactions', facts.measurements.compactions, String(facts.measurements.compactions.value?.length ?? 0)))
+    lines.push('  skills: ' + facts.measurements.adoption.totalSkillInvocations + ' recorded invocation(s), ' + facts.measurements.adoption.totalSkillDocumentReads + ' document read(s); telemetry ' + facts.measurements.adoption.skillTelemetryStatus)
     lines.push(factLine('token total', facts.tokenTotal, String(facts.tokenTotal.value)))
     lines.push(`  first failure: ${renderFirstFailure(facts.firstFailure)}`)
     if ((facts.unreadRecords.value ?? 0) > 0) {
@@ -1006,6 +1066,7 @@ export function renderSessionFactsContext(
       }
     }],
     ['tool_call_span_ids', (facts) => { facts.tool_calls.span_ids = [] }],
+    ['measurements', (facts) => { delete facts.measurements }],
     ['tool_calls_by_name', (facts) => { delete facts.tool_calls_by_name }],
     ['excluded_turn_span_ids', (facts) => {
       facts.excluded_turns = facts.excluded_turns?.map((entry) => {
@@ -1085,6 +1146,7 @@ interface CompactFacts {
   last_record_at: unknown
   token_total: unknown
   first_failure: Record<string, unknown>
+  measurements?: SessionMeasurements
 }
 
 function factJson(fact: SessionFact<unknown>): unknown {
@@ -1168,6 +1230,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
     last_record_at: factJson(facts.lastRecordAt),
     token_total: factJson(facts.tokenTotal),
     first_failure: compactFirstFailure(facts.firstFailure),
+    measurements: facts.measurements,
   }
 }
 
@@ -1215,7 +1278,7 @@ export function sessionFactsContext(
  * prepared context changed is a different analyst. Wrapping therefore bumps the
  * version instead of quietly changing what the same version does.
  */
-export const SESSION_FACTS_VERSION_SUFFIX = 'session-facts.2'
+export const SESSION_FACTS_VERSION_SUFFIX = 'session-facts.' + SESSION_FACTS_MEASUREMENT_VERSION
 
 /**
  * Supply the sheet to every definition as prepared context, before the model

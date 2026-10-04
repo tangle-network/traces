@@ -265,7 +265,8 @@ export interface AdoptionOptions {
   cwds?: readonly string[]
 }
 
-export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: AdoptionOptions = {}): Promise<AdoptionReport> {
+/** Pure span evidence. Repository history is added only by analyzeAdoption. */
+export function computeAdoption(spans: readonly OtlpSpan[]): AdoptionReport {
   const { sessionByTrace, conflicts } = indexSessionIdsByTrace(spans)
   const identifiedSessions = new Set(sessionByTrace.values())
   const unassignedTraceIds = new Set(
@@ -330,11 +331,9 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
     }
   }
 
-  const {
-    linkedCounts: loopDispatchedRuns,
-    unlinkedCounts: unlinkedLoopDispatchedRuns,
-    filesRead,
-  } = await readLoopRuns(opts.cwds ?? [], identifiedSessions)
+  const loopDispatchedRuns: Record<string, number> = {}
+  const unlinkedLoopDispatchedRuns: Record<string, number> = {}
+  const filesRead = 0
 
   const totalSkillInvocations = Object.values(skillInvocations).reduce((a, b) => a + b, 0)
   const totalSkillDocumentReads = Object.values(skillDocumentReads).reduce((a, b) => a + b, 0)
@@ -378,5 +377,20 @@ export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: Adoption
     skillRunFilesRead: filesRead,
     unlinkedLoopDispatchedRuns,
     totalUnlinkedLoopDispatchedRuns,
+  }
+}
+
+/** Add only explicitly requested repository history to the same span measurements. */
+export async function analyzeAdoption(spans: readonly OtlpSpan[], opts: AdoptionOptions = {}): Promise<AdoptionReport> {
+  const report = computeAdoption(spans)
+  const { sessionByTrace } = indexSessionIdsByTrace(spans)
+  const history = await readLoopRuns(opts.cwds ?? [], new Set(sessionByTrace.values()))
+  return {
+    ...report,
+    loopDispatchedRuns: history.linkedCounts,
+    totalLoopDispatchedRuns: Object.values(history.linkedCounts).reduce((sum, count) => sum + count, 0),
+    unlinkedLoopDispatchedRuns: history.unlinkedCounts,
+    totalUnlinkedLoopDispatchedRuns: Object.values(history.unlinkedCounts).reduce((sum, count) => sum + count, 0),
+    skillRunFilesRead: history.filesRead,
   }
 }
