@@ -594,3 +594,34 @@ describe('prime file delivery through the real CLI', () => {
     await rm(home, { recursive: true, force: true })
   }, 300_000)
 })
+
+/**
+ * Opt-in run against a REAL bridge with a REAL prime-agent and a REAL model.
+ * Skipped unless TRACES_PRIME_REAL_E2E=1 plus TRACES_PRIME_BRIDGE_URL and
+ * TRACES_PRIME_MODEL are set; see docs/trace-analysts.md ("Verifying against a
+ * real prime") for the full recipe — the facts that matter there: prime-agent
+ * is a source build at the commit cli-bridge pins (not the npm package), the
+ * bridge needs BRIDGE_BACKENDS=prime plus an operator models.json whose
+ * apiKey names an exported env var, and the kernel wants a persistent
+ * PRIME_AGENT_KERNEL_PYTHON so the isolated per-run HOME cannot orphan a
+ * uv-managed interpreter that lives inside it.
+ */
+describe('primeAnalyzer against a real prime bridge (opt-in)', () => {
+  it.skipIf(
+    !process.env.TRACES_PRIME_REAL_E2E
+      || !process.env.TRACES_PRIME_BRIDGE_URL
+      || !process.env.TRACES_PRIME_MODEL,
+  )('analyzes a real session end to end through the real RLM', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    const [result] = await runExternalAnalyzers(
+      otlpPath,
+      [primeAnalyzer({ delivery: 'file' })],
+      { spans },
+    )
+    expect(result!.ok).toBe(true)
+    // A real RLM reply that survives grounding: every finding cites spans the
+    // artifact actually contains, or is rejected with a recorded reason.
+    expect(result!.output).toMatch(/findings: \d+ mapped, \d+ rejected/)
+  }, 1_200_000)
+})
