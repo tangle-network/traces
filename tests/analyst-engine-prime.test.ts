@@ -233,6 +233,116 @@ describe('primeAnalyzer over a real HTTP bridge', () => {
     expect(repairPrompt).not.toContain('"span_id":"tool-exec"')
   })
 
+  it('falls back to findings.json when the reply cannot be parsed', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    // The scripted bridge plays the analyzer's part: write the payload file
+    // into the request cwd with "tools", then send an unparseable reply.
+    const { url } = await bridge([
+      { text: 'the analysis is written to the payload file; see findings.json' },
+    ])
+    const server = { wrote: false }
+    const wrap: PrimeTransport = async (request) => {
+      if (!server.wrote && typeof request.body.cwd === 'string') {
+        server.wrote = true
+        const { writeFile } = await import('node:fs/promises')
+        await writeFile(join(request.body.cwd, 'findings.json'), JSON.stringify({
+          answer: 'tool-exec failed and the loop continued',
+          findings: [{
+            span_ids: ['tool-exec'],
+            severity: 'high',
+            area: 'tool-failure',
+            claim: 'exec_command exited 1 and the run continued without addressing it',
+            confidence: 0.9,
+          }],
+        }))
+      }
+      return { status: 200, text: replyBody('the analysis is written to the payload file; see findings.json') }
+    }
+    const [result] = await runExternalAnalyzers(
+      otlpPath,
+      [primeAnalyzer({ bridgeUrl: url, transport: wrap, maxInlineChars: 300, perAttributeCharCap: 50 })],
+      { spans },
+    )
+    expect(result!.ok).toBe(true)
+    expect(result!.findings).toHaveLength(1)
+    expect(result!.findings![0]!.evidence_refs[0]!.uri).toBe(spanEvidenceUri('trace-one', 'tool-exec'))
+    expect(result!.output).toContain('reply channel: findings.json')
+    expect(result!.output).toContain('answer: tool-exec failed')
+  })
+
+  it('prefers a well-formed reply over a payload file when both exist', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    const wrap: PrimeTransport = async (request) => {
+      if (typeof request.body.cwd === 'string') {
+        const { writeFile } = await import('node:fs/promises')
+        await writeFile(join(request.body.cwd, 'findings.json'), JSON.stringify({
+          answer: 'from the file',
+          findings: [{ span_ids: ['root'], severity: 'info', area: 'file-channel', claim: 'should not be used', confidence: 0.5 }],
+        }))
+      }
+      return { status: 200, text: replyBody(VALID_REPLY) }
+    }
+    const [result] = await runExternalAnalyzers(
+      otlpPath,
+      [primeAnalyzer({ transport: wrap, delivery: 'file' })],
+      { spans },
+    )
+    expect(result!.ok).toBe(true)
+    expect(result!.output).toContain('answer: exec_command failed at step 2')
+    expect(result!.output).not.toContain('reply channel:')
+    expect(result!.findings![0]!.area).toBe('tool-failure')
+  })
+
+  it('reports both channels honestly when reply and findings.json are both unusable', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    const wrap: PrimeTransport = async (request) => {
+      if (typeof request.body.cwd === 'string') {
+        const { writeFile } = await import('node:fs/promises')
+        await writeFile(join(request.body.cwd, 'findings.json'), 'not json at all\n{{{{')
+      }
+      return { status: 200, text: replyBody('prose only, twice') }
+    }
+    const { url } = await bridge([{ text: replyBody('ignored') }])
+    void url
+    const [result] = await runExternalAnalyzers(
+      otlpPath,
+      [primeAnalyzer({ transport: wrap, delivery: 'file', repair: false })],
+      { spans },
+    )
+    expect(result!.ok).toBe(false)
+    expect(result!.error).toContain('no parseable JSON object in prime reply')
+    expect(result!.error).toContain('findings.json unreadable')
+  })
+
+  it('salvages per-line findings from a JSONL payload file and counts dropped lines', async () => {
+    const spans = fixtureSpans()
+    const otlpPath = await writeOtlpFile(spans)
+    const wrap: PrimeTransport = async (request) => {
+      if (typeof request.body.cwd === 'string') {
+        const { writeFile } = await import('node:fs/promises')
+        await writeFile(join(request.body.cwd, 'findings.json'), [
+          JSON.stringify({ answer: 'salvaged from lines' }),
+          JSON.stringify({ span_ids: ['tool-exec'], severity: 'high', area: 'tool-failure', claim: 'first good row', confidence: 0.8 }),
+          'this line is not json',
+          JSON.stringify({ span_ids: ['llm-planning'], severity: 'low', area: 'second', claim: 'second good row', confidence: 0.7 }),
+        ].join('\n'))
+      }
+      return { status: 200, text: replyBody('empty prose') }
+    }
+    const [result] = await runExternalAnalyzers(
+      otlpPath,
+      [primeAnalyzer({ transport: wrap, delivery: 'file', repair: false })],
+      { spans },
+    )
+    expect(result!.ok).toBe(true)
+    expect(result!.findings).toHaveLength(2)
+    expect(result!.output).toContain('answer: salvaged from lines')
+    expect(result!.output).toContain('JSONL (2 row(s), 1 malformed line(s) dropped)')
+  })
+
   it('classifies a length-capped reply as truncated and repairs compact', async () => {
     const spans = fixtureSpans()
     const otlpPath = await writeOtlpFile(spans)

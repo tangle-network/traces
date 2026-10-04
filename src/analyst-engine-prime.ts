@@ -39,6 +39,7 @@
 import { createHash } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import { join } from 'node:path'
 import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
 import { spanEvidenceUri } from './external-analysis-validation.js'
 import type { ExternalAnalysisResult, ExternalAnalyzer, ExternalAnalyzerOptions } from './external.js'
@@ -331,9 +332,15 @@ const FILE_DELIVERY_CONTRACT_LINES = [
   'Do NOT include a rationale field. Keep every string SHORT — long strings get corrupted in transport and void your work.',
   `Report at most ${MAX_FINDINGS} findings; a finding cites 1..${MAX_SPAN_IDS_PER_FINDING} span_ids, each copied VERBATIM from a span in ${TRAJECTORY_FILE_NAME}.`,
   '"findings" is [] only for a clean trajectory.',
+  `PAYLOAD CHANNEL — do this BEFORE your final message: WRITE the complete JSON object (same schema as`,
+  'the reply contract) to a file named findings.json in your working directory, using your tools (python',
+  'or shell). One assistant message has an output-token cap and a cut reply is discarded unread;',
+  'findings.json is the durable channel a large result must travel on. Write it first, incrementally if',
+  'it is long, THEN send your final message: the fenced ```json block when it is short enough to fit,',
+  'otherwise ONE line only — `findings written to findings.json`.',
   'FINAL MESSAGE RULE: after your REPL work is done, send ONE last message that contains NOTHING BUT the',
-  'fenced ```json block above — no preamble, no summary, no code identifiers around it. A reply whose last',
-  'message is prose or a partial block is discarded unread.',
+  'fenced ```json block (or the one-line pointer above) — no preamble, no summary, no code identifiers',
+  'around it. A reply whose last message is prose or a partial block is discarded unread.',
 ]
 
 function buildPrompt(question: string, projection: ArtifactProjection): string {
@@ -383,7 +390,7 @@ function buildRepairPrompt(parseDefect: string, previousReply: string, finishRea
     '   "claim": string (max 200 chars), "action": string (optional, max 200 chars), "confidence": number 0..1}',
     'No rationale field. Keep every string SHORT.',
     truncated
-      ? 'Your previous reply was cut off by the output limit, so re-emit at most 3 findings — your strongest — with terse strings (claim and action under 120 chars each); do not reproduce the whole cut-off list.'
+      ? 'Your previous reply was cut off by the output limit. Write the corrected JSON to a file named findings.json in your working directory with your tools (at most 3 findings — your strongest — with terse strings, claim and action under 120 chars each), then reply with ONE line: findings written to findings.json.'
       : 'Preserve the span ids and verdicts of your previous reply exactly; shorten prose freely.',
     '',
     'PREVIOUS REPLY:',
@@ -423,6 +430,76 @@ function parseDefectOf(parsed: Record<string, unknown> | null): string | null {
   if (parsed === null) return 'no parseable JSON object'
   if (!Array.isArray(parsed.findings)) return 'JSON has no "findings" array'
   return null
+}
+
+/** Upper bound on the findings file this engine will read. The contract caps
+ *  the payload at MAX_FINDINGS terse rows — anything far past that is a model
+ *  runaway, not a result, and is reported rather than parsed. */
+const FINDINGS_FILE_MAX_BYTES = 256 * 1024
+const FINDINGS_FILE_NAME = 'findings.json'
+
+export interface FindingsFileOutcome {
+  parsed: Record<string, unknown> | null
+  /** Human-readable receipt for the output: what the file was and what
+   *  happened to it. Present whenever a file was found. */
+  receipt: string
+}
+
+/** Read the payload channel: `findings.json` in the run directory, written by
+ *  the analyzer's tools. One assistant message has an output-token cap, so a
+ *  large fenced reply gets cut mid-object — a file written incrementally with
+ *  tools does not. Accepts the contract object verbatim, or one finding row
+ *  per line (JSONL) with malformed lines dropped and counted. */
+async function readFindingsFile(cwd: string, signal?: AbortSignal): Promise<FindingsFileOutcome | undefined> {
+  signal?.throwIfAborted()
+  const path = join(cwd, FINDINGS_FILE_NAME)
+  let raw: string
+  const { readFile, stat } = await import('node:fs/promises')
+  try {
+    const size = (await stat(path)).size
+    if (size > FINDINGS_FILE_MAX_BYTES) {
+      return { parsed: null, receipt: `${FINDINGS_FILE_NAME} is ${size} bytes (cap ${FINDINGS_FILE_MAX_BYTES}); refused` }
+    }
+    raw = await readFile(path, 'utf8')
+  } catch {
+    return undefined
+  }
+  const direct = extractJsonObject(raw)
+  if (direct !== null && parseDefectOf(direct) === null) {
+    return { parsed: direct, receipt: `${FINDINGS_FILE_NAME} read (${raw.length} chars)` }
+  }
+  const rows: unknown[] = []
+  let droppedLines = 0
+  let answer: string | null = null
+  for (const [index, line] of raw.split('\n').entries()) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    const row = extractJsonObject(trimmed)
+    if (row === null) {
+      droppedLines += 1
+      continue
+    }
+    if (typeof row.answer === 'string' && !Array.isArray(row.findings)) {
+      if (answer === null) answer = row.answer
+      continue
+    }
+    if (Array.isArray(row.findings)) {
+      rows.push(...row.findings)
+      if (answer === null && typeof row.answer === 'string') answer = row.answer
+      continue
+    }
+    rows.push(row)
+  }
+  if (rows.length === 0) {
+    return {
+      parsed: null,
+      receipt: `${FINDINGS_FILE_NAME} unreadable (no parseable object${droppedLines > 0 ? `, ${droppedLines} malformed line(s) dropped` : ''})`,
+    }
+  }
+  return {
+    parsed: { ...(answer !== null ? { answer } : {}), findings: rows },
+    receipt: `${FINDINGS_FILE_NAME} read as JSONL (${rows.length} row(s)${droppedLines > 0 ? `, ${droppedLines} malformed line(s) dropped` : ''})`,
+  }
 }
 
 function findingRowDefect(row: unknown, spanTraces: ReadonlyMap<string, Set<string>>): string | FindingRow {
@@ -690,12 +767,35 @@ export function primeAnalyzer(opts: PrimeAnalyzerOptions = {}): ExternalAnalyzer
         parsed = extractJsonObject(repairReply.content)
         parseDefect = parseDefectOf(parsed)
       }
+      let channel = 'reply'
+      let channelReceipt = ''
       if (parseDefect !== null) {
-        return failure(
-          reply.content,
-          `${parseDefect} in prime reply${repairAttempted ? ' even after the bounded repair turn' : ''}; ` +
-            renderUsage(usage),
-        )
+        // The reply channel failed — cut by an output cap or simply malformed.
+        // File delivery has a second, durable channel: the analyzer was told
+        // to write the payload to findings.json with its tools before replying
+        // (a tool-written file gets a fresh output budget per turn; one giant
+        // assistant message does not). Same grounding, same validation.
+        const deliveryCwd = projection.delivery.mode === 'file-cwd' ? projection.delivery.cwd : undefined
+        const file = deliveryCwd !== undefined
+          ? await readFindingsFile(deliveryCwd, analyzeOpts.signal).catch(() => undefined)
+          : undefined
+        if (file?.parsed !== null && file !== undefined) {
+          parsed = file.parsed
+          parseDefect = parseDefectOf(parsed)
+          if (parseDefect === null) {
+            channel = FINDINGS_FILE_NAME
+            channelReceipt = file.receipt
+          }
+        }
+        if (parseDefect !== null) {
+          return failure(
+            reply.content,
+            `${parseDefect} in prime reply${repairAttempted ? ' even after the bounded repair turn' : ''}` +
+              (file === undefined
+                ? '; no findings.json in the run directory'
+                : `; ${file.receipt}`) +
+              `; ${renderUsage(usage)}`,)
+        }
       }
 
       const rows = (parsed!.findings as unknown[]).slice(0, MAX_FINDINGS)
@@ -719,6 +819,7 @@ export function primeAnalyzer(opts: PrimeAnalyzerOptions = {}): ExternalAnalyzer
           (overflow > 0 ? `, ${overflow} over the ${MAX_FINDINGS}-finding cap dropped` : ''),
         ...rejected,
         deliveryLine,
+        ...(channel !== 'reply' ? [`reply channel: ${channel} — ${channelReceipt}; the chat reply was unparseable, the payload file carried the result`] : []),
         `repair: ${repairAttempted ? 'attempted (succeeded)' : 'not needed'}`,
         renderUsage(usage),
         ...(findings.length === 0 ? ['zero findings — an honest null, not a failure'] : []),
