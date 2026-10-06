@@ -72,7 +72,7 @@ interface GeminiFamilyConfig {
 }
 
 /** Shared base for Gemini CLI and its forks (Qwen Code). */
-export class GeminiFamilyAdapter implements HarnessTraceAdapter {
+class GeminiFamilyAdapter implements HarnessTraceAdapter {
   readonly harness: string
   readonly aliases?: readonly string[]
   private readonly service: string

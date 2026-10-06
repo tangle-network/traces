@@ -14,8 +14,8 @@ import { type AnswerSchema, type Field, type Question, QUESTIONS, questionById }
 
 export const TIME_TOLERANCE_MS = 1_000
 
-export type Verdict = 'correct' | 'partial' | 'wrong'
-export type CostBasis = 'observed' | 'estimated'
+type Verdict = 'correct' | 'partial' | 'wrong'
+type CostBasis = 'observed' | 'estimated'
 
 /** One attempt by an arm at one question wording. */
 export interface AnswerRow {
@@ -39,7 +39,7 @@ export interface AnswersFile {
   answers: AnswerRow[]
 }
 
-export interface CitationCheck {
+interface CitationCheck {
   cite: string
   /** The cite names a known record or span. */
   resolved: boolean
@@ -49,7 +49,7 @@ export interface CitationCheck {
   onGold: boolean
 }
 
-export interface LeafResult {
+interface LeafResult {
   path: string
   correct: boolean
   /** The answer said "not in trace" (null) where the gold has a value. */
@@ -217,7 +217,7 @@ export function parseAnswersFile(value: unknown): AnswersFile {
   return file as AnswersFile
 }
 
-export interface Distribution {
+interface Distribution {
   /** Attempts that reported the measure. */
   reported: number
   /** Attempts that did not; never counted as zero. */
@@ -239,7 +239,7 @@ function distribution(values: ReadonlyArray<number | null | undefined>): Distrib
   }
 }
 
-export interface Tally {
+interface Tally {
   attempts: number
   correct: number
   partial: number
@@ -253,7 +253,7 @@ export interface Tally {
   cost: Distribution & { basis: CostBasis | 'mixed' | 'unknown' }
 }
 
-export interface QuestionScore extends Tally {
+interface QuestionScore extends Tally {
   question: string
   variant: number
   heldOut: boolean

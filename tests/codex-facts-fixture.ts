@@ -11,7 +11,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SessionRef } from '../src/types.js'
 
-export const BASE_MS = Date.UTC(2026, 8, 8, 10, 0, 0)
+const BASE_MS = Date.UTC(2026, 8, 8, 10, 0, 0)
 /** The order in which a rollout recorded the two copies of one submitted turn. */
 export type RecordOrder = 'item-first' | 'event-first'
 
@@ -54,7 +54,7 @@ export const task = (t: number, kind: 'task_started' | 'task_complete', turnId: 
   type: 'event_msg',
   payload: { type: kind, turn_id: turnId },
 })
-export const tokens = (t: number, input: number): Row => ({
+const tokens = (t: number, input: number): Row => ({
   t,
   type: 'event_msg',
   payload: {
@@ -116,13 +116,13 @@ export const commandItem = (
 export const AGENTS_BLOCK = '# AGENTS.md instructions for /workspace/demo\n\n<INSTRUCTIONS>\nUse pnpm.\n</INSTRUCTIONS>'
 export const ENVIRONMENT_BLOCK = '<environment_context>\n  <cwd>/workspace/demo</cwd>\n  <shell>zsh</shell>\n</environment_context>'
 export const FIRST_REQUEST = 'Open a PR for the parser fix, merge PR 3, then tell me what git status reports.'
-export const SCRIPT_INPUT = [
+const SCRIPT_INPUT = [
   'const created = await tools.exec_command({ cmd: "gh pr create --fill" })',
   'const merged = await tools.exec_command({ cmd: "gh-drew pr merge 3 --squash" })',
   'const status = await tools.exec_command({ cmd: "git status --short" })',
   'text([created.output, merged.output, status.output].join("\\n"))',
 ].join('\n')
-export const PATCH_INPUT = [
+const PATCH_INPUT = [
   'await tools.apply_patch(`*** Begin Patch',
   '*** Update File: src/parser.ts',
   '@@',

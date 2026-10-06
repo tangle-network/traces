@@ -68,7 +68,7 @@ export interface OtlpIngestIssue {
 }
 
 /** Which unusable field cost a span one measurement, without costing it its existence. */
-export type OtlpWithheldFieldKind = 'negative-duration'
+type OtlpWithheldFieldKind = 'negative-duration'
 
 /**
  * A row that DID become a span, with one unusable field withheld.
@@ -156,14 +156,6 @@ export const SUBSTITUTED_FIELDS_ATTR = 'traces.substituted_fields'
 export const TRACE_ID_MINTED_ATTR = 'traces.trace_id_minted'
 
 /**
- * The status code the producer wrote, when this package analysed a different
- * one. Kept for the same reason as `traces.raw_attribute.end_time`: the export
- * has to say what the SOURCE said, or a re-export validates cleaner than the
- * file it came from.
- */
-export const RAW_STATUS_CODE_ATTR = RAW_FIELD_ATTRIBUTES['status.code']
-
-/**
  * How many rows of the ORIGINAL source could not be represented as spans, and
  * which kinds — carried on every span of an export so the count survives any
  * number of re-exports.
@@ -176,8 +168,8 @@ export const RAW_STATUS_CODE_ATTR = RAW_FIELD_ATTRIBUTES['status.code']
  * source is missing from it, so `validate` on a re-export cannot read as a
  * clean bill of health for a file that never was one.
  */
-export const SOURCE_UNREADABLE_ROWS_ATTR = 'traces.source.unreadable_rows'
-export const SOURCE_UNREADABLE_KINDS_ATTR = 'traces.source.unreadable_row_kinds'
+const SOURCE_UNREADABLE_ROWS_ATTR = 'traces.source.unreadable_rows'
+const SOURCE_UNREADABLE_KINDS_ATTR = 'traces.source.unreadable_row_kinds'
 
 export interface OtlpInputFile {
   readonly path: string

@@ -52,7 +52,7 @@ const TARBALL_BASENAME = 'agent-trace-contract'
 export const EXPECTED_MAX_SPANS_READ = 250_000
 
 /** Absolute path of the `dist/` directory Node resolves this package's entry to. */
-export function traceContractDistDir(fromFile: string = import.meta.url): string {
+function traceContractDistDir(fromFile: string = import.meta.url): string {
   return dirname(createRequire(fromFile).resolve(PACKAGE))
 }
 
@@ -101,7 +101,7 @@ export function traceContractBuildIdOrNull(fromFile: string = import.meta.url): 
 }
 
 /** The one registry build the repo's lockfile pins for this package. */
-export interface LockedTraceContract {
+interface LockedTraceContract {
   version: string
   /** `sha512-…` of the published tarball, straight from the lockfile entry. */
   integrity: string
@@ -115,7 +115,7 @@ export interface LockedTraceContract {
  * make "the locked build" ambiguous — a side-loaded `file:` variant is exactly
  * the shape that ambiguity hides).
  */
-export function lockedTraceContract(lockfilePath: string = defaultLockfilePath(import.meta.url)): LockedTraceContract {
+function lockedTraceContract(lockfilePath: string = defaultLockfilePath(import.meta.url)): LockedTraceContract {
   const text = readFileSync(lockfilePath, 'utf8')
   const entryPattern = /^ {2}'@tangle-network\/agent-trace-contract@([^']+)':\r?\n {4}resolution: \{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\}/gmu
   const entries = [...text.matchAll(entryPattern)]

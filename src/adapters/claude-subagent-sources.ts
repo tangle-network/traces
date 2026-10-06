@@ -10,7 +10,7 @@ import {
   type WorkflowRunBinding,
 } from './claude-workflow.js'
 
-export interface WorkflowSubagentLocation {
+interface WorkflowSubagentLocation {
   runId: string
   transcriptDir: string
   /** The parent's recorded path, retained when the native subtree was copied. */

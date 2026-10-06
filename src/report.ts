@@ -31,7 +31,7 @@ import type { SessionWorkflowIssue, SessionWorkflowSummary } from './session-wor
 import type { SessionCorruptionReceipt, SessionRef } from './types.js'
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
-export const CORRUPTION_RECEIPT_DISPLAY_LIMIT = 100
+const CORRUPTION_RECEIPT_DISPLAY_LIMIT = 100
 const SOURCE_DISPLAY_LIMIT = 20
 const SEVERITY_BADGE: Record<string, string> = {
   critical: '🔴 CRITICAL',

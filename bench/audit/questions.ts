@@ -262,7 +262,7 @@ export function answerJsonSchema(question: Question): Record<string, unknown> {
   return { $schema: 'https://json-schema.org/draft/2020-12/schema', ...objectSchema(question.schema) }
 }
 
-export const ANSWER_RULES = [
+const ANSWER_RULES = [
   'Answer with one JSON object that matches the schema. Put nothing else in the answer.',
   'Use null for a value the session does not contain.',
   'Give times in ISO 8601 UTC. A time is correct within 1 second.',
