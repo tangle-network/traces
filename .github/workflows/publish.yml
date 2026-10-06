@@ -16,14 +16,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  verify:
     if: >-
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
       github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-public]
     permissions:
-      contents: write
-      id-token: write # npm provenance / OIDC trusted publishing
+      contents: read
+    outputs:
+      tag_name: ${{ steps.publish-tag.outputs.tag_name }}
+      ref: ${{ steps.publish-tag.outputs.ref }}
+      publish: ${{ steps.npm-version.outputs.exists != 'true' }}
     steps:
       - name: Select publish tag
         id: publish-tag
@@ -53,6 +56,7 @@ jobs:
         with:
           ref: ${{ steps.publish-tag.outputs.ref }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Verify tag is merged to main
         run: |
           git fetch origin main:refs/remotes/origin/main --no-tags
@@ -87,7 +91,7 @@ jobs:
           PACKAGE_NAME: ${{ steps.package.outputs.name }}
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
         run: |
-          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version --registry=https://registry.npmjs.org 2>/dev/null | grep -qx "$PACKAGE_VERSION"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -98,17 +102,51 @@ jobs:
           pnpm test
           pnpm build
           pnpm check:package
+
+  # npm trusted publishing runs on GitHub-hosted runners only, so this job
+  # starts only when the verified version is not yet on npm.
+  publish:
+    needs: verify
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance / OIDC trusted publishing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.ref }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
       - name: Publish to npm
-        if: steps.npm-version.outputs.exists != 'true'
         # Requires npm trusted publishing for tangle-network/traces, publish.yml.
         # Token configuration takes precedence over its short-lived identity.
         run: npm publish --access public --ignore-scripts
         env:
           NPM_CONFIG_PROVENANCE: 'true'
+
+  release:
+    needs: [verify, publish]
+    if: >-
+      always() &&
+      needs.verify.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: [self-hosted, ci-public]
+    permissions:
+      contents: write
+    steps:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ steps.publish-tag.outputs.tag_name }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.verify.outputs.tag_name }}
         run: |
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             echo "GitHub release $TAG_NAME already exists"
