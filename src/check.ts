@@ -40,7 +40,7 @@ export class AmbiguousTraceInputError extends Error {
 }
 
 /** A contract file that cannot be used. */
-export class ContractFileError extends Error {
+class ContractFileError extends Error {
   override name = 'ContractFileError'
 }
 
@@ -139,7 +139,7 @@ function isEvidenceRow(row: Record<string, unknown>): boolean {
 
 /** The spans of one trace in the shape a contract reads. A timestamp that
  *  does not parse is left missing, so an ordering rule that needs it fails. */
-export function contractSpansFromOtlp(spans: readonly OtlpSpan[]): ContractSpan[] {
+function contractSpansFromOtlp(spans: readonly OtlpSpan[]): ContractSpan[] {
   return spans.map((span) => {
     const startedAt = epochMs(span.start_time)
     const endedAt = epochMs(span.end_time)
@@ -168,7 +168,7 @@ function epochMs(value: string): number | undefined {
 }
 
 /** Spans grouped by trace id, in first-seen order. One contract verdict per trace. */
-export function groupByTrace(spans: readonly OtlpSpan[]): Array<{ traceId: string; spans: OtlpSpan[] }> {
+function groupByTrace(spans: readonly OtlpSpan[]): Array<{ traceId: string; spans: OtlpSpan[] }> {
   const groups = new Map<string, OtlpSpan[]>()
   for (const span of spans) {
     const list = groups.get(span.trace_id) ?? []
@@ -180,7 +180,7 @@ export function groupByTrace(spans: readonly OtlpSpan[]): Array<{ traceId: strin
 
 // ── Evaluation and reports ────────────────────────────────────────────
 
-export interface TraceCheck {
+interface TraceCheck {
   traceId: string
   spanCount: number
   verdict: ContractVerdict

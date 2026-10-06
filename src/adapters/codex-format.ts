@@ -161,7 +161,7 @@ export interface CodexCommandExecution {
   readonly completedAtMs?: number
 }
 
-export interface CodexFileChangeEntry {
+interface CodexFileChangeEntry {
   readonly path: string
   /** Codex's change type (`add`, `delete`, `update`), verbatim. */
   readonly kind: string
@@ -178,7 +178,7 @@ export interface CodexFileChange {
 }
 
 /** A turn a client submitted, from an `item_completed` event whose item is `UserMessage`. */
-export interface CodexUserMessage {
+interface CodexUserMessage {
   readonly itemId: string
   readonly text: string
 }

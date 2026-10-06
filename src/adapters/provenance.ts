@@ -79,6 +79,3 @@ export function isSubagentSpan(attributes: Readonly<Record<string, unknown>>): b
   return attributes[SUBAGENT_SPAN_ATTR] === true
 }
 
-export function isSubagentSpawn(attributes: Readonly<Record<string, unknown>>): boolean {
-  return attributes[SUBAGENT_SPAWN_ATTR] === true
-}

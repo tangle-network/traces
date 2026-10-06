@@ -73,7 +73,7 @@ const SYNTHETIC_MARKERS = [
 const AGENT_PROMPT =
   /^(you are\b|you're\b|read[- ]only\b|stop now\b|your task\b|your job\b|review the\b|audit\b|analyze the\b|return (only|a |the )|here is the\b|context:|task:|do not (revert|edit|touch)|work only in\b|you have been\b|act as\b|operate the\b|goal:|objective:)/i
 
-export function textIsCmdOrInject(s: string): boolean {
+function textIsCmdOrInject(s: string): boolean {
   return CMD_MARKERS.some((m) => s.includes(m)) || INJECT_MARKERS.some((m) => s.includes(m))
 }
 
@@ -199,7 +199,7 @@ function endsWithIgnoringCase(text: string, suffix: string): boolean {
 }
 
 /** Whether one text block of a Codex user-role message is harness context. */
-export function isCodexContextBlock(block: string): boolean {
+function isCodexContextBlock(block: string): boolean {
   const text = block.trim()
   if (CODEX_CONTEXT_PREFIXES.some((prefix) => text.startsWith(prefix))) return true
   if (CODEX_EXTERNAL_CONTEXT.test(text)) return true
@@ -224,7 +224,7 @@ export function isCodexContextBlock(block: string): boolean {
  * record carries no kinds — older rollouts and event mirrors — and the text
  * heuristics answer instead.
  */
-export function codexKindsAreHuman(kinds: readonly unknown[] | undefined): boolean | undefined {
+function codexKindsAreHuman(kinds: readonly unknown[] | undefined): boolean | undefined {
   if (!Array.isArray(kinds) || kinds.length === 0) return undefined
   if (!kinds.every((kind) => typeof kind === 'string')) return undefined
   return kinds.every((kind) => (kind as string).startsWith('user.'))

@@ -17,7 +17,7 @@ export interface WorkflowRunBinding extends WorkflowRunReference {
   startedAt: string
 }
 
-export function validWorkflowRunReference(
+function validWorkflowRunReference(
   runId: unknown,
   transcriptDir: unknown,
 ): WorkflowRunReference | undefined {

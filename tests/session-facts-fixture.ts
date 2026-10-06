@@ -16,7 +16,7 @@ import type { OtlpSpan } from '../src/otlp.js'
 
 export const FIXTURE_SESSION_ID = 'facts-fixture-session'
 export const FIXTURE_AGENT_PATH = '/root/uploader_audit'
-export const FIXTURE_THREAD_ID = 'facts-fixture-child'
+const FIXTURE_THREAD_ID = 'facts-fixture-child'
 
 /** What the fixture's human typed, verbatim, in order. */
 export const FIXTURE_HUMAN_TURNS = [

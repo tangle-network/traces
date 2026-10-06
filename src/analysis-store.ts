@@ -18,7 +18,7 @@ import { writeOtlpFile } from './otlp.js'
  * whose full span list routinely exceeds 150KB. The fixed ceiling covers large
  * sessions without disabling agent-eval's file-size guard.
  */
-export const GENERATED_TRACE_FILE_CEILING = 512 * 1024 * 1024
+const GENERATED_TRACE_FILE_CEILING = 512 * 1024 * 1024
 
 export interface AnalysisTraceFile {
   readonly otlpPath: string

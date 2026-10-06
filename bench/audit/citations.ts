@@ -47,7 +47,7 @@ const LINE_CITE = /^(.+):(\d+)$/
  * An index over the fixture files alone: it resolves `<file>:<line>` citations.
  * `spans` adds span-id aliases, each mapped to the records its span came from.
  */
-export function createCitationIndex(
+function createCitationIndex(
   files: ReadonlyMap<string, string>,
   spans: ReadonlyMap<string, readonly RecordRef[]> = new Map(),
 ): CitationIndex {

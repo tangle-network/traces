@@ -33,14 +33,14 @@ import { assessSpans, redactSpans } from './redact.js'
 import { tracesVersion } from './version.js'
 
 /** Serialized bytes one tool result may carry. The store's own per-call ceiling is lower. */
-export const MCP_RESULT_BYTE_CAP = 512 * 1024
+const MCP_RESULT_BYTE_CAP = 512 * 1024
 
 export interface TraceMcpServerOptions {
   readonly spans: readonly OtlpSpan[]
 }
 
 /** Build the MCP tools over the selected spans, and the redacted span file they read. */
-export async function traceMcpTools(
+async function traceMcpTools(
   options: TraceMcpServerOptions,
 ): Promise<{ tools: McpToolDescriptor[]; otlpPath: string }> {
   const { spans } = redactSpans(options.spans)

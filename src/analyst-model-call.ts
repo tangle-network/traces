@@ -17,7 +17,7 @@ export const DEFAULT_ANALYST_MODEL = 'gpt-5.6-luna'
 export const DEFAULT_QUESTION_MAX_COST_USD = 1
 
 /** Default analysis endpoint: the Tangle router, reached with TANGLE_API_KEY. */
-export const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
+const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
 
 export const ANALYST_MAX_OUTPUT_TOKENS = 16_384
 export const GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS = 8_192

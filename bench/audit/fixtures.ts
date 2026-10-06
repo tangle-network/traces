@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path'
 
 export type BenchSessionId = 'codex-operator' | 'codex-child' | 'claude'
 
-export interface BenchSession {
+interface BenchSession {
   id: BenchSessionId
   harness: 'codex' | 'claude-code'
   /** Path relative to the fixture root. */
@@ -37,7 +37,7 @@ export interface BenchManifest {
 /** Gold answers keyed by question id, in the answer shape an arm submits. */
 export type GoldAnswers = Record<string, Record<string, unknown>>
 
-export interface BenchFile {
+interface BenchFile {
   path: string
   content: string
 }
