@@ -18,6 +18,8 @@
  *   no dedicated skill event, so reading the document is the closest observable act;
  *   a read is not evidence that the skill shaped the outcome. One command that reads
  *   several skills at once is a catalog sweep (an audit or a survey), counted apart.
+ * - Kimi Code `read`: a successful ReadFile call or shell command that reads a skill
+ *   document. Kimi streams tool arguments, so a call is counted after its result.
  *
  * Each event is keyed by its record ID, so a resumed session that copies earlier
  * records, or a file reread after truncation, never counts an event twice. The
@@ -27,8 +29,9 @@
 import { mkdir, open, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { STORES } from '@tangle-network/harness-sessions/catalog'
 
-export type SkillUsageHarness = 'claude-code' | 'codex'
+export type SkillUsageHarness = 'claude-code' | 'codex' | 'kimi-code'
 export type SkillUsageKind = 'model' | 'slash' | 'read'
 
 export interface SkillUsageEvent {
@@ -49,6 +52,8 @@ export interface SkillUsageSources {
   claudeProjects: string
   /** Codex session directories (`~/.codex/sessions`, `~/.codex/archived_sessions`). */
   codexSessions: readonly string[]
+  /** Kimi session directory (`~/.kimi/sessions`); only wire.jsonl is scanned. */
+  kimiSessions?: string
 }
 
 export interface SkillUsageRefresh {
@@ -74,6 +79,8 @@ interface FileCursor {
   /** Byte offset just past the last complete line read. */
   offset: number
   pending?: PendingSlash[]
+  kimiCalls?: Record<string, { name: string; args: string; ts: string | null }>
+  kimiLastCall?: string
 }
 
 type StoredEvent = [SkillUsageHarness, SkillUsageKind, string, string | null, string | null, string, string]
@@ -100,6 +107,7 @@ const CLAUDE_NEEDLES = [
 ].map((n) => Buffer.from(n))
 const SKILL_RESULT_TEXT = /^(?:Launching skill: (\S+)|Skill "([^"]+)" (?:launched|completed) \(forked execution)/
 const CODEX_NEEDLE = Buffer.from('SKILL.md')
+const KIMI_NEEDLES = ['"type": "ToolCall"', '"type":"ToolCall"', '"type": "ToolCallPart"', '"type":"ToolCallPart"', '"type": "ToolResult"', '"type":"ToolResult"'].map((n) => Buffer.from(n))
 const BASE_DIRECTORY = 'Base directory for this skill: '
 const SLASH_COMMAND = /<command-name>\/?([^<\s]+)<\/command-name>/
 const SKILL_READ_VERB = /(?:^|[\s;&|(`'"])(?:cat|sed|head|tail|less|more|awk|nl|bat)\s/
@@ -109,8 +117,9 @@ const SESSION_UUID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 export function defaultSkillUsageSources(): SkillUsageSources {
   const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')
   return {
-    claudeProjects: join(homedir(), '.claude', 'projects'),
-    codexSessions: [join(codexHome, 'sessions'), join(codexHome, 'archived_sessions')],
+    claudeProjects: join(homedir(), STORES['claude-code.projects-jsonl'].root),
+    codexSessions: [join(codexHome, ...STORES['codex.rollout-jsonl'].root.split('/').slice(1)), join(codexHome, 'archived_sessions')],
+    kimiSessions: join(homedir(), STORES['kimi.session-dir'].root),
   }
 }
 
@@ -186,7 +195,8 @@ export class SkillUsageStore {
   async refresh(sources: SkillUsageSources = defaultSkillUsageSources()): Promise<SkillUsageRefresh[]> {
     const claude = await this.refreshHarness('claude-code', await jsonlFiles([sources.claudeProjects]))
     const codex = await this.refreshHarness('codex', await jsonlFiles(sources.codexSessions))
-    return [claude, codex]
+    const kimi = await this.refreshHarness('kimi-code', await jsonlFiles(sources.kimiSessions ? [sources.kimiSessions] : [], 'wire.jsonl'))
+    return [claude, codex, kimi]
   }
 
   private async refreshHarness(harness: SkillUsageHarness, paths: string[]): Promise<SkillUsageRefresh> {
@@ -239,7 +249,9 @@ export class SkillUsageStore {
           const complete = buffer.subarray(0, end)
           events += harness === 'claude-code'
             ? this.scanClaude(complete, cursor, session)
-            : this.scanCodex(complete, session)
+            : harness === 'codex'
+              ? this.scanCodex(complete, session)
+              : this.scanKimi(complete, cursor, kimiSessionFromPath(path))
           cursor.offset += end
         }
         carry = Buffer.from(buffer.subarray(end))
@@ -353,6 +365,55 @@ export class SkillUsageStore {
     }
     return added
   }
+
+  private scanKimi(buffer: Buffer, cursor: FileCursor, session: string): number {
+    let added = 0
+    const calls = cursor.kimiCalls ?? {}
+    const lines = new LineIndex(buffer)
+    for (const start of hitLineStarts(buffer, KIMI_NEEDLES)) {
+      const record = parseLine(buffer, start, lines.endOf(start))
+      const message = record?.message as Record<string, unknown> | undefined
+      const payload = message?.payload as Record<string, unknown> | undefined
+      if (!payload) continue
+      if (message?.type === 'ToolCall') {
+        const fn = payload.function as Record<string, unknown> | undefined
+        const id = payload.id
+        cursor.kimiLastCall = typeof id === 'string' ? id : undefined
+        if (typeof id === 'string' && (fn?.name === 'ReadFile' || fn?.name === 'Shell')) {
+          calls[id] = { name: fn.name, args: typeof fn.arguments === 'string' ? fn.arguments : '', ts: kimiTimestamp(record?.timestamp) }
+        }
+      } else if (message?.type === 'ToolCallPart') {
+        const call = cursor.kimiLastCall ? calls[cursor.kimiLastCall] : undefined
+        if (call && typeof payload.arguments_part === 'string') call.args += payload.arguments_part
+      } else if (message?.type === 'ToolResult' && typeof payload.tool_call_id === 'string') {
+        const id = payload.tool_call_id
+        const call = calls[id]
+        delete calls[id]
+        if (!call) continue
+        const result = payload.return_value as Record<string, unknown> | undefined
+        if (result?.is_error !== false) continue
+        let args: Record<string, unknown>
+        try { args = JSON.parse(call.args) as Record<string, unknown> } catch { continue }
+        const paths = call.name === 'ReadFile' && typeof args.path === 'string'
+          ? [args.path]
+          : call.name === 'Shell' && typeof args.command === 'string' && SKILL_READ_VERB.test(args.command)
+            ? [...args.command.matchAll(SKILL_DOCUMENT)].map((match) => `${match[1]}/SKILL.md`)
+            : []
+        for (const path of paths) {
+          const match = SKILL_DOCUMENT.exec(path)
+          SKILL_DOCUMENT.lastIndex = 0
+          if (!match || !path.endsWith('/SKILL.md')) continue
+          const directory = match[1]!
+          const slash = directory.lastIndexOf('/')
+          if (typeof result.output === 'string' && result.output.includes(`${directory}/SKILL.md: No such file`)) continue
+          if (this.add({ harness: 'kimi-code', kind: 'read', skill: match[2]!, root: slash > 0 ? directory.slice(0, slash) : null,
+            ts: call.ts, session, id: `${session}:${id}#${directory}` })) added += 1
+        }
+      }
+    }
+    cursor.kimiCalls = calls
+    return added
+  }
 }
 
 /** Line boundaries in a buffer of complete lines, found on demand. */
@@ -429,7 +490,18 @@ function sessionFromPath(path: string): string {
   return SESSION_UUID.exec(path)?.[1] ?? path
 }
 
-async function jsonlFiles(roots: readonly string[]): Promise<string[]> {
+function kimiSessionFromPath(path: string): string {
+  const match = /\/([0-9a-f-]{36})(?:\/subagents\/([^/]+))?\/wire\.jsonl$/.exec(path)
+  return match ? `${match[1]}${match[2] ? `:${match[2]}` : ''}` : path
+}
+
+function kimiTimestamp(value: unknown): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const date = new Date(value * 1000)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+async function jsonlFiles(roots: readonly string[], name?: string): Promise<string[]> {
   const files: string[] = []
   for (const root of roots) {
     let entries
@@ -440,7 +512,7 @@ async function jsonlFiles(roots: readonly string[]): Promise<string[]> {
       throw error
     }
     for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(join(entry.parentPath, entry.name))
+      if (entry.isFile() && (name ? entry.name === name : entry.name.endsWith('.jsonl'))) files.push(join(entry.parentPath, entry.name))
     }
   }
   return files.sort()
@@ -550,7 +622,7 @@ export interface SkillUsageReport {
   rows: SkillUsageRow[]
   /** Installed skills with no counted event in the window, by name. */
   unused: Array<{ skill: string; installedIn: SkillUsageHarness[] }>
-  /** A Codex command reading at least `sweepThreshold` skills is a catalog sweep, not use. */
+  /** One Codex or Kimi command reading at least `sweepThreshold` skills is a catalog sweep, not use. */
   sweepThreshold: number
   sweepCommands: number
   sweepReadsExcluded: number
@@ -567,7 +639,7 @@ export interface SkillUsageReportOptions {
 
 export const DEFAULT_SWEEP_THRESHOLD = 3
 
-/** The command that produced a Codex read: its ID without the per-skill suffix. */
+/** The command that produced a read: its ID without the per-skill suffix. */
 function commandOf(event: SkillUsageEvent): string {
   const hash = event.id.indexOf('#')
   return hash === -1 ? event.id : event.id.slice(0, hash)
@@ -644,7 +716,7 @@ export function buildSkillUsageReport(
     sweepThreshold,
     sweepCommands: sweeps.size,
     sweepReadsExcluded,
-    notIndexed: ['opencode', 'pi', 'gemini', 'other harnesses'],
+    notIndexed: ['opencode', 'pi', 'gemini', 'factory', 'other harnesses'],
   }
 }
 
@@ -663,7 +735,7 @@ export function renderSkillUsage(report: SkillUsageReport): string {
     : 'not refreshed'
   lines.push(`skill usage · ${report.storedEvents} stored events ${day(report.firstEvent)} → ${day(report.lastEvent)} · ${refresh}`)
   lines.push(`window: ${report.since === null ? 'all stored events' : `since ${report.since.slice(0, 10)}`}`
-    + ` · codex reads exclude ${report.sweepReadsExcluded} from ${report.sweepCommands} commands that read ${report.sweepThreshold}+ skills at once`)
+    + ` · reads exclude ${report.sweepReadsExcluded} from ${report.sweepCommands} commands that read ${report.sweepThreshold}+ skills at once`)
   lines.push('')
   const width = Math.max(5, ...report.rows.map((r) => r.skill.length))
   lines.push(`${'skill'.padEnd(width)}  model  slash   read  sessions  last        installed`)
