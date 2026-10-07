@@ -8,7 +8,7 @@ on:
 jobs:
   ci:
     name: CI (Node ${{ matrix.node-version }})
-    runs-on: [self-hosted, ci-public]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
