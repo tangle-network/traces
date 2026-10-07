@@ -33,6 +33,7 @@ Emitting the contract is the supported way to integrate a new system. The adapte
 - [Improvement engine](#improvement-engine)
 - [Ask questions](#ask-questions)
 - [Session facts](#session-facts)
+- [Skill usage](#skill-usage)
 - [Diff two runs](#diff-two-runs)
 - [MCP server](#mcp-server)
 - [Session index](#session-index)
@@ -294,6 +295,7 @@ traces investigate --all --last 10 --out report.md  # explicit investigation ali
 traces improve --all --last 10 --dir .traces/improvement
 traces ask --harness codex --session <id> --question "Which commands failed?"
 traces facts --harness codex --session <id>        # the deterministic facts sheet, $0
+traces skills --since 30d                          # skill use across every local session, incremental, $0
 traces diff  run-a.otlp.jsonl run-b.otlp.jsonl      # where two runs of one task first diverge
 traces mcp   --otlp spans.otlp.jsonl                # read-only trace tools for an MCP client
 traces analyze  --all --since 2026-06-18 --out report.md
@@ -631,6 +633,36 @@ Three rules hold for every field:
 `facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
 
 The same sheet reaches the model-backed analysts as prepared context, before their first model call — see [Trace analysts](docs/trace-analysts.md#session-facts-as-prepared-context).
+
+## Skill usage
+
+`traces skills` counts skill use across every Claude Code and Codex session on this machine.
+It makes no model call.
+
+```bash
+traces skills                     # every stored event, with the installed catalog joined
+traces skills --since 30d         # one window
+traces skills --unused            # installed skills with no use in the window, one per line
+traces skills --format json       # rows, unused skills, refresh cost and sweep exclusions
+traces skills --no-refresh        # answer from the store without reading transcripts
+```
+
+A run reads only transcript bytes appended since the previous run.
+It parses only lines that can carry a skill record and stores the events in `~/.local/state/traces/skill-usage.json` (`--store`).
+The first run reads the whole corpus: about two minutes for 41 GB on an M-series Mac.
+Later runs take seconds, mostly to stat every session file.
+Stored events survive a harness deleting old transcripts.
+
+| Column | Harness | Counted record |
+| --- | --- | --- |
+| `model` | Claude Code | A Skill tool result that loaded a skill. A failed call does not count. |
+| `slash` | Claude Code | A `/name` command whose next record is its expanded prompt. Built-in commands such as `/clear` do not expand and do not count. |
+| `read` | Codex | A completed command that reads `<skill>/SKILL.md`. Codex records no skill event, so a read is the closest observable act. It does not show that the skill shaped the outcome. |
+
+Each event is keyed by its record ID, so a resumed session that copies earlier records counts once.
+One Codex command that reads three or more skills (`--sweep`) is a catalog sweep, such as an audit; its reads are excluded and reported separately.
+`installed` names the harnesses whose catalog lists the skill now: `~/.claude/skills` and enabled plugins for Claude Code, and `~/.codex/skills` and `~/.agents/skills` for Codex.
+OpenCode, Pi, Gemini, and other harnesses are not indexed.
 
 ## Diff two runs
 
