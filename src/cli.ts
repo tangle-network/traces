@@ -153,6 +153,14 @@ import {
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload, type RefusedSession } from './upload.js'
 import { formatVerdict, verdictExitCode, verifySafe } from './verify-safe.js'
+import {
+  buildSkillUsageReport,
+  DEFAULT_SWEEP_THRESHOLD,
+  defaultSkillUsageStorePath,
+  readInstalledSkills,
+  renderSkillUsage,
+  SkillUsageStore,
+} from './skill-usage.js'
 
 interface Args {
   command: string
@@ -1825,6 +1833,63 @@ async function cmdVerifySafe(argv: readonly string[]): Promise<void> {
   process.exitCode = verdictExitCode(result)
 }
 
+async function cmdSkills(argv: readonly string[]): Promise<void> {
+  let since: number | undefined
+  let format = 'text'
+  let unusedOnly = false
+  let refresh = true
+  let storePath = defaultSkillUsageStorePath()
+  let sweepThreshold = DEFAULT_SWEEP_THRESHOLD
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    if (arg === '--since') since = parseSince(argv[++i] ?? '')
+    else if (arg === '--format') format = argv[++i] ?? ''
+    else if (arg === '--unused') unusedOnly = true
+    else if (arg === '--no-refresh') refresh = false
+    else if (arg === '--store') storePath = argv[++i] ?? ''
+    else if (arg === '--sweep') sweepThreshold = Number(argv[++i])
+    else if (arg === '--help' || arg === '-h') {
+      usageSkills()
+      return
+    } else throw new Error(`skills: unknown argument ${arg}`)
+  }
+  if (format !== 'json' && format !== 'text') throw new Error(`skills: --format must be json or text, got "${format}"`)
+  if (!storePath) throw new Error('skills: --store needs a path')
+  if (!Number.isInteger(sweepThreshold) || sweepThreshold < 1) throw new Error('skills: --sweep must be a positive integer')
+  const store = await SkillUsageStore.load(storePath)
+  const refreshed = refresh ? await store.refresh() : null
+  if (refreshed) await store.save()
+  const report = buildSkillUsageReport(store.list(), await readInstalledSkills(), storePath, { since, sweepThreshold, refresh: refreshed })
+  if (unusedOnly) {
+    if (format === 'json') process.stdout.write(`${JSON.stringify(report.unused, null, 2)}\n`)
+    else for (const skill of report.unused) process.stdout.write(`${skill.skill}\t${skill.installedIn.join(',')}\n`)
+    return
+  }
+  process.stdout.write(format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : `${renderSkillUsage(report)}\n`)
+}
+
+function usageSkills(): void {
+  console.log(`traces skills [--since 30d|ISO] [--format text|json] [--unused] [--no-refresh] [--store PATH] [--sweep N]
+
+Count skill use across every Claude Code and Codex session on this machine, with no
+model call. Each run reads only transcript bytes appended since the previous run and
+keeps the events in a store (default ${defaultSkillUsageStorePath()}), so counts
+survive a harness deleting old transcripts.
+
+  model   Claude Code Skill tool calls that loaded a skill
+  slash   Claude Code /name commands that expanded to a skill or prompt
+  read    Codex commands that read <skill>/SKILL.md (Codex has no skill event)
+
+--since       count events at or after 30m / 2h / 7d or an ISO date (default: all stored)
+--unused      print only installed skills with no use in the window
+--no-refresh  answer from the store without reading transcripts
+--store       store path
+--sweep       one Codex command reading N or more skills is a catalog sweep, not use;
+              its reads are excluded and counted separately (default ${DEFAULT_SWEEP_THRESHOLD})
+
+OpenCode, Pi, Gemini and other harnesses are not indexed.`)
+}
+
 function usageVerifySafe(): void {
   console.log(`traces verify-safe <file|dir> [--profile default|share|strict] [--known-secret-env NAME]... [--format text|json]
 
@@ -1969,6 +2034,10 @@ Commands:
             No model call, no budget, $0. Every fact names the span ids it came
             from; a fact the spans cannot support is null with its reason.
             --format json (default) or text (exit 1 when a session cannot be read)
+  skills    Count skill use across every Claude Code and Codex session on this
+            machine, and list installed skills with no use in the window.
+            Incremental: a run reads only transcript bytes appended since the
+            last run. No model call. traces skills --help
   convert   Emit OTLP-JSONL only, to --otlp-out (HALO: use analyze --analyzer halo)
   index     Emit a reusable session index JSON for later investigation
   bundle    Assemble one session's durable evidence directory: transcript +
@@ -2155,6 +2224,10 @@ async function main(): Promise<void> {
   }
   if (rawArgs[0] === 'verify-safe') {
     await cmdVerifySafe(rawArgs.slice(1))
+    return
+  }
+  if (rawArgs[0] === 'skills') {
+    await cmdSkills(rawArgs.slice(1))
     return
   }
   const parsedArgs = parseArgs(rawArgs)

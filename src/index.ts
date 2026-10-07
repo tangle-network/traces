@@ -98,6 +98,7 @@ export * from './failure-followup.js' // classifyFailureFollowUps() — blind vs
 export * from './pipelines.js' // runPipelines() — repeated-call + tool-use
 export * from './reactions.js' // analyzeReactions() — human-reaction analyst
 export * from './adoption.js' // analyzeAdoption() — skill + subagent metrics
+export * from './skill-usage.js' // SkillUsageStore — incremental skill use across all local sessions
 export * from './agentic-routing.js' // planTraceAgenticRoute(): deterministic LLM analyst routing
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
