@@ -1,6 +1,6 @@
 # traces
 
-> Point `traces` at any agent trace — OTLP spans your own system emits, or the session logs Claude Code, Codex, OpenCode and Gemini already write to disk. Get failure-mode and efficiency findings, plus a straight answer about what the trace cannot tell you. A CLI *and* an SDK.
+> Point `traces` at any agent trace — OTLP spans your own system emits, or the session logs Claude Code, Codex, OpenCode, Pi, Kimi, Factory and Gemini already write to disk. Get failure-mode and efficiency findings, plus a straight answer about what the trace cannot tell you. A CLI *and* an SDK.
 
 ![traces analyzing a real Claude Code session](https://raw.githubusercontent.com/tangle-network/traces/main/docs/demo.gif)
 
@@ -262,20 +262,22 @@ not the way to integrate a system you own — for that, [emit the contract](#int
 | `claude-code` (`claude`, `claudish`, `openclaw`, `nanoclaw`) | `~/.claude/projects/<cwd>/*.jsonl` (+ subagent sidechains), or an explicit `claude -p --output-format stream-json --verbose` JSONL file | verified |
 | `codex` (`codex-acp`) | `~/.codex/sessions/**/rollout-*.jsonl` | verified |
 | `codex-exec` (`codex-json`) | explicit `codex exec --json` JSONL file | fixture |
-| `opencode` | `~/.local/share/opencode/storage/` | verified |
+| `opencode` | `~/.local/share/opencode/opencode.db` (shared reader), plus historical `storage/` JSON sessions (legacy reader) | verified |
 | `gemini` (`gemini-cli`) | `~/.gemini/tmp/<hash>/chats/session-*.json` | verified |
 | `pi` | `~/.pi/agent/sessions/<cwd>/*.jsonl` | verified |
-| `factory` (`factory-droids`, `droid`) | `~/.factory/sessions/<cwd>/*.jsonl` + `.settings.json` sidecar | locate verified, parse fixture |
+| `kimi` (`kimi-code`) | `~/.kimi/sessions/<cwd hash>/<session id>/wire.jsonl` | verified |
+| `factory` (`factory-droids`, `droid`) | `~/.factory/sessions/<cwd>/*.jsonl` + `.settings.json` sidecar | verified |
 | `qwen` (`qwen-code`) | `~/.qwen/projects/<cwd>/chats/*.jsonl` | fixture |
 | `amp` | `~/.local/share/amp/threads/T-*.json` | fixture |
 | `github-copilot` (`copilot`) | `~/.copilot/session-state/<id>/events.jsonl` | fixture |
 | `forge` (`forgecode`) | `/dump` JSON exports | fixture |
 
 Every adapter captures the conversation stored in one session file: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage.
+Claude Code, Codex, current OpenCode, Pi, Kimi, and Factory read native records through [`@tangle-network/harness-sessions`](https://github.com/tangle-network/agent-sdk/tree/main/packages/harness-sessions); traces adds conversation and workflow spans over its model and tool calls. Historical OpenCode JSON sessions remain readable through the older adapter because their IDs do not overlap the SQLite store. Kimi's wire log has no served-model field, so its model remains unknown rather than being guessed.
 Claude Code's nested subagent files are folded into the parent trace.
 Claude Code's stream-json output also records the tools the harness offered the model and whether the run failed.
 The root span keeps them as `gen_ai.tool.definitions` and `run.status`, so a trace contract can check what the harness enforced.
-Claude source UUIDs remain searchable in `traces.claude.source_*` attributes, while exported OTLP IDs use deterministic `deriveHexId` values.
+Exported native-session span IDs derive deterministically from the session and record IDs.
 The Claude transcript proves turns and tool calls, but does not prove loop iterations or causal links, so those fields remain absent.
 Codex stores each worker in a separate session file; add `--workflow` to resolve the connected coordinator and worker files.
 `github-copilot` is the one exception: its log format carries no user prompt.
@@ -636,7 +638,7 @@ The same sheet reaches the model-backed analysts as prepared context, before the
 
 ## Skill usage
 
-`traces skills` counts skill use across every Claude Code and Codex session on this machine.
+`traces skills` indexes skill records in Claude Code, Codex, and Kimi Code sessions on this machine.
 It makes no model call.
 
 ```bash
@@ -658,11 +660,12 @@ Stored events survive a harness deleting old transcripts.
 | `model` | Claude Code | A Skill tool result that loaded a skill. A failed call does not count. |
 | `slash` | Claude Code | A `/name` command whose next record is its expanded prompt. Built-in commands such as `/clear` do not expand and do not count. |
 | `read` | Codex | A completed command that reads `<skill>/SKILL.md`. Codex records no skill event, so a read is the closest observable act. It does not show that the skill shaped the outcome. |
+| `read` | Kimi Code | A successful `ReadFile` call or shell command that reads `<skill>/SKILL.md`, including streamed arguments. Kimi records no dedicated skill event. |
 
 Each event is keyed by its record ID, so a resumed session that copies earlier records counts once.
-One Codex command that reads three or more skills (`--sweep`) is a catalog sweep, such as an audit; its reads are excluded and reported separately.
+One Codex or Kimi command that reads three or more skills (`--sweep`) is a catalog sweep, such as an audit; its reads are excluded and reported separately.
 `installed` names the harnesses whose catalog lists the skill now: `~/.claude/skills` and enabled plugins for Claude Code, and `~/.codex/skills` and `~/.agents/skills` for Codex.
-OpenCode, Pi, Gemini, and other harnesses are not indexed.
+OpenCode, Pi, Gemini, Factory, and other harnesses are not indexed.
 
 ## Diff two runs
 

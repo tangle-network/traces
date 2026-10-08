@@ -12,27 +12,19 @@
  */
 
 import { AmpAdapter } from './adapters/amp.js'
-import { ClaudeAdapter } from './adapters/claude.js'
-import { CodexAdapter } from './adapters/codex.js'
 import { CodexExecAdapter } from './adapters/codex-exec.js'
 import { CopilotAdapter } from './adapters/copilot.js'
-import { FactoryAdapter } from './adapters/factory.js'
 import { ForgeAdapter } from './adapters/forge.js'
 import { GeminiAdapter } from './adapters/gemini.js'
-import { OpencodeAdapter } from './adapters/opencode.js'
-import { PiAdapter } from './adapters/pi.js'
+import { SHARED_SESSION_ADAPTERS } from './adapters/harness-sessions.js'
 import { QwenAdapter } from './adapters/qwen.js'
 import type { HarnessTraceAdapter } from './types.js'
 
 const ADAPTERS: HarnessTraceAdapter[] = [
-  new ClaudeAdapter(),
-  new CodexAdapter(),
+  ...SHARED_SESSION_ADAPTERS,
   new CodexExecAdapter(),
-  new OpencodeAdapter(),
   new GeminiAdapter(),
   new QwenAdapter(),
-  new FactoryAdapter(),
-  new PiAdapter(),
   new AmpAdapter(),
   new CopilotAdapter(),
   new ForgeAdapter(),

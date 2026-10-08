@@ -11,6 +11,7 @@ import {
 
 const SESSION = '11111111-2222-3333-4444-555555555555'
 const CODEX_SESSION = '01a10a34-ca81-71d0-997e-f336570e67fd'
+const KIMI_SESSION = '22222222-3333-4444-5555-666666666666'
 
 function line(value: unknown): string {
   return `${JSON.stringify(value)}\n`
@@ -73,17 +74,24 @@ function codexRead(id: string, command: string, ts: string, output = '# Skill\n'
   })
 }
 
-async function fixture(): Promise<{ root: string; sources: SkillUsageSources; claudeFile: string; codexFile: string; store: string }> {
+function kimi(type: string, payload: Record<string, unknown>, timestamp = 1791300000): string {
+  return line({ timestamp, message: { type, payload } })
+}
+
+async function fixture(): Promise<{ root: string; sources: SkillUsageSources; claudeFile: string; codexFile: string; kimiFile: string; store: string }> {
   const root = await mkdtemp(join(tmpdir(), 'traces-skill-usage-'))
   const projects = join(root, 'claude', 'projects', '-repo')
   const codexDay = join(root, 'codex', 'sessions', '2026', '10', '04')
+  const kimiDay = join(root, 'kimi', 'sessions', 'workdir-hash', KIMI_SESSION)
   await mkdir(projects, { recursive: true })
   await mkdir(codexDay, { recursive: true })
+  await mkdir(kimiDay, { recursive: true })
   return {
     root,
-    sources: { claudeProjects: join(root, 'claude', 'projects'), codexSessions: [join(root, 'codex', 'sessions')] },
+    sources: { claudeProjects: join(root, 'claude', 'projects'), codexSessions: [join(root, 'codex', 'sessions')], kimiSessions: join(root, 'kimi', 'sessions') },
     claudeFile: join(projects, `${SESSION}.jsonl`),
     codexFile: join(codexDay, `rollout-2026-10-04T20-56-34-${CODEX_SESSION}.jsonl`),
+    kimiFile: join(kimiDay, 'wire.jsonl'),
     store: join(root, 'state', 'skill-usage.json'),
   }
 }
@@ -178,7 +186,39 @@ describe('SkillUsageStore', () => {
     expect(report.rows.map((r) => r.skill)).toEqual(['verify'])
     expect(report).toMatchObject({ sweepCommands: 1, sweepReadsExcluded: 3 })
   })
+
+  it('counts successful Kimi skill document reads, including streamed arguments and appended results', async () => {
+    const f = await fixture()
+    await writeFile(join(f.root, 'kimi', 'sessions', 'workdir-hash', KIMI_SESSION, 'context.jsonl'),
+      kimi('ToolCall', { id: 'context-only', function: { name: 'ReadFile', arguments: '{"path":"/tmp/false/SKILL.md"}' } }))
+    const first = [
+      kimi('ToolCall', { id: 'tool-1', function: { name: 'ReadFile', arguments: '{"path":"/home/u/.kimi/skills/' } }),
+      kimi('ToolCallPart', { arguments_part: 'review/SKILL.md"}' }),
+    ].join('')
+    await writeFile(f.kimiFile, first)
+    const store = await SkillUsageStore.load(f.store)
+    const [, , initial] = await store.refresh(f.sources)
+    expect(initial).toMatchObject({ harness: 'kimi-code', files: 1, eventsAdded: 0 })
+
+    const tail = [
+      kimi('ToolResult', { tool_call_id: 'tool-1', return_value: { is_error: false, output: '# Review' } }),
+      kimi('ToolCall', { id: 'tool-2', function: { name: 'ReadFile', arguments: '{"path":"/home/u/.kimi/skills/missing/SKILL.md"}' } }),
+      kimi('ToolResult', { tool_call_id: 'tool-2', return_value: { is_error: true, message: 'No such file' } }),
+      kimi('ToolCall', { id: 'tool-3', function: { name: 'Grep', arguments: '{"pattern":"SKILL.md"}' } }),
+      kimi('ToolResult', { tool_call_id: 'tool-3', return_value: { is_error: false, output: 'SKILL.md' } }),
+    ].join('')
+    await appendFile(f.kimiFile, tail)
+    const [, , refreshed] = await store.refresh(f.sources)
+    expect(refreshed).toMatchObject({ files: 1, bytesRead: Buffer.byteLength(tail), eventsAdded: 1 })
+    expect(store.list()).toMatchObject([{ harness: 'kimi-code', kind: 'read', skill: 'review', root: '/home/u/.kimi/skills', session: KIMI_SESSION,
+      ts: '2026-10-06T15:20:00.000Z' }])
+    await store.save()
+    const restored = await SkillUsageStore.load(f.store)
+    const [, , unchanged] = await restored.refresh(f.sources)
+    expect(unchanged).toMatchObject({ bytesRead: 0, eventsAdded: 0 })
+  })
 })
+
 
 describe('buildSkillUsageReport', () => {
   it('joins the installed catalog, filters the window, and lists installed skills with no use', async () => {
