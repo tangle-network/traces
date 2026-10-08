@@ -3,7 +3,7 @@
  * alone interprets the harness's records, model calls, tools, and token usage. */
 import { homedir } from 'node:os'
 import { open, stat } from 'node:fs/promises'
-import { join, sep } from 'node:path'
+import { join } from 'node:path'
 import {
   claudeCodeRefForFile,
   codexRefForFile,
@@ -19,6 +19,7 @@ import {
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
 import type { OtlpSpan } from '../otlp.js'
+import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { ClaudeAdapter } from './claude.js'
 import { CodexAdapter } from './codex.js'
@@ -76,6 +77,10 @@ function status(code: string): OtlpSpan['status']['code'] {
   return code === 'STATUS_CODE_OK' ? 'OK' : code === 'STATUS_CODE_ERROR' ? 'ERROR' : 'UNSET'
 }
 
+function stringTooLong(error: unknown): boolean {
+  return error instanceof Error && /Cannot create a string longer than/u.test(error.message)
+}
+
 function asTracesSpan(item: ReturnType<typeof toOtlpSpans>[number]): OtlpSpan {
   const attributes: Record<string, unknown> = { ...item.attributes }
   if (item.kind === 'LLM') {
@@ -109,7 +114,7 @@ function messageText(message: HarnessSession['messages'][number]): string {
 }
 
 function presentationSpans(session: HarnessSession, root: OtlpSpan): OtlpSpan[] {
-  const spans: OtlpSpan[] = []
+  const spans = new Map<string, OtlpSpan>()
   for (const message of session.messages) {
     if (message.role !== 'user' && message.role !== 'assistant') continue
     if (!message.at) continue
@@ -130,9 +135,11 @@ function presentationSpans(session: HarnessSession, root: OtlpSpan): OtlpSpan[] 
         content: text.slice(0, 8000),
       },
     })
-    spans.push(asTracesSpan(item))
+    // Claude can re-emit a message with the same native ID after a resumed
+    // subagent turn. The later copy can carry stronger actor attribution.
+    spans.set(item.span_id, asTracesSpan(item))
   }
-  return spans
+  return [...spans.values()]
 }
 
 /** Codex's `exec` is a JavaScript envelope around one or more actual tools. */
@@ -201,6 +208,62 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
   return result
 }
 
+type CodexHead = { timestamp?: string; type?: string; payload?: {
+  type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string;
+  agent_role?: string; source?: { subagent?: { thread_spawn?: {
+    depth?: number; agent_nickname?: string; agent_role?: string; agent_path?: string
+  } } }
+} }
+
+async function decorateCodexMetadata(path: string, session: HarnessSession, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
+  const head = await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} })
+  const meta = head.find((row) => row.type === 'session_meta')?.payload
+  const spawn = meta?.source?.subagent?.thread_spawn
+  if (typeof spawn?.depth === 'number') root.attributes['traces.codex.agent_depth'] = spawn.depth
+  const nickname = meta?.agent_nickname ?? spawn?.agent_nickname
+  if (nickname) root.attributes['traces.codex.agent_nickname'] = nickname
+  const role = meta?.agent_role ?? spawn?.agent_role
+  if (role) root.attributes['traces.codex.agent_role'] = role
+  if (spawn?.agent_path) root.attributes['traces.codex.agent_path'] = spawn.agent_path
+
+  // Older Codex rollouts can put a plain string in a user message. The shared
+  // reader's 0.1.0 normalized parts omit it; retain the visible subject here.
+  if (session.messages.some((message) => message.role === 'user' && messageText(message))) return
+  for (const row of head) {
+    if (row.type !== 'response_item' || row.payload?.type !== 'message'
+      || row.payload.role !== 'user' || typeof row.payload.content !== 'string'
+      || !row.timestamp) continue
+    spans.push(asTracesSpan(contractSpan({
+      traceId: root.trace_id,
+      spanId: deriveHexId(`codex:${session.nativeSessionId}:legacy-prompt:${row.payload.id ?? row.timestamp}`, 8),
+      parentSpanId: root.span_id,
+      name: 'user.prompt',
+      kind: 'CHAIN',
+      startTime: row.timestamp,
+      endTime: row.timestamp,
+      attributes: { 'service.name': 'codex', 'tangle.actor': session.parentNativeSessionId ? 'subagent-spawn' : 'human', content: row.payload.content },
+    })))
+  }
+}
+
+function stampNativeProvenance(session: HarnessSession, spans: OtlpSpan[]): void {
+  const prefix = session.harness === 'codex' ? 'traces.codex' : 'traces.claude'
+  if (session.harness !== 'codex' && session.harness !== 'claude-code') return
+  for (const item of spans) item.attributes[`${prefix}.source_trace_id`] = session.nativeSessionId
+  const tools = new Map(spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
+    .map((item) => [item.attributes['gen_ai.tool.call.id'], item]))
+  const counts = new Map<string, number>()
+  for (const call of session.toolCalls) {
+    const item = tools.get(call.id)
+    if (!item) continue
+    const key = call.messageId ?? ''
+    const index = counts.get(key) ?? 0
+    counts.set(key, index + 1)
+    item.attributes[`${prefix}.source_span_id`] = session.harness === 'codex'
+      ? `tool:${call.id}` : `${key}:tool:${index}`
+  }
+}
+
 /** The compatibility boundary between traces' session selection and the shared native reader. */
 export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   readonly harness: string
@@ -220,6 +283,9 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
+    // Keep traces' established filesystem selection, including CODEX_HOME and
+    // rollouts whose filename does not contain the metadata's session ID.
+    if (this.scopedAdapter) return this.scopedAdapter.locate(opts)
     const found = await this.reader.locate(homedir(), { sinceMs: opts.sinceMs, cwd: opts.cwd })
     const refs = found.filter((native) => this.nativeHarness !== 'claude-code' || native.parentNativeSessionId === null).map((native) => {
       const ref = tracesRef(native, this.harness)
@@ -233,6 +299,12 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async locateBySessionId(sessionId: string, opts: LocateOptions = {}): Promise<SessionRef[]> {
+    if (this.scopedAdapter instanceof CodexAdapter) {
+      return this.scopedAdapter.locateBySessionId(sessionId, opts)
+    }
+    if (this.scopedAdapter instanceof ClaudeAdapter) {
+      return (await this.scopedAdapter.locate(opts)).filter((ref) => ref.sessionId === sessionId)
+    }
     const refs = await this.reader.locate(homedir(), { nativeSessionId: sessionId, sinceMs: opts.sinceMs, cwd: opts.cwd })
     const selected = refs.map((native) => {
       const ref = tracesRef(native, this.harness)
@@ -264,13 +336,20 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     const key = `${ref.sessionId}\0${ref.path}`
     const cached = this.refs.get(key)
     if (cached) return cached
-    const projects = join(homedir(), '.claude', 'projects') + sep
-    if (this.nativeHarness !== 'claude-code' || !ref.path.startsWith(projects)) return undefined
-    const native = claudeCodeRefForFile(ref.path)
-    const found = (await this.reader.locate(homedir(), { nativeSessionId: native.nativeSessionId }))
-      .find((item) => item.path === ref.path)
-    if (found) this.refs.set(key, found)
-    return found
+    if (this.scopedAdapter instanceof ClaudeAdapter) {
+      const native = claudeCodeRefForFile(ref.path)
+      let files: readonly string[]
+      try {
+        files = await this.scopedAdapter.sourcePaths(ref)
+      } catch (error) {
+        if (!stringTooLong(error)) throw error
+        files = [ref.path]
+      }
+      const found = { ...native, files: files.filter((path) => path.endsWith('.jsonl')) }
+      this.refs.set(key, found)
+      return found
+    }
+    return undefined
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
@@ -296,10 +375,20 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       source = matches[0]!
     }
     source ??= nativeRef(this.nativeHarness, ref)
-    const session = await this.reader.read(source, {
-      signal: options.signal,
-      corruption: options.corruptionMode,
-    })
+    let session: HarnessSession
+    try {
+      session = await this.reader.read(source, {
+        signal: options.signal,
+        corruption: options.corruptionMode,
+      })
+    } catch (error) {
+      // The 0.1.0 shared JSONL reader materializes each record as one string.
+      // Preserve traces' bounded-row recovery for an over-limit Claude row.
+      if (this.scopedAdapter instanceof ClaudeAdapter && stringTooLong(error)) {
+        return this.scopedAdapter.parse(ref, options)
+      }
+      throw error
+    }
     // A missing timestamp is not epoch work. Exclude it rather than allowing the
     // projection's display fallback to enter measured totals.
     if (!session.startedAt) return []
@@ -328,7 +417,11 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       root.attributes['traces.session.total_tokens_source'] = '@tangle-network/harness-sessions'
     }
     spans.push(...presentationSpans(session, root))
-    if (session.harness === 'codex') decorateCodexTools(session, spans)
+    if (session.harness === 'codex') {
+      decorateCodexTools(session, spans)
+      await decorateCodexMetadata(ref.path, session, root, spans)
+    }
+    stampNativeProvenance(session, spans)
     spans.push(...lifecycleSpans(session, root, spans))
     if (session.harness === 'claude-code' && source.parentNativeSessionId === null) {
       const childPaths = source.files.filter((path) => path !== source.path && path.endsWith('.jsonl'))
@@ -345,6 +438,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
         const binding = session.children.find((item) => item.nativeSessionId === child.nativeSessionId)
         const parent = binding?.toolCallId ? toolByCallId.get(binding.toolCallId) : undefined
         const projected = toOtlpSpans(child).map(asTracesSpan)
+        stampNativeProvenance(child, projected)
         projected[0]!.parent_span_id = parent?.span_id ?? root.span_id
         for (const item of [...projected, ...presentationSpans(child, projected[0]!)]) {
           item.trace_id = root.trace_id
@@ -356,6 +450,10 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       }
       if (childIds.size > 0) root.attributes['traces.child_session_ids'] = JSON.stringify([...childIds])
       if (childSpanCount > 0) root.attributes['traces.session.subagent_span_count'] = childSpanCount
+    }
+    if (session.harness === 'claude-code') {
+      const traceId = deriveHexId(session.nativeSessionId, 16)
+      for (const item of spans) item.trace_id = traceId
     }
     for (const item of spans) item.attributes['service.name'] ??= this.harness
     return spans
