@@ -345,7 +345,13 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
         if (!stringTooLong(error)) throw error
         files = [ref.path]
       }
-      const found = { ...native, files: files.filter((path) => path.endsWith('.jsonl')) }
+      const found = {
+        ...native,
+        // A retained capture's filename cannot establish native identity.
+        // The shared fold replaces this sentinel only when records name one.
+        nativeSessionId: ref.sessionId.startsWith('unattributed:') ? ref.sessionId : native.nativeSessionId,
+        files: files.filter((path) => path.endsWith('.jsonl')),
+      }
       this.refs.set(key, found)
       return found
     }
