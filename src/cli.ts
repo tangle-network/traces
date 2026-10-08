@@ -1871,20 +1871,20 @@ async function cmdSkills(argv: readonly string[]): Promise<void> {
 function usageSkills(): void {
   console.log(`traces skills [--since 30d|ISO] [--format text|json] [--unused] [--no-refresh] [--store PATH] [--sweep N]
 
-Count skill use across every Claude Code and Codex session on this machine, with no
+Count skill use across Claude Code, Codex, and Kimi Code sessions on this machine, with no
 model call. Each run reads only transcript bytes appended since the previous run and
 keeps the events in a store (default ${defaultSkillUsageStorePath()}), so counts
 survive a harness deleting old transcripts.
 
   model   Claude Code Skill tool calls that loaded a skill
   slash   Claude Code /name commands that expanded to a skill or prompt
-  read    Codex commands that read <skill>/SKILL.md (Codex has no skill event)
+  read    Codex or Kimi commands that successfully read <skill>/SKILL.md
 
 --since       count events at or after 30m / 2h / 7d or an ISO date (default: all stored)
 --unused      print only installed skills with no use in the window
 --no-refresh  answer from the store without reading transcripts
 --store       store path
---sweep       one Codex command reading N or more skills is a catalog sweep, not use;
+--sweep       one Codex or Kimi command reading N or more skills is a catalog sweep, not use;
               its reads are excluded and counted separately (default ${DEFAULT_SWEEP_THRESHOLD})
 
 OpenCode, Pi, Gemini and other harnesses are not indexed.`)
@@ -2034,7 +2034,7 @@ Commands:
             No model call, no budget, $0. Every fact names the span ids it came
             from; a fact the spans cannot support is null with its reason.
             --format json (default) or text (exit 1 when a session cannot be read)
-  skills    Count skill use across every Claude Code and Codex session on this
+  skills    Count skill use across Claude Code, Codex, and Kimi Code sessions on this
             machine, and list installed skills with no use in the window.
             Incremental: a run reads only transcript bytes appended since the
             last run. No model call. traces skills --help
