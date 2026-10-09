@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   ANALYST_MAX_OUTPUT_TOKENS,
   GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS,
+  DEFAULT_QUESTION_TIMEOUT_MS,
+  analysisEngineFromEnv,
   analystMaxOutputTokens,
   createAnalystModelOwner,
 } from '../src/analyst-model-call.js'
@@ -36,6 +38,16 @@ function owner(baseUrl: string) {
 }
 
 describe('analyst model owner', () => {
+  it('passes the per-question deadline to the engine and keeps the 600 s default', () => {
+    const env = { TANGLE_API_KEY: 'test-key' }
+    const defaulted = analysisEngineFromEnv({ model: 'zai/glm-5.3', env })
+    expect(DEFAULT_QUESTION_TIMEOUT_MS).toBe(600_000)
+    expect(defaulted.executionConfig.timeout_ms).toBe(DEFAULT_QUESTION_TIMEOUT_MS)
+
+    const extended = analysisEngineFromEnv({ model: 'zai/glm-5.3', env, timeoutMs: 1_800_000 })
+    expect(extended.executionConfig.timeout_ms).toBe(1_800_000)
+  })
+
   it('uses a smaller GPT-5.6 reservation without narrowing other model families', () => {
     expect(analystMaxOutputTokens('gpt-5.6-luna')).toBe(GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS)
     expect(analystMaxOutputTokens('openai/gpt-5.6-sol')).toBe(GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS)

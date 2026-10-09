@@ -149,6 +149,9 @@ export function renderRunContextSnapshot(snapshot: RunContextSnapshot): string {
 
   const problems: string[] = []
   if (snapshot.invalidJournalRows > 0) problems.push(`${snapshot.invalidJournalRows} unreadable journal row(s)`)
+  if (snapshot.retiredWaitRows > 0) {
+    problems.push(`${snapshot.retiredWaitRows} wait-state journal row(s) from an older Runtime left out of the tree`)
+  }
   if (snapshot.invalidCoordinationRows > 0) {
     problems.push(`${snapshot.invalidCoordinationRows} unreadable coordination row(s)`)
   }

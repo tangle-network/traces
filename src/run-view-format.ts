@@ -70,7 +70,6 @@ export const STATUS_MARK: Record<string, string> = {
   pending: '·',
   acquiring: '◐',
   running: '▶',
-  waiting: '⏸',
   done: '✓',
   failed: '✗',
   cancelled: '⊘',

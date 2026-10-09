@@ -144,6 +144,8 @@ export interface TraceQuestionsResult {
   readonly budgetUsd: number | null
   /** The engine's own ceiling for one question, when it declares one. */
   readonly questionBudgetUsd: number | null
+  /** The engine's wall-clock deadline for one question, when it declares one. */
+  readonly questionTimeoutMs: number | null
   readonly spanCount: number
   readonly otlpPath: string
   readonly traces: readonly TraceQuestionTrace[]
@@ -784,6 +786,9 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
     budgetUsd: budgetUsd ?? null,
     questionBudgetUsd: typeof opts.engine.executionConfig.max_cost_usd === 'number'
       ? opts.engine.executionConfig.max_cost_usd
+      : null,
+    questionTimeoutMs: typeof opts.engine.executionConfig.timeout_ms === 'number'
+      ? opts.engine.executionConfig.timeout_ms
       : null,
     spanCount: opts.spans.length,
     otlpPath: traceFile.otlpPath,
