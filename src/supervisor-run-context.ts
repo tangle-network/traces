@@ -128,7 +128,7 @@ export function readRunContextJournal(text: string | null): RunContextJournal {
   }
   const supervisorIds = new Set<string>()
   for (const event of events) {
-    if (event.kind !== 'spawned' && event.kind !== 'waiting') continue
+    if (event.kind !== 'spawned') continue
     const parent = event.parent
     if (typeof parent === 'string' && parent.length > 0) supervisorIds.add(parent)
   }
@@ -553,7 +553,7 @@ function orderNodes(view: TreeView, journal: RunContextJournal): RunContextNode[
 
   for (const event of journal.events) {
     const at = parseInstant(event.at)
-    if (event.kind === 'spawned' || event.kind === 'waiting') {
+    if (event.kind === 'spawned') {
       spawnedAt.set(event.id, at)
     } else if (event.kind === 'metered') {
       driver.set(event.id, addSpend(driver.get(event.id) ?? ZERO_ROLL, event.spend))
@@ -567,8 +567,6 @@ function orderNodes(view: TreeView, journal: RunContextJournal): RunContextNode[
     } else if (event.kind === 'cancelled') {
       settledAt.set(event.id, at)
       cancelReason.set(event.id, event.reason)
-    } else if (event.kind === 'woken') {
-      settledAt.set(event.id, at)
     }
   }
 
