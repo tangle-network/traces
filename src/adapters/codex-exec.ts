@@ -6,6 +6,17 @@
  * user prompt. Callers select it explicitly with `--session`; event order is
  * preserved with `step`, and missing timestamps use the source file mtime
  * without inventing durations.
+ *
+ * The same events also arrive wrapped in a Tangle Sandbox live stream
+ * (`retained-execution-*.jsonl`): `{ id, type: 'raw', data: { backend:
+ * 'codex', event }, at }` beside the sandbox's own status, heartbeat, and
+ * message events. The adapter reads `data.event` from Codex raw envelopes,
+ * ignores every other envelope, and uses `at` (the sandbox's receipt time)
+ * when the Codex event has no timestamp of its own.
+ *
+ * A stream that is still being written ends inside a turn. That turn, and any
+ * item it started without completing, are emitted with status UNSET and an
+ * `in_progress` marker, so a live session can be analyzed before it settles.
  */
 
 import { sourceOf, textSources } from '../source-location.js'
@@ -30,12 +41,15 @@ const SUPPORTED_EVENT_TYPES = new Set([
 ])
 
 type JsonObject = Record<string, unknown>
-type ToolItemType = 'command_execution' | 'file_change'
+type ToolItemType = 'command_execution' | 'file_change' | 'mcp_tool_call' | 'web_search'
+type TimeSource = 'event' | 'envelope' | 'file_mtime'
 
 interface TimedEvent {
   readonly time: string
-  readonly source: 'event' | 'file_mtime'
+  readonly source: TimeSource
 }
+
+const IN_PROGRESS = 'in_progress'
 
 interface PendingTool {
   readonly itemType: ToolItemType
@@ -83,7 +97,7 @@ function isoTime(value: unknown): string | undefined {
   return undefined
 }
 
-function eventTime(event: JsonObject, fallback: string): TimedEvent {
+function eventTime(event: JsonObject, envelopeTime: string | undefined, fallback: string): TimedEvent {
   for (const key of [
     'timestamp',
     'created_at',
@@ -96,7 +110,29 @@ function eventTime(event: JsonObject, fallback: string): TimedEvent {
     const time = isoTime(event[key])
     if (time) return { time, source: 'event' }
   }
+  if (envelopeTime) return { time: envelopeTime, source: 'envelope' }
   return { time: fallback, source: 'file_mtime' }
+}
+
+type Unwrapped =
+  | { readonly kind: 'event'; readonly event: JsonObject; readonly envelopeTime?: string }
+  | { readonly kind: 'sandbox-error'; readonly event: JsonObject; readonly envelopeTime?: string }
+  | { readonly kind: 'foreign-envelope' }
+
+/**
+ * Codex raw events from a Sandbox live-stream envelope; plain exec events pass
+ * through. Codex events carry no `data` or `at`, so their presence marks an
+ * envelope. The sandbox's own `error` envelope (a cancelled execution, a
+ * refused lease) ends the execution, so it is surfaced rather than ignored.
+ */
+function unwrap(raw: JsonObject): Unwrapped {
+  const data = objectValue(raw.data)
+  const envelopeTime = isoTime(raw.at)
+  if (!data || !envelopeTime) return { kind: 'event', event: raw }
+  if (raw.type === 'error' && stringValue(data.message)) return { kind: 'sandbox-error', event: data, envelopeTime }
+  const event = raw.type === 'raw' && data.backend === 'codex' ? objectValue(data.event) : undefined
+  if (!event) return { kind: 'foreign-envelope' }
+  return { kind: 'event', event, envelopeTime }
 }
 
 function earlier(left: string, right: string): string {
@@ -156,7 +192,48 @@ function toolInput(itemType: ToolItemType, item: JsonObject, sourcePath: string)
     const cwd = stringValue(item.cwd)
     return { cmd: command, ...(cwd ? { cwd } : {}) }
   }
+  if (itemType === 'mcp_tool_call') {
+    return {
+      server: requireString(item.server, sourcePath, 'mcp_tool_call.server'),
+      tool: requireString(item.tool, sourcePath, 'mcp_tool_call.tool'),
+      ...(item.arguments === undefined ? {} : { arguments: item.arguments }),
+    }
+  }
+  if (itemType === 'web_search') {
+    return {
+      query: typeof item.query === 'string' ? item.query : '',
+      ...(item.action === undefined ? {} : { action: item.action }),
+    }
+  }
   return { changes: fileChanges(item, sourcePath) }
+}
+
+function toolInputFields(itemType: ToolItemType): string[] {
+  switch (itemType) {
+    case 'command_execution': return ['command', 'cwd']
+    case 'mcp_tool_call': return ['server', 'tool', 'arguments']
+    case 'web_search': return ['query', 'action']
+    case 'file_change': return ['changes']
+  }
+}
+
+/** The text an MCP result carries, or its structured content when it has no text. */
+function mcpOutput(item: JsonObject): { value: string; field: string } | undefined {
+  const error = objectValue(item.error)
+  const errorMessage = stringValue(error?.message) ?? stringValue(item.error)
+  if (errorMessage) return { value: errorMessage, field: 'error' }
+  const result = objectValue(item.result)
+  if (!result) return undefined
+  const content = Array.isArray(result.content) ? result.content : []
+  const text = content
+    .map((block) => objectValue(block))
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block!.text as string)
+  if (text.length > 0) return { value: text.join('\n'), field: 'result' }
+  if (result.structured_content !== undefined) {
+    return { value: JSON.stringify(result.structured_content), field: 'result' }
+  }
+  return undefined
 }
 
 function completedStatus(
@@ -164,6 +241,8 @@ function completedStatus(
   item: JsonObject,
   sourcePath: string,
 ): { code: 'OK' | 'ERROR'; message?: string; exitCode?: number } {
+  // Codex records no status on a finished web search; its completion is the result.
+  if (itemType === 'web_search' && item.status === undefined) return { code: 'OK' }
   const status = requireString(item.status, sourcePath, `${itemType}.status`)
   if (status !== 'completed' && status !== 'failed') {
     throw new CodexExecStreamError(
@@ -172,7 +251,8 @@ function completedStatus(
     )
   }
   const code = itemType === 'command_execution' ? exitCode(item, sourcePath) : undefined
-  const failed = status === 'failed' || (code !== undefined && code !== 0)
+  const mcpError = itemType === 'mcp_tool_call' && item.error != null
+  const failed = status === 'failed' || mcpError || (code !== undefined && code !== 0)
   return {
     code: failed ? 'ERROR' : 'OK',
     ...(failed ? { message: code === undefined ? `${itemType} failed` : `command exited ${code}` } : {}),
@@ -184,13 +264,26 @@ function itemType(item: JsonObject): string | undefined {
   return stringValue(item.type)
 }
 
+const TOOL_ITEM_TYPES: ReadonlySet<string> = new Set<ToolItemType>([
+  'command_execution',
+  'file_change',
+  'mcp_tool_call',
+  'web_search',
+])
+
 function toolItemType(item: JsonObject): ToolItemType | undefined {
   const type = itemType(item)
-  return type === 'command_execution' || type === 'file_change' ? type : undefined
+  return type && TOOL_ITEM_TYPES.has(type) ? type as ToolItemType : undefined
 }
 
-function toolName(type: ToolItemType): string {
-  return type === 'command_execution' ? 'exec_command' : 'apply_patch'
+/** MCP calls use the `mcp__<server>__<tool>` spelling other harness adapters emit. */
+function toolName(type: ToolItemType, input: JsonObject): string {
+  switch (type) {
+    case 'command_execution': return 'exec_command'
+    case 'file_change': return 'apply_patch'
+    case 'web_search': return 'web_search'
+    case 'mcp_tool_call': return `mcp__${input.server as string}__${input.tool as string}`
+  }
 }
 
 export class CodexExecAdapter implements HarnessTraceAdapter {
@@ -214,7 +307,8 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
     let recognizedEventCount = 0
     let ignoredEventCount = 0
     let ignoredItemCount = 0
-    let eventTimestampCount = 0
+    const timeSourceCounts: Record<TimeSource, number> = { event: 0, envelope: 0, file_mtime: 0 }
+    let envelopeCount = 0
     let terminalCount = 0
     let fatalError = false
 
@@ -226,7 +320,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       if (!root) return
       root.start_time = earlier(root.start_time, timed.time)
       root.end_time = later(root.end_time, timed.time)
-      if (timed.source === 'event') eventTimestampCount += 1
+      timeSourceCounts[timed.source] += 1
     }
 
     const requireRoot = (type: string): OtlpSpan => {
@@ -242,6 +336,11 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       return current
     }
 
+    const inputSourceOf = (type: ToolItemType, item: JsonObject) => toolInputFields(type).flatMap((field) => {
+      const reference = sourceOf(item, field)
+      return item[field] !== undefined && reference ? [reference] : []
+    })
+
     const createTool = (
       turn: ActiveTurn,
       item: JsonObject,
@@ -250,14 +349,8 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       lifecycle: 'paired' | 'completed_only',
     ): PendingTool => {
       const id = requireString(item.id, ref.path, `${type}.id`)
-      const name = toolName(type)
       const input = toolInput(type, item, ref.path)
-      const inputSource = type === 'command_execution'
-        ? ['command', 'cwd'].flatMap((field) => {
-            const reference = sourceOf(item, field)
-            return item[field] !== undefined && reference ? [reference] : []
-          })
-        : sourceOf(item, 'changes')
+      const name = toolName(type, input)
       const cwd = stringValue(item.cwd)
       if (!ref.cwd && cwd) ref.cwd = cwd
       const toolSpan = span({
@@ -273,7 +366,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         tool: name,
         step: step++,
         extra: {
-          ...toolIoAttributes({ input, argsCaptured: true, inputSource }),
+          ...toolIoAttributes({ input, argsCaptured: true, inputSource: inputSourceOf(type, item) }),
           'traces.codex.exec_item_id': id,
           'traces.codex.exec_item_type': type,
           'traces.codex.exec_lifecycle': lifecycle,
@@ -308,6 +401,16 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       }
       if (type === 'command_execution') {
         recordToolOutput(pending.span, typeof item.aggregated_output === 'string' ? item.aggregated_output : undefined, sourceOf(item, 'aggregated_output'))
+      } else if (type === 'mcp_tool_call') {
+        const output = mcpOutput(item)
+        if (output) recordToolOutput(pending.span, output.value, sourceOf(item, output.field))
+      } else if (type === 'web_search') {
+        // A search starts with an empty query; the completed item names what ran.
+        Object.assign(pending.span.attributes, toolIoAttributes({
+          input: toolInput(type, item, ref.path),
+          inputSource: inputSourceOf(type, item),
+        }))
+        if (Array.isArray(item.results)) recordToolOutput(pending.span, JSON.stringify(item.results), sourceOf(item, 'results'))
       }
       turn.pendingTools.delete(id)
       turn.completedItemIds.add(id)
@@ -320,8 +423,15 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       message?: string,
     ): void => {
       const turn = requireTurn(code === 'OK' ? 'turn.completed' : 'turn.failed')
-      if (code === 'OK' && turn.pendingTools.size > 0) {
-        fail(`turn.completed left ${turn.pendingTools.size} item(s) without item.completed`)
+      const unclosedItemCount = code === 'OK' ? turn.pendingTools.size : 0
+      if (code === 'OK') {
+        // Codex emits no item.completed for some started items (a file_change
+        // that adds a file, observed in Sandbox live streams), even in a turn that
+        // completes. The item stays UNSET: neither its success nor its end is known.
+        for (const pending of turn.pendingTools.values()) {
+          pending.span.attributes['traces.codex.exec_item_status'] = 'no_completion_event'
+        }
+        turn.pendingTools.clear()
       }
       if (code === 'ERROR') {
         for (const pending of turn.pendingTools.values()) {
@@ -350,21 +460,52 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         outputTokens: optionalTokenCount(usage, 'output_tokens', ref.path),
         reasoningTokens: optionalTokenCount(usage, 'reasoning_output_tokens', ref.path),
         step: turn.step,
+        ...(unclosedItemCount > 0 ? { extra: { 'traces.codex.exec_unclosed_item_count': unclosedItemCount } } : {}),
       }))
       activeTurn = undefined
       terminalCount += 1
       if (code === 'ERROR') fatalError = true
     }
 
+    let lastSeen: TimedEvent | undefined
+    let sandboxErrorBeforeThread: string | undefined
+    const threadScope: ActiveTurn = {
+      index: -1,
+      spanId: '',
+      startTime: fallbackTime,
+      step: -1,
+      pendingTools: new Map(),
+      completedItemIds: new Set(),
+    }
     for await (const raw of readJsonl<unknown>(ref.path, sessionJsonlOptions(ref, options))) {
-      const event = objectValue(raw)
-      const type = event ? stringValue(event.type) : undefined
+      const record = objectValue(raw)
+      const unwrapped = record ? unwrap(record) : undefined
+      if (unwrapped?.kind === 'foreign-envelope') {
+        envelopeCount += 1
+        ignoredEventCount += 1
+        continue
+      }
+      if (unwrapped?.kind === 'sandbox-error' && !root) {
+        // The execution failed before Codex started a thread: nothing of Codex's to keep.
+        sandboxErrorBeforeThread ??= stringValue(unwrapped.event.message)
+        envelopeCount += 1
+        ignoredEventCount += 1
+        continue
+      }
+      const event = unwrapped?.event
+      const type = unwrapped?.kind === 'sandbox-error' ? 'error' : event ? stringValue(event.type) : undefined
       if (!event || !type || !SUPPORTED_EVENT_TYPES.has(type)) {
         ignoredEventCount += 1
         continue
       }
+      if (event !== record) {
+        envelopeCount += 1
+        const sandboxId = stringValue(objectValue(record!.data)?.sandboxId)
+        if (sandboxId && !ref.environment) ref.environment = { sandboxId, cwd: null }
+      }
       recognizedEventCount += 1
-      const timed = eventTime(event, fallbackTime)
+      const timed = eventTime(event, unwrapped.envelopeTime, fallbackTime)
+      lastSeen = timed
 
       if (type === 'thread.started') {
         if (root) fail('thread.started appeared more than once')
@@ -429,10 +570,11 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       }
 
       if (type === 'item.completed') {
-        const turn = requireTurn(type)
         const item = requireObject(event.item, ref.path, 'item.completed.item')
         const completedType = itemType(item)
-        if (completedType === 'command_execution' || completedType === 'file_change') {
+        // Codex reports configuration warnings as error items before the first turn.
+        const turn = !activeTurn && completedType === 'error' ? threadScope : requireTurn(type)
+        if (toolItemType(item)) {
           completeTool(turn, item, timed.time)
         } else if (completedType === 'agent_message') {
           const id = requireString(item.id, ref.path, 'agent_message.id')
@@ -464,8 +606,8 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
           const message = requireString(item.message, ref.path, 'error.message')
           spans.push(span({
             traceId: threadId!,
-            spanId: `error:${turn.index}:${id}`,
-            parentSpanId: turn.spanId,
+            spanId: turn === threadScope ? `error:thread:${id}` : `error:${turn.index}:${id}`,
+            parentSpanId: turn === threadScope ? root!.span_id : turn.spanId,
             name: 'error.codex_item',
             kind: 'CHAIN',
             startTime: timed.time,
@@ -526,6 +668,9 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       }
     }
 
+    if (recognizedEventCount === 0 && sandboxErrorBeforeThread) {
+      throw new CodexExecStreamError(ref.path, `the Sandbox execution ended before Codex started: ${sandboxErrorBeforeThread}`)
+    }
     if (recognizedEventCount === 0) {
       throw new CodexExecStreamError(
         ref.path,
@@ -535,23 +680,47 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
     if (!root || !threadId) {
       throw new CodexExecStreamError(ref.path, 'thread.started was not found')
     }
-    if (activeTurn) {
-      throw new CodexExecStreamError(ref.path, 'stream ended before turn.completed, turn.failed, or error')
-    }
-    if (terminalCount === 0) {
+    const openTurn = activeTurn
+    if (openTurn) {
+      // The stream is still being written: keep what happened, mark what has not finished.
+      const lastTime = lastSeen?.time ?? openTurn.startTime
+      for (const pending of openTurn.pendingTools.values()) {
+        pending.span.attributes['traces.codex.exec_item_status'] = IN_PROGRESS
+      }
+      spans.push(span({
+        traceId: threadId,
+        spanId: openTurn.spanId,
+        parentSpanId: root.span_id,
+        name: 'llm.turn',
+        kind: 'LLM',
+        startTime: openTurn.startTime,
+        endTime: later(openTurn.startTime, lastTime),
+        status: 'UNSET',
+        service: SERVICE,
+        agent: SERVICE,
+        step: openTurn.step,
+        extra: {
+          'traces.codex.exec_turn_status': IN_PROGRESS,
+          'traces.codex.exec_open_item_count': openTurn.pendingTools.size,
+        },
+      }))
+      activeTurn = undefined
+    } else if (terminalCount === 0) {
       throw new CodexExecStreamError(ref.path, 'stream has no terminal turn.completed, turn.failed, or error event')
     }
 
-    root.status = fatalError ? { code: 'ERROR', message: 'Codex exec stream failed' } : { code: 'OK' }
+    root.status = fatalError
+      ? { code: 'ERROR', message: 'Codex exec stream failed' }
+      : openTurn ? { code: 'UNSET' } : { code: 'OK' }
+    root.attributes['traces.codex.exec_stream_status'] = fatalError ? 'failed' : openTurn ? IN_PROGRESS : 'completed'
+    if (envelopeCount > 0) root.attributes['traces.codex.stream_envelope'] = 'sandbox-live-stream'
     root.attributes['traces.codex.exec_event_count'] = recognizedEventCount
     root.attributes['traces.codex.exec_ignored_event_count'] = ignoredEventCount
     root.attributes['traces.codex.exec_ignored_item_count'] = ignoredItemCount
-    root.attributes['traces.codex.exec_event_timestamp_count'] = eventTimestampCount
-    root.attributes['traces.codex.exec_time_source'] = eventTimestampCount === 0
-      ? 'file_mtime'
-      : eventTimestampCount === recognizedEventCount
-        ? 'event'
-        : 'mixed'
+    root.attributes['traces.codex.exec_event_timestamp_count'] = timeSourceCounts.event
+    root.attributes['traces.codex.exec_envelope_timestamp_count'] = timeSourceCounts.envelope
+    const usedSources = (Object.keys(timeSourceCounts) as TimeSource[]).filter((key) => timeSourceCounts[key] > 0)
+    root.attributes['traces.codex.exec_time_source'] = usedSources.length === 1 ? usedSources[0] : usedSources.length === 0 ? 'file_mtime' : 'mixed'
     return spans
   }
 }

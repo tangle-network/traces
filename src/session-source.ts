@@ -62,6 +62,10 @@ export async function parseSession(
   // (the image/cwd the session actually ran in) outranks host-side inference.
   stampEnvironmentAttrs(spans, ref.environment)
   if (ref.cwd === null && ref.environment?.cwd) ref.cwd = ref.environment.cwd
+  // A session recorded inside a sandbox names the sandbox's paths. Resolving
+  // them on this host would attach whatever repo happens to live at the same
+  // path here (a host `/work` checkout, say), so repo labels stay unresolved.
+  if (ref.environment?.sandboxId) return spans
   const repo = await resolveSessionRepoAttrs(ref.cwd, spans)
   if (repo.cwd) ref.cwd = repo.cwd
   stampRepoAttrs(spans, repo.attrs)
