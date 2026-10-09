@@ -387,6 +387,23 @@ describe('readRunContextSnapshot — the spawn-journal source', () => {
     expect(rendered).toContain('exhausted its iteration budget')
   })
 
+  it('keeps the tree of a journal written while Runtime still had wait-state nodes', async () => {
+    const dir = await scratch('journal-wait-states')
+    await writeFile(join(dir, 'spawn-journal.jsonl'), journal('r', [
+      spawned('r', undefined, 'root', '2026-07-31T10:00:01.000Z'),
+      spawned('w1', 'r', 'worker', '2026-07-31T10:00:02.000Z'),
+      { kind: 'waiting', id: 'wait-1', parent: 'r', label: 'timer', spec: { kind: 'timer' }, armedAt: 0, seq: 1, at: '2026-07-31T10:00:03.000Z' },
+      { kind: 'woken', id: 'wait-1', by: 'fired', seq: 2, at: '2026-07-31T10:00:04.000Z' },
+      settled('w1', 'done', 10, 5, 0.01, '2026-07-31T10:00:05.000Z'),
+    ]))
+    const snapshot = await readRunContextSnapshot(dir)
+    expect(snapshot.treeError).toBeNull()
+    expect(snapshot.nodes.map((node) => node.id)).toEqual(['r', 'w1'])
+    expect(snapshot.invalidJournalRows).toBe(0)
+    expect(snapshot.retiredWaitRows).toBe(2)
+    expect(renderRunContextSnapshot(snapshot)).toContain('2 wait-state journal row(s) from an older Runtime')
+  })
+
   it('tolerates a half-written last line rather than reporting corruption every poll', async () => {
     const dir = await scratch('journal-partial')
     const complete = journal('r', [spawned('r', undefined, 'root', '2026-07-31T10:00:01.000Z')])
