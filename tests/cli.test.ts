@@ -1263,6 +1263,24 @@ describe('traces ask', () => {
     expect(failure.stderr).toContain('ask needs --question')
   }, 30_000)
 
+  it('rejects a --question-timeout that is not a positive number of seconds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-ask-timeout-'))
+    const input = await writeSessionFile(dir)
+    for (const value of ['0', '-5', 'soon']) {
+      const failure = await execFileAsync(process.execPath, [
+        '--import', 'tsx', 'src/cli.ts', 'ask', input, '--format', 'openinference',
+        '--question', 'Did the session finish?', '--question-timeout', value,
+      ], { cwd: process.cwd(), env: { ...process.env, NO_COLOR: '1' }, timeout: 30_000 }).then(
+        () => {
+          throw new Error(`ask exited 0 with --question-timeout ${value}`)
+        },
+        (error: Error & { code?: number; stderr?: string }) => error,
+      )
+      expect(failure.code).toBe(1)
+      expect(failure.stderr).toContain('--question-timeout must be a number of seconds')
+    }
+  }, 60_000)
+
   it('writes every answer and failure, then exits 1 when the engine dies at startup', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-ask-fail-'))
     const input = await writeSessionFile(dir)

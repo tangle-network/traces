@@ -16,6 +16,13 @@ export const DEFAULT_ANALYST_MODEL = 'gpt-5.6-luna'
  */
 export const DEFAULT_QUESTION_MAX_COST_USD = 1
 
+/**
+ * Wall-clock deadline for one investigation when `ask --question-timeout` is
+ * omitted. It equals the DSPy engine's own default, stated here so the help
+ * text names the value the engine applies.
+ */
+export const DEFAULT_QUESTION_TIMEOUT_MS = 600_000
+
 /** Default analysis endpoint: the Tangle router, reached with TANGLE_API_KEY. */
 const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
 
@@ -79,6 +86,8 @@ export interface AnalysisEngineFromEnvOptions {
    * cap here and the total to the ledger.
    */
   maxCostUsd?: number
+  /** Wall-clock deadline for ONE investigation. Default: {@link DEFAULT_QUESTION_TIMEOUT_MS}. */
+  timeoutMs?: number
   /** Receives one line per model call, in the CLI's analyst log format. */
   log?: (msg: string, fields?: Record<string, unknown>) => void
   /** Environment to read credentials and the Python interpreter from. Default: process.env. */
@@ -145,6 +154,7 @@ export function analysisEngineFromEnv(opts: AnalysisEngineFromEnvOptions): Trace
     ...(opts.maxCostUsd !== undefined && Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0
       ? { maxCostUsd: opts.maxCostUsd }
       : {}),
+    timeoutMs: opts.timeoutMs ?? DEFAULT_QUESTION_TIMEOUT_MS,
     ...(python ? { runner: { command: python } } : {}),
   })
 }

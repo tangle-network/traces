@@ -98,7 +98,7 @@ import {
 import { fileRunContextSupervisorRunReader } from './supervisor-run-context.js'
 import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
 import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL, DEFAULT_QUESTION_MAX_COST_USD } from './analyst-model-call.js'
+import { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL, DEFAULT_QUESTION_MAX_COST_USD, DEFAULT_QUESTION_TIMEOUT_MS } from './analyst-model-call.js'
 import {
   loadTraceQuestionsFile,
   MAX_TRACE_QUESTION_CHARS,
@@ -227,6 +227,8 @@ interface Args {
   questionsFile?: string
   /** ask: provider ceiling for one question; `--budget` bounds all of them together. */
   questionBudget?: number
+  /** ask: wall-clock deadline for one question's investigation, in seconds. */
+  questionTimeout?: number
   /** check: the declarative contract file. */
   contract?: string
   /** check: JUnit XML output path. */
@@ -322,6 +324,7 @@ function parseArgs(argv: string[]): Args {
       case '--question': { const v = next(); if (v !== undefined) a.questions.push(v); break }
       case '--questions': a.questionsFile = next(); break
       case '--question-budget': a.questionBudget = Number(next()); break
+      case '--question-timeout': a.questionTimeout = Number(next()); break
       case '--redactor': a.redactorCmd = next(); break
       case '--format': a.format = next(); break
       case '--contract': a.contract = next(); break
@@ -1473,11 +1476,16 @@ async function cmdAsk(args: Args): Promise<void> {
   if (args.budget !== undefined && (!Number.isFinite(args.budget) || args.budget <= 0)) {
     throw new Error('--budget must be a positive number of USD')
   }
+  const questionTimeoutMs = args.questionTimeout === undefined ? undefined : Math.round(args.questionTimeout * 1000)
+  if (questionTimeoutMs !== undefined && (!Number.isSafeInteger(questionTimeoutMs) || questionTimeoutMs < 1000)) {
+    throw new Error('--question-timeout must be a number of seconds, at least 1')
+  }
   // Before the adapter pass: a missing API key must not cost an operator the
   // wait for a large session to be parsed before it is reported.
   const engine = analysisEngineFromEnv({
     model: analystModelFor(args),
     maxCostUsd: args.questionBudget ?? Math.min(args.budget ?? Infinity, DEFAULT_QUESTION_MAX_COST_USD),
+    ...(questionTimeoutMs !== undefined ? { timeoutMs: questionTimeoutMs } : {}),
     log: analystLog,
   })
   const collected = await collectSpans(args)
@@ -2150,6 +2158,9 @@ Options:
   --question-budget <usd>
                    ask: provider ceiling for one question (default: the smaller
                    of --budget and $${DEFAULT_QUESTION_MAX_COST_USD})
+  --question-timeout <seconds>
+                   ask: wall-clock deadline for one question's investigation
+                   (default: ${DEFAULT_QUESTION_TIMEOUT_MS / 1000})
   --concurrency <n> ask: questions running at once (default 4);
                    import-codetracebench: trajectories imported at once
   --analyzer <id>  analyze: also run halo, hodoscope, prime, or an installed command (repeatable);

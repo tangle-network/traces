@@ -124,6 +124,7 @@ This package carries no JSON Schema library, and a constraint that is quietly ig
 - Ctrl-C keeps what the run already bought. The signal reaches the engine, not the checks that follow it: an answer that came back is kept with its citations resolved, and each question the run never reached is recorded as `aborted`.
 - The artifacts are written before the exit code is decided. `ask` exits 1 when any question failed, returned no answer, broke its schema, or cited a missing span.
 - `totals.wallTimeMs` covers the whole run, including writing and indexing the trace file; `totals.setupTimeMs` names that part. `result.effectiveConcurrency` is the number of workers the run created, `min(--concurrency, questions)`, and `totals.peakConcurrency` is how many actually overlapped.
+- `--question-timeout <seconds>` is the wall-clock deadline for one question's investigation (default 600). A question over many large sessions can need longer; the timeout fails that question alone.
 
 ### Budget under concurrency
 
