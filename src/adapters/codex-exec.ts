@@ -117,7 +117,10 @@ function eventTime(event: JsonObject, envelopeTime: string | undefined, fallback
 type Unwrapped =
   | { readonly kind: 'event'; readonly event: JsonObject; readonly envelopeTime?: string }
   | { readonly kind: 'sandbox-error'; readonly event: JsonObject; readonly envelopeTime?: string }
+  | { readonly kind: 'sandbox-end'; readonly failed: boolean; readonly label: string; readonly envelopeTime: string }
   | { readonly kind: 'foreign-envelope' }
+
+const SANDBOX_END_STATUSES = new Set(['failed', 'complete', 'completed'])
 
 /**
  * Codex raw events from a Sandbox live-stream envelope; plain exec events pass
@@ -130,6 +133,13 @@ function unwrap(raw: JsonObject): Unwrapped {
   const envelopeTime = isoTime(raw.at)
   if (!data || !envelopeTime) return { kind: 'event', event: raw }
   if (raw.type === 'error' && stringValue(data.message)) return { kind: 'sandbox-error', event: data, envelopeTime }
+  // The execution's own end: `done` or `result` with its outcome, or a terminal status.
+  const status = raw.type === 'status' ? stringValue(data.status) : undefined
+  if (raw.type === 'done' || raw.type === 'result' || (status && SANDBOX_END_STATUSES.has(status))) {
+    const outcome = stringValue(objectValue(data.outcome)?.type)
+    const label = status ? `status ${status}` : `${raw.type as string}${outcome ? ` ${outcome}` : ''}`
+    return { kind: 'sandbox-end', failed: status === 'failed', label, envelopeTime }
+  }
   const event = raw.type === 'raw' && data.backend === 'codex' ? objectValue(data.event) : undefined
   if (!event) return { kind: 'foreign-envelope' }
   return { kind: 'event', event, envelopeTime }
@@ -392,7 +402,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         code: result.code,
         ...(result.message ? { message: result.message } : {}),
       }
-      pending.span.attributes['traces.codex.exec_item_status'] = item.status
+      if (typeof item.status === 'string') pending.span.attributes['traces.codex.exec_item_status'] = item.status
       if (result.exitCode !== undefined) {
         pending.span.attributes['traces.codex.exec_exit_code'] = result.exitCode
         // One spelling for one fact: the rollout adapter's command spans use
@@ -469,6 +479,7 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
 
     let lastSeen: TimedEvent | undefined
     let sandboxErrorBeforeThread: string | undefined
+    let sandboxEnd: { readonly label: string; readonly time: string } | undefined
     const threadScope: ActiveTurn = {
       index: -1,
       spanId: '',
@@ -483,6 +494,13 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       if (unwrapped?.kind === 'foreign-envelope') {
         envelopeCount += 1
         ignoredEventCount += 1
+        continue
+      }
+      if (unwrapped?.kind === 'sandbox-end') {
+        envelopeCount += 1
+        ignoredEventCount += 1
+        // An error envelope that follows names why; the turn is closed at the end of the stream otherwise.
+        sandboxEnd ??= { label: unwrapped.label, time: unwrapped.envelopeTime }
         continue
       }
       if (unwrapped?.kind === 'sandbox-error' && !root) {
@@ -662,7 +680,10 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         contentSource: textSources(event, 'message'),
       }))
       if (activeTurn) closeTurn('ERROR', timed.time, undefined, message)
-      else {
+      else if (unwrapped.kind === 'sandbox-error' && terminalCount > 0) {
+        // A Sandbox error after Codex finished its turns (a late cancel) does not undo them.
+        root!.attributes['traces.codex.sandbox_error_after_completion'] = message
+      } else {
         fatalError = true
         terminalCount += 1
       }
@@ -679,6 +700,10 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
     }
     if (!root || !threadId) {
       throw new CodexExecStreamError(ref.path, 'thread.started was not found')
+    }
+    if (activeTurn && sandboxEnd) {
+      // Codex never closed the turn, and the execution will write nothing more to it.
+      closeTurn('ERROR', sandboxEnd.time, undefined, `the Sandbox execution ended (${sandboxEnd.label}) before turn.completed`)
     }
     const openTurn = activeTurn
     if (openTurn) {
@@ -714,6 +739,9 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
       : openTurn ? { code: 'UNSET' } : { code: 'OK' }
     root.attributes['traces.codex.exec_stream_status'] = fatalError ? 'failed' : openTurn ? IN_PROGRESS : 'completed'
     if (envelopeCount > 0) root.attributes['traces.codex.stream_envelope'] = 'sandbox-live-stream'
+    if (sandboxEnd) root.attributes['traces.codex.sandbox_end'] = sandboxEnd.label
+    // A reader tells a stalled stream from a live one by how long ago it last moved.
+    if (lastSeen) root.attributes['traces.codex.exec_last_event_at'] = lastSeen.time
     root.attributes['traces.codex.exec_event_count'] = recognizedEventCount
     root.attributes['traces.codex.exec_ignored_event_count'] = ignoredEventCount
     root.attributes['traces.codex.exec_ignored_item_count'] = ignoredItemCount

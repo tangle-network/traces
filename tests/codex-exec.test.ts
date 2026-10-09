@@ -424,6 +424,50 @@ describe('Codex exec events inside a Sandbox live stream', () => {
     expect(kind(spans, 'AGENT')[0]!.attributes['traces.codex.exec_stream_status']).toBe('completed')
   })
 
+  it('fails a turn the Sandbox ended before Codex completed it', async () => {
+    const envelope = (id: number, type: string, data: Record<string, unknown>) => ({ id: String(id), type, data: { ...data, sandboxId: 'sandbox-1' }, at: `2026-10-09T06:0${id}:00.000Z` })
+    const codex = (id: number, event: Record<string, unknown>) => envelope(id, 'raw', { type: 'raw', backend: 'codex', event })
+    const spans = await new CodexExecAdapter().parse(ref(source([
+      codex(1, { type: 'thread.started', thread_id: 'thread-ended' }),
+      codex(2, { type: 'turn.started' }),
+      codex(3, { type: 'item.started', item: { id: 'item_1', type: 'command_execution', command: 'sleep 9', status: 'in_progress' } }),
+      envelope(4, 'status', { type: 'status', status: 'failed' }),
+      envelope(5, 'done', { outcome: { type: 'completed' } }),
+    ], 'ended-by-sandbox.jsonl')))
+    const root = kind(spans, 'AGENT')[0]!
+
+    expect(kind(spans, 'LLM')[0]!.status).toEqual({ code: 'ERROR', message: 'the Sandbox execution ended (status failed) before turn.completed' })
+    expect(kind(spans, 'TOOL')[0]!.attributes['traces.codex.exec_item_status']).toBe('interrupted')
+    expect(root.attributes).toMatchObject({
+      'traces.codex.exec_stream_status': 'failed',
+      'traces.codex.sandbox_end': 'status failed',
+      'traces.codex.exec_last_event_at': '2026-10-09T06:03:00.000Z',
+    })
+  })
+
+  it('keeps completed turns when the Sandbox reports an error afterwards', async () => {
+    const spans = await new CodexExecAdapter().parse(ref(source([
+      { id: '1', type: 'raw', data: { backend: 'codex', event: { type: 'thread.started', thread_id: 'thread-late' } }, at: '2026-10-09T06:00:00.000Z' },
+      { id: '2', type: 'raw', data: { backend: 'codex', event: { type: 'turn.started' } }, at: '2026-10-09T06:00:01.000Z' },
+      { id: '3', type: 'raw', data: { backend: 'codex', event: { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } } }, at: '2026-10-09T06:00:02.000Z' },
+      { id: '4', type: 'error', data: { message: 'Execution cancelled by user', code: 'EXECUTION_CANCELLED' }, at: '2026-10-09T06:00:03.000Z' },
+    ], 'late-cancel.jsonl')))
+    const root = kind(spans, 'AGENT')[0]!
+
+    expect(root.status).toEqual({ code: 'OK' })
+    expect(root.attributes['traces.codex.sandbox_error_after_completion']).toBe('Execution cancelled by user')
+  })
+
+  it('reads a plain exec stream cut off mid-turn as in progress', async () => {
+    const spans = await new CodexExecAdapter().parse(ref(source([
+      { type: 'thread.started', thread_id: 'thread-truncated' },
+      { type: 'turn.started' },
+    ], 'truncated-turn.jsonl')))
+
+    expect(kind(spans, 'LLM')[0]!.attributes['traces.codex.exec_turn_status']).toBe('in_progress')
+    expect(kind(spans, 'AGENT')[0]!.attributes['traces.codex.exec_stream_status']).toBe('in_progress')
+  })
+
   it('answers through the CLI for a live-stream session', async () => {
     const { stdout } = await execFileAsync(process.execPath, [
       '--import',
