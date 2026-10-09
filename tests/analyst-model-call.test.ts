@@ -63,7 +63,7 @@ describe('analyst model owner', () => {
       .toBe(GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS)
   })
 
-  it('uses Runtime to translate the analyst profile into one exact provider request', async () => {
+  it('uses Runtime to translate the analyst profile into one exact streamed provider request', async () => {
     let body: Record<string, unknown> | undefined
     let idempotencyKey: string | undefined
     const baseUrl = await startGateway((req, res) => {
@@ -72,16 +72,24 @@ describe('analyst model owner', () => {
       req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
       req.on('end', () => {
         body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(
-          JSON.stringify({
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        const frame = (chunk: unknown) => `data: ${JSON.stringify(chunk)}\n\n`
+        res.write(frame({ model: 'test-model', choices: [{ index: 0, delta: { reasoning_content: 'look' } }] }))
+        res.write(frame({ model: 'test-model', choices: [{ index: 0, delta: { content: 'o' } }] }))
+        res.write(
+          frame({
             model: 'test-model',
-            choices: [
-              { index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
-            ],
+            choices: [{ index: 0, delta: { content: 'k' }, finish_reason: 'stop' }],
+          }),
+        )
+        res.write(
+          frame({
+            model: 'test-model',
+            choices: [],
             usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18, cost: 0.002 },
           }),
         )
+        res.end('data: [DONE]\n\n')
       })
     })
     const configured = owner(baseUrl)
@@ -102,7 +110,11 @@ describe('analyst model owner', () => {
       model: 'test-model',
       max_tokens: ANALYST_MAX_OUTPUT_TOKENS,
       reasoning_effort: 'none',
+      // Streamed so a long thinking-model step is not cut off by the Router's request deadline.
+      stream: true,
+      stream_options: { include_usage: true },
     })
+    expect(body).not.toHaveProperty('tools')
     expect(body).not.toHaveProperty('thinking')
     expect(idempotencyKey).toBe('call-abc123')
     expect(configured.profile.model.reasoningEffort).toBe('none')
