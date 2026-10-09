@@ -56,6 +56,10 @@ export function createAnalystModelOwner(opts: {
       default: opts.model,
       reasoningEffort: 'none',
       maxVisibleOutputTokens: maxOutputTokens,
+      // Stream every analyst call. The Tangle Router bounds a buffered request by a deadline that
+      // ends when response headers are sent, and a thinking model's long recursive step outlives
+      // it (`request_deadline_exceeded`). A streamed response sends headers at the first byte.
+      metadata: { stream: true },
     },
   } satisfies AgentProfile
 
