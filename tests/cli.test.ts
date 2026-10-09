@@ -1300,6 +1300,7 @@ describe('traces ask', () => {
       '--questions', questions,
       '--question', 'Did the session finish?',
       '--budget', '5',
+      '--question-timeout', '1.25',
       '--concurrency', '2',
       '--dir', out,
     ], {
@@ -1331,12 +1332,14 @@ describe('traces ask', () => {
       ok: boolean
       budgetUsd: number
       questionBudgetUsd: number
+      questionTimeoutMs: number
       questions: Array<{ id: string; status: string; failure?: { kind: string; message: string } }>
     }
     expect(answers.kind).toBe('traces.ask')
     expect(answers.ok).toBe(false)
     expect(answers.budgetUsd).toBe(5)
     expect(answers.questionBudgetUsd).toBe(1)
+    expect(answers.questionTimeoutMs).toBe(1250)
     expect(answers.questions.map((answer) => answer.id)).toEqual(['checks', 'turns', 'q3'])
     for (const answer of answers.questions) {
       expect(answer.status).toBe('failed')
