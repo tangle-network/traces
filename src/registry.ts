@@ -14,7 +14,6 @@
 import { AmpAdapter } from './adapters/amp.js'
 import { CodexExecAdapter } from './adapters/codex-exec.js'
 import { CopilotAdapter } from './adapters/copilot.js'
-import { ForgeAdapter } from './adapters/forge.js'
 import { GeminiAdapter } from './adapters/gemini.js'
 import { SHARED_SESSION_ADAPTERS } from './adapters/harness-sessions.js'
 import { QwenAdapter } from './adapters/qwen.js'
@@ -27,7 +26,6 @@ const ADAPTERS: HarnessTraceAdapter[] = [
   new QwenAdapter(),
   new AmpAdapter(),
   new CopilotAdapter(),
-  new ForgeAdapter(),
 ]
 
 const BY_NAME = new Map<string, HarnessTraceAdapter>()

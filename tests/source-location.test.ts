@@ -9,7 +9,6 @@ import { CodexAdapter } from '../src/adapters/codex.js'
 import { CodexExecAdapter } from '../src/adapters/codex-exec.js'
 import { CopilotAdapter } from '../src/adapters/copilot.js'
 import { FactoryAdapter } from '../src/adapters/factory.js'
-import { ForgeAdapter } from '../src/adapters/forge.js'
 import { GeminiAdapter } from '../src/adapters/gemini.js'
 import { OpencodeAdapter } from '../src/adapters/opencode.js'
 import { PiAdapter } from '../src/adapters/pi.js'
@@ -58,10 +57,6 @@ const cases: Array<{ harness: string; adapter: HarnessTraceAdapter; json?: unkno
   ] },
   { harness: 'gemini', adapter: new GeminiAdapter(), json: { sessionId: 'fixture', startTime: timestamp, messages: [{ id: 'm', type: 'assistant', timestamp, content: text, toolCalls: [{ id: 'call', name: 'Read', args, result: output, status: 'ok' }] }] } },
   { harness: 'gemini', adapter: new GeminiAdapter(), json: { sessionId: 'fixture', startTime: timestamp, messages: [{ id: 'm', type: 'assistant', timestamp, content: { text, structured: true }, toolCalls: [{ id: 'call', name: 'Read', args, result: output, status: 'ok' }] }] } },
-  { harness: 'forge', adapter: new ForgeAdapter(), json: { conversation_id: 'fixture', messages: [
-    { text: { role: 'assistant', content: text, tool_calls: [{ name: 'Read', call_id: 'call', arguments: args }] } },
-    { tool: { name: 'Read', call_id: 'call', output: { is_error: false, values: output } } },
-  ] } },
   { harness: 'codex', adapter: new CodexAdapter(), lines: [
     { type: 'session_meta', timestamp, payload: { id: 'fixture' } },
     { type: 'response_item', timestamp, payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } },

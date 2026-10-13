@@ -14,7 +14,6 @@ import { capText, CONTENT_CAP } from '../src/adapters/conversation.js'
 import { CodexAdapter } from '../src/adapters/codex.js'
 import { CopilotAdapter } from '../src/adapters/copilot.js'
 import { FactoryAdapter } from '../src/adapters/factory.js'
-import { ForgeAdapter } from '../src/adapters/forge.js'
 import { GeminiAdapter } from '../src/adapters/gemini.js'
 import { OpencodeAdapter } from '../src/adapters/opencode.js'
 import { PiAdapter } from '../src/adapters/pi.js'
@@ -551,7 +550,6 @@ describe('single-JSON adapter failures', () => {
   const adapters = [
     { harness: 'amp', make: () => new AmpAdapter() },
     { harness: 'gemini', make: () => new GeminiAdapter() },
-    { harness: 'forge', make: () => new ForgeAdapter() },
   ]
 
   it.each(adapters)('$harness rejects an unreadable discovered session', async ({ harness, make }) => {
@@ -3182,27 +3180,6 @@ describe('conversation capture — single-JSON adapters', () => {
     expect(tool(spans)?.attributes['tool.name']).toBe('test-tool')
     expect(tool(spans)?.attributes.content).toBeUndefined()
     expect(tool(spans)?.attributes['output.value']).toBe('{"value":1}')
-  })
-
-  it('forge captures user.prompt + assistant text + a tool call', async () => {
-    const path = join(dir, 'x-dump.json')
-    writeFileSync(
-      path,
-      JSON.stringify({
-        conversation_id: 'c1',
-        messages: [
-          { text: { role: 'user', content: 'hello world' }, usage: {} },
-          { text: { role: 'assistant', content: 'on it', model: 'claude-opus', tool_calls: [{ name: 'test_tool', call_id: 'c1', arguments: { k: 'v' } }] }, usage: { prompt_tokens: { actual: 100 }, completion_tokens: { actual: 50 } } },
-          { tool: { name: 'test_tool', call_id: 'c1', output: { is_error: false, values: ['ok'] } }, usage: {} },
-        ],
-      }),
-    )
-    const spans = await new ForgeAdapter().parse(refFor(path, 'forge'))
-    expect(userPrompt(spans)?.attributes['content']).toBe('hello world')
-    expect(hasContent(spans, 'on it')).toBe(true)
-    expect(tool(spans)?.attributes['tool.name']).toBe('test_tool')
-    expect(tool(spans)?.attributes.content).toBeUndefined()
-    expect(tool(spans)?.attributes['output.value']).toBe('["ok"]')
   })
 })
 
