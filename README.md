@@ -270,7 +270,6 @@ not the way to integrate a system you own — for that, [emit the contract](#int
 | `qwen` (`qwen-code`) | `~/.qwen/projects/<cwd>/chats/*.jsonl` | fixture |
 | `amp` | `~/.local/share/amp/threads/T-*.json` | fixture |
 | `github-copilot` (`copilot`) | `~/.copilot/session-state/<id>/events.jsonl` | fixture |
-| `forge` (`forgecode`) | `/dump` JSON exports | fixture |
 
 Every adapter captures the conversation stored in one session file: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage.
 Claude Code, Codex, current OpenCode, Pi, Kimi, and Factory read native records through [`@tangle-network/harness-sessions`](https://github.com/tangle-network/agent-sdk/tree/main/packages/harness-sessions); traces adds conversation and workflow spans over its model and tool calls. Historical OpenCode JSON sessions remain readable through the older adapter because their IDs do not overlap the SQLite store. Kimi's wire log has no served-model field, so its model remains unknown rather than being guessed.
@@ -282,7 +281,6 @@ The Claude transcript proves turns and tool calls, but does not prove loop itera
 Codex stores each worker in a separate session file; add `--workflow` to resolve the connected coordinator and worker files.
 `github-copilot` is the one exception: its log format carries no user prompt.
 Factory stores token totals in `.settings.json`, not per turn.
-Forge reads `/dump` JSON exports; live SQLite remains unsupported.
 ACP-only bridges may not persist a local transcript.
 
 ## CLI reference

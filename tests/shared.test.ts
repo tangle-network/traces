@@ -48,6 +48,8 @@ describe('selectAdapters', () => {
   it('named harnesses resolve; an unknown one throws (fail-loud)', () => {
     expect(selectAdapters({ harnesses: ['claude-code'] })[0]!.harness).toBe('claude-code')
     expect(() => selectAdapters({ harnesses: ['nope-xyz'] })).toThrow(/unknown harness/)
+    expect(() => selectAdapters({ harnesses: ['forge'] })).toThrow(/unknown harness/)
+    expect(() => selectAdapters({ harnesses: ['forgecode'] })).toThrow(/unknown harness/)
   })
 })
 
