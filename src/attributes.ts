@@ -23,7 +23,7 @@ export const ATTR = {
    *  (`deriveSubjectKey` reads `tangle.subject.key` first). Resolves to the git
    *  remote (host/owner/repo) when readable, else the cwd path basename. */
   SUBJECT_KEY: 'tangle.subject.key',
-  /** Normalized git remote (e.g. `github.com/tangle-network/agent-dev-container`). */
+  /** Normalized git remote (e.g. `github.com/tangle-network/agent-container`). */
   GIT_REPOSITORY: 'git.repository',
   /** Current branch at conversion time. */
   GIT_BRANCH_NAME: 'git.branch',

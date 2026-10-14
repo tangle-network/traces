@@ -82,11 +82,11 @@ const ref = (id: string, cwd: string | null): SessionRef => ({
 
 describe('normalizeRemote', () => {
   it('normalizes https + scp git urls to host/owner/repo', () => {
-    expect(normalizeRemote('https://github.com/tangle-network/agent-dev-container.git')).toBe(
-      'github.com/tangle-network/agent-dev-container',
+    expect(normalizeRemote('https://github.com/tangle-network/agent-container.git')).toBe(
+      'github.com/tangle-network/agent-container',
     )
-    expect(normalizeRemote('git@github.com:tangle-network/agent-dev-container.git')).toBe(
-      'github.com/tangle-network/agent-dev-container',
+    expect(normalizeRemote('git@github.com:tangle-network/agent-container.git')).toBe(
+      'github.com/tangle-network/agent-container',
     )
     expect(normalizeRemote('https://user:tok@gitlab.com:443/a/b')).toBe('gitlab.com/a/b')
   })
@@ -111,10 +111,10 @@ describe('resolveRepoAttrs', () => {
   })
 
   it('git cwd → remote-derived subject key + git.* labels', async () => {
-    const dir = await gitRepo('git@github.com:tangle-network/agent-dev-container.git')
+    const dir = await gitRepo('git@github.com:tangle-network/agent-container.git')
     const a = await resolveRepoAttrs(dir)
-    expect(a[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/agent-dev-container')
-    expect(a[ATTR.GIT_REPOSITORY]).toBe('github.com/tangle-network/agent-dev-container')
+    expect(a[ATTR.SUBJECT_KEY]).toBe('github.com/tangle-network/agent-container')
+    expect(a[ATTR.GIT_REPOSITORY]).toBe('github.com/tangle-network/agent-container')
     expect(a[ATTR.GIT_BRANCH_NAME]).toBe('main')
     expect(typeof a[ATTR.GIT_COMMIT]).toBe('string')
     expect(a[ATTR.GIT_COMMIT]!.length).toBeGreaterThan(0)
@@ -256,7 +256,7 @@ describe('resolveSessionRepoAttrs', () => {
 
 describe('per-session repo grouping in OTLP resource attrs', () => {
   it('two sessions with different cwds get DIFFERENT tangle.subject.key in resource attributes', async () => {
-    const repoA = await gitRepo('git@github.com:tangle-network/agent-dev-container.git')
+    const repoA = await gitRepo('git@github.com:tangle-network/agent-container.git')
     const repoB = await gitRepo('https://github.com/tangle-network/traces.git')
     const ad = adapter()
 
@@ -270,7 +270,7 @@ describe('per-session repo grouping in OTLP resource attrs', () => {
     }
     const keyA = resourceKeyOf(spansA)
     const keyB = resourceKeyOf(spansB)
-    expect(keyA).toBe('github.com/tangle-network/agent-dev-container')
+    expect(keyA).toBe('github.com/tangle-network/agent-container')
     expect(keyB).toBe('github.com/tangle-network/traces')
     expect(keyA).not.toBe(keyB)
 
@@ -278,7 +278,7 @@ describe('per-session repo grouping in OTLP resource attrs', () => {
     const resA = JSON.parse(serializeSpans(spansA).trim().split('\n')[0]!).resource.attributes
     expect(resA['service.name']).toBe('claude-code')
     expect(resA['agent.name']).toBe('claude-code')
-    expect(resA['git.repository']).toBe('github.com/tangle-network/agent-dev-container')
+    expect(resA['git.repository']).toBe('github.com/tangle-network/agent-container')
   })
 
   it('deleted-cwd session falls back to the path basename in resource attrs, no git.* keys', async () => {
