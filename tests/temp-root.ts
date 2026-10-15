@@ -11,6 +11,7 @@ import { join } from 'node:path'
  */
 export default function setup(): () => void {
   const root = mkdtempSync(join(tmpdir(), 'traces-vitest-'))
-  process.env.TMPDIR = root
+  // os.tmpdir() reads TMPDIR on POSIX and TEMP or TMP on Windows.
+  for (const name of ['TMPDIR', 'TEMP', 'TMP']) process.env[name] = root
   return () => rmSync(root, { recursive: true, force: true })
 }
