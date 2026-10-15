@@ -14,6 +14,12 @@ export function parseIsoToEpochMs(ts: string): number {
 /** Parse a `--since` window: `30m` / `2h` / `7d` (relative to now) or an ISO
  *  date, → epoch ms. Throws on a malformed value (fail-loud, not silent). */
 export function parseSince(value: string): number {
+  return parseTimeBound(value, '--since')
+}
+
+/** Parse one time bound the way `--since` reads it: `30m` / `2h` / `7d` before
+ *  now, or an ISO date. `flag` names the option in the error. */
+export function parseTimeBound(value: string, flag: string): number {
   const m = value.match(/^(\d+)\s*([mhd])$/i)
   if (m) {
     const unit = m[2]!.toLowerCase()
@@ -21,6 +27,6 @@ export function parseSince(value: string): number {
     return Date.now() - Number(m[1]) * ms
   }
   const t = Date.parse(value)
-  if (Number.isNaN(t)) throw new Error(`--since: expected 30m / 2h / 7d or an ISO date, got "${value}"`)
+  if (Number.isNaN(t)) throw new Error(`${flag}: expected 30m / 2h / 7d or an ISO date, got "${value}"`)
   return t
 }

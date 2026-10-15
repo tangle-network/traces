@@ -35,12 +35,14 @@ import {
 import { ATTR, deriveHexId, type ParentConfidence } from '@tangle-network/agent-trace-contract'
 import { sessionJsonlOptions } from '../integrity.js'
 import { appendAll } from '../arrays.js'
+import { SESSION_CWD_ATTR } from '../attributes.js'
 import { isMissingJsonSource, isMissingPathError, readJsonFile } from '../json.js'
 import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
-import { claudeActor, claudePromptStartsTask, claudeRecordIsMachine } from './actor.js'
+import { claudeRecordIsMachine, claudeTypedPromptText } from '@tangle-network/harness-sessions'
+import { claudeActor, claudePromptStartsTask } from './actor.js'
 import { collectClaudeSubagentSources } from './claude-subagent-sources.js'
 import {
   bindWorkflowRuns,
@@ -131,15 +133,6 @@ const ORIGIN_RECORDED_ATTR = 'traces.claude.origin_recorded'
 
 /** Claude Code's own name for the kind of record an origin describes. */
 const ORIGIN_KIND_ATTR = 'traces.claude.origin_kind'
-
-/**
- * A slash command as the transcript stores it: the CLI wraps the line a person
- * typed in `<command-name>` and `<command-args>` (plus a `<command-message>`
- * display label it did not type). Rejoining the two recovers the typed line,
- * which is what a reader counting human turns is looking for.
- */
-const COMMAND_NAME = /<command-name>([\s\S]*?)<\/command-name>/
-const COMMAND_ARGS = /<command-args>([\s\S]*?)<\/command-args>/
 
 /**
  * The tool input field with which Claude Code's Task tool selects the agent to
@@ -590,22 +583,6 @@ function claudeActorFromOrigin(
   return fallback()
 }
 
-/**
- * The line a person typed, for a turn stored as a slash-command wrapper.
- *
- * Applied only to a turn the harness attributed to a person: the wrapper is
- * how the CLI stores what they typed, so `<command-name>` plus `<command-args>`
- * IS the text, and reporting the tags instead reports the harness's storage
- * format as the human's words. Text carrying no wrapper is returned unchanged,
- * and so is a wrapper with no command name.
- */
-function typedPromptText(text: string): string {
-  const name = COMMAND_NAME.exec(text)?.[1]?.trim()
-  if (!name) return text
-  const args = COMMAND_ARGS.exec(text)?.[1]?.trim()
-  return args ? `${name} ${args}` : name
-}
-
 /** Claude Code's `origin.kind`, when the record carries a usable one. */
 function recordedOrigin(origin: { kind?: unknown } | undefined): string | null {
   const kind = origin?.kind
@@ -893,7 +870,7 @@ function consumeClaudeEvent(
         text: event.prompt,
         isMeta: event.isMeta,
         isCompactSummary: event.isCompactSummary,
-        entrypoint: event.entrypoint,
+        entrypoint: event.entrypoint ?? undefined,
       })
       const actor = machine ? 'injected' : claudeActorFromOrigin(event.originKind, () => claudeActor({
         text: event.prompt ?? '',
@@ -912,7 +889,7 @@ function consumeClaudeEvent(
         service: SERVICE,
         agent: ctx.agent,
         step: state.step,
-        content: actor === 'human' ? typedPromptText(event.prompt) : event.prompt,
+        content: actor === 'human' ? claudeTypedPromptText(event.prompt) : event.prompt,
         contentSource: event.contentSource,
         actor,
       })
@@ -944,7 +921,7 @@ function consumeClaudeEvent(
       service: SERVICE,
       agent: ctx.agent,
       step: state.step,
-      content: actor === 'human' ? typedPromptText(event.prompt) : event.prompt,
+      content: actor === 'human' ? claudeTypedPromptText(event.prompt) : event.prompt,
       contentSource: event.contentSource,
       actor,
     })
@@ -1383,11 +1360,16 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     let active = taskScope === 'all'
     let offeredTools: string[] | undefined
     let runResult: { failed: boolean; subtype: string } | undefined
+    // The session's own working directory: the first one its records state.
+    // Read from every record, selected task or not, because it describes the
+    // session rather than one turn of it.
+    let recordedCwd: string | undefined
 
     for await (const event of readJsonl<ClaudeEvent>(ref.path, sessionJsonlOptions(ref, options))) {
       options.signal?.throwIfAborted()
       const eventSessionId = event.sessionId ?? event.session_id
       if (!discoveredTraceId && eventSessionId) discoveredTraceId = eventSessionId
+      if (!recordedCwd && typeof event.cwd === 'string' && event.cwd.length > 0) recordedCwd = event.cwd
       if (event.type === 'system' && event.subtype === 'init' && Array.isArray(event.tools)) {
         offeredTools = modelFacingToolNames(
           event.tools.filter((t): t is string => typeof t === 'string'),
@@ -1458,6 +1440,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     if (offeredTools) {
       root.attributes[TOOL_DEFINITIONS_ATTR] = JSON.stringify(offeredTools.map((name) => ({ type: 'function', name })))
     }
+    if (recordedCwd) root.attributes[SESSION_CWD_ATTR] = recordedCwd
     if (runResult) {
       root.attributes[RUN_STATUS_ATTR] = runResult.failed ? 'failed' : 'completed'
       root.status = runResult.failed ? { code: 'ERROR', message: `the run ended with ${runResult.subtype}` } : { code: 'OK' }

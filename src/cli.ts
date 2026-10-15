@@ -14,6 +14,7 @@
  *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
  *   traces ask --harness codex --session <id> --question "..." [--questions q.json] [--dir <dir>]
  *   traces facts [--harness codex] [--last 5] [--format json|text] [--out facts.json]
+ *   traces facts --harness claude-code --since 7d [--until 2026-10-14] [--all]
  *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
  *   traces index   [--harness claude-code] [--last 20] --out session-index.json
  *   traces bundle  --harness claude-code --session <id|path> --out <dir>
@@ -118,12 +119,12 @@ import type {
   UnreadableSourceRows,
 } from './otlp-input.js'
 import { readOtlpInput } from './otlp-input.js'
-import { buildSessionFactsReport, renderSessionFacts } from './session-facts.js'
+import { createSessionFactsReportBuilder, renderSessionFacts, type SessionFactsReport } from './session-facts.js'
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
 import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
-import { locateSessions, parseSession } from './session-source.js'
+import { locateSessions, parseSession, scanSessions } from './session-source.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
 import {
   type SessionWorkflowIssue,
@@ -137,7 +138,7 @@ import { serveTraceMcp } from './mcp.js'
 import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
-import { parseSince } from './time.js'
+import { parseSince, parseTimeBound } from './time.js'
 import { explainTraceContract } from '@tangle-network/agent-eval'
 import {
   AmbiguousTraceInputError,
@@ -177,6 +178,8 @@ interface Args {
   session?: string
   cwd?: string
   since?: string
+  /** facts: exclusive upper bound of the time window. */
+  until?: string
   out?: string
   dir?: string
   /** OTLP-JSONL file or directory to READ. */
@@ -292,6 +295,7 @@ function parseArgs(argv: string[]): Args {
       case '--revision': a.revision = next(); break
       case '--concurrency': a.concurrency = Number(next()); break
       case '--since': a.since = next(); break
+      case '--until': a.until = next(); break
       case '--out': a.out = next(); break
       case '--dir': a.dir = next(); break
       case '--otlp': a.otlp = next(); break
@@ -436,6 +440,12 @@ function validateViewSelection(args: Args): Args {
   )
 }
 
+/** `--until` closes the facts time window; no other command reads a window's upper bound. */
+function validateUntilSelection(args: Args): Args {
+  if (args.until === undefined || args.command === 'facts') return args
+  throw new Error(`--until is not supported by ${args.command}; it bounds the facts window (traces facts --since <t> --until <t>)`)
+}
+
 function validateWorkflowSelection(args: Args): Args {
   if (!args.workflow && !args.latestTurn) return args
   if (!WORKFLOW_COMMANDS.has(args.command)) {
@@ -474,7 +484,7 @@ function adaptersFor(args: Args): HarnessTraceAdapter[] {
 }
 
 async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; refs: SessionRef[] }[]> {
-  const sinceMs = args.since ? Date.parse(args.since) : undefined
+  const sinceMs = args.since ? parseSince(args.since) : undefined
   const out: { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] = []
   for (const adapter of adaptersFor(args)) {
     let refs = await locateSessions(adapter, { cwd: args.cwd, sinceMs })
@@ -1060,22 +1070,74 @@ async function cmdBundleView(args: Args): Promise<void> {
  * the short readable form. Every fact names the span ids it came from, so any
  * number here can be checked with `traces export` or a trace tool.
  *
- * Exits non-zero when a selected session cannot be read: `collectSpans` throws,
- * and an unreadable session must never be reported as a session with no facts.
+ * Without a window, exits non-zero when a selected session cannot be read:
+ * `collectSpans` throws, and an unreadable session must never be reported as a
+ * session with no facts. With `--since`/`--until` the selection is every
+ * session with a record in the window, read one at a time; a session that
+ * cannot be read is named in `selection.unreadSessions` with its reason instead
+ * of ending a run over hundreds of sessions.
  */
 async function cmdFacts(args: Args): Promise<void> {
   const format = args.format ?? 'json'
   if (format !== 'json' && format !== 'text') {
     throw new Error(`unknown facts format "${format}" (expected json or text)`)
   }
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
-  warnIncompleteWorkflow(collected.workflow)
-  const report = buildSessionFactsReport(collected.spans, { harness: collected.harness, includeContent: !args.noContent })
+  const window = args.since !== undefined || args.until !== undefined
+    ? {
+        ...(args.since !== undefined ? { since: new Date(parseSince(args.since)).toISOString() } : {}),
+        ...(args.until !== undefined ? { until: new Date(parseTimeBound(args.until, '--until')).toISOString() } : {}),
+      }
+    : undefined
+  const builder = createSessionFactsReportBuilder({ includeContent: !args.noContent, window })
+  let report: SessionFactsReport
+  const discoversWindow = window !== undefined &&
+    !args.session && !args.otlp && !args.input && !args.sourceBundle && !args.workflow
+  if (discoversWindow) {
+    // Every session modified since the window opened, newest first, parsed and
+    // reduced to its facts one at a time: a week of sessions is gigabytes of
+    // spans, and the sheet needs only one session's at once. A file last
+    // written before `since` holds no record after it.
+    const harnesses = new Set<string>()
+    for await (const scanned of scanSessions({
+      adapters: adaptersFor(args),
+      cwd: args.cwd,
+      sinceMs: window.since === undefined ? undefined : Date.parse(window.since),
+      last: args.last > 0 ? args.last : undefined,
+      taskScope: args.latestTurn ? 'latest' : 'all',
+      onError: (error, ref) => {
+        if (!ref) throw error
+        builder.addUnread({
+          sessionId: ref.sessionId,
+          traceId: null,
+          source: ref.path,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+      },
+    })) {
+      harnesses.add(scanned.adapter.harness)
+      builder.add(scanned.spans)
+    }
+    report = { ...builder.build(), harness: [...harnesses].join('+') || args.harness }
+  } else {
+    const collected = await collectSpans(args)
+    if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+    warnIncompleteWorkflow(collected.workflow)
+    builder.add(collected.spans)
+    report = { ...builder.build(), harness: collected.harness }
+  }
+  const unreadInWindow = report.selection?.unreadSessions ?? []
+  if (unreadInWindow.length > 0) {
+    const named = unreadInWindow.slice(0, 3).map((entry) => entry.source ?? entry.sessionId ?? entry.traceId)
+    process.stderr.write(
+      `warning: ${unreadInWindow.length} session(s) could not be read; each is named with its reason in ` +
+        `selection.unreadSessions (${named.join(', ')}${unreadInWindow.length > named.length ? ', …' : ''})\n`,
+    )
+  }
   // A session that yielded no record spans was not read: only its root, and any
   // integrity receipt for the bytes that failed to parse. Printing a sheet of
   // zeros for it would state, in the sheet's own voice, that the session did
-  // nothing — which is the one thing the sheet must never do.
+  // nothing — which is the one thing the sheet must never do. A windowed report
+  // never holds one: it names such a session in selection.unreadSessions.
   const unread = report.sessions.filter((facts) => facts.recordSpans === 0)
   if (unread.length > 0) {
     throw new Error(
@@ -2038,10 +2100,15 @@ Commands:
             sessions: tool calls excluding synthesized spans, subagent spawns
             with task names, human turns in order, the final message per task,
             changed paths, first/last record times, the harness token total, and
-            the first failure by agent-eval's fixed precedence (or none).
+            the first failure by agent-eval's fixed precedence (or none), the
+            session's recorded working directory, and for each human turn the
+            agent message it answered.
             No model call, no budget, $0. Every fact names the span ids it came
             from; a fact the spans cannot support is null with its reason.
-            --format json (default) or text (exit 1 when a session cannot be read)
+            --since/--until select every session with a record in the window and
+            count only that window's turns; a session that cannot be read is named
+            in selection.unreadSessions. Without a window: exit 1 when a selected
+            session cannot be read. --format json (default) or text
   skills    Count skill use across Claude Code, Codex, and Kimi Code sessions on this
             machine, and list installed skills with no use in the window.
             Incremental: a run reads only transcript bytes appended since the
@@ -2117,7 +2184,11 @@ Options:
                    accepted vs rejected. Rolls up when the dir holds many runs.
                    analyze reads Runtime journals and recorded startup failures.
                    watch reads a live Runtime journal and OTLP span files.
-  --since <t>      upload: window, 30m / 2h / 7d or an ISO date (default 24h); analyze: ISO cutoff
+  --since <t>      30m / 2h / 7d (before now) or an ISO date. Selection commands read
+                   sessions modified at or after it; upload: its window (default 24h).
+                   facts: opens a time window and selects EVERY session with a record
+                   in it, not only the newest; its turn facts keep only turns inside it
+  --until <t>      facts: closes the window (exclusive), same forms as --since
   --out <path>     Write report to a file
   --dir <path>     improve/ask: write artifacts to this directory
   --otlp <file|dir>  READ OTLP-JSONL emitted by any system, skipping the adapters.
@@ -2253,7 +2324,7 @@ async function main(): Promise<void> {
     return
   }
   const args = validateOtlpSelection(
-    validateViewSelection(validateWorkflowSelection(applyCurrentSessionSelection(parsedArgs))),
+    validateViewSelection(validateWorkflowSelection(validateUntilSelection(applyCurrentSessionSelection(parsedArgs)))),
   )
   switch (args.command) {
     case 'help':

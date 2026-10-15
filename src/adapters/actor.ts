@@ -13,6 +13,7 @@
  *      extract.py's regexes verbatim. The user-reaction analyst keys off this.
  */
 
+import { claudeRecordIsMachine } from '@tangle-network/harness-sessions'
 import type { Actor } from './conversation.js'
 
 /** Slash-command / injected-template wrappers Claude Code stamps around a turn. */
@@ -72,41 +73,6 @@ const SYNTHETIC_MARKERS = [
  *  prompt, not a person. Ported verbatim from extract.py AGENT_PROMPT. */
 const AGENT_PROMPT =
   /^(you are\b|you're\b|read[- ]only\b|stop now\b|your task\b|your job\b|review the\b|audit\b|analyze the\b|return (only|a |the )|here is the\b|context:|task:|do not (revert|edit|touch)|work only in\b|you have been\b|act as\b|operate the\b|goal:|objective:)/i
-
-/**
- * Records Claude Code writes that no person typed, matched at the start of the
- * record so a typed message that merely mentions one is not swallowed. These win
- * over a recorded `human` origin: the CLI stamps its own command output with one.
- * A typed slash command (`<command-name>`) or `!` bash line (`<bash-input>`) is
- * not here: the person typed it.
- */
-const CLAUDE_MACHINE_PREFIXES = [
-  '<local-command-caveat>',
-  '<local-command-stdout>',
-  '<local-command-stderr>',
-  'Caveat: The messages below',
-  '<task-notification>',
-  '<bash-stdout>',
-  '<bash-stderr>',
-  '<user-prompt-submit-hook>',
-  '[Request interrupted by user',
-] as const
-
-/**
- * Whether a Claude Code user record is the harness's, whatever its recorded
- * origin says: an interrupt, local-command or bash output, a hook wrapper, a meta or compaction-summary entry, or any record of a session
- * the SDK launched (`entrypoint: "sdk-cli"`).
- */
-export function claudeRecordIsMachine(args: {
-  text: string
-  isMeta?: boolean
-  isCompactSummary?: boolean
-  entrypoint?: string | null
-}): boolean {
-  if (args.isMeta === true || args.isCompactSummary === true || args.entrypoint === 'sdk-cli') return true
-  const text = args.text.trimStart()
-  return CLAUDE_MACHINE_PREFIXES.some((prefix) => text.startsWith(prefix))
-}
 
 function textIsCmdOrInject(s: string): boolean {
   return CMD_MARKERS.some((m) => s.includes(m)) || INJECT_MARKERS.some((m) => s.includes(m))
@@ -184,7 +150,7 @@ export function claudeActor(args: {
   isFirstUserTurn?: boolean
 }): Actor {
   if (args.isSidechain === true) return 'subagent-spawn'
-  if (claudeRecordIsMachine(args)) return 'injected'
+  if (claudeRecordIsMachine({ ...args, entrypoint: args.entrypoint ?? undefined })) return 'injected'
   if (args.userType != null && args.userType !== 'external') return 'injected'
   // Harness-injected wrappers (task notifications, continuation summaries, slash
   // commands) arrive AS `external` user turns, so check the text before trusting

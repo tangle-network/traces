@@ -18,6 +18,7 @@ import {
 } from '@tangle-network/harness-sessions'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
+import { SESSION_CWD_ATTR } from '../attributes.js'
 import type { OtlpSpan } from '../otlp.js'
 import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
@@ -402,6 +403,8 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     const root = spans[0]!
     root.attributes['service.name'] = this.harness
     root.attributes['traces.session.role'] = session.parentNativeSessionId ? 'child' : 'operator'
+    // The directory the shared reader read from the session's own records.
+    if (session.cwd) root.attributes[SESSION_CWD_ATTR] = session.cwd
     if (session.parentNativeSessionId) root.attributes['traces.parent_session_id'] = session.parentNativeSessionId
     if (session.children.length > 0) {
       root.attributes['traces.child_session_ids'] = JSON.stringify(session.children.map((child) => child.nativeSessionId))

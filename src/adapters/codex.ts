@@ -20,6 +20,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
+import { SESSION_CWD_ATTR } from '../attributes.js'
 import { sessionJsonlOptions } from '../integrity.js'
 import { isMissingPathError } from '../json.js'
 import { readJsonl, takeJsonl } from '../jsonl.js'
@@ -111,6 +112,10 @@ const CODEX_TOTAL_TOKENS_SOURCE = 'codex.token_count.info.total_token_usage'
 /** Carry a reported counter only when it is a usable non-negative number. */
 function reportedCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /** Convert Codex's readable span identities to fixed-width OTLP wire IDs. */
@@ -879,6 +884,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
       }
     }
     const traceId = meta?.payload?.id ?? ref.sessionId
+    // The working directory Codex recorded for the session, as the shared
+    // reader reads it: the session_meta cwd, or none.
+    const recordedCwd = nonEmpty(meta?.payload?.cwd)
     // `codex exec` runs a script's prompt: no person typed the first turn.
     const scriptLaunched = meta?.payload?.originator === 'codex_exec' || (meta?.payload?.source as unknown) === 'exec'
     const sessionRole = parentSessionId || meta?.payload?.thread_source === 'subagent' ? 'child' : 'operator'
@@ -899,6 +907,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
         // Keep the source session identity searchable after the wire id is normalized.
         'tangle.sessionId': traceId,
         'traces.session.role': sessionRole,
+        ...(recordedCwd ? { [SESSION_CWD_ATTR]: recordedCwd } : {}),
         'traces.codex.task_scope': options.taskScope === 'latest'
           ? 'latest'
           : options.taskScope === 'turn'

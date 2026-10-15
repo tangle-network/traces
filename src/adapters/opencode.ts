@@ -13,6 +13,7 @@ import { sourceOf } from '../source-location.js'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { SESSION_CWD_ATTR } from '../attributes.js'
 import { isMissingJsonSource, isMissingPathError, listJsonFiles, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
 import { span } from '../otlp.js'
@@ -33,6 +34,8 @@ interface OcMessage {
     cache?: { read?: number; write?: number }
   }
   time?: { created?: number; completed?: number }
+  /** On an assistant message: the directory the session ran in, and its project root. */
+  path?: { cwd?: unknown; root?: unknown }
 }
 
 interface OcPart {
@@ -133,6 +136,10 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
       messages.push(await readJsonFile<OcMessage>(join(ref.path, f), options))
     }
     messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+    // The session directory as the harness recorded it on its own messages.
+    const recordedCwd = messages
+      .map((message) => message.path?.cwd)
+      .find((cwd): cwd is string => typeof cwd === 'string' && cwd.length > 0)
 
     const spans: OtlpSpan[] = [
       span({
@@ -145,6 +152,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
         endTime: isoOf(messages.at(-1)?.time?.completed ?? messages.at(-1)?.time?.created),
         service: SERVICE,
         agent: SERVICE,
+        ...(recordedCwd ? { extra: { [SESSION_CWD_ATTR]: recordedCwd } } : {}),
       }),
     ]
 
