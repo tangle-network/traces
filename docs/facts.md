@@ -1,0 +1,145 @@
+# Session facts
+
+[traces](../README.md#docs) › Session facts
+
+`traces facts` prints the deterministic session-facts sheet: the answers a session audit needs first, computed straight from the spans.
+No model call, no engine, no budget — it costs $0 and always returns the same sheet for the same spans.
+
+```bash
+traces facts --harness codex --session <id>                 # JSON on stdout
+traces facts --harness codex --last 5 --format text         # the short readable form
+traces facts --otlp spans.otlp.jsonl --out facts.json
+traces facts --harness claude-code --since 7d               # every session with a record in the last week
+traces facts --all --since 2026-10-14 --until 2026-10-15    # one day, across every harness
+```
+
+## Time window
+
+`--since <t>` and `--until <t>` open a half-open time window `[since, until)`; each takes `30m`/`2h`/`7d` before now or an ISO date, and either may be left open.
+With a window, `facts` selects **every** session with a record that starts or ends inside it, not only the newest (`--last <n>` still caps it to the newest `n` per harness, and `--session` or `--otlp` still name the input).
+Sessions are read one at a time, and a session file last modified before `since` is not read, because it cannot hold a later record.
+Within a selected session, `humanTurns`, `excludedTurns` and `turnsByActor` keep only turns that started inside the window, so a one-day run counts only that day's turns; every other fact covers the whole session.
+The report's `selection` states the window, both rules, the sessions read whose records all fell outside it (`outsideWindow`), and every session that could not be read (`unreadSessions`, each with its reason).
+A report built without a window has `selection: null`.
+
+## What it states
+
+| Fact | What it is |
+|---|---|
+| `toolCalls` | TOOL spans **this session's agent** actually invoked. Synthesized lifecycle spans are excluded and counted in `synthesizedToolSpans`, so the total is not high by the number of subagents; calls a spawned subagent made are excluded and counted in `subagentToolSpans` |
+| `toolCallsByName` | the same calls by tool name, so a category decision is the reader's, not a guess |
+| `subagentToolSpans` | TOOL spans excluded because a subagent, not this agent, made the call. Zero on a trace that carries no subagent records |
+| `subagents` | every subagent-spawning call with the task name the adapter recorded |
+| `pullRequests` | the pull requests the commands created and merged, each named by number or head branch, with the command span and how the identity was joined. Scanned the way a shell reads the script, so a `gh pr create` inside a heredoc body is not a command that ran |
+| `cwd` | the working directory the harness recorded for the session (`traces.session.cwd` on the root span): Claude Code's first record `cwd`, Codex's `session_meta` cwd, Pi's session header, OpenCode's session directory (the older JSON store: its messages' `path.cwd`), Factory's `session_start`. Never decoded from a directory name or inferred from paths; `null` with the reason when the source names none or its adapter does not read one |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable. Each turn's `answered` is the last message this session's own agent wrote before it (not a subagent's, not inherited history), clipped to 1,500 characters with a `… [+N chars]` marker, with its span in `answeredSpanId`; `null` when the agent had written no text yet in the spans read (a `--latest-turn` read starts at the latest task, so its first turn has none) |
+| `excludedTurns` | every `user.prompt` turn `humanTurns` left out, grouped by the reason, with the span ids |
+| `turnsByActor` | every `user.prompt` turn by actor, so the human filter is checkable |
+| `finalMessages` | the last message of the session's own agent, and of each subagent task, kept apart |
+| `changedFiles` | paths the harness recorded for the changes it applied, plus paths named by patch headers and file-editing tool arguments, with the operation |
+| `firstRecordAt` / `lastRecordAt` | the earliest span start and latest span end among this session's own records — a subagent that outlives the session does not stretch its window |
+| `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
+| `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
+| `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none` — spans were observed and none of them failed. When every span is UNSET (a capture that failed before any status was written), or a session has no records of its own at all (every span is `traces.span.subagent` — spawned work folded into this trace, with nothing this agent recorded itself), the status is `unknown`, not `none`: the record does not say whether the run failed. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own, and is `unknown` rather than `agent` when no evidence names the agent |
+
+Three rules hold for every field:
+
+- **Every fact is about this session's own agent.** Some harnesses fold a spawned agent's transcript into the parent's trace, so a trace can carry both what this agent did and what a child it spawned did (Claude Code writes one file per subagent under the session directory and the adapter reads them all). The child's work is named in `subagents` and counted in `subagentToolSpans`; it is never added to the parent's totals.
+
+- **Every fact names its span ids.** `spanIds` lists the spans the value was computed from, so any number here can be opened and checked. The sheet itself is not a span and cannot be cited.
+- **A fact the spans cannot support is `null` with its reason.** It is never guessed, and never a silent zero. `partial` marks a measured value that is known to be incomplete — a truncated patch, or a list above the entry cap.
+
+## Exit status
+
+Without a window, `facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
+With a window, a session that cannot be read — the parser failed, or no record could be read — is named in `selection.unreadSessions` with its reason and a warning on stderr, and the run still exits 0 with the sessions it could read; it is never counted as a session with no turns.
+
+## Why it exists
+
+The trace tools are bounded, and above their bounds they answer a different question than the one asked.
+`viewTrace` returns a `≤20`-entry span-name histogram once a trace exceeds `perCallByteCeiling` (150,000 bytes).
+`countTraces` counts traces, not spans.
+`viewSpans` needs span ids the reader does not have yet.
+`searchTrace` stops at 500 hits.
+
+A model asked "how many tool calls ran?" therefore adds up a capped histogram and decides by eye which names belong.
+Measured over twelve private audit sessions, the model-backed analyst arm scored a deterministic mean of **0.389**.
+Extracting the same answers mechanically from the OTLP spans those runs already wrote scored **0.858** — the facts were present and exact the whole time.
+The sheet is that extraction, made part of the tool.
+
+## Pull requests
+
+The command spans carry the script, the exit code and the output.
+`pullRequests` scans each script the way a shell would, so a `gh pr create` inside a heredoc body or a commit message is not counted as a command that ran.
+A pull request is named by its number when the command or an output that joins to it shows one, and by its head branch when neither does.
+A create whose stdout was redirected away takes the number a later output states for the same branch on the same line, and names the span that stated it.
+A failed `git push && gh pr create` counts only when the output shows `gh` itself answering; otherwise the shell never reached it.
+A trace whose spans carry no executed command returns `null` with that reason, because "no pull requests" and "the spans cannot say" are different answers.
+
+## Human turns
+
+A user message is one the human typed into this session.
+Three filters run in order, and each excluded span is listed in `excludedTurns` with its reason, never silently dropped:
+
+- history the session carries but did not receive — the prefix a fork copies from its parent, and the turns a compaction replays;
+- turns whose actor is not a person — an instruction file, an environment-context block, a system reminder, a subagent notification, a turn-aborted marker, or a skill or slash-command expansion;
+- a second record of the turn before it, meaning the same text at the same instant with no model call, tool call or assistant message between them.
+
+For Codex the actor comes from the harness's own per-item labelling (`internal_chat_message_metadata_passthrough.content_item_kinds`) whenever the record carries it: a message is the person's exactly when every item in it is a `user.` kind.
+
+## Measurements and `--no-content`
+
+The same facts sheet includes observed tool outcomes, captured input/output byte
+volumes, call-to-result intervals, compaction boundaries and available context
+sizes, spawn intervals, and existing skill invocation/document-read evidence.
+Each measurement carries coverage; absent telemetry remains unknown.
+`facts --no-content` withholds conversation (including each turn's `answered` text),
+command, changed-file, working-directory and assignment text while retaining
+measurement metadata. This is a local metadata view, not a
+share-safety certificate.
+
+## Prepared context for analysts
+
+The same sheet is supplied to the model-backed analysts before their first model call, through `TraceAnalystDefinition.prepareContext`.
+It reaches the built-in kinds run by `analyze --llm`, `investigate`, and `improve`, and it reaches every `traces ask` question inside `PREPARED CONTEXT:`.
+
+- The sheet is bounded at `PREPARED_CONTEXT_BYTE_CEILING` (30,000 bytes), a fifth of the `perCallByteCeiling` of 150,000 the trace tools work to, so the rest of the budget stays available for the tool calls the model still makes.
+- When the sheet does not fit, fields are shed from the largest downward and the shed is listed in `omitted_fields`. The tool-call counts are the last facts to go.
+- Receiving the sheet changes an analyst's behavior, so its version carries `SESSION_FACTS_VERSION_SUFFIX` (`+session-facts.` and the sheet's `measurementVersion`). `createTraceAnalyst` records `prepare_context` in the exact-run identity, and a changed prepared context must not hide behind an unchanged version.
+- The sheet is not evidence. Citations still resolve against the raw spans, which is why every fact names its span ids rather than asking the model to trust the sheet.
+
+Pass `sessionFactsContext: false` to `analyzeSpans` to run an analyst without it.
+
+## SDK
+
+```ts
+import { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from '@tangle-network/traces'
+
+const [facts] = computeSessionFacts(spans)
+console.log(facts.toolCalls.value, facts.toolCalls.spanIds)
+console.log(renderSessionFacts(buildSessionFactsReport(spans)))
+```
+
+SDK consumers use `buildSessionFactsReport(spans, { includeContent: false })`.
+Pass `window: { since, until }` (ISO bounds) for the windowed report `facts --since/--until` prints, and use
+`createSessionFactsReportBuilder(options)` (`add(spans)`, `addUnread(...)`, `build()`) to build it one session at a time.
+Cache by `measurementVersion` and `sourceDigest`; `evidenceThrough` is the latest
+recorded endpoint, not current liveness. Computing the sheet parses the supplied
+spans; returning a stored sheet needs no model call or trace scan. Semantic
+judgments remain attributed analyst results.
+
+The SDK also accepts verified retained captures through
+`parseRetainedSession({ harness, nativeSessionId, files, signal? })`.
+Pass files as `{ path, content }` with their original relative layout.
+Runtime or the caller owns custody, digest verification and capture completeness.
+The reader uses existing adapters and selects a file only when native records
+establish the supplied session identity.
+It does not inspect the host session catalog or infer identity from filenames.
+Directory-only stores and formats without a recorded native identity remain unavailable.
+The returned source files, duplicate snapshots and unselected files explain the selection.
+Identical or append-only copies count once; divergent histories remain unavailable.
+Parsing is bounded to 1024 text files, 16 MiB per file, and 64 MiB total.
+No model calls occur.
+Call `buildSessionFactsReport(selection.spans, { includeContent: false })` to
+withhold native bodies from the resulting facts.
+The reader itself returns spans containing native content, for local trusted consumers only.
