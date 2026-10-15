@@ -6,8 +6,9 @@ content itself — see Ownership.
 
 ## Read for the task
 
-- For CLI commands, flags, and the SDK export table, read [README.md](README.md) — it is the source
-  of truth for both; do not duplicate command inventories here.
+- For CLI commands and flags, read [docs/cli.md](docs/cli.md); for the SDK export table, read
+  [docs/sdk.md](docs/sdk.md). They are the source of truth for both; do not duplicate command inventories
+  here. [README.md](README.md) stays a short front page that links to one guide per task.
 - For the analyst engine (built-in vs `--llm` vs external engines like HALO/Hodoscope/Prime), read
   [docs/trace-analysts.md](docs/trace-analysts.md).
 - For executed-replay proofs of a finding (`replay-verify`, `verify-findings`), read
@@ -42,7 +43,8 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
   inside. A `links` entry is what caused it (e.g. a verdict that triggered a retry round). Never encode
   a causal edge as a parent pointer — it claims a nesting that never existed and cannot round-trip.
 - **Exit codes are a stable API.** `validate`/`check`/`diff` scripts and CI gates branch on exact exit
-  codes (see the tables in README.md). Do not repurpose a code's meaning; add a new one only alongside a
+  codes (see the tables in [docs/integrate.md](docs/integrate.md), [docs/check.md](docs/check.md),
+  [docs/diff.md](docs/diff.md) and [docs/upload.md](docs/upload.md)). Do not repurpose a code's meaning; add a new one only alongside a
   major-version note.
 - **Nothing on the ingest path is repaired or invented.** A span with an unreadable timestamp is
   reported and excluded from analysis, never given a synthesized value — a repaired value would put
@@ -83,5 +85,5 @@ pnpm check:package  # proves the packed npm tarball actually contains the `trace
 pnpm run verify:contracts-corpus   # real-trace corpus that CI runs traces check against
 ```
 
-`pnpm bench:audit` (see [Audit benchmark](README.md#audit-benchmark)) is a separate, hand-run
+`pnpm bench:audit` (see [Audit benchmark](docs/develop.md#audit-benchmark)) is a separate, hand-run
 comparison; it is not part of the standard gate.
