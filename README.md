@@ -295,6 +295,7 @@ traces investigate --all --last 10 --out report.md  # explicit investigation ali
 traces improve --all --last 10 --dir .traces/improvement
 traces ask --harness codex --session <id> --question "Which commands failed?"
 traces facts --harness codex --session <id>        # the deterministic facts sheet, $0
+traces facts --all --since 2026-10-14 --until 2026-10-15  # every session with a record that day, that day's turns
 traces skills --since 30d                          # skill use across every local session, incremental, $0
 traces diff  run-a.otlp.jsonl run-b.otlp.jsonl      # where two runs of one task first diverge
 traces mcp   --otlp spans.otlp.jsonl                # read-only trace tools for an MCP client
@@ -347,7 +348,8 @@ See [Replay verification](./docs/replay-verify.md) for setup, semantics, and hon
 | `--workflow` | Expand selected files through stable parent and child session IDs |
 | `--max-workflow-sessions <n>` | Stop workflow expansion before parsing more than `n` files; default `100` |
 | `--cwd <dir>` | Filter by working directory |
-| `--since <t>` | `upload`: window, `30m`/`2h`/`7d` or ISO (default 24h); `analyze`: ISO cutoff |
+| `--since <t>` | `30m`/`2h`/`7d` before now, or an ISO date. Commands that select sessions read those modified at or after it; `upload`: its window (default 24h); `facts`: opens a time window — see [Session facts](#session-facts) |
+| `--until <t>` | `facts`: closes the time window (exclusive), same forms as `--since` |
 | `--out <path>` | Write the report to a file |
 | `--dir <path>` | `improve`: write the full artifact pack to this directory; `ask`: write `answers.json` + `report.md` there |
 | `--otlp <file\|dir>` | **READ** OTLP-JSONL from any system, skipping the adapters; a directory reads the OTLP files under it (only `otlp/` when the producer made one) and names the JSONL that is not OTLP. `validate`, `check`, `analyze`, `investigate`, `improve`, `ask`, `stream` |
@@ -590,11 +592,14 @@ The same facts sheet includes observed tool outcomes, captured input/output byte
 volumes, call-to-result intervals, compaction boundaries and available context
 sizes, spawn intervals, and existing skill invocation/document-read evidence.
 Each measurement carries coverage; absent telemetry remains unknown.
-`facts --no-content` withholds conversation, command, changed-file and assignment
-text while retaining measurement metadata. This is a local metadata view, not a
+`facts --no-content` withholds conversation (including each turn's `answered` text),
+command, changed-file, working-directory and assignment text while retaining
+measurement metadata. This is a local metadata view, not a
 share-safety certificate.
 
 SDK consumers use `buildSessionFactsReport(spans, { includeContent: false })`.
+Pass `window: { since, until }` (ISO bounds) for the windowed report `facts --since/--until` prints, and use
+`createSessionFactsReportBuilder(options)` (`add(spans)`, `addUnread(...)`, `build()`) to build it one session at a time.
 Cache by `measurementVersion` and `sourceDigest`; `evidenceThrough` is the latest
 recorded endpoint, not current liveness. Computing the sheet parses the supplied
 spans; returning a stored sheet needs no model call or trace scan. Semantic
@@ -608,7 +613,16 @@ No model call, no engine, no budget — it costs $0 and always returns the same 
 traces facts --harness codex --session <id>                 # JSON on stdout
 traces facts --harness codex --last 5 --format text         # the short readable form
 traces facts --otlp spans.otlp.jsonl --out facts.json
+traces facts --harness claude-code --since 7d               # every session with a record in the last week
+traces facts --all --since 2026-10-14 --until 2026-10-15    # one day, across every harness
 ```
+
+`--since <t>` and `--until <t>` open a half-open time window `[since, until)`; each takes `30m`/`2h`/`7d` before now or an ISO date, and either may be left open.
+With a window, `facts` selects **every** session with a record that starts or ends inside it, not only the newest (`--last <n>` still caps it to the newest `n` per harness, and `--session` or `--otlp` still name the input).
+Sessions are read one at a time, and a session file last modified before `since` is not read, because it cannot hold a later record.
+Within a selected session, `humanTurns`, `excludedTurns` and `turnsByActor` keep only turns that started inside the window, so a one-day run counts only that day's turns; every other fact covers the whole session.
+The report's `selection` states the window, both rules, the sessions read whose records all fell outside it (`outsideWindow`), and every session that could not be read (`unreadSessions`, each with its reason).
+A report built without a window has `selection: null`.
 
 | Fact | What it is |
 |---|---|
@@ -617,7 +631,8 @@ traces facts --otlp spans.otlp.jsonl --out facts.json
 | `subagentToolSpans` | TOOL spans excluded because a subagent, not this agent, made the call. Zero on a trace that carries no subagent records |
 | `subagents` | every subagent-spawning call with the task name the adapter recorded |
 | `pullRequests` | the pull requests the commands created and merged, each named by number or head branch, with the command span and how the identity was joined. Scanned the way a shell reads the script, so a `gh pr create` inside a heredoc body is not a command that ran |
-| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable |
+| `cwd` | the working directory the harness recorded for the session (`traces.session.cwd` on the root span): Claude Code's first record `cwd`, Codex's `session_meta` cwd, Pi's session header, OpenCode's session directory (the older JSON store: its messages' `path.cwd`), Factory's `session_start`. Never decoded from a directory name or inferred from paths; `null` with the reason when the source names none or its adapter does not read one |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable. Each turn's `answered` is the last message this session's own agent wrote before it (not a subagent's, not inherited history), clipped to 1,500 characters with a `… [+N chars]` marker, with its span in `answeredSpanId`; `null` when the agent had written no text yet in the spans read (a `--latest-turn` read starts at the latest task, so its first turn has none) |
 | `finalMessages` | the last message of the session's own agent, and of each subagent task, kept apart |
 | `changedFiles` | paths the harness recorded for the changes it applied, plus paths named by patch headers and file-editing tool arguments, with the operation |
 | `firstRecordAt` / `lastRecordAt` | the earliest span start and latest span end among this session's own records — a subagent that outlives the session does not stretch its window |
@@ -631,7 +646,8 @@ Three rules hold for every field:
 - **Every fact names its span ids.** `spanIds` lists the spans the value was computed from, so any number here can be opened and checked. The sheet itself is not a span and cannot be cited.
 - **A fact the spans cannot support is `null` with its reason.** It is never guessed, and never a silent zero. `partial` marks a measured value that is known to be incomplete — a truncated patch, or a list above the entry cap.
 
-`facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
+Without a window, `facts` exits non-zero when a selected session cannot be read at all: a session that produced no record spans would otherwise print a sheet of zeros stating, in the sheet's own voice, that the session did nothing.
+With a window, a session that cannot be read — the parser failed, or no record could be read — is named in `selection.unreadSessions` with its reason and a warning on stderr, and the run still exits 0 with the sessions it could read; it is never counted as a session with no turns.
 
 The same sheet reaches the model-backed analysts as prepared context, before their first model call — see [Trace analysts](docs/trace-analysts.md#session-facts-as-prepared-context).
 

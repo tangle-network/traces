@@ -57,7 +57,7 @@ import {
   isSubagentSpan,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { indexSessionIdsByTrace } from './attributes.js'
+import { indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
 
@@ -70,11 +70,30 @@ import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js
  * deltas, which is a different (and smaller) number.
  */
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '3'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '4'
+
+/**
+ * A half-open time window: a time `t` is inside when `since <= t < until`.
+ * Either bound may be absent, which leaves that side open.
+ */
+export interface SessionFactsWindow {
+  /** ISO-8601 lower bound, inclusive. */
+  readonly since?: string
+  /** ISO-8601 upper bound, exclusive. */
+  readonly until?: string
+}
 
 export interface SessionFactsOptions {
   /** Defaults to true for compatibility. False withholds conversation, commands, paths and assignment text. */
   readonly includeContent?: boolean
+  /**
+   * Limit the turn facts to a time window. `humanTurns`, `excludedTurns` and
+   * `turnsByActor` keep only `user.prompt` turns that started inside it; every
+   * other fact still covers the whole session. A report built with a window
+   * also leaves out every session with no record inside it, and names them in
+   * {@link SessionFactsReport.selection}.
+   */
+  readonly window?: SessionFactsWindow
 }
 
 export const SESSION_TOKEN_TOTAL_ATTR = 'traces.session.total_tokens'
@@ -95,6 +114,9 @@ const CORRUPTION_RECEIPT_VERSION_ATTR = 'traces.session.corruption.receipt_versi
 
 /** Max characters of message or prompt text kept per fact entry. */
 export const FACT_TEXT_CAP = 2000
+
+/** Max characters of the agent message kept in {@link SessionTurnFact.answered}. */
+export const ANSWERED_TEXT_CAP = 1500
 
 /** Entries kept per list field before the sheet reports the rest as omitted. */
 export const FACT_LIST_CAP = 200
@@ -145,6 +167,15 @@ export interface SessionTurnFact {
   readonly at: string
   readonly text: string
   readonly spanId: string
+  /**
+   * The text of the last message this session's own agent wrote before the
+   * turn: what the person was answering. Clipped to {@link ANSWERED_TEXT_CAP}
+   * characters with a visible `… [+N chars]` marker. Null when the agent had
+   * written no text before the turn.
+   */
+  readonly answered: string | null
+  /** The `message.assistant` span `answered` was read from. */
+  readonly answeredSpanId: string | null
 }
 
 /** How many `user.prompt` turns each actor produced. */
@@ -198,6 +229,13 @@ export interface SessionFacts {
   readonly traceId: string
   readonly sessionId: string | null
   readonly harness: string | null
+  /**
+   * The working directory the harness recorded for the session, read from
+   * `traces.session.cwd` on the adapter's root span. Null with the reason when
+   * no span carries it; never decoded from a directory name or inferred from
+   * the paths the session touched.
+   */
+  readonly cwd: SessionFact<string>
   /** Spans in this trace, including the synthesized ones. */
   readonly spanCount: number
   /**
@@ -249,18 +287,47 @@ export interface SessionFacts {
   readonly measurements: SessionMeasurements
 }
 
+/** A session the report could not read, so whether it belongs in the window is unknown. */
+export interface UnreadSessionFact {
+  readonly sessionId: string | null
+  readonly traceId: string | null
+  /** Where the session was read from, when the reader knows. */
+  readonly source: string | null
+  readonly reason: string
+}
+
+/** How a windowed report chose its sessions and turns. Null on a report built without a window. */
+export interface SessionFactsSelection {
+  /** The window's inclusive lower bound, or null when open. */
+  readonly since: string | null
+  /** The window's exclusive upper bound, or null when open. */
+  readonly until: string | null
+  /** Which sessions the report holds. */
+  readonly sessionRule: string
+  /** Which turns `humanTurns`, `excludedTurns` and `turnsByActor` hold. */
+  readonly turnRule: string
+  /** Sessions read in full whose records all fall outside the window, by session id. */
+  readonly outsideWindow: readonly string[]
+  /** Sessions that could not be read; each is named with the reason, never counted as empty. */
+  readonly unreadSessions: readonly UnreadSessionFact[]
+}
+
 export interface SessionFactsReport {
   readonly schemaVersion: 1
   readonly kind: 'traces.session_facts_report'
   readonly generatedAt: string
   readonly measurementVersion: typeof SESSION_FACTS_MEASUREMENT_VERSION
-  /** SHA-256 of the canonical selected spans, including content, attributes, links and timing. */
+  /**
+   * SHA-256 over the selected sessions in trace-id order, each contributing the
+   * SHA-256 of its canonical spans (content, attributes, links and timing).
+   */
   readonly sourceDigest: string
   /** Latest recorded endpoint, not the last time the filesystem was checked. */
   readonly evidenceThrough: string | null
   readonly contentIncluded: boolean
   readonly harness: string | null
   readonly spanCount: number
+  readonly selection: SessionFactsSelection | null
   readonly sessions: readonly SessionFacts[]
 }
 
@@ -655,6 +722,42 @@ function normalizedTurnText(span: OtlpSpan): string {
   return turnText(span).replace(/\s+/g, ' ').trim()
 }
 
+/** The `… [+N chars]` marker an adapter appends when it cut a message at capture. */
+const CAPTURE_CUT_MARKER = /… \[\+(\d+) chars\]$/
+
+/**
+ * Clip an agent message to {@link ANSWERED_TEXT_CAP}. The marker counts every
+ * character the reader does not see, including any the adapter already cut
+ * when it captured the message.
+ */
+function clipAnswered(raw: string): string {
+  const text = raw.trim()
+  const marker = CAPTURE_CUT_MARKER.exec(text)
+  const body = marker ? text.slice(0, marker.index) : text
+  if (body.length <= ANSWERED_TEXT_CAP) return text
+  // A cut between the halves of a surrogate pair leaves a lone high surrogate; drop it and count it hidden.
+  const lastKept = body.charCodeAt(ANSWERED_TEXT_CAP - 1)
+  const keep = lastKept >= 0xd800 && lastKept <= 0xdbff ? ANSWERED_TEXT_CAP - 1 : ANSWERED_TEXT_CAP
+  const hidden = body.length - keep + (marker ? Number(marker[1]) : 0)
+  return `${body.slice(0, keep)}… [+${hidden} chars]`
+}
+
+/** A message this session's own agent wrote, with text a person could have read. */
+function isOwnAgentMessage(span: OtlpSpan): boolean {
+  return (
+    span.name === 'message.assistant' &&
+    span.attributes[INHERITED_SPAN_ATTR] !== true &&
+    typeof span.attributes.content === 'string' &&
+    span.attributes.content.trim().length > 0
+  )
+}
+
+/** One excluded `user.prompt` span, with the time the window test reads. */
+interface ExcludedTurn {
+  readonly spanId: string
+  readonly at: string
+}
+
 /**
  * The human turns of one session, and every `user.prompt` span left out of them.
  *
@@ -665,33 +768,39 @@ function normalizedTurnText(span: OtlpSpan): string {
  */
 function humanTurnsOf(spans: readonly OtlpSpan[]): {
   turns: SessionTurnFact[]
-  excluded: ExcludedTurnFact[]
+  excluded: Map<string, ExcludedTurn[]>
 } {
-  const excluded = new Map<string, string[]>()
-  const drop = (reason: string, spanId: string): void => {
-    excluded.set(reason, [...(excluded.get(reason) ?? []), spanId])
+  const excluded = new Map<string, ExcludedTurn[]>()
+  const drop = (reason: string, span: OtlpSpan): void => {
+    excluded.set(reason, [...(excluded.get(reason) ?? []), { spanId: span.span_id, at: span.start_time }])
   }
   const kept: OtlpSpan[] = []
+  const turns: SessionTurnFact[] = []
   let sinceKept: OtlpSpan[] = []
+  // The last message this session's agent wrote so far: what a turn answers.
+  // Tracked over every span, so a turn just inside a time window still names
+  // the message it answered when that message fell just outside it.
+  let lastAgentMessage: OtlpSpan | null = null
   for (const span of spans) {
     // A subagent's records are not this session's: its prompts are not human
     // turns here, and its activity does not separate two turns of this session.
     if (isSubagentSpan(span.attributes)) {
-      if (span.name === 'user.prompt') drop(SUBAGENT_TURN_REASON, span.span_id)
+      if (span.name === 'user.prompt') drop(SUBAGENT_TURN_REASON, span)
       continue
     }
     if (span.name !== 'user.prompt') {
+      if (isOwnAgentMessage(span)) lastAgentMessage = span
       sinceKept.push(span)
       continue
     }
     if (span.attributes[INHERITED_SPAN_ATTR] === true) {
       const source = stringAttr(span, INHERITED_SOURCE_ATTR)
-      drop(source === null ? INHERITED_TURN_REASON : `${INHERITED_TURN_REASON} (${source})`, span.span_id)
+      drop(source === null ? INHERITED_TURN_REASON : `${INHERITED_TURN_REASON} (${source})`, span)
       continue
     }
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
     if (actor !== 'human') {
-      drop(TURN_EXCLUSION_REASONS[actor] ?? `the adapter classified this turn as "${actor}", not as a person typing`, span.span_id)
+      drop(TURN_EXCLUSION_REASONS[actor] ?? `the adapter classified this turn as "${actor}", not as a person typing`, span)
       continue
     }
     const previous = kept[kept.length - 1]
@@ -708,18 +817,71 @@ function humanTurnsOf(spans: readonly OtlpSpan[]): {
       normalizedTurnText(span).length > 0 &&
       !sinceKept.some(isAgentActivity)
     if (duplicate) {
-      drop(DUPLICATE_TURN_REASON, span.span_id)
+      drop(DUPLICATE_TURN_REASON, span)
       continue
     }
     kept.push(span)
+    turns.push({
+      actor: 'human',
+      at: span.start_time,
+      text: turnText(span),
+      spanId: span.span_id,
+      answered: lastAgentMessage ? clipAnswered(lastAgentMessage.attributes.content as string) : null,
+      answeredSpanId: lastAgentMessage?.span_id ?? null,
+    })
     sinceKept = []
   }
-  return {
-    turns: kept.map((span) => ({ actor: 'human', at: span.start_time, text: turnText(span), spanId: span.span_id })),
-    excluded: [...excluded]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([reason, spanIds]) => ({ reason, turns: spanIds.length, spanIds })),
+  return { turns, excluded }
+}
+
+/** The excluded turns inside the window, grouped by reason; a reason left empty is dropped. */
+function excludedTurnFacts(
+  excluded: ReadonlyMap<string, readonly ExcludedTurn[]>,
+  keep: (at: string) => boolean,
+): ExcludedTurnFact[] {
+  return [...excluded]
+    .map(([reason, entries]) => [reason, entries.filter((entry) => keep(entry.at)).map((entry) => entry.spanId)] as const)
+    .filter(([, spanIds]) => spanIds.length > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([reason, spanIds]) => ({ reason, turns: spanIds.length, spanIds }))
+}
+
+/** Epoch bounds of a window; `null` when the window is absent or open on both sides. */
+interface WindowBounds {
+  readonly since: string | null
+  readonly until: string | null
+  readonly sinceMs: number
+  readonly untilMs: number
+}
+
+function windowBounds(window: SessionFactsWindow | undefined): WindowBounds | null {
+  if (!window || (window.since === undefined && window.until === undefined)) return null
+  const bound = (value: string | undefined, name: string, open: number): number => {
+    if (value === undefined) return open
+    const ms = Date.parse(value)
+    if (!Number.isFinite(ms)) throw new RangeError(`window ${name} is not a readable time: ${value}`)
+    return ms
   }
+  const sinceMs = bound(window.since, 'since', Number.NEGATIVE_INFINITY)
+  const untilMs = bound(window.until, 'until', Number.POSITIVE_INFINITY)
+  if (!(sinceMs < untilMs)) throw new RangeError(`window since (${window.since}) must be before until (${window.until})`)
+  return {
+    since: window.since === undefined ? null : new Date(sinceMs).toISOString(),
+    until: window.until === undefined ? null : new Date(untilMs).toISOString(),
+    sinceMs,
+    untilMs,
+  }
+}
+
+function insideWindow(bounds: WindowBounds | null, time: string): boolean {
+  if (bounds === null) return true
+  const ms = Date.parse(time)
+  return Number.isFinite(ms) && ms >= bounds.sinceMs && ms < bounds.untilMs
+}
+
+/** A span the adapter built from one of the session's records: not the root, not an integrity receipt. */
+function isRecordSpan(span: OtlpSpan): boolean {
+  return span.parent_span_id !== null && span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] === undefined
 }
 
 /**
@@ -728,6 +890,23 @@ function humanTurnsOf(spans: readonly OtlpSpan[]): {
  * model, network call, or budget is involved.
  */
 export function computeSessionFacts(spans: readonly OtlpSpan[], options: SessionFactsOptions = {}): SessionFacts[] {
+  const bounds = windowBounds(options.window)
+  return groupByTrace(spans)
+    .sort((left, right) => compareIds(left.traceId, right.traceId))
+    .map((group) => sessionFactsForTrace(group.traceId, group.sessionId, group.spans, options, bounds))
+}
+
+function compareIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+interface TraceGroup {
+  readonly traceId: string
+  readonly sessionId: string | null
+  readonly spans: OtlpSpan[]
+}
+
+function groupByTrace(spans: readonly OtlpSpan[]): TraceGroup[] {
   const { sessionByTrace } = indexSessionIdsByTrace(spans)
   const byTrace = new Map<string, OtlpSpan[]>()
   for (const span of spans) {
@@ -735,9 +914,11 @@ export function computeSessionFacts(spans: readonly OtlpSpan[], options: Session
     if (group) group.push(span)
     else byTrace.set(span.trace_id, [span])
   }
-  return [...byTrace]
-    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .map(([traceId, traceSpans]) => sessionFactsForTrace(traceId, sessionByTrace.get(traceId) ?? null, traceSpans, options))
+  return [...byTrace].map(([traceId, traceSpans]) => ({
+    traceId,
+    sessionId: sessionByTrace.get(traceId) ?? null,
+    spans: traceSpans,
+  }))
 }
 
 function sessionFactsForTrace(
@@ -745,6 +926,7 @@ function sessionFactsForTrace(
   sessionId: string | null,
   unordered: readonly OtlpSpan[],
   options: SessionFactsOptions,
+  bounds: WindowBounds | null,
 ): SessionFacts {
   const spans = [...unordered].sort(byTraceOrder)
   const harness = spans.map((span) => stringAttr(span, 'service.name')).find((name) => name !== null) ?? null
@@ -764,8 +946,12 @@ function sessionFactsForTrace(
 
   const subagents = subagentsOf(ownSpans, spans)
   const pullRequests = readPullRequests(ownSpans)
-  const promptSpans = spans.filter((span) => span.name === 'user.prompt')
-  const { turns: humanTurns, excluded: excludedTurns } = humanTurnsOf(spans)
+  // The turn facts honor the window; every other fact covers the whole session.
+  const inWindow = (at: string): boolean => insideWindow(bounds, at)
+  const promptSpans = spans.filter((span) => span.name === 'user.prompt' && inWindow(span.start_time))
+  const turnFacts = humanTurnsOf(spans)
+  const humanTurns = turnFacts.turns.filter((turn) => inWindow(turn.at))
+  const excludedTurns = excludedTurnFacts(turnFacts.excluded, inWindow)
   const actorCounts = new Map<string, string[]>()
   for (const span of promptSpans) {
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
@@ -787,10 +973,9 @@ function sessionFactsForTrace(
 
   const tokenSpan = spans.find((span) => typeof span.attributes[SESSION_TOKEN_TOTAL_ATTR] === 'number')
   const receipts = spans.filter((span) => span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] !== undefined)
-  const recordSpans = spans.filter(
-    (span) => span.parent_span_id !== null && span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] === undefined,
-  ).length
+  const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
+  const cwdSpan = spans.find((span) => stringAttr(span, SESSION_CWD_ATTR) !== null)
 
   const facts: SessionFacts = {
     schemaVersion: 1,
@@ -798,6 +983,15 @@ function sessionFactsForTrace(
     traceId,
     sessionId,
     harness,
+    cwd: cwdSpan
+      ? { value: stringAttr(cwdSpan, SESSION_CWD_ATTR), spanIds: [cwdSpan.span_id], unavailable: null }
+      : {
+          value: null,
+          spanIds: [],
+          unavailable:
+            `no span carries ${SESSION_CWD_ATTR}: the session source records no working directory, ` +
+            'or the adapter that read it does not read one',
+        },
     spanCount: spans.length,
     recordSpans,
     unreadRecords: corruptionSpan
@@ -887,6 +1081,7 @@ function sessionFactsForTrace(
   })
   return {
     ...facts,
+    cwd: withheld(),
     humanTurns: withheld(),
     finalMessages: withheld(),
     changedFiles: withheld(),
@@ -903,32 +1098,118 @@ function sessionFactsForTrace(
   }
 }
 
+export type SessionFactsReportOptions = SessionFactsOptions & { harness?: string | null; generatedAt?: string }
+
 /** The facts sheet for a set of spans, as one report. */
 export function buildSessionFactsReport(
   spans: readonly OtlpSpan[],
-  options: SessionFactsOptions & { harness?: string | null; generatedAt?: string } = {},
+  options: SessionFactsReportOptions = {},
 ): SessionFactsReport {
-  const digest = createHash('sha256')
-  const ordered = [...spans].sort((a, b) =>
-    a.trace_id.localeCompare(b.trace_id) || a.span_id.localeCompare(b.span_id))
+  const builder = createSessionFactsReportBuilder(options)
+  builder.add(spans)
+  return builder.build()
+}
+
+/**
+ * Builds one report from sessions supplied a batch at a time, so a caller
+ * reading many sessions holds one session's spans at once rather than all of
+ * them. `add` the whole spans of one or more sessions per call; a trace split
+ * across two calls is reported as two sessions.
+ */
+export interface SessionFactsReportBuilder {
+  add(spans: readonly OtlpSpan[]): void
+  /** Name a session that could not be read at all. Only a windowed report holds these. */
+  addUnread(session: UnreadSessionFact): void
+  build(): SessionFactsReport
+}
+
+const WINDOW_SESSION_RULE =
+  'a session is selected when at least one of its records starts or ends inside [since, until)'
+const WINDOW_TURN_RULE =
+  'humanTurns, excludedTurns and turnsByActor keep only user.prompt turns that started inside [since, until); ' +
+  "every other fact, and each turn's answered text, covers the whole session"
+
+export function createSessionFactsReportBuilder(options: SessionFactsReportOptions = {}): SessionFactsReportBuilder {
+  const bounds = windowBounds(options.window)
+  const sessions: SessionFacts[] = []
+  const digests: Array<{ traceId: string; digest: string }> = []
+  const outsideWindow: string[] = []
+  const unreadSessions: UnreadSessionFact[] = []
+  let spanCount = 0
   let evidenceThrough: string | null = null
-  for (const span of ordered) {
-    digest.update(canonicalJson(span)).update('\n')
-    for (const time of [span.start_time, span.end_time]) {
-      if (Number.isFinite(Date.parse(time)) && (evidenceThrough === null || Date.parse(time) > Date.parse(evidenceThrough))) evidenceThrough = time
+
+  const select = (group: TraceGroup): void => {
+    const digest = createHash('sha256')
+    for (const span of [...group.spans].sort((a, b) => a.span_id.localeCompare(b.span_id))) {
+      digest.update(canonicalJson(span)).update('\n')
+      for (const time of [span.start_time, span.end_time]) {
+        if (Number.isFinite(Date.parse(time)) && (evidenceThrough === null || Date.parse(time) > Date.parse(evidenceThrough))) evidenceThrough = time
+      }
     }
+    digests.push({ traceId: group.traceId, digest: digest.digest('hex') })
+    spanCount += group.spans.length
+    sessions.push(sessionFactsForTrace(group.traceId, group.sessionId, group.spans, options, bounds))
   }
+
   return {
-    schemaVersion: 1,
-    kind: 'traces.session_facts_report',
-    measurementVersion: SESSION_FACTS_MEASUREMENT_VERSION,
-    sourceDigest: 'sha256:' + digest.digest('hex'),
-    evidenceThrough,
-    contentIncluded: options.includeContent !== false,
-    generatedAt: options.generatedAt ?? new Date().toISOString(),
-    harness: options.harness ?? null,
-    spanCount: spans.length,
-    sessions: computeSessionFacts(spans, options),
+    add(spans) {
+      for (const group of groupByTrace(spans)) {
+        if (bounds === null) {
+          select(group)
+          continue
+        }
+        const records = group.spans.filter(isRecordSpan)
+        if (records.length === 0) {
+          // Nothing was read, so nothing says whether the session belongs in
+          // the window; leaving it out silently would count it as empty.
+          const unread = group.spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
+          unreadSessions.push({
+            sessionId: group.sessionId,
+            traceId: group.traceId,
+            source: null,
+            reason: `no record could be read (${unread ? `${unread.attributes[CORRUPTION_COUNT_ATTR]} unread record(s)` : 'no record spans'}), ` +
+              'so whether the session holds a record inside the window is unknown',
+          })
+          continue
+        }
+        if (records.some((span) => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) select(group)
+        else outsideWindow.push(group.sessionId ?? group.traceId)
+      }
+    },
+    addUnread(session) {
+      if (bounds === null) {
+        throw new Error('an unread session is reported only by a windowed report; without a window, refuse the selection')
+      }
+      unreadSessions.push(session)
+    },
+    build() {
+      const digest = createHash('sha256')
+      for (const entry of [...digests].sort((a, b) => a.traceId.localeCompare(b.traceId) || a.digest.localeCompare(b.digest))) {
+        digest.update(`${entry.traceId}\n${entry.digest}\n`)
+      }
+      return {
+        schemaVersion: 1,
+        kind: 'traces.session_facts_report',
+        measurementVersion: SESSION_FACTS_MEASUREMENT_VERSION,
+        sourceDigest: 'sha256:' + digest.digest('hex'),
+        evidenceThrough,
+        contentIncluded: options.includeContent !== false,
+        generatedAt: options.generatedAt ?? new Date().toISOString(),
+        harness: options.harness ?? null,
+        spanCount,
+        selection: bounds === null
+          ? null
+          : {
+              since: bounds.since,
+              until: bounds.until,
+              sessionRule: WINDOW_SESSION_RULE,
+              turnRule: WINDOW_TURN_RULE,
+              outsideWindow: [...outsideWindow].sort(compareIds),
+              unreadSessions: [...unreadSessions],
+            },
+        sessions: [...sessions].sort((left, right) => compareIds(left.traceId, right.traceId)),
+      }
+    },
   }
 }
 
@@ -943,8 +1224,19 @@ export function renderSessionFacts(report: SessionFactsReport): string {
   const lines: string[] = [
     `session facts — ${report.sessions.length} session(s), ${report.spanCount} span(s), deterministic, $0`,
   ]
+  const selection = report.selection
+  if (selection) {
+    lines.push(
+      `window [${selection.since ?? 'open'}, ${selection.until ?? 'open'}): turn facts count only turns inside it; ` +
+        `${selection.outsideWindow.length} session(s) read with no record inside it`,
+    )
+    for (const unread of selection.unreadSessions) {
+      lines.push(`  unread session ${unread.sessionId ?? unread.traceId ?? unread.source ?? 'unknown'}: ${unread.reason}`)
+    }
+  }
   for (const facts of report.sessions) {
     lines.push('', `${facts.sessionId ?? facts.traceId} [${facts.harness ?? 'unknown harness'}] ${facts.spanCount} spans`)
+    lines.push(factLine('cwd', facts.cwd, String(facts.cwd.value)))
     lines.push(
       factLine(
         'tool calls',
@@ -1057,6 +1349,7 @@ export function renderSessionFactsContext(
   // Shed in reverse usefulness order: text first, then the long id lists, then
   // whole list fields. The counts, which answer most questions, are last to go.
   const sheds: Array<[string, (facts: CompactFacts) => void]> = [
+    ['human_turn_answered', (facts) => { for (const turn of facts.human_turns) delete turn.answered }],
     ['human_turn_text', (facts) => { for (const turn of facts.human_turns) delete turn.text }],
     ['final_message_text', (facts) => { for (const message of facts.final_messages) delete message.text }],
     ['pull_request_commands', (facts) => {
@@ -1127,6 +1420,7 @@ interface CompactPullRequests {
 interface CompactFacts {
   session_id: string | null
   trace_id: string
+  cwd: unknown
   spans: number
   tool_calls: {
     count: number | null
@@ -1137,7 +1431,7 @@ interface CompactFacts {
   tool_calls_by_name?: Readonly<Record<string, number>> | null
   subagents: { count: number; entries?: readonly unknown[] }
   pull_requests: CompactPullRequests
-  human_turns: Array<{ at: string; span_id: string; text?: string }>
+  human_turns: Array<{ at: string; span_id: string; text?: string; answered?: string | null }>
   excluded_turns?: readonly unknown[] | null
   turns_by_actor?: readonly unknown[] | null
   final_messages: Array<{ task: string | null; at: string; span_id: string; text?: string }>
@@ -1177,6 +1471,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
   return {
     session_id: facts.sessionId,
     trace_id: facts.traceId,
+    cwd: factJson(facts.cwd),
     spans: facts.spanCount,
     tool_calls: {
       count: facts.toolCalls.value,
@@ -1200,6 +1495,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
       at: turn.at,
       span_id: turn.spanId,
       text: turn.text,
+      answered: turn.answered,
     })),
     excluded_turns: facts.excludedTurns.value?.map((entry) => ({
       reason: entry.reason,

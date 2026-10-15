@@ -65,6 +65,15 @@ export const ATTR = {
   ENVIRONMENT_CWD: 'tangle.environment.cwd',
 } as const
 
+/**
+ * The working directory the harness recorded for a session, verbatim, on the
+ * adapter's root `session` span. Unlike `tangle.cwd` it is never repaired,
+ * decoded from a directory name, or inferred from paths the spans mention: an
+ * adapter sets it only from a field the session source itself carries, and
+ * leaves it absent when the source names none.
+ */
+export const SESSION_CWD_ATTR = 'traces.session.cwd'
+
 /** `tangle.ingest_source` value for CLI-uploaded traces. Wire contract. */
 export const INGEST_SOURCE_CLI = 'cli'
 

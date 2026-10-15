@@ -198,7 +198,8 @@ The sheet is that extraction, made part of the tool.
 | `subagentToolSpans` | TOOL spans excluded because a subagent, not this agent, made the call |
 | `subagents` | every subagent-spawning call, with the task name the call recorded |
 | `pullRequests` | pull requests the commands created and merged, each named by number or head branch, with the command span and the join evidence |
-| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with timestamps |
+| `cwd` | the working directory the harness recorded for the session, or `null` with the reason |
+| `humanTurns` | `user.prompt` turns a person typed into this session, in order, with timestamps, each with the agent message it `answered` |
 | `excludedTurns` | every `user.prompt` turn `humanTurns` left out, grouped by the reason, with the span ids |
 | `turnsByActor` | every `user.prompt` turn by actor, so the human filter is checkable |
 | `finalMessages` | the last message of the session's own agent, and of each subagent task, separately |
@@ -242,7 +243,7 @@ It reaches the built-in kinds run by `analyze --llm`, `investigate`, and `improv
 
 - The sheet is bounded at `PREPARED_CONTEXT_BYTE_CEILING` (30,000 bytes), a fifth of the `perCallByteCeiling` of 150,000 the trace tools work to, so the rest of the budget stays available for the tool calls the model still makes.
 - When the sheet does not fit, fields are shed from the largest downward and the shed is listed in `omitted_fields`. The tool-call counts are the last facts to go.
-- Receiving the sheet changes an analyst's behavior, so its version carries `+session-facts.2`. `createTraceAnalyst` records `prepare_context` in the exact-run identity, and a changed prepared context must not hide behind an unchanged version.
+- Receiving the sheet changes an analyst's behavior, so its version carries `SESSION_FACTS_VERSION_SUFFIX` (`+session-facts.` and the sheet's `measurementVersion`). `createTraceAnalyst` records `prepare_context` in the exact-run identity, and a changed prepared context must not hide behind an unchanged version.
 - The sheet is not evidence. Citations still resolve against the raw spans, which is why every fact names its span ids rather than asking the model to trust the sheet.
 
 Pass `sessionFactsContext: false` to `analyzeSpans` to run an analyst without it.
