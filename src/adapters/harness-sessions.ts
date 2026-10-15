@@ -3,7 +3,7 @@
  * alone interprets the harness's records, model calls, tools, and token usage. */
 import { homedir } from 'node:os'
 import { open, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import {
   claudeCodeRefForFile,
   codexRefForFile,
@@ -439,12 +439,21 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
         .map((item) => [item.attributes['gen_ai.tool.call.id'], item]))
       let childSpanCount = 0
       const childIds = new Set(session.children.map((child) => child.nativeSessionId))
+      const readIds = new Set<string>()
       for (const path of childPaths) {
         const childRef = claudeCodeRefForFile(path, session.nativeSessionId)
-        const child = await this.reader.read(childRef, { signal: options.signal, corruption: options.corruptionMode })
-        childIds.add(child.nativeSessionId)
+        const read = await this.reader.read(childRef, { signal: options.signal, corruption: options.corruptionMode })
+        // Claude Code can write one agent ID to two transcripts (a top-level subagent and a
+        // workflow run). Span identity derives from the session ID, so the later file takes
+        // its directory as scope; its spans stay distinct, and only the first binds to the parent.
+        const repeated = readIds.has(read.nativeSessionId)
+        readIds.add(read.nativeSessionId)
+        const child = repeated
+          ? { ...read, nativeSessionId: `${read.nativeSessionId}@${basename(dirname(path))}` }
+          : read
+        childIds.add(read.nativeSessionId)
         if (!child.startedAt) continue
-        const binding = session.children.find((item) => item.nativeSessionId === child.nativeSessionId)
+        const binding = repeated ? undefined : session.children.find((item) => item.nativeSessionId === child.nativeSessionId)
         const parent = binding?.toolCallId ? toolByCallId.get(binding.toolCallId) : undefined
         const projected = toOtlpSpans(child).map(asTracesSpan)
         stampNativeProvenance(child, projected)
