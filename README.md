@@ -47,7 +47,7 @@ traces check   run.jsonl --contract contract.json           # fail CI when a run
 | Upload, or check files before sharing | `upload`, `verify-safe` | [Upload and share safely](docs/upload.md) |
 | Prove a finding by replaying it | `replay-verify`, `verify-findings` | [Replay verification](docs/replay-verify.md) |
 
-Every command and flag is in the [CLI reference](docs/cli.md), and `traces <command> --help` prints its own.
+The common commands and flags are in the [CLI reference](docs/cli.md). `traces --help` lists every command and option, and `traces <command> --help` prints that command's own flags.
 
 ## Two ways in
 
@@ -68,7 +68,7 @@ console.log(renderValidation(input.validation, { subject: 'spans.otlp.jsonl', sp
 if (input.validation.ok) await analyzeSpans(input.spans)
 ```
 
-The CLI is a thin consumer of the SDK. Every export is in [Library (SDK)](docs/sdk.md); runnable code is in [examples](examples/README.md).
+The CLI is a thin consumer of the SDK. The main exports are in [Library (SDK)](docs/sdk.md), and [`src/index.ts`](src/index.ts) is the complete list. Runnable code is in [examples](examples/README.md).
 
 ## Docs
 

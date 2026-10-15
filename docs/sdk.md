@@ -2,6 +2,8 @@
 
 [traces](../README.md#docs) › Library (SDK)
 
+The main exports. [`src/index.ts`](../src/index.ts) is the complete list; resolve signatures there.
+
 The CLI is a thin consumer of these exports.
 
 | Export | Signature | Use |

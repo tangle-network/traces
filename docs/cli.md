@@ -2,7 +2,7 @@
 
 [traces](../README.md#docs) › CLI reference
 
-Every command also prints its own flags: `traces <command> --help`.
+The common commands and flags. `traces --help` lists every command and option, and `traces <command> --help` prints that command's own flags.
 
 ```bash
 traces list     --harness claude-code --last 20    # discover sessions

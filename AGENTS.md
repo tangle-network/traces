@@ -6,9 +6,10 @@ content itself — see Ownership.
 
 ## Read for the task
 
-- For CLI commands and flags, read [docs/cli.md](docs/cli.md); for the SDK export table, read
-  [docs/sdk.md](docs/sdk.md). They are the source of truth for both; do not duplicate command inventories
-  here. [README.md](README.md) stays a short front page that links to one guide per task.
+- For the common CLI commands and flags, read [docs/cli.md](docs/cli.md); for the main SDK exports, read
+  [docs/sdk.md](docs/sdk.md). Both are curated: `traces --help` and [src/index.ts](src/index.ts) are the
+  complete inventories. Do not duplicate command inventories here. [README.md](README.md) stays a short
+  front page that links to one guide per task.
 - For the analyst engine (built-in vs `--llm` vs external engines like HALO/Hodoscope/Prime), read
   [docs/trace-analysts.md](docs/trace-analysts.md).
 - For executed-replay proofs of a finding (`replay-verify`, `verify-findings`), read
