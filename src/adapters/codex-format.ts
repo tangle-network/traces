@@ -81,6 +81,8 @@ export interface CodexLine {
        *  person's own words, a namespaced kind for anything the harness added. */
       content_item_kinds?: readonly unknown[]
     }
+    /** `codex_exec` when a script launched the session through `codex exec`. */
+    originator?: string
     source?: {
       subagent?: {
         thread_spawn?: {

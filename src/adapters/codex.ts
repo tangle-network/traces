@@ -879,6 +879,8 @@ export class CodexAdapter implements HarnessTraceAdapter {
       }
     }
     const traceId = meta?.payload?.id ?? ref.sessionId
+    // `codex exec` runs a script's prompt: no person typed the first turn.
+    const scriptLaunched = meta?.payload?.originator === 'codex_exec' || (meta?.payload?.source as unknown) === 'exec'
     const sessionRole = parentSessionId || meta?.payload?.thread_source === 'subagent' ? 'child' : 'operator'
 
     const rootId = `root:${traceId}`
@@ -973,7 +975,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       }
       const actor = sessionRole === 'child'
         ? 'agent'
-        : codexActor({ text: prompt, isFirstUserTurn: !sawUserTurn })
+        : codexActor({ text: prompt, isFirstUserTurn: !sawUserTurn, scriptLaunched })
       sawUserTurn = true
       const turnSpan = userPromptSpan({
         traceId,
@@ -1031,7 +1033,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
       if (inheritedTurnKeys.has(dedupKey)) return
       if (!claimInheritedSpan()) return
       inheritedTurnKeys.add(dedupKey)
-      const actor = codexActor({ text: prompt, blocks, isFirstUserTurn: !sawInheritedTurn, kinds })
+      const actor = codexActor({ text: prompt, blocks, isFirstUserTurn: !sawInheritedTurn, kinds, scriptLaunched })
       sawInheritedTurn = true
       const turnSpan = userPromptSpan({
         traceId,
@@ -1485,6 +1487,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
                 text: prompt,
                 blocks: contentTextBlocks(l.payload.content),
                 isFirstUserTurn: !sawUserTurn,
+                scriptLaunched,
                 kinds: l.payload.internal_chat_message_metadata_passthrough?.content_item_kinds,
               })
           sawUserTurn = true
