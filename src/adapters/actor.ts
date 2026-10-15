@@ -73,6 +73,41 @@ const SYNTHETIC_MARKERS = [
 const AGENT_PROMPT =
   /^(you are\b|you're\b|read[- ]only\b|stop now\b|your task\b|your job\b|review the\b|audit\b|analyze the\b|return (only|a |the )|here is the\b|context:|task:|do not (revert|edit|touch)|work only in\b|you have been\b|act as\b|operate the\b|goal:|objective:)/i
 
+/**
+ * Records Claude Code writes that no person typed, matched at the start of the
+ * record so a typed message that merely mentions one is not swallowed. These win
+ * over a recorded `human` origin: the CLI stamps its own command output with one.
+ * A typed slash command (`<command-name>`) or `!` bash line (`<bash-input>`) is
+ * not here: the person typed it.
+ */
+const CLAUDE_MACHINE_PREFIXES = [
+  '<local-command-caveat>',
+  '<local-command-stdout>',
+  '<local-command-stderr>',
+  'Caveat: The messages below',
+  '<task-notification>',
+  '<bash-stdout>',
+  '<bash-stderr>',
+  '<user-prompt-submit-hook>',
+  '[Request interrupted by user',
+] as const
+
+/**
+ * Whether a Claude Code user record is the harness's, whatever its recorded
+ * origin says: an interrupt, local-command or bash output, a hook wrapper, a meta or compaction-summary entry, or any record of a session
+ * the SDK launched (`entrypoint: "sdk-cli"`).
+ */
+export function claudeRecordIsMachine(args: {
+  text: string
+  isMeta?: boolean
+  isCompactSummary?: boolean
+  entrypoint?: string | null
+}): boolean {
+  if (args.isMeta === true || args.isCompactSummary === true || args.entrypoint === 'sdk-cli') return true
+  const text = args.text.trimStart()
+  return CLAUDE_MACHINE_PREFIXES.some((prefix) => text.startsWith(prefix))
+}
+
 function textIsCmdOrInject(s: string): boolean {
   return CMD_MARKERS.some((m) => s.includes(m)) || INJECT_MARKERS.some((m) => s.includes(m))
 }
@@ -133,7 +168,7 @@ export function claudePromptStartsTask(args: {
  * adapter already parses, falling back to the text heuristics above.
  *
  *   isSidechain === true             → subagent-spawn
- *   isMeta === true                  → injected
+ *   machine record (meta, compact summary, sdk-cli, interrupt, command/bash output, hook wrappers) → injected
  *   userType present and !== external → injected
  *   synthetic markers in the text     → injected
  *   first-turn agent-spawn prompt     → subagent-spawn
@@ -143,11 +178,13 @@ export function claudeActor(args: {
   text: string
   isSidechain?: boolean
   isMeta?: boolean
+  isCompactSummary?: boolean
+  entrypoint?: string | null
   userType?: string | null
   isFirstUserTurn?: boolean
 }): Actor {
   if (args.isSidechain === true) return 'subagent-spawn'
-  if (args.isMeta === true) return 'injected'
+  if (claudeRecordIsMachine(args)) return 'injected'
   if (args.userType != null && args.userType !== 'external') return 'injected'
   // Harness-injected wrappers (task notifications, continuation summaries, slash
   // commands) arrive AS `external` user turns, so check the text before trusting
@@ -244,7 +281,10 @@ export function codexActor(args: {
   blocks?: readonly string[]
   isFirstUserTurn?: boolean
   kinds?: readonly unknown[]
+  /** The session was launched by a script (`codex exec`): its first turn is the launcher's brief. */
+  scriptLaunched?: boolean
 }): Actor {
+  if (args.isFirstUserTurn && args.scriptLaunched) return 'injected'
   const recorded = codexKindsAreHuman(args.kinds)
   if (recorded !== undefined) return recorded ? 'human' : 'injected'
   if ((args.blocks ?? [args.text]).some(isCodexContextBlock)) return 'injected'

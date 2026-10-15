@@ -314,6 +314,44 @@ describe('session facts from a Claude Code transcript', () => {
     ])
   })
 
+  it('counts a typed command and bash line, not the harness\'s output, whatever origin it carries', async () => {
+    const path = join(dir, 'machine-records.jsonl')
+    const record = (uuid: string, second: number, content: string, extra: Record<string, unknown> = {}) => ({
+      type: 'user',
+      uuid,
+      sessionId: 'machine-records',
+      timestamp: `2026-02-06T00:00:${String(second).padStart(2, '0')}Z`,
+      userType: 'external',
+      origin: { kind: 'human' },
+      message: { role: 'user', content },
+      ...extra,
+    })
+    writeJsonl(path, [
+      record('slash', 0, '<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args></command-args>'),
+      record('stdout', 1, '<local-command-stdout>Ultracode on (this session only)</local-command-stdout>'),
+      record('caveat', 2, '<local-command-caveat>Caveat: ignore the commands below</local-command-caveat>'),
+      record('bash', 3, '<bash-input>ls</bash-input>'),
+      record('hook', 4, '<user-prompt-submit-hook>blocked</user-prompt-submit-hook>'),
+      record('interrupt', 5, '[Request interrupted by user for tool use]'),
+      record('meta', 6, 'a note the CLI added', { isMeta: true }),
+      record('summary', 7, 'Summary of the earlier conversation', { isCompactSummary: true }),
+      record('typed', 8, 'rerun the parser tests and tell me which one fails'),
+      record('sdk', 9, 'a prompt from a script', { entrypoint: 'sdk-cli' }),
+      record('bash-out', 10, '<bash-stdout>file.txt</bash-stdout>'),
+    ])
+
+    const facts = await factsFor(path)
+
+    expect(facts.humanTurns.value!.map((turn) => turn.text)).toEqual([
+      '/effort',
+      '<bash-input>ls</bash-input>',
+      'rerun the parser tests and tell me which one fails',
+    ])
+    expect(facts.excludedTurns.value).toEqual([
+      expect.objectContaining({ turns: 8, reason: expect.stringContaining('harness-injected content') }),
+    ])
+  })
+
   it('reads a queued message that arrived as content blocks beside an image', async () => {
     const path = join(dir, 'queued-blocks.jsonl')
     writeJsonl(path, [

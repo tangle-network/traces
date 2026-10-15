@@ -229,4 +229,20 @@ describe('session facts: human turns', () => {
     expect(unlabelledFacts.humanTurns.value).toEqual([])
     expect(excludedFor(unlabelledFacts, 'harness-injected content')).toHaveLength(1)
   })
+
+  it('does not count the launcher brief of a script-launched exec session as typed', async () => {
+    const facts = await factsFor('exec-launched', [
+      { t: 0, type: 'session_meta', payload: { id: 'facts-session', cwd: '/workspace/demo', originator: 'codex_exec', source: 'exec' } },
+      task(1, 'task_started', 'turn-1'),
+      labelled(2, [TYPED], ['user.text']),
+      task(3, 'task_complete', 'turn-1'),
+      task(4, 'task_started', 'turn-2'),
+      labelled(5, [FOLLOW_UP], ['user.text']),
+      task(6, 'task_complete', 'turn-2'),
+    ])
+
+    // Only the first turn is the script's brief; a later turn is not.
+    expect(texts(facts)).toEqual([FOLLOW_UP])
+    expect(excludedFor(facts, 'harness-injected content')).toEqual([expect.objectContaining({ turns: 1 })])
+  })
 })

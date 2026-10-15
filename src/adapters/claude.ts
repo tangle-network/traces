@@ -40,7 +40,7 @@ import { readJsonl } from '../jsonl.js'
 import type { OtlpSpan, OtlpStatusCode } from '../otlp.js'
 import { span } from '../otlp.js'
 import type { HarnessTraceAdapter, LocateOptions, ParseOptions, SessionRef } from '../types.js'
-import { claudeActor, claudePromptStartsTask } from './actor.js'
+import { claudeActor, claudePromptStartsTask, claudeRecordIsMachine } from './actor.js'
 import { collectClaudeSubagentSources } from './claude-subagent-sources.js'
 import {
   bindWorkflowRuns,
@@ -123,6 +123,9 @@ const HUMAN_ORIGIN = 'human'
 /** Why a turn that reads human was not counted as one. */
 const ORIGIN_EVIDENCE_ATTR = 'traces.claude.actor_evidence'
 
+/** `true` on a `user.prompt` span the harness wrote, whatever its recorded origin says. */
+const MACHINE_RECORD_ATTR = 'traces.claude.machine_record'
+
 /** `true` on a `user.prompt` span whose record carried a recorded origin. */
 const ORIGIN_RECORDED_ATTR = 'traces.claude.origin_recorded'
 
@@ -203,6 +206,8 @@ interface ClaudeEvent {
     cumulativeDroppedTokens?: unknown
   }
   isMeta?: boolean
+  isCompactSummary?: boolean
+  entrypoint?: string
   userType?: string
   origin?: { kind?: unknown }
   /** Set on a subagent's own stream events (in-stream, not a separate
@@ -399,6 +404,8 @@ type ClaudeEventProjection =
       parentToolUseId?: string | null
       isSidechain?: boolean
       isMeta?: boolean
+      isCompactSummary?: boolean
+      entrypoint?: string | null
       userType?: string | null
       originKind?: string | null
       results: ToolResultProjection[]
@@ -511,6 +518,8 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
         ? {
             isSidechain: event.isSidechain === true,
             isMeta: event.isMeta === true,
+            isCompactSummary: event.isCompactSummary === true,
+            entrypoint: event.entrypoint ?? null,
             userType: event.userType ?? null,
             originKind: recordedOrigin(event.origin),
           }
@@ -714,6 +723,8 @@ function applyOriginEnrichment(uid: string, originKind: string, state: ClaudeStr
   state.sawRecordedOrigin = true
   prompt.attributes[ORIGIN_RECORDED_ATTR] = true
   prompt.attributes[ORIGIN_KIND_ATTR] = originKind
+  // A record the harness wrote stays injected whatever origin it gained.
+  if (prompt.attributes[MACHINE_RECORD_ATTR] === true) return
   prompt.attributes[ACTOR_ATTR] = claudeActorFromOrigin(
     originKind,
     () => prompt.attributes[ACTOR_ATTR] as Actor,
@@ -878,10 +889,15 @@ function consumeClaudeEvent(
     }
   } else if (event.kind === 'user') {
     if (event.prompt) {
-      const actor = claudeActorFromOrigin(event.originKind, () => claudeActor({
+      const machine = claudeRecordIsMachine({
+        text: event.prompt,
+        isMeta: event.isMeta,
+        isCompactSummary: event.isCompactSummary,
+        entrypoint: event.entrypoint,
+      })
+      const actor = machine ? 'injected' : claudeActorFromOrigin(event.originKind, () => claudeActor({
         text: event.prompt ?? '',
         isSidechain: event.isSidechain,
-        isMeta: event.isMeta,
         userType: event.userType ?? null,
         isFirstUserTurn: !state.sawUserTurn,
       }))
@@ -900,6 +916,7 @@ function consumeClaudeEvent(
         contentSource: event.contentSource,
         actor,
       })
+      if (machine) prompt.attributes[MACHINE_RECORD_ATTR] = true
       if (event.originKind) {
         prompt.attributes[ORIGIN_RECORDED_ATTR] = true
         prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
@@ -916,7 +933,8 @@ function consumeClaudeEvent(
   } else if (event.kind === 'attachment') {
     backfillResult(state.toolSpanByUseId.get(event.result.toolUseId), event.timestamp, event.result)
   } else if (event.kind === 'queued-prompt') {
-    const actor = claudeActorFromOrigin(event.originKind, () => 'injected')
+    const machine = claudeRecordIsMachine({ text: event.prompt })
+    const actor = machine ? 'injected' : claudeActorFromOrigin(event.originKind, () => 'injected')
     if (event.originKind) state.sawRecordedOrigin = true
     const prompt = userPromptSpan({
       traceId: ctx.traceId,
@@ -931,6 +949,7 @@ function consumeClaudeEvent(
       actor,
     })
     prompt.attributes['traces.claude.queued'] = true
+    if (machine) prompt.attributes[MACHINE_RECORD_ATTR] = true
     if (event.originKind) {
       prompt.attributes[ORIGIN_RECORDED_ATTR] = true
       prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
