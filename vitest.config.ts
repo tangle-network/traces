@@ -13,5 +13,6 @@ export default defineConfig({
      * inner ones.
      */
     testTimeout: 30_000,
+    globalSetup: ['tests/temp-root.ts'],
   },
 })
