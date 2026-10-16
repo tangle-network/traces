@@ -271,7 +271,7 @@ export function codexActor(args: {
  */
 const HARNESS_TURN_PREFIXES: readonly RegExp[] = [
   /^<task-notification>/u, /^<local-command-/u, /^Caveat: The messages below/u, /^<system-reminder>/u,
-  /^<bash-(?:input|stdout|stderr)>/u, /^<user-prompt-submit-hook>/u, /^\[Request interrupted by user/u,
+  /^<bash-(?:stdout|stderr)>/u, /^<user-prompt-submit-hook>/u, /^\[Request interrupted by user/u,
   /^Base directory for this skill/u, /^This session is being continued/u, /^Your claude\.ai usage limit/u,
   /^\[\d+ prior \/loop wakeup/u, /^<subagent_notification>/u, /^<turn_aborted>/u, /^<environment_context>/u,
   /^# AGENTS\.md instructions/u, /^<user_instructions>/u, /^<user_shell_command>/u, /^<skill>/u,

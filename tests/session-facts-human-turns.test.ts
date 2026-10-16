@@ -133,7 +133,7 @@ describe('session facts: human turns', () => {
     const [facts] = computeSessionFacts([...spans, echo])
     expect(texts(facts!)).toEqual([TYPED])
     expect(excludedFor(facts!, 'a second record of the turn before it')).toEqual([
-      { reason: expect.stringContaining('a second record'), turns: 1, spanIds: [echo.span_id] },
+      { reason: expect.stringContaining('a second record'), author: 'human', turns: 1, spanIds: [echo.span_id] },
     ])
   })
 

@@ -83,3 +83,40 @@ describe('facts JSON: a named session and its children', () => {
     expect(sessions.map((session) => session.sessionId)).toEqual([IDS.child2])
   })
 })
+
+/**
+ * dotfiles voice-ledger `scripts/from_traces.py` runs `traces facts --harness
+ * claude-code --since S --until U --format json` and reads `measurementVersion`
+ * (at least 4), each session's `sessionId`, `cwd.value` and
+ * `humanTurns.value[].{at, text, answered}`, and `selection.unreadSessions[]`
+ * `{sessionId, source, reason}` for the sessions it must recover elsewhere.
+ */
+describe('facts JSON: the paths voice-ledger reads', () => {
+  const window = ['--since', '2026-10-14T00:00:00Z', '--until', '2026-10-15T00:00:00Z']
+
+  it('serves every path over a window of Claude Code sessions', async () => {
+    const run = await runCli(['facts', '--harness', 'claude-code', ...window, '--format', 'json'], { env: fx.env })
+    expect(run.code).toBe(0)
+    const report = JSON.parse(run.stdout) as {
+      measurementVersion: string
+      sessions: Array<{ sessionId: string; cwd: { value: string | null }; humanTurns: { value: Array<{ at: string; text: string; answered: string | null }> } }>
+    }
+    expect(Number(report.measurementVersion)).toBeGreaterThanOrEqual(4)
+    const byId = new Map(report.sessions.map((session) => [session.sessionId, session]))
+    const claude = byId.get(IDS.claude)!
+    expect(claude.cwd.value).toBe(fx.repo)
+    expect(claude.humanTurns.value.map((turn) => [turn.at, turn.text, turn.answered])).toEqual([
+      ['2026-10-14T10:00:00.000Z', 'Fix the build.', null],
+    ])
+  })
+
+  it('names each session it could not read with its source and reason', async () => {
+    const run = await runCli(['facts', '--harness', 'codex', ...window, '--format', 'json'], { env: fx.env })
+    expect(run.code).toBe(0)
+    const unread = (JSON.parse(run.stdout) as { selection: { unreadSessions: Array<{ sessionId: string; source: string; reason: string }> } })
+      .selection.unreadSessions
+    expect(unread.map((entry) => entry.sessionId)).toEqual([IDS.unreadable])
+    expect(typeof unread[0]!.source).toBe('string')
+    expect(unread[0]!.reason.length).toBeGreaterThan(0)
+  })
+})

@@ -178,10 +178,11 @@ export interface SubagentSpawnFact {
 }
 
 /**
- * A correction signal on a typed turn:
- *   - `interrupt`      the person interrupted the agent since their previous turn
- *   - `rejected-tool`  the person rejected a tool call since their previous turn
- *   - `after-claim`    the agent message the turn answered claims completion
+ * A correction signal on a typed turn, counted since the person's previous
+ * human turn (a fleet or relay turn in between does not reset it):
+ *   - `interrupt`      the person interrupted the agent
+ *   - `rejected-tool`  the person rejected a tool call
+ *   - `after-claim`    the agent wrote since then, and its last message claims completion
  */
 export type TurnSignal = 'interrupt' | 'rejected-tool' | 'after-claim'
 
@@ -206,14 +207,15 @@ export interface SessionTurnFact {
   /** The `message.assistant` span `answered` was read from. */
   readonly answeredSpanId: string | null
   /**
-   * The first message this session's own agent wrote after the turn and before
-   * the next typed turn, clipped like `answered`. Null when it wrote none.
+   * The first message this session's own agent wrote after the turn, clipped
+   * like `answered`. Null when it wrote none.
    */
   readonly reply: string | null
   /** The `message.assistant` span `reply` was read from. */
   readonly replySpanId: string | null
-  /** The person interrupted the agent's work on this turn, before their next turn. */
+  /** The person interrupted the agent's work on this turn, before the next typed turn. */
   readonly interrupted: boolean
+  /** The correction signals since the person's previous human turn. */
   readonly signals: readonly TurnSignal[]
 }
 
@@ -886,7 +888,11 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
   // the message it answered when that message fell just outside it.
   let lastAgentMessage: OtlpSpan | null = null
   let lastTurn: MutableTurn | null = null
+  // Turns the agent has not written a message after yet: its next one is their reply.
+  let awaitingReply: MutableTurn[] = []
+  // Signals since the person's previous human turn, and whether the agent wrote since it.
   let pending = new Set<TurnSignal>()
+  let agentWroteSinceHuman = false
   for (const span of spans) {
     // A subagent's records are not this session's: its prompts are not turns
     // here, and its activity does not separate two turns of this session.
@@ -897,10 +903,12 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
     if (span.name !== 'user.prompt') {
       if (isOwnAgentMessage(span)) {
         lastAgentMessage = span
-        if (lastTurn && lastTurn.replySpanId === null) {
-          lastTurn.reply = clipAnswered(rawContent(span))
-          lastTurn.replySpanId = span.span_id
+        agentWroteSinceHuman = true
+        for (const turn of awaitingReply) {
+          turn.reply = clipAnswered(rawContent(span))
+          turn.replySpanId = span.span_id
         }
+        awaitingReply = []
       }
       if (isRejectedTool(span)) pending.add('rejected-tool')
       sinceKept.push(span)
@@ -949,7 +957,7 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
       continue
     }
     const answered = lastAgentMessage ? rawContent(lastAgentMessage) : null
-    if (answered !== null && isCompletionClaim(answered)) pending.add('after-claim')
+    if (agentWroteSinceHuman && answered !== null && isCompletionClaim(answered)) pending.add('after-claim')
     const turn: MutableTurn = {
       actor: 'human',
       author,
@@ -965,10 +973,12 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
     }
     turns.push(turn)
     lastTurn = turn
-    pending = new Set()
+    awaitingReply.push(turn)
     if (author === 'human') {
       kept.push(span)
       sinceKept = []
+      pending = new Set()
+      agentWroteSinceHuman = false
     } else {
       drop(TURN_EXCLUSION_REASONS[author]!, author, span)
     }
