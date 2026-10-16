@@ -291,12 +291,7 @@ const COMPLETE_ID_CHARS = 20
  * id anywhere wins over a prefix or suffix anywhere.
  */
 async function lookupSession(query: string, options: ResolveRefOptions, storeRoot: string | undefined): Promise<ResolvedRef> {
-  if (query.length < MIN_REF_CHARS) {
-    throw new RefError(
-      `"${query}" is not a file or directory, and a session id prefix or suffix needs at least ${MIN_REF_CHARS} characters`,
-      'usage',
-    )
-  }
+  const short = query.length < MIN_REF_CHARS
   const home = storeRoot ?? ownHome()
   const selected: readonly HarnessTraceAdapter[] = options.harness ? [adapterFor(options.harness)] : listAdapters()
   const adapters: readonly HarnessTraceAdapter[] = storeRoot === undefined ? selected : selected.filter(readsStoreRoots)
@@ -332,7 +327,13 @@ async function lookupSession(query: string, options: ResolveRefOptions, storeRoo
     return [...found.values()].sort((a, b) => b.session.mtimeMs - a.session.mtimeMs)
   }
   // A whole id is looked up directly; a prefix or suffix needs every session listed.
-  let found = query.length >= COMPLETE_ID_CHARS ? await search(true) : []
+  let found = query.length >= COMPLETE_ID_CHARS || short ? await search(true) : []
+  if (found.length === 0 && short) {
+    throw new RefError(
+      `"${query}" is not a file, a directory or a session id, and a session id prefix or suffix needs at least ${MIN_REF_CHARS} characters`,
+      'usage',
+    )
+  }
   if (found.length === 0) {
     const matched = await search(false)
     const exact = matched.filter(({ session }) => session.sessionId === query)
@@ -355,6 +356,49 @@ async function lookupSession(query: string, options: ResolveRefOptions, storeRoo
     'ambiguous',
     found.map(candidate),
   )
+}
+
+/**
+ * For each id, the shortest form a ref resolves to it alone among `ids`: a
+ * prefix or a suffix of at least {@link MIN_REF_CHARS} characters that no
+ * other id starts or ends with, the shorter of the two (the prefix on a tie),
+ * else the whole id.
+ */
+export function shortestRefs(ids: readonly string[]): Map<string, string> {
+  const unique = [...new Set(ids)]
+  const reverse = (text: string): string => [...text].reverse().join('')
+  const forward = [...unique].sort()
+  const backward = unique.map(reverse).sort()
+  // Up to two entries of `sorted` that start with `prefix`.
+  const starting = (sorted: readonly string[], prefix: string): string[] => {
+    let low = 0
+    let high = sorted.length
+    while (low < high) {
+      const mid = (low + high) >> 1
+      if (sorted[mid]! < prefix) low = mid + 1
+      else high = mid
+    }
+    const found: string[] = []
+    for (let i = low; i < sorted.length && found.length < 2 && sorted[i]!.startsWith(prefix); i += 1) found.push(sorted[i]!)
+    return found
+  }
+  // `id` is the only id that starts or ends with `form`.
+  const alone = (id: string, form: string): boolean => {
+    const matches = new Set([...starting(forward, form), ...starting(backward, reverse(form)).map(reverse)])
+    return matches.size === 1 && matches.has(id)
+  }
+  const shortest = new Map<string, string>()
+  for (const id of unique) {
+    let best = id
+    for (let length = MIN_REF_CHARS; length < id.length; length += 1) {
+      const prefix = id.slice(0, length)
+      const suffix = id.slice(-length)
+      if (alone(id, prefix)) { best = prefix; break }
+      if (alone(id, suffix)) { best = suffix; break }
+    }
+    shortest.set(id, best)
+  }
+  return shortest
 }
 
 // ── Entry points ──────────────────────────────────────────────────────

@@ -185,6 +185,28 @@ export async function equivalentGitCwds(cwd: string | null | undefined): Promise
 }
 
 /**
+ * The repository holding `dir`, as its normalized remote (`host/owner/repo`),
+ * or null when `dir` is in no git repository or the repository has no remote.
+ * A session whose worktree was removed is matched to its repository by the
+ * remote it recorded, compared in this form.
+ */
+export async function repositoryIdentity(dir: string): Promise<string | null> {
+  const root = await findGitRoot(dir)
+  if (!root) return null
+  try {
+    const { remote } = await readGit(root)
+    return remote ? normalizeRemote(remote) : null
+  } catch {
+    return null
+  }
+}
+
+/** True when `path` is gone: a removed worktree, or a directory from another machine. */
+export async function pathIsGone(path: string): Promise<boolean> {
+  return isAbsolute(path) && (await pathStat(path)) === null
+}
+
+/**
  * `cwdMatchesSelection`, then a second attempt with the cwd's resolved
  * (symlink-free) form. A deleted cwd cannot resolve and keeps the raw verdict.
  */

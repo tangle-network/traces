@@ -230,6 +230,11 @@ export interface SessionFacts {
   readonly sessionId: string | null
   readonly harness: string | null
   /**
+   * The session that spawned this one, when this is a spawned child read with
+   * its parent. A child's numbers are its own; none is added to its parent's.
+   */
+  readonly parentSessionId: string | null
+  /**
    * The working directory the harness recorded for the session, read from
    * `traces.session.cwd` on the adapter's root span. Null with the reason when
    * no span carries it; never decoded from a directory name or inferred from
@@ -296,7 +301,10 @@ export interface UnreadSessionFact {
   readonly reason: string
 }
 
-/** How a windowed report chose its sessions and turns. Null on a report built without a window. */
+/**
+ * How a report chose its sessions and turns. Null on a report built without a
+ * window that skipped no unreadable session.
+ */
 export interface SessionFactsSelection {
   /** The window's inclusive lower bound, or null when open. */
   readonly since: string | null
@@ -983,6 +991,10 @@ function sessionFactsForTrace(
     traceId,
     sessionId,
     harness,
+    parentSessionId: spans
+      .filter((span) => span.parent_span_id === null)
+      .map((span) => stringAttr(span, 'traces.parent_session_id'))
+      .find((id) => id !== null) ?? null,
     cwd: cwdSpan
       ? { value: stringAttr(cwdSpan, SESSION_CWD_ATTR), spanIds: [cwdSpan.span_id], unavailable: null }
       : {
@@ -1098,7 +1110,16 @@ function sessionFactsForTrace(
   }
 }
 
-export type SessionFactsReportOptions = SessionFactsOptions & { harness?: string | null; generatedAt?: string }
+export type SessionFactsReportOptions = SessionFactsOptions & {
+  harness?: string | null
+  generatedAt?: string
+  /**
+   * Name a session none of whose records could be read in
+   * `selection.unreadSessions` and leave it out, as a window always does,
+   * rather than report it. For a sweep, where one bad file must not end the run.
+   */
+  nameUnread?: boolean
+}
 
 /** The facts sheet for a set of spans, as one report. */
 export function buildSessionFactsReport(
@@ -1118,7 +1139,7 @@ export function buildSessionFactsReport(
  */
 export interface SessionFactsReportBuilder {
   add(spans: readonly OtlpSpan[]): void
-  /** Name a session that could not be read at all. Only a windowed report holds these. */
+  /** Name a session that could not be read at all: it is skipped, never counted as empty. */
   addUnread(session: UnreadSessionFact): void
   build(): SessionFactsReport
 }
@@ -1128,6 +1149,9 @@ const WINDOW_SESSION_RULE =
 const WINDOW_TURN_RULE =
   'humanTurns, excludedTurns and turnsByActor keep only user.prompt turns that started inside [since, until); ' +
   "every other fact, and each turn's answered text, covers the whole session"
+
+const SWEEP_SESSION_RULE = 'the sessions the selection named or found; one that could not be read is named here and skipped'
+const SWEEP_TURN_RULE = 'every turn of each selected session'
 
 export function createSessionFactsReportBuilder(options: SessionFactsReportOptions = {}): SessionFactsReportBuilder {
   const bounds = windowBounds(options.window)
@@ -1154,32 +1178,29 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
   return {
     add(spans) {
       for (const group of groupByTrace(spans)) {
-        if (bounds === null) {
+        if (bounds === null && options.nameUnread !== true) {
           select(group)
           continue
         }
         const records = group.spans.filter(isRecordSpan)
         if (records.length === 0) {
-          // Nothing was read, so nothing says whether the session belongs in
-          // the window; leaving it out silently would count it as empty.
+          // Nothing was read, so nothing says what the session did, or whether
+          // it belongs in the window; leaving it out silently would count it as empty.
           const unread = group.spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
           unreadSessions.push({
             sessionId: group.sessionId,
             traceId: group.traceId,
             source: null,
-            reason: `no record could be read (${unread ? `${unread.attributes[CORRUPTION_COUNT_ATTR]} unread record(s)` : 'no record spans'}), ` +
-              'so whether the session holds a record inside the window is unknown',
+            reason: `no record could be read (${unread ? `${unread.attributes[CORRUPTION_COUNT_ATTR]} unread record(s)` : 'no record spans'})` +
+              (bounds === null ? '' : ', so whether the session holds a record inside the window is unknown'),
           })
           continue
         }
-        if (records.some((span) => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) select(group)
+        if (bounds === null || records.some((span) => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) select(group)
         else outsideWindow.push(group.sessionId ?? group.traceId)
       }
     },
     addUnread(session) {
-      if (bounds === null) {
-        throw new Error('an unread session is reported only by a windowed report; without a window, refuse the selection')
-      }
       unreadSessions.push(session)
     },
     build() {
@@ -1197,17 +1218,19 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
         generatedAt: options.generatedAt ?? new Date().toISOString(),
         harness: options.harness ?? null,
         spanCount,
-        selection: bounds === null
+        selection: bounds === null && unreadSessions.length === 0
           ? null
           : {
-              since: bounds.since,
-              until: bounds.until,
-              sessionRule: WINDOW_SESSION_RULE,
-              turnRule: WINDOW_TURN_RULE,
+              since: bounds?.since ?? null,
+              until: bounds?.until ?? null,
+              sessionRule: bounds === null ? SWEEP_SESSION_RULE : WINDOW_SESSION_RULE,
+              turnRule: bounds === null ? SWEEP_TURN_RULE : WINDOW_TURN_RULE,
               outsideWindow: [...outsideWindow].sort(compareIds),
               unreadSessions: [...unreadSessions],
             },
-        sessions: [...sessions].sort((left, right) => compareIds(left.traceId, right.traceId)),
+        // In the order they were selected: a named session first, each spawned
+        // child after it in the order it started.
+        sessions: [...sessions],
       }
     },
   }

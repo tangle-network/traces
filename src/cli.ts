@@ -119,12 +119,18 @@ import type {
   UnreadableSourceRows,
 } from './otlp-input.js'
 import { readOtlpInput } from './otlp-input.js'
-import { createSessionFactsReportBuilder, renderSessionFacts, type SessionFactsReport } from './session-facts.js'
+import {
+  computeSessionFacts,
+  createSessionFactsReportBuilder,
+  renderSessionFacts,
+  type SessionFactsReport,
+  type UnreadSessionFact,
+} from './session-facts.js'
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
 import { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
-import { locateSessions, parseSession, scanSessions } from './session-source.js'
+import { locateSessions, parseSession, readSessionSpans, sessionsInCwd } from './session-source.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
 import {
   type SessionWorkflowIssue,
@@ -150,7 +156,7 @@ import {
   runCheck,
 } from './check.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
-import { RefError, resolveRefs, selectSpans, type ResolvedRef, type SpanReader } from './refs.js'
+import { RefError, resolveRefs, selectSpans, shortestRefs, type ResolvedRef, type SpanReader } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload, planUploadFrom, type RefusedSession, type UploadPlan } from './upload.js'
 import { formatVerdict, verdictExitCode, verifySafe } from './verify-safe.js'
@@ -308,7 +314,7 @@ function parseArgs(argv: string[]): Args {
       case '--workflow': a.workflow = true; break
       case '--max-workflow-sessions': a.maxWorkflowSessions = Number(next()); break
       case '--session': a.session = next(); break
-      case '--cwd': a.cwd = next(); break
+      case '--cwd': { const v = next(); if (v !== undefined) a.cwd = resolve(v); break }
       case '--supervisor-run-dir': a.supervisorRunDir = next(); break
       case '--trajectory-dir': a.trajectoryDir = next(); break
       case '--revision': a.revision = next(); break
@@ -364,6 +370,12 @@ function parseArgs(argv: string[]): Args {
         if (arg) a.refs.push(arg)
     }
   }
+  // `--session X` names the same session as the ref X; it is read as one.
+  if (a.session !== undefined && REF_COMMANDS.has(a.command)) {
+    if (a.refs.length > 0) throw new Error('--session and a positional ref both name the trace; pass one')
+    a.refs.push(a.session)
+    a.session = undefined
+  }
   a.input = a.refs[0]
   if (a.refs.length > 1 && !MULTI_REF_COMMANDS.has(a.command)) {
     throw new Error(`unexpected positional argument: ${a.refs[1]}`)
@@ -408,7 +420,6 @@ function validateOtlpSelection(args: Args): Args {
     )
   }
   if (args.input) throw new Error('--otlp cannot be combined with a positional ref; name the file once')
-  if (args.session) throw new Error('--otlp reads a file and cannot be combined with --session')
   if (args.supervisorRunDir) throw new Error('--otlp cannot be combined with --supervisor-run-dir')
   if (args.workflow || args.latestTurn) {
     throw new Error('--workflow and --latest-turn expand harness sessions and cannot be combined with --otlp')
@@ -419,6 +430,8 @@ function validateOtlpSelection(args: Args): Args {
 const CURRENT_SESSION_COMMANDS = new Set([
   'analyze',
   'facts',
+  'mcp',
+  'upload',
   'investigate',
   'improve',
   'ask',
@@ -440,23 +453,48 @@ const WORKFLOW_COMMANDS = new Set([
   'evidence',
 ])
 
+/**
+ * The caller's own session, from the variable its harness sets. Codex's wins:
+ * a Codex session started from Claude Code inherits CLAUDE_CODE_SESSION_ID.
+ * `harness` (an explicit `--harness codex|claude-code`) reads only its own variable.
+ */
+function callerSession(harness?: string): { readonly harness: 'codex' | 'claude-code'; readonly sessionId: string } | undefined {
+  const codex = process.env.CODEX_THREAD_ID?.trim()
+  const claude = process.env.CLAUDE_CODE_SESSION_ID?.trim()
+  if (codex && harness !== 'claude-code') return { harness: 'codex', sessionId: codex }
+  if (claude && harness !== 'codex') return { harness: 'claude-code', sessionId: claude }
+  return undefined
+}
+
+const CURRENT_VARIABLES = 'CODEX_THREAD_ID (Codex) or CLAUDE_CODE_SESSION_ID (Claude Code)'
+
+/** `--current` is the caller's own session, named by id. */
 function applyCurrentSessionSelection(args: Args): Args {
   if (!args.current) return args
   if (!CURRENT_SESSION_COMMANDS.has(args.command)) {
     throw new Error(`--current is not supported by ${args.command}`)
   }
-  if (args.input) throw new Error('--current cannot be combined with a positional ref')
-  if (args.supervisorRunDir) throw new Error('--current cannot be combined with --supervisor-run-dir')
-  if (args.session) throw new Error('--current cannot be combined with --session')
-  if (args.last > 0) throw new Error('--current cannot be combined with --last')
-  if (args.all) throw new Error('--current cannot be combined with --all')
-  const adapter = resolveAdapter(args.harness)
-  if (adapter?.harness !== 'codex') {
-    throw new Error('--current uses CODEX_THREAD_ID and requires --harness codex')
+  if (args.refs.length > 0) throw new RefError('--current names the caller\'s own session; pass --current or a ref, not both', 'usage')
+  if (args.supervisorRunDir) throw new RefError('--current cannot be combined with --supervisor-run-dir', 'usage')
+  if (args.otlp) throw new RefError('--current cannot be combined with --otlp', 'usage')
+  if (args.last > 0) throw new RefError('--current cannot be combined with --last', 'usage')
+  const named = args.harnessExplicit ? resolveAdapter(args.harness)?.harness ?? args.harness : undefined
+  if (named !== undefined && named !== 'codex' && named !== 'claude-code') {
+    throw new RefError(
+      `--current reads ${CURRENT_VARIABLES}; ${named} sets neither. ` +
+        'Name this session with `traces list --cwd . --last 1`',
+      'usage',
+    )
   }
-  const sessionId = process.env.CODEX_THREAD_ID?.trim()
-  if (!sessionId) throw new Error('--current requires CODEX_THREAD_ID from the active Codex session')
-  return { ...args, session: sessionId }
+  const caller = callerSession(named)
+  if (!caller) {
+    throw new RefError(
+      `--current needs ${CURRENT_VARIABLES}, and neither is set. ` +
+        'On another harness, `traces list --cwd . --last 1` names this session',
+      'usage',
+    )
+  }
+  return { ...args, refs: [caller.sessionId], input: caller.sessionId, harness: caller.harness, harnessExplicit: true }
 }
 
 /**
@@ -489,9 +527,9 @@ function validateWorkflowSelection(args: Args): Args {
   if (args.supervisorRunDir) {
     throw new Error('--workflow and --latest-turn cannot be combined with --supervisor-run-dir')
   }
-  const selected = resolveAdapter(args.harness)
-  if (args.latestTurn && (args.all || !supportsTaskTurns(selected))) {
-    throw new Error('--latest-turn requires --harness codex or claude-code')
+  // Without --harness, --latest-turn reads the harnesses that record task turns.
+  if (args.latestTurn && args.harnessExplicit && !supportsTaskTurns(resolveAdapter(args.harness))) {
+    throw new Error('--latest-turn reads Codex and Claude Code sessions; pass --harness codex or claude-code, or no --harness')
   }
   return args
 }
@@ -518,7 +556,6 @@ async function resolveSelection(
   overrides: { harness?: string; format?: SpanReader } = {},
 ): Promise<RefSelection | undefined> {
   if (args.refs.length === 0) return undefined
-  if (args.session) throw new Error('--session and a positional ref both name the trace; pass one')
   const resolved = await resolveRefs(args.refs, {
     harness: overrides.harness ?? (args.harnessExplicit ? args.harness : undefined),
     format: overrides.format ?? refInputFormat(args),
@@ -571,81 +608,99 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 /**
- * The harnesses a selection reads. Over a store root that is every harness
- * that reads one, unless --harness names one; over HOME, `--harness` (default
- * claude-code) or every harness with --all.
+ * The harnesses a selection reads: every harness, or the one `--harness` names.
+ * Over a store root, only those that read one. `--latest-turn` with no
+ * `--harness` reads the harnesses that record task turns.
  */
 function adaptersFor(args: Args): HarnessTraceAdapter[] {
-  if (args.selection?.home !== undefined) {
-    const named = args.harnessExplicit ? selectAdapters({ harnesses: [args.harness] }) : listAdapters()
-    return named.filter(readsStoreRoots)
-  }
-  return selectAdapters({ all: args.all, harnesses: [args.harness] })
+  let adapters = args.harnessExplicit ? selectAdapters({ harnesses: [args.harness] }) : [...listAdapters()]
+  if (args.latestTurn && !args.harnessExplicit) adapters = adapters.filter(supportsTaskTurns)
+  return args.selection?.home !== undefined ? adapters.filter(readsStoreRoots) : adapters
 }
 
-async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; refs: SessionRef[] }[]> {
-  const sinceMs = args.since ? parseSince(args.since) : undefined
-  const out: { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] = []
+interface Discovered {
+  /** Newest first, across every harness read. */
+  readonly sessions: ReadonlyArray<{ readonly adapter: HarnessTraceAdapter; readonly ref: SessionRef }>
+  /** Harness stores that could not be listed, each named with its reason. */
+  readonly unread: UnreadSessionFact[]
+}
+
+/**
+ * The sessions a selection with no named session finds: every one modified
+ * since `--since` (with a record in the window, for commands that read one),
+ * newest first by file mtime across every harness. `--last N`, or `defaultLast`
+ * when neither `--last` nor `--since` is given, keeps the newest N, and never
+ * the caller's own session.
+ */
+async function discover(args: Args, defaultLast?: number): Promise<Discovered> {
+  return narrow(args, await locateAll(args, args.since ? parseSince(args.since) : undefined), defaultLast)
+}
+
+/** Every session of the selected harnesses (modified since `sinceMs`, when given), newest first. */
+async function locateAll(args: Args, sinceMs?: number): Promise<Discovered> {
+  const sessions: Array<Discovered['sessions'][number]> = []
+  const unread: UnreadSessionFact[] = []
   for (const adapter of adaptersFor(args)) {
-    let refs = await locateSessions(adapter, { cwd: args.cwd, sinceMs, home: args.selection?.home })
-    if (args.last > 0) refs = refs.slice(0, args.last)
-    out.push({ adapter, refs })
+    try {
+      for (const ref of await locateSessions(adapter, { sinceMs, home: args.selection?.home })) sessions.push({ adapter, ref })
+    } catch (error) {
+      unread.push({ sessionId: null, traceId: null, source: `${adapter.harness} sessions`, reason: errorText(error) })
+    }
   }
-  return out
+  return { sessions: sessions.sort((a, b) => b.ref.mtimeMs - a.ref.mtimeMs), unread }
 }
 
-function missingPath(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT'
+/** `located`, narrowed by `--since`, `--cwd` and `--last` (see `discover`). */
+async function narrow(args: Args, located: Discovered, defaultLast?: number): Promise<Discovered> {
+  const sinceMs = args.since ? parseSince(args.since) : undefined
+  let sessions = sinceMs === undefined ? located.sessions : located.sessions.filter(({ ref }) => ref.mtimeMs >= sinceMs)
+  if (args.cwd) {
+    const kept = new Set<SessionRef>()
+    for (const adapter of new Set(sessions.map((session) => session.adapter))) {
+      const refs = sessions.filter((session) => session.adapter === adapter).map((session) => session.ref)
+      for (const ref of await sessionsInCwd(adapter, refs, args.cwd)) kept.add(ref)
+    }
+    sessions = sessions.filter(({ ref }) => kept.has(ref))
+  }
+  const last = args.last > 0 ? args.last : args.since ? undefined : defaultLast
+  if (last === undefined) return { sessions, unread: located.unread }
+  const caller = callerSession()?.sessionId
+  return { sessions: sessions.filter(({ ref }) => ref.sessionId !== caller).slice(0, last), unread: located.unread }
 }
 
-/** Resolve `--session` as either a concrete harness file or an ID printed by
- * `traces list`. An ID is only accepted when it identifies one session under
- * the selected harnesses, keeping reports reproducible as live files change. */
-async function resolveSelectedSession(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref: SessionRef }> {
-  if (!args.session) throw new Error('resolveSelectedSession requires --session')
-
-  const adapter = resolveAdapter(args.harness)
-  if (!adapter && !args.all) throw new Error(`unknown harness "${args.harness}"`)
-
-  try {
-    const st = await stat(args.session)
-    if (!adapter) {
-      throw new Error('--session <path> requires --harness when --all is set')
-    }
-    return {
-      adapter,
-      ref: {
-        harness: adapter.harness,
-        sessionId: args.session,
-        path: args.session,
-        // --session is an explicit file; honor --cwd so adoption can find the
-        // project's current or legacy skill-run log (locate() infers cwd in the scan path).
-        cwd: args.cwd ?? null,
-        mtimeMs: st.mtimeMs,
-      },
-    }
-  } catch (error) {
-    if (!missingPath(error)) throw error
+/** Sessions as the per-harness groups the selection collector reads, in their order. */
+function groupsInOrder(sessions: Discovered['sessions']): { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] {
+  const groups: { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] = []
+  for (const { adapter, ref } of sessions) {
+    const last = groups[groups.length - 1]
+    if (last?.adapter === adapter) last.refs.push(ref)
+    else groups.push({ adapter, refs: [ref] })
   }
+  return groups
+}
 
-  const matches: Array<{ adapter: HarnessTraceAdapter; ref: SessionRef }> = []
-  for (const candidate of args.all ? adaptersFor(args) : [adapter!]) {
-    const refs = await locateSessions(candidate, { cwd: args.cwd })
-    for (const ref of refs) {
-      if (ref.sessionId === args.session) matches.push({ adapter: candidate, ref })
-    }
-  }
-  if (matches.length === 1) return matches[0]!
-  if (matches.length === 0) {
-    throw new Error(
-      `no ${args.all ? 'selected' : adapter!.harness} session with ID "${args.session}"; ` +
-        'run `traces list` to select an ID, or pass an explicit session path',
-    )
-  }
-  throw new AmbiguousTraceInputError(
-    `session ID "${args.session}" is ambiguous across ${matches.length} files; ` +
-      'select one harness or pass its explicit session path',
-  )
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Name the sessions a sweep skipped, in one stderr line that says how to see
+ * each with its reason.
+ */
+function warnUnread(args: Args, unread: readonly UnreadSessionFact[]): void {
+  if (unread.length === 0) return
+  const select: string[] = args.current ? ['--current'] : args.refs.map(shellWord)
+  if (args.harnessExplicit && !args.current) select.push('--harness', args.harness)
+  if (args.since) select.push('--since', shellWord(args.since))
+  if (args.until) select.push('--until', shellWord(args.until))
+  if (args.last > 0) select.push('--last', String(args.last))
+  if (args.cwd) select.push('--cwd', shellWord(args.cwd))
+  if (args.latestTurn) select.push('--latest-turn')
+  process.stderr.write(`${unread.length} unreadable: traces facts ${select.join(' ')} --format json | jq .selection\n`)
+}
+
+function shellWord(word: string): string {
+  return /^[\w@%+=:,./-]+$/u.test(word) ? word : `'${word.replace(/'/gu, `'\\''`)}'`
 }
 
 /**
@@ -700,18 +755,113 @@ function assertRequestedAnalysesRan(
   if (messages.length > 0) throw new Error(messages.join('\n'))
 }
 
+/** One `traces list` row: the facts a person picks a session by. */
+interface ListRow {
+  /** The shortest prefix or suffix (8+ characters) that names this session alone; any command takes it as a ref. */
+  readonly ref: string
+  readonly id: string
+  readonly harness: string
+  readonly path: string
+  readonly bytes: number | null
+  readonly parentSessionId: string | null
+  /** The last record, or the file's mtime when no record carries a time. */
+  readonly lastActivity: string
+  readonly durationMs: number | null
+  readonly humanTurns: number | null
+  /** The working directory the session recorded. */
+  readonly cwd: string | null
+  /** The first turn a person typed, on one line, clipped to 80 characters. */
+  readonly firstPrompt: string | null
+}
+
+const PROMPT_CHARS = 80
+
+function oneLine(text: string, chars: number): string {
+  const flat = text.replace(/\s+/gu, ' ').trim()
+  return flat.length <= chars ? flat : `${flat.slice(0, chars - 1)}…`
+}
+
+function formatDuration(ms: number | null): string {
+  if (ms === null) return '?'
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** The facts of one session's own trace, as a list row. */
+async function listRow(adapter: HarnessTraceAdapter, ref: SessionRef, shortRef: string): Promise<ListRow> {
+  const spans = await readSessionSpans(adapter, ref)
+  const sessions = computeSessionFacts(spans)
+  const facts = sessions.find((entry) => entry.sessionId === ref.sessionId) ?? sessions[0]
+  if (!facts || facts.recordSpans === 0) throw new Error('no record could be read')
+  const first = facts.firstRecordAt.value
+  const last = facts.lastRecordAt.value
+  let bytes: number | null = null
+  try {
+    bytes = (await stat(ref.path)).size
+  } catch {
+    // A store that moved between locate and read has no size to report.
+  }
+  const turns = facts.humanTurns.value
+  return {
+    ref: shortRef,
+    id: ref.sessionId,
+    harness: adapter.harness,
+    path: ref.path,
+    bytes,
+    parentSessionId: facts.parentSessionId,
+    lastActivity: last ?? new Date(ref.mtimeMs).toISOString(),
+    durationMs: first !== null && last !== null ? Date.parse(last) - Date.parse(first) : null,
+    humanTurns: turns?.length ?? null,
+    cwd: facts.cwd.value ?? ref.cwd,
+    firstPrompt: turns?.[0] ? oneLine(turns[0].text, PROMPT_CHARS) : null,
+  }
+}
+
+/**
+ * `traces list`: one row per session, newest first, across every harness.
+ * `--last 20` by default, never the caller's own session; `--since` lists
+ * every session active in the window. A session that cannot be read is
+ * counted in the footer and named in the JSON's `selection.unreadSessions`.
+ */
 async function cmdList(args: Args): Promise<void> {
   const named = args.selection?.sessions[0]?.ref.sessionId ?? args.selection?.spans[0]?.ref
   if (named !== undefined) {
     throw new RefError(`list finds sessions; its only ref is a store root, and ${named} is not one (read it with \`traces facts ${named}\`)`, 'usage')
   }
-  const groups = await discover({ ...args, last: args.last || 20 })
-  for (const { adapter, refs } of groups) {
-    console.log(`\n${adapter.harness}: ${refs.length} session(s)`)
-    for (const r of refs) {
-      console.log(`  ${new Date(r.mtimeMs).toISOString()}  ${r.sessionId}  ${r.cwd ?? ''}`)
+  const format = args.format ?? 'text'
+  if (format !== 'text' && format !== 'json') throw new RefError(`list prints text or json, not "${format}"`, 'usage')
+  // Every session a ref could name, so each row's short ref names it alone.
+  const every = await locateAll(args)
+  const shortRefs = shortestRefs(every.sessions.map(({ ref }) => ref.sessionId))
+  const found = await narrow(args, every, 20)
+  const rows: ListRow[] = []
+  const unread: UnreadSessionFact[] = [...found.unread]
+  for (const { adapter, ref } of found.sessions) {
+    try {
+      rows.push(await listRow(adapter, ref, shortRefs.get(ref.sessionId) ?? ref.sessionId))
+    } catch (error) {
+      unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: errorText(error) })
     }
   }
+  const footer = `${rows.length} session${rows.length === 1 ? '' : 's'} · ${unread.length} unreadable`
+  if (format === 'json') {
+    process.stdout.write(`${JSON.stringify({ sessions: rows, selection: { unreadSessions: unread } }, null, 2)}\n`)
+    if (unread.length > 0) process.stderr.write(`${footer}: traces list … --format json | jq .selection\n`)
+    return
+  }
+  const lines = rows.map((row) => [
+    row.ref.padEnd(8),
+    row.harness.padEnd(11),
+    row.lastActivity.slice(0, 16).replace('T', ' '),
+    formatDuration(row.durationMs).padStart(7),
+    `${row.humanTurns ?? '?'} turn${row.humanTurns === 1 ? '' : 's'}`.padEnd(9),
+    row.cwd ?? '(no cwd)',
+    row.firstPrompt ? `"${row.firstPrompt}"` : '',
+  ].join('  ').trimEnd())
+  process.stdout.write(`${[...lines, footer].join('\n')}\n`)
 }
 
 type SelectedSessionSource = ReportSource
@@ -733,6 +883,8 @@ interface CollectedSpans {
   conformanceIssues?: readonly OtlpIngestIssue[]
   conformanceWithheld?: readonly OtlpFieldWithheld[]
   conformanceUnreadable?: UnreadableSourceRows
+  /** Sessions the selection skipped because they could not be read. */
+  unread?: readonly UnreadSessionFact[]
 }
 
 /**
@@ -783,7 +935,7 @@ async function collectOtlpSpans(path: string, selector?: string): Promise<Collec
 async function collectSpans(args: Args): Promise<CollectedSpans> {
   if (args.sourceBundle) {
     if (!['analyze', 'investigate', 'improve', 'ask'].includes(args.command)) throw new Error('--source-bundle is an analysis option')
-    if (args.session || args.otlp || args.input || args.current || args.workflow || args.noContent || args.redactorCmd) {
+    if (args.otlp || args.input || args.current || args.workflow || args.noContent || args.redactorCmd) {
       throw new Error('--source-bundle cannot be combined with another input, redaction, or metadata-only selection')
     }
     for (const output of [args.out, args.dir, args.otlpOut]) {
@@ -794,7 +946,11 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
   if (args.otlp) return collectOtlpSpans(args.otlp)
   if (args.refs.length > 0 && !args.selection) throw new Error(`internal: ${args.command} read its refs before resolving them`)
   const sources = args.selection?.spans ?? []
-  if (sources.length === 0) return collectSessionSpans(args)
+  if (sources.length === 0) {
+    const collected = await collectSessionSpans(args)
+    warnUnread(args, collected.unread ?? [])
+    return collected
+  }
   const parts: CollectedSpans[] = []
   for (const source of sources) {
     parts.push(source.kind === 'run-dir'
@@ -804,7 +960,9 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
         : await collectImportedSpans(source.path, source.reader, args, source.selector))
   }
   if (args.selection?.sessions.length) parts.push(await collectSessionSpans(args))
-  return parts.length === 1 ? parts[0]! : mergeCollected(parts)
+  const collected = parts.length === 1 ? parts[0]! : mergeCollected(parts)
+  warnUnread(args, collected.unread ?? [])
+  return collected
 }
 
 /** Spans of several refs together. A source's conformance describes that source alone, so it is not carried. */
@@ -812,11 +970,13 @@ function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
   const spans: OtlpSpan[] = []
   const cwds: string[] = []
   const sources: SelectedSessionSource[] = []
+  const unread: UnreadSessionFact[] = []
   const workflows = parts.flatMap((part) => (part.workflow ? [part.workflow] : []))
   for (const part of parts) {
     appendAll(spans, part.spans)
     appendAll(cwds, part.cwds)
     appendAll(sources, part.sources)
+    appendAll(unread, part.unread ?? [])
   }
   return {
     spans,
@@ -824,6 +984,7 @@ function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
     cwds,
     sources,
     ...(workflows[0] ? { workflow: workflows[0] } : {}),
+    ...(unread.length > 0 ? { unread } : {}),
   }
 }
 
@@ -842,10 +1003,11 @@ async function collectSessionSpans(args: Args): Promise<CollectedSpans> {
   }
   return {
     spans,
-    harness: [...harnesses].join('+') || args.harness,
+    harness: [...harnesses].join('+') || (args.harnessExplicit ? args.harness : 'none'),
     cwds,
     sources,
     ...(selection.workflow ? { workflow: selection.workflow } : {}),
+    ...(selection.unread.length > 0 ? { unread: selection.unread } : {}),
   }
 }
 
@@ -927,7 +1089,7 @@ async function cmdCheck(args: Args): Promise<void> {
   }
   let spans: OtlpSpan[]
   try {
-    if (args.refs.length > 0 && (args.otlp || args.session)) {
+    if (args.refs.length > 0 && args.otlp) {
       throw new Error('name the trace once: a positional ref, --otlp, or --session')
     }
     const selected = { ...args, selection: await resolveSelection(args, checkInputFormat(args)) }
@@ -990,44 +1152,47 @@ function warnIncompleteWorkflow(workflow: SessionWorkflowSummary | undefined): v
   )
 }
 
+/** The sessions a selection names, or finds, parsed; with the sessions a sweep skipped as unreadable. */
+type CollectedSessionRows = SessionSelection & { readonly unread: UnreadSessionFact[] }
+
+/**
+ * Parse the selected harness sessions. A named session (a ref or `--current`)
+ * and a `--last` selection bring each session's spawned children, the named
+ * session first; a window already holds every child that ran in it. A named
+ * session that cannot be read exits 2; any other session that cannot be read
+ * is skipped and named in `unread`.
+ */
 async function collectSessionRows(
   args: Args,
   bindExplicitSource = false,
   defaultLast = 20,
-): Promise<SessionSelection> {
+): Promise<CollectedSessionRows> {
   const named = args.selection?.sessions ?? []
   const source = args.selection?.spans[0]
-  if (source && named.length === 0 && !args.session) {
+  if (source && named.length === 0) {
     throw new Error(`${args.command} reads harness sessions; ${source.ref} is a span source`)
   }
-  const groups = args.session
-    ? [await resolveSelectedSession(args).then(({ adapter, ref }) => ({ adapter, refs: [ref] }))]
-    : named.length > 0
-      ? groupByAdapter(named)
-      : await discover({ ...args, last: args.last || defaultLast })
-  return collectSessionSelection(groups, {
-    workflow: args.workflow,
+  const found = named.length > 0 ? { sessions: named, unread: [] } : await discover(args, defaultLast)
+  const unread = [...found.unread]
+  const selection = await collectSessionSelection(groupsInOrder(found.sessions), {
+    workflow: named.length > 0 || !args.since,
+    parents: false,
     maxWorkflowSessions: args.maxWorkflowSessions,
     taskScope: args.latestTurn ? 'latest' : 'all',
-    bindSources: bindExplicitSource && (Boolean(args.session) || named.length > 0),
+    bindSources: bindExplicitSource && named.length > 0,
     home: args.selection?.home,
+    onUnreadable: ({ ref, error, seed }) => {
+      if (seed && named.length > 0) throw new RefError(`${ref.sessionId} could not be read (${ref.path}): ${errorText(error)}`, 'unreadable')
+      unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: errorText(error) })
+    },
   })
-}
-
-/** Named sessions as the per-harness groups the selection collector reads, in the order named. */
-function groupByAdapter(named: RefSelection['sessions']): { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] {
-  const groups = new Map<HarnessTraceAdapter, SessionRef[]>()
-  for (const { adapter, ref } of named) {
-    const refs = groups.get(adapter)
-    if (refs) refs.push(ref)
-    else groups.set(adapter, [ref])
-  }
-  return [...groups].map(([adapter, refs]) => ({ adapter, refs }))
+  return { ...selection, unread }
 }
 
 async function cmdEvidence(args: Args): Promise<void> {
   const selection = await collectSessionRows(args, true)
   const rows = selection.rows.filter((row) => row.spans.length > 0)
+  warnUnread(args, selection.unread)
   if (rows.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(selection.workflow)
   const otlpPath = args.otlpOut ? await writeOtlpFile(rows.flatMap((row) => row.spans), args.otlpOut) : undefined
@@ -1052,6 +1217,7 @@ async function cmdEvidence(args: Args): Promise<void> {
 async function cmdIndex(args: Args): Promise<void> {
   const selection = await collectSessionRows(args)
   const rows = selection.rows.filter((row) => row.spans.length > 0)
+  warnUnread(args, selection.unread)
   if (rows.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(selection.workflow)
   const index = await buildSessionIndexFromRows(rows, {
@@ -1059,9 +1225,9 @@ async function cmdIndex(args: Args): Promise<void> {
     selection: {
       command: 'index',
       harness: args.harnessExplicit ? args.harness : undefined,
-      all: args.all || undefined,
+      all: !args.harnessExplicit || undefined,
       last: args.last || undefined,
-      session: args.session,
+      session: args.refs[0],
       cwd: args.cwd,
       since: args.since,
       latestTurn: args.latestTurn || undefined,
@@ -1078,7 +1244,7 @@ async function cmdIndex(args: Args): Promise<void> {
 
 async function cmdBundle(args: Args): Promise<void> {
   const named = args.selection
-  if (!args.session && (named?.sessions.length !== 1 || named.spans.length > 0)) {
+  if (named?.sessions.length !== 1 || named.spans.length > 0) {
     throw new Error(
       named?.spans[0]
         ? `bundle keeps one harness session's evidence; ${named.spans[0].ref} is a span source`
@@ -1086,7 +1252,7 @@ async function cmdBundle(args: Args): Promise<void> {
     )
   }
   if (!args.out) throw new Error('bundle needs --out <dir> — a new or empty directory for the bundle')
-  const { adapter, ref } = args.session ? await resolveSelectedSession(args) : named!.sessions[0]!
+  const { adapter, ref } = named!.sessions[0]!
   const result = await assembleSessionBundle({
     adapter,
     ref,
@@ -1243,12 +1409,12 @@ async function cmdBundleView(args: Args): Promise<void> {
  * the short readable form. Every fact names the span ids it came from, so any
  * number here can be checked with `traces export` or a trace tool.
  *
- * Without a window, exits non-zero when a selected session cannot be read:
- * `collectSpans` throws, and an unreadable session must never be reported as a
- * session with no facts. With `--since`/`--until` the selection is every
- * session with a record in the window, read one at a time; a session that
- * cannot be read is named in `selection.unreadSessions` with its reason instead
- * of ending a run over hundreds of sessions.
+ * A named session (a ref or `--current`) comes first, its spawned children
+ * after it, and one that cannot be read exits 2. A sweep (`--last`, a window)
+ * skips a session that cannot be read and names it with its reason in
+ * `selection.unreadSessions`, so one bad file never ends a run over hundreds.
+ * With `--since`/`--until` the selection is every session with a record in
+ * the window, read one at a time.
  */
 async function cmdFacts(args: Args): Promise<void> {
   const format = args.format ?? 'json'
@@ -1261,67 +1427,54 @@ async function cmdFacts(args: Args): Promise<void> {
         ...(args.until !== undefined ? { until: new Date(parseTimeBound(args.until, '--until')).toISOString() } : {}),
       }
     : undefined
-  const builder = createSessionFactsReportBuilder({ includeContent: !args.noContent, window })
-  let report: SessionFactsReport
   // A store root alone is a place to select from, not a selection.
   const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
-  const discoversWindow = window !== undefined &&
-    !args.session && !args.otlp && named === 0 && !args.sourceBundle && !args.workflow
-  if (discoversWindow) {
+  const builder = createSessionFactsReportBuilder({ includeContent: !args.noContent, window, nameUnread: named === 0 })
+  let report: SessionFactsReport
+  if (window !== undefined && !args.otlp && named === 0 && !args.sourceBundle) {
     // Every session modified since the window opened, newest first, parsed and
     // reduced to its facts one at a time: a week of sessions is gigabytes of
     // spans, and the sheet needs only one session's at once. A file last
     // written before `since` holds no record after it.
+    const found = await discover(args)
+    const unread = [...found.unread]
     const harnesses = new Set<string>()
-    for await (const scanned of scanSessions({
-      adapters: adaptersFor(args),
-      cwd: args.cwd,
-      home: args.selection?.home,
-      sinceMs: window.since === undefined ? undefined : Date.parse(window.since),
-      last: args.last > 0 ? args.last : undefined,
-      taskScope: args.latestTurn ? 'latest' : 'all',
-      onError: (error, ref) => {
-        if (!ref) throw error
-        builder.addUnread({
-          sessionId: ref.sessionId,
-          traceId: null,
-          source: ref.path,
-          reason: error instanceof Error ? error.message : String(error),
-        })
-      },
-    })) {
-      harnesses.add(scanned.adapter.harness)
-      builder.add(scanned.spans)
+    for (const { adapter, ref } of found.sessions) {
+      let spans: OtlpSpan[]
+      try {
+        spans = await parseSession(adapter, ref, { taskScope: args.latestTurn ? 'latest' : 'all' })
+      } catch (error) {
+        unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: errorText(error) })
+        continue
+      }
+      harnesses.add(adapter.harness)
+      builder.add(spans)
     }
-    report = { ...builder.build(), harness: [...harnesses].join('+') || args.harness }
+    for (const entry of unread) builder.addUnread(entry)
+    warnUnread(args, unread)
+    report = { ...builder.build(), harness: [...harnesses].join('+') || (args.harnessExplicit ? args.harness : null) }
   } else {
     const collected = await collectSpans(args)
-    if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+    if (collected.spans.length === 0 && (collected.unread ?? []).length === 0) throw new Error('no spans found for the given selection')
     warnIncompleteWorkflow(collected.workflow)
     builder.add(collected.spans)
+    for (const entry of collected.unread ?? []) builder.addUnread(entry)
     report = { ...builder.build(), harness: collected.harness }
-  }
-  const unreadInWindow = report.selection?.unreadSessions ?? []
-  if (unreadInWindow.length > 0) {
-    const named = unreadInWindow.slice(0, 3).map((entry) => entry.source ?? entry.sessionId ?? entry.traceId)
-    process.stderr.write(
-      `warning: ${unreadInWindow.length} session(s) could not be read; each is named with its reason in ` +
-        `selection.unreadSessions (${named.join(', ')}${unreadInWindow.length > named.length ? ', …' : ''})\n`,
-    )
   }
   // A session that yielded no record spans was not read: only its root, and any
   // integrity receipt for the bytes that failed to parse. Printing a sheet of
   // zeros for it would state, in the sheet's own voice, that the session did
-  // nothing — which is the one thing the sheet must never do. A windowed report
-  // never holds one: it names such a session in selection.unreadSessions.
+  // nothing — which is the one thing the sheet must never do. A sweep names
+  // such a session in selection.unreadSessions instead.
   const unread = report.sessions.filter((facts) => facts.recordSpans === 0)
   if (unread.length > 0) {
-    throw new Error(
+    throw new RefError(
       `no records could be read from ${unread.length} selected session(s): ` +
         unread
           .map((facts) => `${facts.sessionId ?? facts.traceId} (${facts.unreadRecords.value ?? 0} unread record(s))`)
           .join(', ') +
         '. The facts sheet would state zeros the spans cannot support.',
+      'unreadable',
     )
   }
   const rendered = format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderSessionFacts(report)
@@ -1824,27 +1977,9 @@ function streamPreset(args: Args): { mode: StreamMode; includeSpans: boolean; in
 async function streamExplicitSession(
   args: Args,
   extraAnalysts: readonly TraceLiveAnalyst[] | undefined,
-  named?: RefSelection['sessions'][number],
+  { adapter, ref }: RefSelection['sessions'][number],
 ): Promise<void> {
   const preset = streamPreset(args)
-  let adapter: HarnessTraceAdapter
-  let ref: SessionRef
-  if (named) {
-    ({ adapter, ref } = named)
-  } else {
-    if (!args.session) throw new Error('streamExplicitSession needs --session or a session ref')
-    const selected = resolveAdapter(args.harness)
-    if (!selected) throw new Error(`unknown harness "${args.harness}"`)
-    adapter = selected
-    const st = await stat(args.session)
-    ref = {
-      harness: adapter.harness,
-      sessionId: basename(args.session),
-      path: resolve(args.session),
-      cwd: args.cwd ?? null,
-      mtimeMs: st.mtimeMs,
-    }
-  }
   const spans = await parseSession(adapter, ref)
   for (const event of traceStreamEventsFromSpans(spans, {
     ref,
@@ -1883,12 +2018,12 @@ async function cmdStream(args: Args): Promise<void> {
     }
     return
   }
-  if (args.session || named?.sessions[0]) {
-    await streamExplicitSession(args, config?.liveAnalysts, named?.sessions[0])
+  if (named?.sessions[0]) {
+    await streamExplicitSession(args, config?.liveAnalysts, named.sessions[0])
     return
   }
 
-  const all = args.all || (!args.harnessExplicit && !args.cwd)
+  const all = !args.harnessExplicit
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
   if (!args.replay) {
@@ -1932,7 +2067,7 @@ async function cmdStream(args: Args): Promise<void> {
 async function cmdWatch(args: Args): Promise<void> {
   const target = args.supervisorRunDir ?? args.input
   if (target !== undefined) return cmdWatchRunTarget(target, args)
-  const all = args.all || (!args.harnessExplicit && !args.cwd)
+  const all = !args.harnessExplicit
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
   process.stderr.write(
@@ -2028,8 +2163,9 @@ async function cmdUpload(args: Args): Promise<void> {
   const named = args.selection
   const fromRefs = named !== undefined && named.sessions.length + named.spans.length > 0
   const sinceMs = fromRefs ? undefined : args.since ? parseSince(args.since) : Date.now() - 24 * 60 * 60 * 1000
-  // Default to ALL harnesses unless a specific --harness was given.
-  const all = args.all || !args.harnessExplicit
+  const all = !args.harnessExplicit
+  // A window is a sweep: a session that cannot be read is skipped and named.
+  const unread: UnreadSessionFact[] = []
   const plan: UploadPlan = fromRefs
     ? await planUploadFrom(refSessions(args))
     : await planUpload({
@@ -2038,7 +2174,11 @@ async function cmdUpload(args: Args): Promise<void> {
           : { all, harnesses: args.harnessExplicit ? [args.harness] : undefined }),
         cwd: args.cwd,
         sinceMs,
+        onError: (error, ref) => {
+          unread.push({ sessionId: ref?.sessionId ?? null, traceId: null, source: ref?.path ?? null, reason: errorText(error) })
+        },
       })
+  warnUnread(args, unread)
 
   const redactorParts = args.redactorCmd?.split(/\s+/).filter(Boolean) ?? []
   const redactor = redactorParts[0] ? commandRedactor({ command: redactorParts[0], args: redactorParts.slice(1) }) : undefined
@@ -2332,7 +2472,11 @@ Commands:
             names it when the sniff cannot.
             Exit 0 pass, 1 fail, 2 bad contract or a rule could not run,
             3 unreadable trace, 4 ambiguous trace reference
-  list      List discovered sessions
+  list      One row per session, newest first, across every harness: the short
+            ref any command takes, harness, last activity, duration, human
+            turns, recorded cwd and first prompt (--last 20 by default; never
+            the caller's own session). --format json adds id, path, bytes and
+            parent id. Footer: N sessions · M unreadable
   analyze   Run analyst suite + loop/waste pipelines over OTLP (--otlp), sessions,
             or an input file; names every analysis the spans could not support
             (--supervisor-run-dir <dir> reports a supervision tree instead)
@@ -2413,17 +2557,19 @@ Commands:
             Say whether files are safe to share: SAFE, SAFE_WITH_WARNINGS, UNSAFE
             (exit 1) or UNKNOWN (exit 2). Read-only (--help for flags)
 
-Options:
-  --harness <id>   Harness or alias (default: claude-code). Known: ${knownHarnesses().join(', ')}
-  --all            Sweep every known harness
-  --last <n>       Most-recent N sessions
-  --current        Analyze the active Codex session named by CODEX_THREAD_ID
+Selection (every harness unless --harness names one; a named session brings
+its spawned children, up to 100, and comes first; a session a sweep cannot
+read is skipped and named in selection.unreadSessions):
+  --harness <id>   Read only this harness. Known: ${knownHarnesses().join(', ')}
+  --last <n>       The N sessions with the newest file mtime, never the caller's own
+  --current        The caller's own session: CODEX_THREAD_ID (Codex) wins, else
+                   CLAUDE_CODE_SESSION_ID (Claude Code); elsewhere use
+                   traces list --cwd . --last 1
   --latest-turn    Limit a resumed Codex or Claude Code session to its latest task turn
-  --session <id|path> Analyze one listed session ID or one explicit harness session file
-  --workflow       Expand selected sessions through stable parent/child session IDs
-  --max-workflow-sessions <n>
-                   Stop workflow expansion before parsing more than N files (default 100)
-  --cwd <dir>      Filter sessions by working directory
+  --session <id|path> The session a ref names (same as the positional ref)
+  --cwd <dir>      Sessions recorded in DIR or under it (path boundary), in a live
+                   worktree of its repository, or in a removed worktree whose
+                   recorded repository (Codex) is DIR's
   --supervisor-run-dir <dir>
                    analyze: report a SUPERVISION TREE instead of harness sessions —
                    steers, spawn waves, concurrency, idle wall, cost by role,

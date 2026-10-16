@@ -78,6 +78,18 @@ export interface CollectSessionWorkflowOptions extends ParseOptions {
   readonly maxSessions?: number
   /** The store root the seeds came from; parents and children are looked up there, not in HOME. */
   readonly home?: string
+  /**
+   * Follow parent links as well as child links (default true). With false, a
+   * seed brings only its descendants, and the sessions come seed by seed, each
+   * followed by its children in the order they started: what the CLI reads.
+   */
+  readonly parents?: boolean
+  /**
+   * A session that cannot be parsed. Return to skip it (it is left out of the
+   * tree and no issue names it as missing); throw to stop. Without this, the
+   * parse error ends the expansion.
+   */
+  readonly onUnreadable?: (unread: { readonly ref: SessionRef; readonly error: unknown; readonly seed: boolean }) => void
 }
 
 interface SessionReference {
@@ -225,6 +237,37 @@ function orderSessions(sessions: readonly SessionWorkflowSession[]): SessionWork
   return ordered
 }
 
+/** When a session began: its earliest span start. */
+function startedAt(session: SessionWorkflowSession): number {
+  let first = Number.POSITIVE_INFINITY
+  for (const span of session.spans) {
+    const at = Date.parse(span.start_time)
+    if (Number.isFinite(at) && at < first) first = at
+  }
+  return first
+}
+
+/** Seed by seed, in the order given, each followed by its descendants in the order they started. */
+function orderFromSeeds(sessions: readonly SessionWorkflowSession[], seedIds: readonly string[]): SessionWorkflowSession[] {
+  const byId = new Map(sessions.map((session) => [session.relationship.sessionId, session]))
+  const ordered: SessionWorkflowSession[] = []
+  const seen = new Set<string>()
+  const visit = (id: string): void => {
+    const session = byId.get(id)
+    if (!session || seen.has(id)) return
+    seen.add(id)
+    ordered.push(session)
+    const children = session.relationship.childSessionIds
+      .map((childId) => byId.get(childId))
+      .filter((child): child is SessionWorkflowSession => child !== undefined)
+      .sort((a, b) => startedAt(a) - startedAt(b) || a.relationship.sessionId.localeCompare(b.relationship.sessionId))
+    for (const child of children) visit(child.relationship.sessionId)
+  }
+  for (const id of seedIds) visit(id)
+  for (const session of sessions) visit(session.relationship.sessionId)
+  return ordered
+}
+
 /** Expand one or more selected source files into their connected session tree.
  * Missing or ambiguous files are returned as issues; no path is guessed. */
 export async function collectSessionWorkflow(
@@ -232,6 +275,7 @@ export async function collectSessionWorkflow(
   seeds: readonly SessionRef[],
   options: CollectSessionWorkflowOptions = {},
 ): Promise<SessionWorkflow> {
+  const followParents = options.parents !== false
   if (seeds.length === 0) {
     throw new SessionWorkflowError(
       'SESSION_WORKFLOW_EMPTY_SELECTION',
@@ -320,28 +364,44 @@ export async function collectSessionWorkflow(
   const unresolvedReferences = new Set<string>()
   const seedPaths = new Set(seeds.map(refPathKey))
   const seedSessionIds: string[] = []
+  // Sessions skipped as unreadable: named by the caller, never reported missing.
+  const unreadIds = new Set<string>()
 
   for (let index = 0; index < queue.length; index += 1) {
     options.signal?.throwIfAborted()
     if (sessions.length >= maxSessions) {
       throw new SessionWorkflowError(
         'SESSION_WORKFLOW_LIMIT_EXCEEDED',
-        `session workflow exceeds maxSessions=${maxSessions}; raise the limit only after checking the selected tree`,
+        `the selected session tree holds more than ${maxSessions} sessions, the cap on spawned children read with a ` +
+          'session; name one child session to read it alone',
       )
     }
     const selected = queue[index]!
     const { ref, taskScope, taskTurnId } = selected
-    const spans = await parseSession(adapter, ref, {
-      corruptionMode: options.corruptionMode,
-      taskScope,
-      taskTurnId,
-      signal: options.signal,
-    })
+    let spans: OtlpSpan[]
+    try {
+      spans = await parseSession(adapter, ref, {
+        corruptionMode: options.corruptionMode,
+        taskScope,
+        taskTurnId,
+        signal: options.signal,
+      })
+    } catch (error) {
+      if (!options.onUnreadable || options.signal?.aborted) throw error
+      options.onUnreadable({ ref, error, seed: seedPaths.has(refPathKey(ref)) })
+      unreadIds.add(ref.sessionId)
+      continue
+    }
     options.signal?.throwIfAborted()
     const relationship = describeSessionRelationship(ref, spans)
-    const discoveredPaths = (await refsForId(relationship.sessionId))
-      .map((candidate) => candidate.path)
-      .filter((path, pathIndex, paths) => paths.indexOf(path) === pathIndex)
+    // A whole-tree read checks that no other file claims this session's id. A
+    // read down from named seeds already holds each seed's file, and a copy of
+    // it elsewhere (a loose rollout beside its store) is not a second session.
+    const discoveredPaths = followParents
+      ? (await refsForId(relationship.sessionId))
+          .map((candidate) => candidate.path)
+          .filter((path, pathIndex, paths) => paths.indexOf(path) === pathIndex)
+      : []
     if (discoveredPaths.length > 1) {
       throw new SessionWorkflowError(
         'SESSION_WORKFLOW_DUPLICATE_ID',
@@ -369,6 +429,7 @@ export async function collectSessionWorkflow(
         ? await adapter.locateSpawnedChildren(relationship.sessionId, relationship.unjoinedSpawnPaths, {
             corruptionMode: options.corruptionMode,
             signal: options.signal,
+            ...(options.home !== undefined ? { home: options.home } : {}),
           })
         : []
       options.signal?.throwIfAborted()
@@ -419,7 +480,7 @@ export async function collectSessionWorkflow(
     parsedById.set(joined.sessionId, session)
     if (seedPaths.has(refPathKey(ref))) seedSessionIds.push(joined.sessionId)
 
-    const discovered = referencesFor(joined)
+    const discovered = referencesFor(joined).filter((reference) => followParents || reference.relation === 'child')
     references.push(...discovered)
     for (const reference of discovered) {
       if (parsedById.has(reference.sessionId)) continue
@@ -455,7 +516,7 @@ export async function collectSessionWorkflow(
   }
 
   for (const reference of references) {
-    if (parsedById.has(reference.sessionId)) continue
+    if (parsedById.has(reference.sessionId) || unreadIds.has(reference.sessionId)) continue
     if (unresolvedReferences.has(referenceKey(reference))) continue
     const {
       taskScope: _taskScope,
@@ -468,7 +529,7 @@ export async function collectSessionWorkflow(
   }
   issues.push(...relationshipIssues(sessions))
   const uniqueIssues = [...new Map(issues.map((issue) => [issueKey(issue), issue])).values()]
-  const ordered = orderSessions(sessions)
+  const ordered = followParents ? orderSessions(sessions) : orderFromSeeds(sessions, seedSessionIds)
   return {
     sessions: ordered,
     seedSessionIds: [...new Set(seedSessionIds)],
