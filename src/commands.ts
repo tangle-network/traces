@@ -251,7 +251,11 @@ const COMMANDS = [
     name: 'list',
     usage: 'list [<store-root>] [--last N | --since T] [--cwd DIR] [--harness ID] [--format text|json]',
     job: "Find a session: one row per session, newest first, across every harness, never the caller's own.",
-    flags: [{ flag: '--last', help: 'the N newest sessions (default 20)' }, '--since', '--cwd', '--harness', { flag: '--format', help: 'text (default), or json with id, path, bytes and parent id' }],
+    flags: [
+      { flag: '--last', help: 'the N newest sessions (default 20)' }, '--since', '--cwd',
+      { flag: '--harness', help: "only this harness's sessions" },
+      { flag: '--format', help: 'text (default), or json with id, path, bytes and parent id' },
+    ],
     formats: ['text', 'json'],
     refs: [0, 1],
     jq: [
@@ -356,7 +360,7 @@ const COMMANDS = [
     notes: ['A run tree stops when its result lands, and exits 1 when the run ended with an error.'],
     flags: [
       { flag: '--once', help: 'with a run dir or span file: print one snapshot and exit' },
-      '--harness', '--cwd', hidden('--window'), hidden('--interval'),
+      { flag: '--harness', help: "only this harness's sessions" }, '--cwd', hidden('--window'), hidden('--interval'),
     ],
     refs: [0, 1],
     examples: ['traces watch', 'traces watch runs/my-run --once', 'traces watch --harness codex --cwd .'],
