@@ -131,7 +131,7 @@ export function knownGoodSpans(): ContractSpan[] {
 }
 
 /** Contract spans as traces reads them: written as OTLP-JSONL, then read back. */
-async function readEmitted(spans: readonly ContractSpan[]): Promise<OtlpSpan[]> {
+async function readEmitted(spans: readonly ContractSpan[]): Promise<readonly OtlpSpan[]> {
   const dir = await mkdtemp(join(tmpdir(), 'traces-custom-analyst-'))
   try {
     const path = join(dir, 'spans.otlp.jsonl')
@@ -143,7 +143,7 @@ async function readEmitted(spans: readonly ContractSpan[]): Promise<OtlpSpan[]> 
 }
 
 /** The most recent session of the first harness on this machine that has one. */
-async function newestSession(): Promise<OtlpSpan[]> {
+async function newestSession(): Promise<readonly OtlpSpan[]> {
   for await (const session of scanSessions({ last: 1 })) return session.spans
   throw new Error('no recent sessions found')
 }
