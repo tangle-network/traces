@@ -842,7 +842,7 @@ describe('traces CLI', () => {
     })
   })
 
-  it('resolves the parent turn from Codex nested SubAgentActivity events', async () => {
+  it('reads a named Codex child alone: children come with a session, its parent does not', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-nested-activity-'))
     const codexHome = join(dir, 'codex')
     const sessions = join(codexHome, 'sessions', '2026', '07', '29')
@@ -950,13 +950,8 @@ describe('traces CLI', () => {
       complete: true,
       issues: [],
     })
-    expect(output.sessions.map((row) => row.session.sessionId)).toEqual([parentId, childId])
+    expect(output.sessions.map((row) => row.session.sessionId)).toEqual([childId])
     expect(output.sessions[0]!.session).toMatchObject({
-      taskScope: 'turn',
-      turnId: 'current-parent-turn',
-      childSessionIds: [childId],
-    })
-    expect(output.sessions[1]!.session).toMatchObject({
       taskScope: 'latest',
       parentSessionId: parentId,
     })

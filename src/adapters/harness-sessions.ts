@@ -23,7 +23,7 @@ import type { OtlpSpan } from '../otlp.js'
 import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { ClaudeAdapter } from './claude.js'
-import { CodexAdapter } from './codex.js'
+import { CodexAdapter, spawnAgentPath } from './codex.js'
 import { multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { OpencodeAdapter } from './opencode.js'
 
@@ -176,7 +176,12 @@ function decorateCodexTools(session: HarnessSession, spans: OtlpSpan[]): void {
       ? [...new Set([...children, ...spawnedSessionIds(call.result?.output)])]
       : targetedSessionIds(operation, call.inputText ?? call.input)
     if (ids.length > 0) item.attributes['traces.codex.agent_session_ids'] = JSON.stringify(ids)
-    if (operation === 'spawn_agent') item.attributes['traces.agent.spawn'] = true
+    if (operation !== 'spawn_agent') continue
+    item.attributes['traces.agent.spawn'] = true
+    // The task path the child stamps in its own session_meta: its name, and
+    // the join key when the spawn returned no child id.
+    const path = spawnAgentPath(call.input) ?? spawnAgentPath(call.inputText) ?? spawnAgentPath(call.result?.output)
+    if (path) item.attributes['traces.codex.spawn_agent_path'] = path
   }
 }
 

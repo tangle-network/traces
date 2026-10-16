@@ -5,12 +5,17 @@
  * Discovery (discovery-lab `runner/trace-review.mjs`) converts every Sandbox
  * live stream that carries a `"backend":"codex"` envelope with `--harness
  * codex-exec`, and every other sandbox recording as sandbox events.
+ *
+ * tangle-tools `fleet/recurrence.py` reads one session's facts as JSON from
+ * stdout (`facts P --harness H --format json`); `tests/facts-json-contract.test.ts`
+ * pins the paths it reads.
  */
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { IDS, makeFixtureHome } from './fixtures/home.js'
 import { runCli } from './run-cli.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'sandbox-live-stream')
@@ -62,5 +67,15 @@ describe('Discovery convert argv', () => {
     const current = join(dir, 'live-1.0.otlp.jsonl')
     expect((await runCli(['convert', liveStream, '--harness', 'codex-exec', '--out', current], { env })).code).toBe(0)
     expect(await toolSpans(live)).toBe(await toolSpans(current))
+  })
+})
+
+describe('recurrence facts argv', () => {
+  it('reads a Codex session file with --harness codex, the named session first', async () => {
+    const fx = await makeFixtureHome()
+    const run = await runCli(['facts', fx.paths.parent, '--harness', 'codex', '--format', 'json'], { env: fx.env })
+    expect(run.code).toBe(0)
+    const report = JSON.parse(run.stdout.slice(run.stdout.indexOf('{'))) as { sessions: Array<{ sessionId: string }> }
+    expect(report.sessions[0]!.sessionId).toBe(IDS.parent)
   })
 })

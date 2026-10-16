@@ -331,7 +331,7 @@ function agentRequestId(output: unknown, depth = 3): string | undefined {
  * own `session_meta`; the value is identical (`/root/c1_b_grid`). A leading slash is kept, so the
  * comparison is exact and never a prefix match.
  */
-function spawnAgentPath(value: unknown, depth = 4): string | undefined {
+export function spawnAgentPath(value: unknown, depth = 4): string | undefined {
   if (depth < 0 || value == null) return undefined
   if (typeof value === 'string') {
     try {

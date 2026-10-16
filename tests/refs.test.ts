@@ -186,8 +186,9 @@ describe('refs: a store root', () => {
   it('selects over its own stores instead of HOME', async () => {
     const listed = await run(['list', fx.storeRoot])
     expect(listed.code).toBe(0)
-    expect(listed.stdout).toContain(IDS.archived)
-    expect(listed.stdout).not.toContain(IDS.claude)
+    // A row's ref is the shortest unique prefix or suffix.
+    expect(listed.stdout).toContain(IDS.archived.slice(0, 8))
+    expect(listed.stdout).not.toContain(IDS.claude.slice(0, 8))
 
     const windowed = await factsOf(fx.storeRoot, '--since', '3650d')
     expect(windowed.sessions.map((session) => session.sessionId)).toEqual([IDS.archived])
