@@ -127,19 +127,3 @@ Cache by `measurementVersion` and `sourceDigest`; `evidenceThrough` is the lates
 recorded endpoint, not current liveness. Computing the sheet parses the supplied
 spans; returning a stored sheet needs no model call or trace scan. Semantic
 judgments remain attributed analyst results.
-
-The SDK also accepts verified retained captures through
-`parseRetainedSession({ harness, nativeSessionId, files, signal? })`.
-Pass files as `{ path, content }` with their original relative layout.
-Runtime or the caller owns custody, digest verification and capture completeness.
-The reader uses existing adapters and selects a file only when native records
-establish the supplied session identity.
-It does not inspect the host session catalog or infer identity from filenames.
-Directory-only stores and formats without a recorded native identity remain unavailable.
-The returned source files, duplicate snapshots and unselected files explain the selection.
-Identical or append-only copies count once; divergent histories remain unavailable.
-Parsing is bounded to 1024 text files, 16 MiB per file, and 64 MiB total.
-No model calls occur.
-Call `buildSessionFactsReport(selection.spans, { includeContent: false })` to
-withhold native bodies from the resulting facts.
-The reader itself returns spans containing native content, for local trusted consumers only.

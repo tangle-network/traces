@@ -12,7 +12,7 @@ You install it to PRODUCE spans. This package already depends on it to read
 them, so `npx @tangle-network/traces@latest` arrives with the contract-backed
 analyses working: trace conformance, `traces validate`, `--otlp` inbound
 reading, round-over-round convergence and the steering chain, and OpenInference
-/ intelligence-spans conversion.
+conversion.
 
 ```ts
 import { llmSpan, loopSpan, steeredBy, toolSpan } from '@tangle-network/agent-trace-contract'

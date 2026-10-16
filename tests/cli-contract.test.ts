@@ -44,7 +44,31 @@ const STEP_4: readonly MovedCase[] = [
   pinned('--format chat-trajectory', ['convert', 'trajectory.json', '--format', 'chat-trajectory', '--out', 'spans.jsonl']),
 ]
 
-const MOVED = [...STEP_4]
+/** Step 5: the second analyzer and the outputs no one reads. */
+const STEP_5: readonly MovedCase[] = [
+  { argv: ['index', '--harness', 'codex', '--last', '20', '--out', 'session-index.json'], spelling: 'index', instead: 'traces list --format json' },
+  { argv: ['inspect', 'session-index.json', '--out', 'inspection-report.md'], spelling: 'inspect', instead: 'traces analyze <ref>' },
+  { argv: ['evidence', '--since', '24h', '--out', 'policy-evidence.jsonl'], spelling: 'evidence', instead: 'traces facts --format json' },
+  {
+    argv: ['bundle-view', 'bundle-dir', '--view', 'evidence-only', '--out', 'writer-dir'],
+    spelling: 'bundle-view',
+    instead: 'traces facts <bundle-dir> --no-content',
+  },
+  {
+    argv: ['analyze', '--source-bundle', 'bundle-dir', '--out', 'report.md'],
+    spelling: '--source-bundle',
+    instead: 'traces analyze bundle-dir --out report.md',
+  },
+  {
+    argv: ['bundle', 'session.jsonl', '--view', 'evidence-only', '--out', 'bundle-dir'],
+    spelling: '--view',
+    instead: 'removed (bundle-view is traces facts <bundle-dir> --no-content)',
+  },
+  pinned('--format policy-evidence', ['convert', 'policy-evidence.jsonl', '--format', 'policy-evidence', '--out', 'spans.jsonl']),
+  pinned('--format intelligence-spans', ['analyze', 'spans.jsonl', '--format', 'intelligence-spans']),
+]
+
+const MOVED = [...STEP_4, ...STEP_5]
 
 let env: Record<string, string>
 beforeAll(async () => {
@@ -74,10 +98,15 @@ describe('moved spellings', () => {
   })
 
   it('refuses a removed command asked for help, rather than describing it', async () => {
-    for (const argv of [['import-codetracebench', '--help'], ['help', 'replay-verify']]) {
+    for (const [argv, instead] of [
+      [['import-codetracebench', '--help'], PIN],
+      [['help', 'replay-verify'], PIN],
+      [['evidence', '--help'], 'Instead: traces facts --format json'],
+      [['help', 'index'], 'Instead: traces list --format json'],
+    ] as const) {
       const run = await runCli(argv, { env })
       expect(run.code).toBe(2)
-      expect(run.stderr).toContain(PIN)
+      expect(run.stderr).toContain(instead)
     }
   })
 
@@ -85,6 +114,12 @@ describe('moved spellings', () => {
     // The question is free text: it is not the --redactor flag.
     const run = await runCli(['ask', 'missing.jsonl', '--question', '--redactor'], { env })
     expect(run.stderr).not.toContain('was removed in traces 1.0')
+  })
+
+  it('keeps a question that names a removed flag when it rewrites the argv', async () => {
+    const run = await runCli(['ask', '--source-bundle', 'bundle-dir', '--question', '--source-bundle'], { env })
+    expect(run.code).toBe(2)
+    expect(run.stderr).toContain('Instead: traces ask bundle-dir --question --source-bundle')
   })
 })
 
@@ -103,7 +138,13 @@ describe('traces help moved', () => {
     expect(run.stdout).toContain('traces help moved')
     for (const { spelling } of MOVED) {
       const word = spelling.split(' ').at(-1)!
-      expect(run.stdout).not.toMatch(new RegExp(`(^|[\\s(|,])${word}($|[\\s),.|])`, 'mu'))
+      // A flag or a flag's value is advertised wherever it appears as a word. A
+      // command is advertised by its entry in the command list or by a
+      // `traces <command>` line; the same word in prose ("evidence") is not.
+      const advertised = spelling.startsWith('--')
+        ? new RegExp(`(^|[\\s(|,])${word}($|[\\s),.|])`, 'mu')
+        : new RegExp(`(^ {2}|traces )${word}($|\\s)`, 'mu')
+      expect(run.stdout).not.toMatch(advertised)
     }
   })
 })

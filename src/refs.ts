@@ -5,7 +5,7 @@
  *   1. An existing path is read by its content: a harness session file (its
  *      harness from its store root, else from its first records), a Sandbox
  *      live stream (Codex events in `raw` envelopes, read by codex-exec), a
- *      sandbox-events recording or other trace evidence, OTLP JSONL, a
+ *      sandbox-events recording, OTLP or OpenInference JSONL, a
  *      directory of OTLP files, a bundle directory, a Runtime run directory,
  *      or a store root: a directory that holds harness stores the way a home
  *      does (a trace archive's `<host>/home`, a fleet seat). `path#<trace id>`
@@ -255,11 +255,15 @@ export async function isStoreRoot(dir: string): Promise<boolean> {
   return false
 }
 
+/** Where a bundle keeps its spans: 1.0's layout, then a 0.x bundle's, which stays readable as evidence. */
+const BUNDLE_SPAN_FILES = ['spans.otlp.jsonl', join('derived', 'trace.otlp.jsonl')]
+
 async function directoryRef(path: string, ref: string): Promise<ResolvedRef> {
   if (await isFile(join(path, 'manifest.json'))) {
-    const spans = join(path, 'derived', 'trace.otlp.jsonl')
-    if (!(await isFile(spans))) throw new RefError(`${ref} has a manifest.json but no derived/trace.otlp.jsonl; it is not a traces bundle`, 'unreadable')
-    return { kind: 'spans', ref, path: spans, reader: 'otlp' }
+    for (const file of BUNDLE_SPAN_FILES) {
+      if (await isFile(join(path, file))) return { kind: 'spans', ref, path: join(path, file), reader: 'otlp' }
+    }
+    throw new RefError(`${ref} has a manifest.json but no spans.otlp.jsonl; it is not a traces bundle`, 'unreadable')
   }
   if (await isRuntimeSupervisorRunDir(path)) return { kind: 'run-dir', ref, path }
   if (await isStoreRoot(path)) return { kind: 'store-root', ref, path: resolve(path) }

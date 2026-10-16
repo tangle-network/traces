@@ -79,25 +79,14 @@ It edits no agent, repository, memory store, or knowledge base.
 Preserve a session for later inspection:
 
 ```bash
-traces bundle --harness claude-code --session <id-or-path> --out .traces/bundle
+traces bundle <id-or-path> --out .traces/bundle
+traces bundle verify .traces/bundle
 ```
 
-`bundle` copies transcripts, report, spans, and session-window `.evolve` rows with per-file SHA-256 hashes.
+`bundle` copies transcripts, spans, the facts sheet, and the session-window git log with per-file SHA-256 hashes.
 It uses no model calls.
 Missing transcripts stop assembly; optional missing inputs appear in `manifest.absent`.
-
-## Pick the view for the reader
-
-The full bundle includes transcripts containing prior reports, even when report files are removed.
-For a writer who must not see earlier conclusions, project an evidence-only copy:
-
-```bash
-traces bundle-view .traces/bundle --view evidence-only --out .traces/writer
-```
-
-This retains the session index, evidence JSONL, and structured ledger records.
-It excludes transcripts, reports, spans, prose ledgers, and files repeating an eight-word passage from excluded prose.
-Check `manifest.view` and the rules and hashes in `manifest.excluded`.
+A bundle directory is a ref: `traces facts .traces/bundle --no-content` reads its evidence without the session's own words.
 
 ## Ask your own question
 

@@ -27,6 +27,16 @@ export interface MovedRow {
    * command line.
    */
   readonly pinned?: true
+  /**
+   * The caller's argv in its 1.0 spelling, for a row whose rewrite is
+   * mechanical: the error prints it as the command to run instead.
+   */
+  readonly rewrite?: (argv: readonly string[]) => readonly string[]
+}
+
+/** `--flag X` becomes the positional ref `X`. A question that spells the flag stays a question. */
+function flagToPositional(flag: string): (argv: readonly string[]) => readonly string[] {
+  return (argv) => argv.filter((word, i) => word !== flag || FREE_TEXT_FLAGS.has(argv[i - 1] ?? ''))
 }
 
 export const MOVED: readonly MovedRow[] = [
@@ -46,6 +56,21 @@ export const MOVED: readonly MovedRow[] = [
   },
   {
     was: ['--format chat-trajectory'],
+    now: 'removed (traces@0.23.1)',
+    pinned: true,
+  },
+  { was: ['index'], now: 'traces list --format json' },
+  { was: ['inspect'], now: 'traces analyze <ref>' },
+  { was: ['evidence'], now: 'traces facts --format json' },
+  { was: ['bundle-view'], now: 'traces facts <bundle-dir> --no-content' },
+  {
+    was: ['--source-bundle'],
+    now: 'a positional ref: traces analyze <bundle-dir>',
+    rewrite: flagToPositional('--source-bundle'),
+  },
+  { was: ['--view'], now: 'removed (bundle-view is traces facts <bundle-dir> --no-content)' },
+  {
+    was: ['--format policy-evidence', '--format intelligence-spans'],
     now: 'removed (traces@0.23.1)',
     pinned: true,
   },
@@ -92,9 +117,9 @@ export function pinnedCommand(argv: readonly string[]): string {
 
 /** The one-line error for a removed spelling. */
 export function movedMessage({ row, spelling }: MovedSpelling, argv: readonly string[]): string {
-  return row.pinned
-    ? `${spelling} was removed in traces 1.0. The last version with it runs as: ${pinnedCommand(argv)}`
-    : `${spelling} was removed in traces 1.0. Instead: ${row.now}`
+  if (row.pinned) return `${spelling} was removed in traces 1.0. The last version with it runs as: ${pinnedCommand(argv)}`
+  const instead = row.rewrite ? ['traces', ...row.rewrite(argv)].map(shellWord).join(' ') : row.now
+  return `${spelling} was removed in traces 1.0. Instead: ${instead}`
 }
 
 /** `traces help moved`. */

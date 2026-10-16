@@ -43,7 +43,7 @@ traces check   run.jsonl --contract contract.json           # fail CI when a run
 | Write a reviewable improvement packet | `improve` | [Improvement engine](docs/improve.md) |
 | Count which skills get used | `skills` | [Skill usage](docs/skill-usage.md) |
 | Keep one session's evidence after the logs rotate | `bundle` | [Session bundle](docs/bundle.md) |
-| Export rows for mining or OpenInference | `index`, `evidence`, `export` | [Index, evidence and export](docs/evidence.md) |
+| Convert event captures to OpenInference | `export` | [Export to OpenInference](docs/evidence.md) |
 | Upload, or check files before sharing | `upload`, `verify-safe` | [Upload and share safely](docs/upload.md) |
 
 The common commands and flags are in the [CLI reference](docs/cli.md). `traces --help` lists every command and option, and `traces <command> --help` prints that command's own flags.

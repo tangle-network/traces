@@ -17,12 +17,12 @@ import {
   isSynthesizedSpan,
   SYNTHESIZED_SPAN_ATTR,
 } from '../src/adapters/provenance.js'
-import { buildPolicyEvidenceRecord } from '../src/evidence.js'
 import { analyzeLiveBatch } from '../src/live.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
 import { sessionReportSource } from '../src/report.js'
-import { at, ms, type Row, writeRollout } from './codex-facts-fixture.js'
+import { computeSessionFacts } from '../src/session-facts.js'
+import { ms, type Row, writeRollout } from './codex-facts-fixture.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'traces-codex-provenance-'))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -201,14 +201,14 @@ describe('Codex synthesized subagent spans', () => {
       .toEqual(['exec_command', 'spawn_agent', 'exec_command'])
   })
 
-  it('reports the model-issued count through the evidence, live, and pipeline paths', async () => {
+  it('reports the model-issued count through the facts, live, and pipeline paths', async () => {
     const ref = subagentRollout()
     const spans = await parse(ref)
 
-    const record = await buildPolicyEvidenceRecord(ref, spans)
-    expect(record.metrics.toolCallCount).toBe(3)
-    expect(record.metrics.tools.map((tool) => tool.name).sort()).toEqual(['exec_command', 'spawn_agent'])
-    expect(record.metrics.tools.find((tool) => tool.name === 'Agent')).toBeUndefined()
+    const [facts] = computeSessionFacts(spans)
+    expect(facts!.toolCalls.value).toBe(3)
+    expect(Object.keys(facts!.toolCallsByName.value!).sort()).toEqual(['exec_command', 'spawn_agent'])
+    expect(facts!.synthesizedToolSpans.value).toBe(0)
 
     expect(analyzeLiveBatch(spans).toolCallCount).toBe(3)
 
@@ -304,10 +304,8 @@ describe('Codex inherited context', () => {
       JSON.stringify({ cmd: 'rm -rf child-build' }),
     ])
 
-    const record = await buildPolicyEvidenceRecord(ref, spans)
-    expect(record.metrics.toolCallCount).toBe(1)
-    // The acted-in window starts at the fork, not at the parent's first record.
-    expect(record.metrics.firstSpanAt).toBe(at(10))
+    const [facts] = computeSessionFacts(spans)
+    expect(facts!.toolCalls.value).toBe(1)
 
     // The report subject names what THIS scope was asked to do.
     expect(sessionReportSource(ref, spans).subject).toBe('Audit the parser and report back.')

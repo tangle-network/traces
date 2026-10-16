@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { describe, expect, it } from 'vitest'
-import { serializeSpans, span, type SessionWorkflowSummary } from '../src/index.js'
+import { serializeSpans, span } from '../src/index.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -14,118 +14,58 @@ function parseRows(jsonl: string): Record<string, unknown>[] {
 }
 
 describe('traces CLI', () => {
-  it('routes an Intelligence span file through analyze, investigate, and improve', async () => {
+  it('routes a span file through analyze, investigate, and improve', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-test-'))
-    const input = join(dir, 'intelligence-spans.jsonl')
+    const input = join(dir, 'spans.otlp.jsonl')
     const report = join(dir, 'report.md')
-    const otlp = join(dir, 'spans.openinference.jsonl')
-    const rows = [
-      {
-        id: 'trace_cli:root',
-        trace_id: 'trace_cli',
-        parent_span_id: null,
+    await writeFile(input, serializeSpans([
+      span({
+        traceId: 'trace-cli',
+        spanId: 'root',
         name: 'claude_code.interaction',
-        start_unix_nano: '1782427464458000000',
-        end_unix_nano: '1782427465458000000',
-        attributes: {
-          'span.type': 'interaction',
-          'service.name': 'claude-code',
-          'session.id': 'session_cli',
-          user_prompt: 'Fix the Linear issue using the available tools.',
-        },
-        status_code: 'UNSET',
-        redaction_version: '1.0.0+tangle.3',
-      },
-      {
-        id: 'trace_cli:llm',
-        trace_id: 'trace_cli',
-        parent_span_id: 'trace_cli:root',
+        kind: 'AGENT',
+        startTime: '2026-06-25T22:44:24.458Z',
+        endTime: '2026-06-25T22:44:25.458Z',
+        service: 'claude-code',
+        content: 'Fix the Linear issue using the available tools.',
+        extra: { 'session.id': 'session-cli' },
+      }),
+      span({
+        traceId: 'trace-cli',
+        spanId: 'llm',
+        parentSpanId: 'root',
         name: 'claude_code.llm_request',
-        start_unix_nano: '1782427464470000000',
-        end_unix_nano: '1782427467470000000',
-        attributes: {
-          'span.type': 'llm_request',
-          'service.name': 'claude-code',
-          model: 'claude-opus-4-8',
-          input_tokens: 25,
-          output_tokens: 739,
-        },
-        status_code: 'OK',
-        redaction_version: '1.0.0+tangle.3',
-      },
-    ]
-    await writeFile(input, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
-
-    const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'analyze',
-      input,
-      '--format',
-      'intelligence-spans',
-      '--out',
-      report,
-      '--otlp-out',
-      otlp,
-    ], {
+        kind: 'LLM',
+        startTime: '2026-06-25T22:44:24.470Z',
+        endTime: '2026-06-25T22:44:27.470Z',
+        service: 'claude-code',
+        model: 'claude-opus-4-8',
+        inputTokens: 25,
+        outputTokens: 739,
+        extra: { 'session.id': 'session-cli' },
+      }),
+    ]), 'utf8')
+    const run = (args: string[]) => execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
       cwd: process.cwd(),
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
       maxBuffer: 10 * 1024 * 1024,
       timeout: 30_000,
     })
 
+    const { stdout } = await run(['analyze', input, '--out', report])
     expect(stdout).toContain(`report → ${report}`)
     const reportText = await readFile(report, 'utf8')
-    expect(reportText).toContain('intelligence-spans')
     expect(reportText).toContain('1 session(s), 2 spans')
     // The external-engine footer went with the engines (1.0).
     expect(reportText).not.toContain('--analyzer')
-    const outputRows = parseRows(await readFile(otlp, 'utf8'))
-    expect(outputRows).toHaveLength(2)
-    expect(outputRows[0]!.attributes).toEqual(expect.objectContaining({
-      'traces.source_format': 'intelligence-spans',
-      'content': 'Fix the Linear issue using the available tools.',
-    }))
-    expect(outputRows[1]!.parent_span_id).toBe('trace_cli:root')
 
     const investigation = join(dir, 'investigation.md')
-    const investigated = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'investigate',
-      input,
-      '--format',
-      'intelligence-spans',
-      '--out',
-      investigation,
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
+    const investigated = await run(['investigate', input, '--out', investigation])
     expect(investigated.stdout).toContain(`investigation report → ${investigation}`)
     expect(await readFile(investigation, 'utf8')).toContain('1 session(s), 2 spans')
 
     const improvement = join(dir, 'improvement')
-    const improved = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'improve',
-      input,
-      '--format',
-      'intelligence-spans',
-      '--dir',
-      improvement,
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
+    const improved = await run(['improve', input, '--dir', improvement])
     expect(improved.stdout).toContain(`improvement artifacts → ${improvement}`)
     const result = JSON.parse(await readFile(join(improvement, 'result.json'), 'utf8')) as {
       spanCount: number
@@ -549,7 +489,6 @@ describe('traces CLI', () => {
     const sessionId = '019f-session-id'
     const sessions = join(codexHome, 'sessions', '2026', '07', '23')
     const session = join(sessions, `rollout-2026-07-23T00-00-00-${sessionId}.jsonl`)
-    const index = join(dir, 'index.json')
     await mkdir(sessions, { recursive: true })
     await writeFile(session, [
       {
@@ -564,31 +503,25 @@ describe('traces CLI', () => {
       },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
-    await execFileAsync(process.execPath, [
+    const { stdout } = await execFileAsync(process.execPath, [
       '--import',
       'tsx',
       'src/cli.ts',
-      'index',
+      'facts',
+      sessionId,
       '--harness',
       'codex',
-      '--session',
-      sessionId,
-      '--out',
-      index,
+      '--format',
+      'json',
     ], {
       cwd: process.cwd(),
-      env: { ...process.env, CODEX_HOME: codexHome, NO_COLOR: '1', FORCE_COLOR: '' },
+      env: { ...process.env, HOME: dir, CODEX_HOME: codexHome, NO_COLOR: '1', FORCE_COLOR: '' },
       maxBuffer: 10 * 1024 * 1024,
       timeout: 30_000,
     })
 
-    const output = JSON.parse(await readFile(index, 'utf8')) as {
-      sessions: Array<{ session: { sessionId: string; path: string } }>
-    }
-    expect(output.sessions).toHaveLength(1)
-    expect(output.sessions[0]).toMatchObject({
-      session: { sessionId, path: session },
-    })
+    const output = JSON.parse(stdout) as { sessions: Array<{ sessionId: string | null }> }
+    expect(output.sessions.map((facts) => facts.sessionId)).toEqual([sessionId])
   })
 
   it('selects the Codex session named by CODEX_THREAD_ID instead of the most recent child', async () => {
@@ -599,7 +532,6 @@ describe('traces CLI', () => {
     const childId = '019fae74-a099-7b13-befd-003a6ba7f09a'
     const parent = join(sessions, `rollout-2026-07-29T00-00-00-${parentId}.jsonl`)
     const child = join(sessions, `rollout-2026-07-29T00-01-00-${childId}.jsonl`)
-    const index = join(dir, 'index.json')
     await mkdir(sessions, { recursive: true })
     await writeFile(parent, [
       { timestamp: '2026-07-29T00:00:00.000Z', type: 'session_meta', payload: { id: parentId, cwd: dir } },
@@ -614,20 +546,21 @@ describe('traces CLI', () => {
       { timestamp: '2026-07-29T00:01:01.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Child task.' } },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
-    await execFileAsync(process.execPath, [
+    const { stdout } = await execFileAsync(process.execPath, [
       '--import',
       'tsx',
       'src/cli.ts',
-      'index',
+      'facts',
       '--harness',
       'codex',
       '--current',
-      '--out',
-      index,
+      '--format',
+      'json',
     ], {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        HOME: dir,
         CODEX_HOME: codexHome,
         CODEX_THREAD_ID: parentId,
         NO_COLOR: '1',
@@ -637,17 +570,13 @@ describe('traces CLI', () => {
       timeout: 30_000,
     })
 
-    const output = JSON.parse(await readFile(index, 'utf8')) as {
-      sessions: Array<{ session: { sessionId: string; path: string } }>
-    }
-    expect(output.sessions).toHaveLength(1)
-    expect(output.sessions[0]).toMatchObject({ session: { sessionId: parentId, path: parent } })
+    const output = JSON.parse(stdout) as { sessions: Array<{ sessionId: string | null }> }
+    expect(output.sessions.map((facts) => facts.sessionId)).toEqual([parentId])
   })
 
   it('limits an explicit Claude Code session to its latest task turn', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-claude-latest-'))
     const session = join(dir, 'claude-session.jsonl')
-    const index = join(dir, 'index.json')
     await writeFile(session, [
       {
         type: 'user',
@@ -690,33 +619,31 @@ describe('traces CLI', () => {
       },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
-    await execFileAsync(process.execPath, [
+    const { stdout } = await execFileAsync(process.execPath, [
       '--import',
       'tsx',
       'src/cli.ts',
-      'index',
+      'facts',
+      session,
       '--harness',
       'claude-code',
-      '--session',
-      session,
       '--latest-turn',
-      '--out',
-      index,
+      '--format',
+      'json',
     ], {
       cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
+      env: { ...process.env, HOME: dir, NO_COLOR: '1', FORCE_COLOR: '' },
       maxBuffer: 10 * 1024 * 1024,
       timeout: 30_000,
     })
 
-    const output = JSON.parse(await readFile(index, 'utf8')) as {
-      selection: { latestTurn?: boolean }
-      totals: { sessions: number; spans: number }
-    }
-    expect(output.selection.latestTurn).toBe(true)
+    const output = JSON.parse(stdout) as { spanCount: number; sessions: Array<{ spanCount: number }> }
     // Root, the new task, its llm.turn, the assistant message it produced, and
     // the task notification that followed it.
-    expect(output.totals).toMatchObject({ sessions: 1, spans: 5 })
+    expect(output.sessions).toHaveLength(1)
+    expect(output.spanCount).toBe(5)
+    expect(stdout).toContain('NEW TASK')
+    expect(stdout).not.toContain('OLD TASK')
   })
 
   it('expands the active Codex session through recursively spawned child files', async () => {
@@ -730,7 +657,6 @@ describe('traces CLI', () => {
     const root = join(sessions, `rollout-2026-07-29T00-00-00-${rootId}.jsonl`)
     const child = join(sessions, `rollout-2026-07-29T00-01-00-${childId}.jsonl`)
     const nested = join(sessions, `rollout-2026-07-29T00-02-00-${nestedId}.jsonl`)
-    const index = join(dir, 'workflow-index.json')
     await mkdir(sessions, { recursive: true })
     const spawn = (id: string, callId: string, second = 1) => [
       {
@@ -783,24 +709,22 @@ describe('traces CLI', () => {
       { timestamp: '2026-07-28T22:00:00.100Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'nested-turn' } },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
-    await execFileAsync(process.execPath, [
+    const { stdout, stderr } = await execFileAsync(process.execPath, [
       '--import',
       'tsx',
       'src/cli.ts',
-      'index',
+      'facts',
       '--harness',
       'codex',
       '--current',
       '--latest-turn',
-      '--workflow',
-      '--max-workflow-sessions',
-      '10',
-      '--out',
-      index,
+      '--format',
+      'json',
     ], {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        HOME: dir,
         CODEX_HOME: codexHome,
         CODEX_THREAD_ID: rootId,
         NO_COLOR: '1',
@@ -810,34 +734,23 @@ describe('traces CLI', () => {
       timeout: 30_000,
     })
 
-    const output = JSON.parse(await readFile(index, 'utf8')) as {
-      selection: { workflow: SessionWorkflowSummary }
+    const output = JSON.parse(stdout) as {
       sessions: Array<{
-        session: {
-          sessionId: string
-          role: string
-          parentSessionId?: string
-          childSessionIds: string[]
-          depth?: number
-          agentNickname?: string
-        }
+        sessionId: string | null
+        parentSessionId: string | null
+        measurements: { relationship: { childSessionIds: string[]; depth?: number; agentNickname?: string } }
       }>
     }
-    expect(output.selection.workflow).toEqual({
-      seedSessionIds: [rootId],
-      complete: true,
-      issues: [],
-    })
-    expect(output.sessions.map((row) => row.session.sessionId)).toEqual([rootId, childId, nestedId])
-    expect(output.sessions.map((row) => row.session.role)).toEqual(['operator', 'child', 'child'])
-    expect(output.sessions[1]!.session).toMatchObject({
-      parentSessionId: rootId,
+    // The tree is complete: no workflow warning on stderr.
+    expect(stderr).not.toContain('session workflow is incomplete')
+    expect(output.sessions.map((facts) => facts.sessionId)).toEqual([rootId, childId, nestedId])
+    expect(output.sessions.map((facts) => facts.parentSessionId)).toEqual([null, rootId, childId])
+    expect(output.sessions[1]!.measurements.relationship).toMatchObject({
       childSessionIds: [nestedId],
       depth: 1,
       agentNickname: 'worker',
     })
-    expect(output.sessions[2]!.session).toMatchObject({
-      parentSessionId: childId,
+    expect(output.sessions[2]!.measurements.relationship).toMatchObject({
       childSessionIds: [],
       depth: 2,
       agentNickname: 'worker',
@@ -852,7 +765,6 @@ describe('traces CLI', () => {
     const childId = '019fae74-a099-7b13-befd-003a6ba7f09a'
     const parent = join(sessions, `rollout-2026-07-29T00-00-00-${parentId}.jsonl`)
     const child = join(sessions, `rollout-2026-07-29T00-01-00-${childId}.jsonl`)
-    const index = join(dir, 'nested-workflow-index.json')
     await mkdir(sessions, { recursive: true })
     await writeFile(parent, [
       {
@@ -908,24 +820,22 @@ describe('traces CLI', () => {
       },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
-    await execFileAsync(process.execPath, [
+    const { stdout, stderr } = await execFileAsync(process.execPath, [
       '--import',
       'tsx',
       'src/cli.ts',
-      'index',
+      'facts',
       '--harness',
       'codex',
       '--current',
       '--latest-turn',
-      '--workflow',
-      '--max-workflow-sessions',
-      '10',
-      '--out',
-      index,
+      '--format',
+      'json',
     ], {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        HOME: dir,
         CODEX_HOME: codexHome,
         CODEX_THREAD_ID: childId,
         NO_COLOR: '1',
@@ -935,28 +845,17 @@ describe('traces CLI', () => {
       timeout: 30_000,
     })
 
-    const output = JSON.parse(await readFile(index, 'utf8')) as {
-      selection: { workflow: SessionWorkflowSummary }
+    const output = JSON.parse(stdout) as {
       sessions: Array<{
-        session: {
-          sessionId: string
-          taskScope?: string
-          turnId?: string
-          parentSessionId?: string
-          childSessionIds: string[]
-        }
+        sessionId: string | null
+        parentSessionId: string | null
+        measurements: { relationship: { taskScope?: string } }
       }>
     }
-    expect(output.selection.workflow).toEqual({
-      seedSessionIds: [childId],
-      complete: true,
-      issues: [],
-    })
-    expect(output.sessions.map((row) => row.session.sessionId)).toEqual([childId])
-    expect(output.sessions[0]!.session).toMatchObject({
-      taskScope: 'latest',
-      parentSessionId: parentId,
-    })
+    expect(stderr).not.toContain('session workflow is incomplete')
+    expect(output.sessions.map((facts) => facts.sessionId)).toEqual([childId])
+    expect(output.sessions[0]!.parentSessionId).toBe(parentId)
+    expect(output.sessions[0]!.measurements.relationship.taskScope).toBe('latest')
   })
 
   it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {
@@ -1302,69 +1201,4 @@ describe('traces ask', () => {
     }
     expect(await readFile(join(out, 'report.md'), 'utf8')).toContain('failed: error')
   }, 90_000)
-})
-
-describe('traces bundle + bundle-view', () => {
-  it('assembles the full view, then projects the writer view over the same session', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'traces-cli-bundle-'))
-    const leaked = 'The retry budget was the wrong lever and the queue depth decides tail latency here.'
-    const transcript = join(root, 'session.jsonl')
-    await writeFile(
-      transcript,
-      [
-        {
-          type: 'user',
-          uuid: 'u1',
-          sessionId: 'cli-bundle',
-          timestamp: '2026-01-01T00:00:00Z',
-          message: { role: 'user', content: leaked },
-        },
-        {
-          type: 'assistant',
-          uuid: 'a1',
-          sessionId: 'cli-bundle',
-          timestamp: '2026-01-01T00:00:01Z',
-          message: { id: 'm1', role: 'assistant', content: 'understood' },
-        },
-      ].map((row) => JSON.stringify(row)).join('\n'),
-      'utf8',
-    )
-
-    const run = (args: string[]) =>
-      execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
-        cwd: process.cwd(),
-        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-        maxBuffer: 10 * 1024 * 1024,
-        timeout: 120_000,
-      })
-
-    const bundleDir = join(root, 'bundle')
-    const bundled = await run([
-      'bundle', '--harness', 'claude-code', '--session', transcript, '--out', bundleDir,
-    ])
-    expect(bundled.stdout).toContain('session bundle (full view) →')
-
-    const viewDir = join(root, 'view')
-    const projected = await run([
-      'bundle-view', bundleDir, '--view', 'evidence-only', '--out', viewDir,
-    ])
-    expect(projected.stdout).toContain('evidence-only view →')
-    expect(projected.stdout).toContain('0 session-text match(es)')
-
-    const manifest = JSON.parse(await readFile(join(viewDir, 'manifest.json'), 'utf8')) as {
-      view: string
-      excluded: { path: string; rule: string }[]
-    }
-    expect(manifest.view).toBe('evidence-only')
-    expect(manifest.excluded.map((entry) => entry.path)).toContain('session/transcript.jsonl')
-    await expect(readFile(join(viewDir, 'session', 'transcript.jsonl'), 'utf8')).rejects.toThrow()
-    await expect(readFile(join(viewDir, 'derived', 'report.md'), 'utf8')).rejects.toThrow()
-    expect(await readFile(join(bundleDir, 'derived', 'report.md'), 'utf8')).toContain(leaked)
-    expect(await readFile(join(viewDir, 'derived', 'evidence.jsonl'), 'utf8')).not.toContain(leaked)
-
-    // --view belongs to bundle-view alone, so nobody can ask `bundle` for a
-    // projection and silently receive the full record.
-    await expect(run(['bundle', '--session', transcript, '--view', 'evidence-only', '--out', join(root, 'x')]))
-      .rejects.toThrow(/--view is not supported by bundle/)
-  }, 180_000)
 })

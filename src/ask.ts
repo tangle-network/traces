@@ -167,8 +167,6 @@ export interface TraceQuestionsOptions {
   /** Shared USD ceiling across every question. Omit for no shared ceiling. */
   readonly budgetUsd?: number
   readonly limits?: Partial<TraceAnalystLimits>
-  /** Explicit full-bundle source access for `readSpanSource`. */
-  readonly sourceBundle?: { path: string; maxRecordBytes?: number }
   /** Where to write the OpenInference file the engine reads. Default: a temp file. */
   readonly otlpOutPath?: string
   readonly generatedAt?: string
@@ -598,11 +596,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   // exists to shorten, and `setupTimeMs` says how much of it that was.
   const runStarted = performance.now()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const traceFile = await writeAnalysisTraceFile(opts.spans, {
-    sourceBundle: opts.sourceBundle,
-    otlpOutPath: opts.otlpOutPath,
-    signal: opts.signal,
-  })
+  const traceFile = await writeAnalysisTraceFile(opts.spans, { otlpOutPath: opts.otlpOutPath })
   const store = await openAgenticTraceStore(traceFile)
   const traces = describeTraces(opts.spans)
   const context = preparedContext(traces, opts.spans)

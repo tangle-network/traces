@@ -29,8 +29,6 @@ import type { OtlpSpan } from './otlp.js'
 import { withSessionFactsContext } from './session-facts.js'
 
 export interface AnalyzeOptions {
-  /** Explicitly authorize original source reads from this full session bundle. */
-  sourceBundle?: { path: string; maxRecordBytes?: number }
   /**
    * Recursive analysis engine enabling the agentic analyst kinds. Omit →
    * deterministic only. The engine's id, version, and model become the
@@ -101,11 +99,7 @@ function mergeCostProvenance(
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
-  const traceFile = await writeAnalysisTraceFile(spans, {
-    sourceBundle: opts.sourceBundle,
-    otlpOutPath: opts.otlpOutPath,
-    signal: opts.signal,
-  })
+  const traceFile = await writeAnalysisTraceFile(spans, { otlpOutPath: opts.otlpOutPath })
   const { otlpPath } = traceFile
   opts.signal?.throwIfAborted()
   const runId = opts.runId ?? `traces-${Date.now()}`

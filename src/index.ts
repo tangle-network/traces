@@ -45,7 +45,6 @@ export {
 } from './integrity.js'
 export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp
-export { createBundleSourceReader } from './bundle-source.js'
 export { SOURCE_ATTRIBUTE_PREFIX, type SourceRecordReference } from './source-location.js'
 export * from './session-relationship.js' // stable parent/child metadata decoding
 export * from './session-workflow.js' // collectSessionWorkflow() — bounded parent/child expansion
@@ -95,12 +94,8 @@ export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipel
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
 export * from './analyst-citations.js' // normalizeAnalystCitations() — model citations the evidence gate can check
 export * from './execution.js' // shared execution accounting over normalized spans
-export * from './evidence.js' // policy-evidence JSONL for downstream miners
-export * from './session-index.js' // collectSessionIndex() — reusable session catalog
 export * from './bundle.js' // assembleSessionBundle() — one session's durable evidence dir
-export * from './bundle-view.js' // projectSessionBundle() — the evidence-only view for a writer
 export * from './diff.js' // diffRuns() — two runs paired step by step, first divergence marked
-export * from './inspect.js' // inspectSessionIndex() — ranked findings from a session catalog
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
 export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
 export * from './ask.js' // runTraceQuestions(): concurrent free-form questions, answers kept and citations checked
