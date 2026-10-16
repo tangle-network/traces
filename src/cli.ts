@@ -5,7 +5,7 @@
  *   traces validate <file|dir>
  *   traces check   <trace> --contract contract.json [--junit out.xml] [--evidence dir]
  *   traces analyze --otlp <file|dir> [--out report.md] [--llm]
- *   traces list    [--harness claude-code] [--last 20] [--all]
+ *   traces list    [--cwd .] [--last 20] [--harness codex]
  *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
  *   traces analyze --harness codex --current --latest-turn --workflow
  *   traces analyze --harness claude-code --session <path> --latest-turn --workflow
@@ -685,9 +685,9 @@ function errorText(error: unknown): string {
 
 /**
  * Name the sessions a sweep skipped, in one stderr line that says how to see
- * each with its reason.
+ * each with its reason: `command` with the same selection, as JSON.
  */
-function warnUnread(args: Args, unread: readonly UnreadSessionFact[]): void {
+function warnUnread(args: Args, unread: readonly UnreadSessionFact[], command: 'facts' | 'list' = 'facts'): void {
   if (unread.length === 0) return
   const select: string[] = args.current ? ['--current'] : args.refs.map(shellWord)
   if (args.harnessExplicit && !args.current) select.push('--harness', args.harness)
@@ -696,7 +696,7 @@ function warnUnread(args: Args, unread: readonly UnreadSessionFact[]): void {
   if (args.last > 0) select.push('--last', String(args.last))
   if (args.cwd) select.push('--cwd', shellWord(args.cwd))
   if (args.latestTurn) select.push('--latest-turn')
-  process.stderr.write(`${unread.length} unreadable: traces facts ${select.join(' ')} --format json | jq .selection\n`)
+  process.stderr.write(`${unread.length} unreadable: ${['traces', command, ...select].join(' ')} --format json | jq .selection\n`)
 }
 
 function shellWord(word: string): string {
@@ -846,12 +846,12 @@ async function cmdList(args: Args): Promise<void> {
       unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: errorText(error) })
     }
   }
-  const footer = `${rows.length} session${rows.length === 1 ? '' : 's'} · ${unread.length} unreadable`
+  warnUnread(args, unread, 'list')
   if (format === 'json') {
     process.stdout.write(`${JSON.stringify({ sessions: rows, selection: { unreadSessions: unread } }, null, 2)}\n`)
-    if (unread.length > 0) process.stderr.write(`${footer}: traces list … --format json | jq .selection\n`)
     return
   }
+  const footer = `${rows.length} session${rows.length === 1 ? '' : 's'} · ${unread.length} unreadable`
   const lines = rows.map((row) => [
     row.ref.padEnd(8),
     row.harness.padEnd(11),
@@ -2375,7 +2375,7 @@ Input formats:
   auto             Detect the format from the file contents (default)
 
 Examples:
-  traces evidence --all --since 24h --out policy-evidence.jsonl
+  traces evidence --since 24h --out policy-evidence.jsonl
   traces export policy-evidence.jsonl --out spans.openinference.jsonl
   traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
   traces export intelligence-spans.jsonl --out spans.openinference.jsonl
