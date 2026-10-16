@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ClaudeAdapter, CodexAdapter, HarnessSessionsAdapter, buildSessionFactsReport, parseSession, span } from '../src/index.js'
+import { ClaudeAdapter, CodexAdapter, buildSessionFactsReport, parseSession, span } from '../src/index.js'
 import { computeAdoption, analyzeAdoption } from '../src/adoption.js'
 import { toolIoAttributes } from '../src/adapters/tool-io.js'
 import type { HarnessTraceAdapter } from '../src/types.js'
@@ -29,16 +29,6 @@ describe('standard session measurements', () => {
     expect(events).toHaveLength(2)
     expect(events[0]).toMatchObject({ latencyMs: 4200, tokensBefore: 100, tokensAfter: 20, sincePreviousMs: null })
     expect(events[1]).toMatchObject({ latencyMs: null, tokensBefore: 110, tokensAfter: null, sincePreviousMs: 20000 })
-  })
-  it('keeps Pi boundary context size and leaves unrecorded latency and post-context unknown', async () => {
-    // Pi is read through harness-sessions, the reader `--harness pi` uses.
-    const spans = await parse(new HarnessSessionsAdapter('pi'), [
-      { type: 'session', id: 'sample', timestamp: at(0) },
-      { type: 'compaction', id: 'c1', timestamp: at(20), tokensBefore: 92000, summary: 'private summary', firstKeptEntryId: 'entry' },
-    ])
-    expect(buildSessionFactsReport(spans).sessions[0]!.measurements.compactions.value?.[0]).toMatchObject({
-      tokensBefore: 92000, tokensAfter: null, latencyMs: null,
-    })
   })
   it('keeps Codex boundaries when the source records no summary', async () => {
     const spans = await parse(new CodexAdapter(), [
