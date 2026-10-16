@@ -8,7 +8,6 @@ import { CodexAdapter } from '../src/adapters/codex.js'
 import { CodexExecAdapter } from '../src/adapters/codex-exec.js'
 import { OpencodeAdapter } from '../src/adapters/opencode.js'
 import { assembleSessionBundle } from '../src/bundle.js'
-import { createBundleSourceReader } from '../src/bundle-source.js'
 import { readOtlpInput } from '../src/otlp-input.js'
 import { canonicalJson } from '../src/adapters/tool-io.js'
 import { readJsonl } from '../src/jsonl.js'
@@ -71,14 +70,24 @@ async function verifyLocations(adapter: HarnessTraceAdapter, ref: SessionRef): P
   }
   expect([...found].sort()).toEqual(['content', 'input.value', 'output.value'])
   if (ref.harness === 'codex' || ref.harness === 'opencode') {
+    // A bundle keeps every record its spans cite: with the originals gone, the
+    // bundle's own copy answers each reference byte for byte.
     const destination = await mkdtemp(join(tmpdir(), 'native-retained-'))
     directories.push(destination)
     await assembleSessionBundle({ adapter, ref, outDir: destination })
-    const retained = (await readOtlpInput(join(destination, 'derived/trace.otlp.jsonl'))).spans
+    const retained = (await readOtlpInput(join(destination, 'spans.otlp.jsonl'))).spans
     for (const file of row.sourceFiles!) await rm(file.path)
-    const reader = await createBundleSourceReader(destination, retained)
+    const manifest = JSON.parse(await readFile(join(destination, 'manifest.json'), 'utf8')) as {
+      files: Array<{ path: string; sourceId?: string; sha256: string }>
+    }
     const message = retained.find((span) => span.attributes[`${SOURCE_ATTRIBUTE_PREFIX}content`] !== undefined)!
-    expect(await reader!({ trace_id: message.trace_id, span_id: message.span_id, attribute: 'content', offset: Buffer.byteLength(text) - 12, limit: 12 })).toMatchObject({ status: 'available', text: 'message-tail', next_offset: null })
+    const [reference] = JSON.parse(String(message.attributes[`${SOURCE_ATTRIBUTE_PREFIX}content`])) as SourceRecordReference[]
+    const kept = manifest.files.find((file) => file.sourceId === reference!.sourceId)!
+    expect(kept.sha256).toBe(reference!.sourceSha256)
+    const bytes = await readFile(join(destination, kept.path))
+    const raw = bytes.subarray(reference!.recordOffset, reference!.recordOffset + reference!.recordBytes)
+    expect(createHash('sha256').update(raw).digest('hex')).toBe(reference!.recordSha256)
+    expect(raw.toString('utf8')).toContain('message-tail')
   }
 }
 

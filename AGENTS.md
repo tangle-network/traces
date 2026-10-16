@@ -65,8 +65,8 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
 - Do not treat a `warn` validation finding as a failure, or an `UNKNOWN` share-safety verdict as safe.
   Both mean "the input could not fully answer this," not "answer negative."
 - Do not call `readSpanSource` (or otherwise read original bytes) as a way to route around the
-  redaction the rest of this package applies. It is withheld from `traces mcp` entirely and reachable
-  elsewhere only through the caller's explicit, opt-in `--source-bundle` — never a default path.
+  redaction the rest of this package applies. It is withheld from `traces mcp` entirely, and no
+  command grants it.
 - Do not assume `@tangle-network/agent-eval`'s published version matches this package's declared range
   without checking; run `npm view @tangle-network/agent-eval version` before pinning a bridge
   (`agent-eval-rpc[dspy]`) to a version.

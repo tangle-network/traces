@@ -1,38 +1,29 @@
 /**
- * `traces bundle` — assemble one session's durable evidence directory.
+ * `traces bundle` — keep one session's evidence beyond log rotation.
  *
- * A bundle is the input contract for downstream consumers (distillers,
- * report writers, auditors) that must cite a session long after the live
- * stores have rotated: the raw transcript + subagent transcripts, every
- * derived artifact this CLI already knows how to produce (session index,
- * deterministic analyze report, policy evidence, OTLP spans), the repo's
- * `.evolve` ledger sliced to the session window, the git log for that
- * window, and a manifest with a SHA-256 per file so any later claim can be
- * checked against the exact bytes it cites.
+ * A bundle is a directory a reader can cite long after the live stores have
+ * rotated:
  *
- * The transcript is REQUIRED — no transcript, no bundle, loudly. Everything
- * else is an optional input whose absence is a recorded fact in the
- * manifest (`absent`, with the reason), never a silent gap and never an
- * error: a session without subagents or without an `.evolve` ledger is a
- * complete bundle of a smaller session.
+ *   session/          the transcript byte for byte, and every other source file
+ *                     the session's spans cite (subagent transcripts, metadata)
+ *   spans.otlp.jsonl  the session's spans, as every command reads them
+ *   facts.json        the session's facts sheet (`traces facts --format json`)
+ *   git-log.txt       commits in the session's window, from its recorded cwd
+ *   manifest.json     provenance, and the size and SHA-256 of every file
  *
- * This module assembles the FULL view. `bundle-view.ts` projects that full
- * bundle down to the evidence-only view for a consumer that must not read the
- * session's own words; `manifest.view` names which of the two a directory is.
+ * The transcript is REQUIRED — no transcript, no bundle, loudly. Every other
+ * input whose absence is possible (subagents, a recorded cwd, a git history)
+ * is recorded in `manifest.absent` with the reason: a fact, never a silent gap.
+ * Assembly spends no model call.
+ *
+ * A bundle directory is a ref: `traces facts <dir>` reads its spans.
  */
 
-import { createHash } from 'node:crypto'
-import { copyFile, cp, lstat, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { cp, copyFile, lstat, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
-import { buildPolicyEvidenceRecord, serializePolicyEvidence } from './evidence.js'
-import { runTraceInvestigation } from './improvement.js'
 import { isMissingPathError } from './json.js'
-import { sessionReportSource } from './report.js'
-import {
-  buildSessionIndexFromRows,
-  findContextRoot,
-  serializeSessionIndex,
-} from './session-index.js'
+import { writeOtlpFile } from './otlp.js'
+import { buildSessionFactsReport } from './session-facts.js'
 import { collectSessionSelection, fileSha256 } from './session-selection.js'
 import { sourceFileId } from './source-location.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -53,103 +44,9 @@ export interface SessionBundleAbsence {
   readonly reason: string
 }
 
-export type SessionBundleSliceRule =
-  /** JSONL rows kept verbatim when their `ts` falls inside the padded session window. */
-  | 'session-window-rows'
-  | 'copied-whole'
-  /** The lexically last `handoff-*.md` — names are date-prefixed, so name order is time order. */
-  | 'latest-by-name'
-  /** Files whose name carries a `YYYY-MM-DD` date inside the session window's dates. */
-  | 'session-window-dated-files'
-
-export interface SessionBundleLedgerSlice {
-  readonly path: string
-  /** Absolute source path the slice was read from. */
-  readonly source: string
-  readonly rule: SessionBundleSliceRule
-  readonly totalRows?: number
-  readonly keptRows?: number
-  /** Rows excluded because no `ts` could be parsed — counted, never silently dropped. */
-  readonly unparseableTsRows?: number
-}
-
-/**
- * Which projection of a session a bundle directory holds.
- *
- * `full` is the auditor's copy: every source byte, so a claim can be checked
- * against the exact text it cites. `evidence-only` is the writer's copy: the
- * counted artifacts, with the session's own words removed, so a writer that
- * must reach its own conclusion cannot read an earlier one instead.
- */
-export type SessionBundleView = 'full' | 'evidence-only'
-
-export type SessionBundleExclusionRule =
-  /** The session's raw text: transcript and subagent transcripts. */
-  | 'session-source'
-  /** A derived artifact that replays session text (prompt lines, excerpts, span content). */
-  | 'session-text-derived'
-  /** A file whose body is prose someone authored: ledger notes, handoffs, commit subjects. */
-  | 'authored-prose'
-  /** An allow-listed file dropped because its own text repeats an excluded source. */
-  | 'content-signature'
-  /** Default deny: the evidence-only view carries an allow-list, and this path is not on it. */
-  | 'not-allow-listed'
-
-export interface SessionBundleExclusion {
-  /** Bundle-relative path in the FULL bundle this view was projected from. */
-  readonly path: string
-  readonly bytes: number
-  /** SHA-256 of the excluded bytes, so an auditor can prove which file was dropped. */
-  readonly sha256: string
-  readonly rule: SessionBundleExclusionRule
-  readonly reason: string
-  /**
-   * Present when `rule` is `content-signature`: how much text the file shared
-   * with which excluded sources. Counts and paths only — quoting the matched
-   * text here would carry into the view the very text the exclusion removes.
-   */
-  readonly contentMatch?: {
-    readonly signatures: number
-    readonly sources: readonly string[]
-  }
-}
-
-export interface SessionBundleCarriedSignatures {
-  readonly path: string
-  /** What the artifact is made of, which is the reason it is safe to carry. */
-  readonly carries: string
-  /** Distinct content signatures the carried file holds at all. 0 = no prose run of that length. */
-  readonly signatures: number
-}
-
-/**
- * The projection's own proof that no excluded file's text survived into the
- * view. `matches` is typed `0` because a match aborts the projection: a view
- * directory carrying a leak is never written, so the artifact cannot record one.
- */
-export interface SessionBundleLeakCheck {
-  /** Consecutive words per content signature. */
-  readonly signatureWords: number
-  /** Excluded files whose text supplied the signatures compared against. */
-  readonly comparedSources: readonly string[]
-  readonly sourceSignatures: number
-  readonly carried: readonly SessionBundleCarriedSignatures[]
-  readonly matches: 0
-}
-
-export interface SessionBundleProjection {
-  /** Absolute directory of the full bundle this view was projected from. */
-  readonly sourceDirectory: string
-  /** SHA-256 of that bundle's `manifest.json` bytes. */
-  readonly sourceManifestSha256: string
-  readonly leakCheck: SessionBundleLeakCheck
-}
-
 export interface SessionBundleManifest {
-  readonly schemaVersion: 2
+  readonly schemaVersion: 3
   readonly kind: 'traces.session_bundle'
-  /** Which projection this directory is. A reader must branch on this, never on the file list. */
-  readonly view: SessionBundleView
   readonly createdAt: string
   readonly provenance: {
     readonly sessionId: string
@@ -158,24 +55,17 @@ export interface SessionBundleManifest {
     /** Absolute path of the source transcript at assembly time. */
     readonly transcriptPath: string
     readonly transcriptSha256: string
-    /** Root the `.evolve` ledger and git log were read under, when found. */
-    readonly contextRoot: string | null
     readonly tracesVersion: string
+    /** The session's own records, as `facts.json` reports them. */
     readonly sessionWindow: {
-      readonly firstSpanAt: string | null
-      readonly lastSpanAt: string | null
-      /** Pad applied to each side of the window when slicing ledger rows. */
+      readonly firstRecordAt: string | null
+      readonly lastRecordAt: string | null
+      /** Pad applied to each side of the window when reading the git log. */
       readonly padMs: number
     }
   }
   readonly files: readonly SessionBundleFile[]
   readonly absent: readonly SessionBundleAbsence[]
-  /** Files the view deliberately dropped. Empty in the `full` view: it drops nothing. */
-  readonly excluded: readonly SessionBundleExclusion[]
-  readonly ledgerSlices: readonly SessionBundleLedgerSlice[]
-  readonly knownLimits: readonly string[]
-  /** Present only in a projected view: where it came from, and the leak check that passed. */
-  readonly projection?: SessionBundleProjection
 }
 
 export interface SessionBundleResult {
@@ -190,35 +80,15 @@ export interface AssembleSessionBundleOptions {
   /** Bundle directory to create. Must be new or empty: one bundle, one session. */
   readonly outDir: string
   readonly generatedAt?: string
-  readonly minLoopOccurrences?: number
   readonly signal?: AbortSignal
-  readonly log?: (msg: string, fields?: Record<string, unknown>) => void
 }
 
 /**
- * Ledger rows land moments AFTER the last span (handoff/reflect run at
- * session close), so a bare span window would drop exactly the decision
- * records the bundle exists to keep. 15 minutes admits session-close writes
- * without swallowing a neighboring session's rows; the manifest records the
- * value so the slice rule is inspectable, not folklore.
+ * Commits land moments after the last span (a session commits as it closes),
+ * so a bare record window would drop exactly the commit the session made last.
+ * The manifest records the pad, so the rule is inspectable.
  */
 const SESSION_WINDOW_PAD_MS = 15 * 60 * 1000
-
-/**
- * Honest limits of what a v1 bundle captures, carried in every manifest so a
- * consumer reads the boundary from the artifact instead of discovering it.
- */
-const KNOWN_LIMITS: readonly string[] = [
-  "'what was decided' is prose-only: handoff, progress, and reflection files are copied as markdown with no structured decision extraction",
-  "'what was measured' is split between experiments.jsonl free-text fields and progress/handoff markdown tables",
-  'session-to-ledger join is by timestamp/cwd inference: ledger rows are window-sliced, not linked by transcript path',
-  'progress.md is copied whole; no session-dated section extraction is performed',
-  'open pull-request state is not captured: the bundler makes no network calls',
-]
-
-function sha256Hex(bytes: Uint8Array): string {
-  return createHash('sha256').update(bytes).digest('hex')
-}
 
 function bundlePath(...parts: string[]): string {
   return parts.join('/')
@@ -234,44 +104,6 @@ async function statOrNull(path: string): Promise<Awaited<ReturnType<typeof stat>
     if ((error as NodeJS.ErrnoException).code === 'ENOTDIR') return null
     throw error
   }
-}
-
-interface JsonlSlice {
-  readonly kept: readonly string[]
-  readonly totalRows: number
-  readonly unparseableTsRows: number
-}
-
-/**
- * Keep rows VERBATIM (raw line bytes, no re-serialization) when their `ts`
- * parses inside the window. Rows without a parseable `ts` — including invalid
- * JSON lines — are excluded from the slice but counted in the manifest, so
- * nothing disappears without a number pointing at it.
- */
-function sliceJsonlByWindow(text: string, windowStartMs: number, windowEndMs: number): JsonlSlice {
-  const kept: string[] = []
-  let totalRows = 0
-  let unparseableTsRows = 0
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue
-    totalRows += 1
-    let tsMs = Number.NaN
-    try {
-      const row: unknown = JSON.parse(line)
-      const ts = row !== null && typeof row === 'object' && !Array.isArray(row)
-        ? (row as { ts?: unknown }).ts
-        : undefined
-      if (typeof ts === 'string') tsMs = Date.parse(ts)
-    } catch {
-      // invalid JSON row → no timestamp → counted below
-    }
-    if (Number.isNaN(tsMs)) {
-      unparseableTsRows += 1
-      continue
-    }
-    if (tsMs >= windowStartMs && tsMs <= windowEndMs) kept.push(line)
-  }
-  return { kept, totalRows, unparseableTsRows }
 }
 
 interface GitLogOutcome {
@@ -296,12 +128,8 @@ async function runGitLog(cwd: string, sinceIso: string, untilIso: string): Promi
   }
 }
 
-/**
- * Every file under a bundle directory, as sorted bundle-relative
- * `/`-separated paths. Both the manifest writer and the view projector walk a
- * bundle through here, so neither can see a file the other does not.
- */
-export async function listSessionBundleFiles(root: string): Promise<string[]> {
+/** Every file under a bundle directory, as sorted bundle-relative `/`-separated paths. */
+async function listBundleFiles(root: string): Promise<string[]> {
   const out: string[] = []
   const pending = [resolve(root)]
   while (pending.length > 0) {
@@ -315,121 +143,10 @@ export async function listSessionBundleFiles(root: string): Promise<string[]> {
   return out.sort()
 }
 
-interface LedgerContext {
-  readonly evolveDir: string
-  readonly ledgerDir: string
-  readonly windowStartMs: number | null
-  readonly windowEndMs: number | null
-  readonly slices: SessionBundleLedgerSlice[]
-  readonly absent: SessionBundleAbsence[]
-}
-
-async function sliceLedgerJsonl(ctx: LedgerContext, name: string): Promise<void> {
-  const source = join(ctx.evolveDir, name)
-  const s = await statOrNull(source)
-  if (!s?.isFile()) {
-    ctx.absent.push({ path: bundlePath('ledger', name), reason: `no ${name} at ${source}` })
-    return
-  }
-  const text = await readFile(source, 'utf8')
-  const target = join(ctx.ledgerDir, name)
-  if (ctx.windowStartMs === null || ctx.windowEndMs === null) {
-    await writeFile(target, text, 'utf8')
-    ctx.slices.push({ path: bundlePath('ledger', name), source, rule: 'copied-whole' })
-    return
-  }
-  const slice = sliceJsonlByWindow(text, ctx.windowStartMs, ctx.windowEndMs)
-  await writeFile(target, slice.kept.length > 0 ? `${slice.kept.join('\n')}\n` : '', 'utf8')
-  ctx.slices.push({
-    path: bundlePath('ledger', name),
-    source,
-    rule: 'session-window-rows',
-    totalRows: slice.totalRows,
-    keptRows: slice.kept.length,
-    unparseableTsRows: slice.unparseableTsRows,
-  })
-}
-
-async function copyLedgerWhole(ctx: LedgerContext, name: string): Promise<void> {
-  const source = join(ctx.evolveDir, name)
-  const s = await statOrNull(source)
-  if (!s?.isFile()) {
-    ctx.absent.push({ path: bundlePath('ledger', name), reason: `no ${name} at ${source}` })
-    return
-  }
-  await cp(source, join(ctx.ledgerDir, name))
-  ctx.slices.push({ path: bundlePath('ledger', name), source, rule: 'copied-whole' })
-}
-
-async function copyLatestHandoff(ctx: LedgerContext): Promise<void> {
-  let names: string[]
-  try {
-    names = (await readdir(ctx.evolveDir, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && /^handoff-.*\.md$/.test(entry.name))
-      .map((entry) => entry.name)
-      .sort()
-  } catch {
-    names = []
-  }
-  const latest = names[names.length - 1]
-  if (!latest) {
-    ctx.absent.push({
-      path: bundlePath('ledger', 'handoff-*.md'),
-      reason: `no flat handoff-*.md files in ${ctx.evolveDir}`,
-    })
-    return
-  }
-  const source = join(ctx.evolveDir, latest)
-  await cp(source, join(ctx.ledgerDir, latest))
-  ctx.slices.push({ path: bundlePath('ledger', latest), source, rule: 'latest-by-name' })
-}
-
-async function copyWindowReflections(ctx: LedgerContext): Promise<void> {
-  const reflectionsDir = join(ctx.evolveDir, 'reflections')
-  const s = await statOrNull(reflectionsDir)
-  if (!s?.isDirectory()) {
-    ctx.absent.push({
-      path: bundlePath('ledger', 'reflections'),
-      reason: `no reflections directory at ${reflectionsDir}`,
-    })
-    return
-  }
-  const names = (await readdir(reflectionsDir, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
-    .map((entry) => entry.name)
-    .sort()
-  const windowed = ctx.windowStartMs === null || ctx.windowEndMs === null
-    ? names
-    : names.filter((name) => {
-        const date = name.match(/(\d{4}-\d{2}-\d{2})/)?.[1]
-        if (!date) return false
-        // Date-only comparison: a reflection is dated to a day, not an instant.
-        const startDate = new Date(ctx.windowStartMs!).toISOString().slice(0, 10)
-        const endDate = new Date(ctx.windowEndMs!).toISOString().slice(0, 10)
-        return date >= startDate && date <= endDate
-      })
-  if (windowed.length === 0) {
-    ctx.absent.push({
-      path: bundlePath('ledger', 'reflections'),
-      reason: `no reflections dated inside the session window in ${reflectionsDir}`,
-    })
-    return
-  }
-  await mkdir(join(ctx.ledgerDir, 'reflections'), { recursive: true })
-  const rule: SessionBundleSliceRule = ctx.windowStartMs === null ? 'copied-whole' : 'session-window-dated-files'
-  for (const name of windowed) {
-    const source = join(reflectionsDir, name)
-    await cp(source, join(ctx.ledgerDir, 'reflections', name))
-    ctx.slices.push({ path: bundlePath('ledger', 'reflections', name), source, rule })
-  }
-}
-
 /**
  * Assemble one session's bundle directory. Throws when the transcript is
  * missing or unparseable — a bundle without its primary source is not a
- * degraded bundle, it is not a bundle. Optional inputs (subagents directory,
- * `.evolve` ledger, git history) that are absent are recorded in
- * `manifest.absent` with the probed path and reason.
+ * degraded bundle, it is not a bundle.
  */
 export async function assembleSessionBundle(opts: AssembleSessionBundleOptions): Promise<SessionBundleResult> {
   const { adapter, ref } = opts
@@ -461,7 +178,6 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
   }
 
   const absent: SessionBundleAbsence[] = []
-  const slices: SessionBundleLedgerSlice[] = []
 
   // session/ — the raw sources, byte-for-byte.
   await mkdir(join(outDir, 'session'), { recursive: true })
@@ -491,143 +207,80 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
     retainedSourceIds.set(path, sourceId)
   }
 
-  // derived/ — every derivation this CLI already owns, deterministic only:
-  // a bundle assembly must never spend a model call.
-  await mkdir(join(outDir, 'derived'), { recursive: true })
-  const otlpPath = join(outDir, 'derived', 'trace.otlp.jsonl')
-  const investigation = await runTraceInvestigation({
-    spans,
-    harness: ref.harness,
-    sources: [sessionReportSource(ref, spans)],
-    cwds: ref.cwd ? [ref.cwd] : [],
-    minLoopOccurrences: opts.minLoopOccurrences,
-    otlpOutPath: otlpPath,
-    generatedAt,
-    signal: opts.signal,
-    log: opts.log,
-  })
-  await writeFile(join(outDir, 'derived', 'report.md'), investigation.report, 'utf8')
+  // spans.otlp.jsonl and facts.json — what every command reads, computed once.
+  await writeOtlpFile(spans, join(outDir, 'spans.otlp.jsonl'))
+  const facts = buildSessionFactsReport(spans, { harness: ref.harness, generatedAt })
+  await writeFile(join(outDir, 'facts.json'), `${JSON.stringify(facts, null, 2)}\n`, 'utf8')
 
-  const evidence = await buildPolicyEvidenceRecord(ref, spans, {
-    generatedAt,
-    minLoopOccurrences: opts.minLoopOccurrences,
-    // Bundle-relative pointer: the bundle must stay internally valid when moved.
-    otlpPath: bundlePath('derived', 'trace.otlp.jsonl'),
-    sourceSha256: transcriptSha256,
-  })
-  await writeFile(join(outDir, 'derived', 'evidence.jsonl'), serializePolicyEvidence([evidence]), 'utf8')
+  const own = facts.sessions.find((session) => session.sessionId === ref.sessionId) ?? facts.sessions[0]
+  const firstRecordAt = own?.firstRecordAt.value ?? null
+  const lastRecordAt = own?.lastRecordAt.value ?? null
+  // The cwd the session recorded; a session file named on the command line
+  // carries none until it is read.
+  const cwd = own?.cwd.value ?? ref.cwd ?? null
 
-  const index = await buildSessionIndexFromRows([{ ref, spans }], {
-    generatedAt,
-    minLoopOccurrences: opts.minLoopOccurrences,
-    selection: { command: 'bundle', harness: ref.harness, session: ref.sessionId },
-  })
-  await writeFile(join(outDir, 'derived', 'session-index.json'), serializeSessionIndex(index), 'utf8')
-
-  const { firstSpanAt, lastSpanAt } = evidence.metrics
-  const windowStartMs = firstSpanAt !== null ? Date.parse(firstSpanAt) - SESSION_WINDOW_PAD_MS : null
-  const windowEndMs = lastSpanAt !== null ? Date.parse(lastSpanAt) + SESSION_WINDOW_PAD_MS : null
-
-  // ledger/ — the .evolve slices for this session's window.
-  const contextRoot = await findContextRoot(ref.cwd)
-  if (!contextRoot) {
-    absent.push({ path: 'ledger', reason: `no context root found from session cwd ${ref.cwd ?? '(unknown)'}` })
-  } else {
-    const evolveDir = join(contextRoot, '.evolve')
-    if (!(await statOrNull(evolveDir))?.isDirectory()) {
-      absent.push({ path: 'ledger', reason: `no .evolve ledger at ${evolveDir}` })
-    } else {
-      const ledgerDir = join(outDir, 'ledger')
-      await mkdir(ledgerDir, { recursive: true })
-      const ctx: LedgerContext = { evolveDir, ledgerDir, windowStartMs, windowEndMs, slices, absent }
-      await sliceLedgerJsonl(ctx, 'experiments.jsonl')
-      await sliceLedgerJsonl(ctx, 'skill-runs.jsonl')
-      await copyLedgerWhole(ctx, 'current.json')
-      await copyLedgerWhole(ctx, 'scorecard.json')
-      await copyLedgerWhole(ctx, 'progress.md')
-      await copyLatestHandoff(ctx)
-      await copyWindowReflections(ctx)
-    }
-  }
-
-  // repo/ — commit history for the session window, from the resolved cwd.
-  const gitLogPath = bundlePath('repo', 'git-log.txt')
-  if (!ref.cwd) {
+  // git-log.txt — commit history for the session window, from the recorded cwd.
+  const gitLogPath = 'git-log.txt'
+  if (!cwd) {
     absent.push({ path: gitLogPath, reason: 'session has no recorded cwd to read git history from' })
-  } else if (windowStartMs === null || windowEndMs === null) {
-    absent.push({ path: gitLogPath, reason: 'session window unavailable (spans carry no timestamps)' })
+  } else if (firstRecordAt === null || lastRecordAt === null) {
+    absent.push({ path: gitLogPath, reason: 'session window unavailable (no record carries a time)' })
   } else {
-    const log = await runGitLog(ref.cwd, new Date(windowStartMs).toISOString(), new Date(windowEndMs).toISOString())
+    const log = await runGitLog(
+      cwd,
+      new Date(Date.parse(firstRecordAt) - SESSION_WINDOW_PAD_MS).toISOString(),
+      new Date(Date.parse(lastRecordAt) + SESSION_WINDOW_PAD_MS).toISOString(),
+    )
     if (log.succeeded) {
-      await mkdir(join(outDir, 'repo'), { recursive: true })
       // An empty log is data: the session touched a repo with no commits in
       // the window. The file exists so a consumer reads "0 commits", not "unknown".
-      await writeFile(join(outDir, 'repo', 'git-log.txt'), log.stdout ? `${log.stdout}\n` : '', 'utf8')
+      await writeFile(join(outDir, gitLogPath), log.stdout ? `${log.stdout}\n` : '', 'utf8')
     } else {
-      absent.push({ path: gitLogPath, reason: `git log failed in ${ref.cwd}: ${log.error}` })
+      absent.push({ path: gitLogPath, reason: `git log failed in ${cwd}: ${log.error}` })
     }
   }
 
   // manifest.json — sha256 per file, written LAST so it covers every byte.
-  const files = (await hashSessionBundleFiles(outDir)).map((file) => ({
-    ...file,
-    ...(retainedSourceIds.has(file.path) ? { sourceId: retainedSourceIds.get(file.path)! } : {}),
-  }))
+  const files: SessionBundleFile[] = []
+  for (const path of await listBundleFiles(outDir)) {
+    const filePath = join(outDir, path)
+    const sourceId = retainedSourceIds.get(path)
+    files.push({
+      ...(sourceId !== undefined ? { sourceId } : {}),
+      path,
+      bytes: (await stat(filePath)).size,
+      sha256: await fileSha256(filePath),
+    })
+  }
   const manifest: SessionBundleManifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'traces.session_bundle',
-    view: 'full',
     createdAt: generatedAt,
     provenance: {
-      sessionId: ref.sessionId,
+      // The id the session recorded; a file named on the command line is its own ref.
+      sessionId: own?.sessionId ?? ref.sessionId,
       harness: ref.harness,
-      cwd: ref.cwd,
+      cwd,
       transcriptPath: resolve(ref.path),
       transcriptSha256,
-      contextRoot,
       tracesVersion: tracesVersion(),
-      sessionWindow: { firstSpanAt, lastSpanAt, padMs: SESSION_WINDOW_PAD_MS },
+      sessionWindow: { firstRecordAt, lastRecordAt, padMs: SESSION_WINDOW_PAD_MS },
     },
     files,
     absent,
-    // The full view is the whole record: it drops nothing, and says so rather
-    // than leaving a reader to infer completeness from a missing field.
-    excluded: [],
-    ledgerSlices: slices,
-    knownLimits: KNOWN_LIMITS,
   }
-  const manifestPath = await writeSessionBundleManifest(outDir, manifest)
+  const manifestPath = join(outDir, 'manifest.json')
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
   return { directory: outDir, manifestPath, manifest }
 }
 
-/** SHA-256 + byte count for every file under a bundle directory, manifest included when present. */
-export async function hashSessionBundleFiles(root: string): Promise<SessionBundleFile[]> {
-  const files: SessionBundleFile[] = []
-  for (const path of await listSessionBundleFiles(root)) {
-    const filePath = join(root, path)
-    const info = await stat(filePath)
-    files.push({ path, bytes: info.size, sha256: await fileSha256(filePath) })
-  }
-  return files
-}
-
-export async function writeSessionBundleManifest(
-  outDir: string,
-  manifest: SessionBundleManifest,
-): Promise<string> {
-  const manifestPath = join(outDir, 'manifest.json')
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-  return manifestPath
-}
-
 /**
- * Read a bundle's manifest and prove it is one. A directory that merely looks
- * like a bundle must not be projected: the view guarantee is only as good as
- * the classification, and the classification only holds over paths this
- * package wrote.
+ * The file list of a bundle's manifest, after proving the directory is a
+ * bundle. A 0.x bundle (schemaVersion 2) is read too: it is retained
+ * evidence, and its manifest lists its files the same way.
  */
-export async function readSessionBundleManifest(bundleDir: string): Promise<SessionBundleManifest> {
-  const path = join(resolve(bundleDir), 'manifest.json')
+async function readBundleFileList(bundleDir: string): Promise<readonly SessionBundleFile[]> {
+  const path = join(bundleDir, 'manifest.json')
   let text: string
   try {
     text = await readFile(path, 'utf8')
@@ -643,20 +296,15 @@ export async function readSessionBundleManifest(bundleDir: string): Promise<Sess
   } catch (error) {
     throw new Error(`${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
   }
-  const manifest = parsed as Partial<SessionBundleManifest>
+  const manifest = parsed as { kind?: unknown; schemaVersion?: unknown; files?: unknown }
   if (manifest?.kind !== 'traces.session_bundle') {
     throw new Error(`${path} has kind ${JSON.stringify(manifest?.kind)}, expected "traces.session_bundle"`)
   }
-  if (manifest.schemaVersion !== 2) {
-    throw new Error(
-      `${path} is bundle schemaVersion ${JSON.stringify(manifest.schemaVersion)}; this traces reads 2. ` +
-        'Re-run `traces bundle` to assemble it with the view-aware manifest.',
-    )
+  if (manifest.schemaVersion !== 3 && manifest.schemaVersion !== 2) {
+    throw new Error(`${path} is bundle schemaVersion ${JSON.stringify(manifest.schemaVersion)}; this traces reads 2 and 3`)
   }
-  if (manifest.view !== 'full' && manifest.view !== 'evidence-only') {
-    throw new Error(`${path} has view ${JSON.stringify(manifest.view)}, expected "full" or "evidence-only"`)
-  }
-  return manifest as SessionBundleManifest
+  if (!Array.isArray(manifest.files)) throw new Error(`${path} lists no files`)
+  return manifest.files as SessionBundleFile[]
 }
 
 export type SessionBundleIssueKind =
@@ -681,21 +329,11 @@ export interface SessionBundleVerification {
   /** True only when every listed file matches and nothing else is present. */
   readonly ok: boolean
   readonly directory: string
-  readonly view: SessionBundleView
   /** Files listed in the manifest. */
   readonly listed: number
   /** Listed files whose size and SHA-256 matched. */
   readonly matched: number
   readonly issues: readonly SessionBundleIssue[]
-  /**
-   * For a projected view: whether the full bundle it names still has the
-   * manifest bytes the view recorded. `unavailable` when that directory is
-   * gone, which is not a failure of this view.
-   */
-  readonly source?: {
-    readonly directory: string
-    readonly status: 'match' | 'mismatch' | 'unavailable'
-  }
 }
 
 function unsafeBundlePath(path: string): string | null {
@@ -734,11 +372,11 @@ async function nonRegularEntries(root: string): Promise<string[]> {
  */
 export async function verifySessionBundle(bundleDir: string): Promise<SessionBundleVerification> {
   const directory = resolve(bundleDir)
-  const manifest = await readSessionBundleManifest(directory)
+  const listedFiles = await readBundleFileList(directory)
   const issues: SessionBundleIssue[] = []
   const listed = new Set<string>()
   let matched = 0
-  for (const file of manifest.files) {
+  for (const file of listedFiles) {
     const unsafe = unsafeBundlePath(file.path)
     if (unsafe) {
       issues.push({ kind: 'unsafe-path', path: file.path, detail: `manifest path ${unsafe}` })
@@ -765,37 +403,12 @@ export async function verifySessionBundle(bundleDir: string): Promise<SessionBun
     }
     matched += 1
   }
-  for (const path of await listSessionBundleFiles(directory)) {
+  for (const path of await listBundleFiles(directory)) {
     if (path === 'manifest.json' || listed.has(path)) continue
     issues.push({ kind: 'unexpected', path, detail: 'on disk, not listed in the manifest' })
   }
   for (const path of await nonRegularEntries(directory)) {
     issues.push({ kind: 'not-a-file', path, detail: 'a symbolic link or special file; a bundle holds regular files only' })
   }
-  let source: SessionBundleVerification['source']
-  if (manifest.projection) {
-    const sourceManifest = join(manifest.projection.sourceDirectory, 'manifest.json')
-    const bytes = await readFile(sourceManifest).catch((error: unknown) => {
-      if (isMissingPathError(error)) return null
-      throw error
-    })
-    source = {
-      directory: manifest.projection.sourceDirectory,
-      status:
-        bytes === null
-          ? 'unavailable'
-          : sha256Hex(bytes) === manifest.projection.sourceManifestSha256
-            ? 'match'
-            : 'mismatch',
-    }
-  }
-  return {
-    ok: issues.length === 0 && source?.status !== 'mismatch',
-    directory,
-    view: manifest.view,
-    listed: manifest.files.length,
-    matched,
-    issues,
-    ...(source ? { source } : {}),
-  }
+  return { ok: issues.length === 0, directory, listed: listedFiles.length, matched, issues }
 }

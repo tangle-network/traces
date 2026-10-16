@@ -8,9 +8,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { CodexAdapter } from '../src/adapters/codex.js'
-import { buildPolicyEvidenceRecord } from '../src/evidence.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
+import { computeSessionFacts } from '../src/session-facts.js'
 import { describeSessionRelationship } from '../src/session-relationship.js'
 import {
   at,
@@ -150,26 +150,27 @@ describe('Codex command and file-change spans', () => {
     expect(scriptSpan.status.code).toBe('OK')
   })
 
-  it('adds only inner spans: outer tool counts, evidence tool counts, and loop input stay unchanged', async () => {
+  it('adds only inner spans: outer tool counts, facts tool counts, and loop input stay unchanged', async () => {
     const spans = await new CodexAdapter().parse(rollout('counts'))
     expect(spanCounts(spans)).toEqual({ ...BASELINE, total: BASELINE.total + 6, inner: 6, humanTurns: 2 })
 
-    const ref = rollout('counts-evidence')
     const outerOnly = spans.filter((item) => item.attributes['traces.tool_call.level'] !== 'inner')
-    const evidence = await buildPolicyEvidenceRecord(ref, spans, { generatedAt: at(0) })
-    const outerEvidence = await buildPolicyEvidenceRecord(ref, outerOnly, { generatedAt: at(0) })
-    expect(evidence.metrics).toMatchObject({ spanCount: BASELINE.total + 6, toolCallCount: 2, erroredToolCallCount: 0 })
-    expect(evidence.metrics.tools).toEqual([
-      { name: 'apply_patch', calls: 1, errors: 0 },
-      { name: 'exec_command.verify', calls: 1, errors: 0 },
-    ])
-    const { spanCount: _all, ...toolMetrics } = evidence.metrics
-    const { spanCount: _outer, ...outerToolMetrics } = outerEvidence.metrics
-    expect(toolMetrics).toEqual(outerToolMetrics)
-    expect(evidence.signals).toEqual(outerEvidence.signals)
+    const [facts] = computeSessionFacts(spans)
+    const [outerFacts] = computeSessionFacts(outerOnly)
+    expect(facts!.spanCount).toBe(BASELINE.total + 6)
+    expect(facts!.toolCalls.value).toBe(2)
+    expect(facts!.toolCallsByName.value).toEqual({ apply_patch: 1, 'exec_command.verify': 1 })
+    expect(facts!.measurements.tools.map(({ name, calls, outcomes }) => ({ name, calls, errors: outcomes.error })))
+      .toEqual([
+        { name: 'apply_patch', calls: 1, errors: 0 },
+        { name: 'exec_command.verify', calls: 1, errors: 0 },
+      ])
+    expect(outerFacts!.toolCalls.value).toBe(facts!.toolCalls.value)
+    expect(outerFacts!.toolCallsByName.value).toEqual(facts!.toolCallsByName.value)
+    expect(outerFacts!.measurements.tools).toEqual(facts!.measurements.tools)
     // agent-eval counts a failed inner command as one more execution error.
-    expect(evidence.execution.execution.executionErrors.events)
-      .toBe(outerEvidence.execution.execution.executionErrors.events + 1)
+    expect(facts!.measurements.execution!.execution.executionErrors.events)
+      .toBe(outerFacts!.measurements.execution!.execution.executionErrors.events + 1)
     const [pipelines, outerPipelines] = await Promise.all([runPipelines(spans), runPipelines(outerOnly)])
     expect(pipelines.toolUse).toEqual(outerPipelines.toolUse)
     expect(pipelines.stuckLoops.findings).toEqual(outerPipelines.stuckLoops.findings)

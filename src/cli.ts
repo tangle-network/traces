@@ -16,12 +16,8 @@
  *   traces facts [--harness codex] [--last 5] [--format json|text] [--out facts.json]
  *   traces facts --harness claude-code --since 7d [--until 2026-10-14] [--all]
  *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
- *   traces index   [--harness claude-code] [--last 20] --out session-index.json
- *   traces bundle  --harness claude-code --session <id|path> --out <dir>
- *   traces bundle-view <bundle-dir> --view evidence-only --out <dir>
- *   traces inspect session-index.json [--out inspection-report.md]
+ *   traces bundle  <id|path> --out <dir>
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
- *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces stream  [input.jsonl] [--replay] [--all] [--format auto]
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
  *   traces watch   <run-dir | spans.otlp.jsonl> [--once] [--interval 2]
@@ -43,17 +39,14 @@
  * `--otlp <file|dir>` READS OTLP; `--otlp-out <path>` WRITES the artifact.
  */
 
-import { assertOutsideSourceBundle } from './bundle-source.js'
 import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
-import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
 import { findingRejectionDetail } from './finding-rejections.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
-import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import {
   loadTracesConfig,
   mergeTracesConfig,
@@ -120,12 +113,10 @@ import {
   type SessionWorkflowIssue,
   type SessionWorkflowSummary,
 } from './session-workflow.js'
-import { assembleSessionBundle, type SessionBundleView, verifySessionBundle } from './bundle.js'
-import { projectSessionBundle } from './bundle-view.js'
+import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
 import { diffRuns, renderRunDiff } from './diff.js'
 import { tracesVersion } from './version.js'
 import { serveTraceMcp } from './mcp.js'
-import { buildSessionIndexFromRows, serializeSessionIndex, writeSessionIndexFile } from './session-index.js'
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince, parseTimeBound } from './time.js'
@@ -192,8 +183,6 @@ interface Args {
   dir?: string
   /** OTLP-JSONL file or directory to READ. */
   otlp?: string
-  /** Full bundle whose original records may be read by local analysts. */
-  sourceBundle?: string
   /** Where to WRITE the OTLP-JSONL artifact. */
   otlpOut?: string
   llm: boolean
@@ -210,8 +199,6 @@ interface Args {
   config?: string
   format?: string
   mode?: string
-  /** `bundle-view`: which projection of a bundle to write. */
-  view?: string
   replay: boolean
   /** `--once`: a single pass instead of a live tail. */
   once: boolean
@@ -292,14 +279,12 @@ function parseArgs(argv: string[]): Args {
       case '--out': a.out = next(); break
       case '--dir': a.dir = next(); break
       case '--otlp': a.otlp = next(); break
-      case '--source-bundle': a.sourceBundle = next(); break
       case '--otlp-out': a.otlpOut = next(); break
       case '--llm': a.llm = true; break
       case '--budget': a.budget = Number(next()); break
       case '--model': a.model = next(); break
       case '--config': a.config = next(); break
       case '--mode': a.mode = next(); break
-      case '--view': a.view = next(); break
       case '--metadata': a.metadata = next(); break
       case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
       case '--interval': a.interval = Number(next()); a.intervalExplicit = true; break
@@ -347,13 +332,13 @@ function parseArgs(argv: string[]): Args {
 
 /** Commands whose positional arguments are refs (`refs.ts`). */
 const REF_COMMANDS = new Set([
-  'list', 'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert', 'index', 'evidence',
+  'list', 'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert',
   'bundle', 'upload', 'stream', 'check', 'mcp',
 ])
 
 /** Ref commands that read more than one ref and combine what they name. */
 const MULTI_REF_COMMANDS = new Set([
-  'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert', 'index', 'evidence', 'upload', 'check', 'mcp',
+  'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert', 'upload', 'check', 'mcp',
 ])
 
 /**
@@ -398,8 +383,6 @@ const CURRENT_SESSION_COMMANDS = new Set([
   'improve',
   'ask',
   'convert',
-  'index',
-  'evidence',
   'bundle',
   'stream',
 ])
@@ -411,8 +394,6 @@ const WORKFLOW_COMMANDS = new Set([
   'improve',
   'ask',
   'convert',
-  'index',
-  'evidence',
 ])
 
 /**
@@ -457,20 +438,6 @@ function applyCurrentSessionSelection(args: Args): Args {
     )
   }
   return { ...args, refs: [caller.sessionId], input: caller.sessionId, harness: caller.harness, harnessExplicit: true }
-}
-
-/**
- * `--view` names a projection of an assembled bundle, so it belongs to
- * `bundle-view` alone. Accepting it silently on `bundle` would let someone ask
- * for the evidence-only view and receive the full one, which is the exact
- * mistake the two views exist to make impossible.
- */
-function validateViewSelection(args: Args): Args {
-  if (args.view === undefined || args.command === 'bundle-view') return args
-  throw new Error(
-    `--view is not supported by ${args.command}. A view is a projection of an assembled bundle: ` +
-      'run `traces bundle ... --out <dir>` first, then `traces bundle-view <dir> --view evidence-only --out <view-dir>`.',
-  )
 }
 
 /** `--until` closes the facts time window; no other command reads a window's upper bound. */
@@ -886,16 +853,6 @@ async function collectOtlpSpans(path: string, selector?: string): Promise<Collec
 }
 
 async function collectSpans(args: Args): Promise<CollectedSpans> {
-  if (args.sourceBundle) {
-    if (!['analyze', 'investigate', 'improve', 'ask'].includes(args.command)) throw new Error('--source-bundle is an analysis option')
-    if (args.otlp || args.input || args.current || args.workflow || args.noContent) {
-      throw new Error('--source-bundle cannot be combined with another input, redaction, or metadata-only selection')
-    }
-    for (const output of [args.out, args.dir, args.otlpOut]) {
-      if (output) await assertOutsideSourceBundle(args.sourceBundle, output)
-    }
-    return collectOtlpSpans(join(args.sourceBundle, 'derived', 'trace.otlp.jsonl'))
-  }
   if (args.otlp) return collectOtlpSpans(args.otlp)
   if (args.refs.length > 0 && !args.selection) throw new Error(`internal: ${args.command} read its refs before resolving them`)
   const sources = args.selection?.spans ?? []
@@ -943,7 +900,7 @@ function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
 
 /** Spans of the selected harness sessions: refs, --session, or discovery. */
 async function collectSessionSpans(args: Args): Promise<CollectedSpans> {
-  const selection = await collectSessionRows(args, false, args.last || 1)
+  const selection = await collectSessionRows(args, args.last || 1)
   const spans: OtlpSpan[] = []
   const harnesses = new Set<string>()
   const cwds: string[] = []
@@ -1001,7 +958,7 @@ async function cmdValidate(args: Args): Promise<void> {
   process.exitCode = validationExitCode(validation)
 }
 
-const EVIDENCE_FORMATS = new Set(['policy-evidence', 'sandbox-events', 'openinference', 'intelligence-spans'])
+const EVIDENCE_FORMATS = new Set(['sandbox-events', 'openinference'])
 
 /** check's --format names its input: a span reader, or a harness whose session reader it forces. */
 function checkInputFormat(args: Args): { harness?: string; format?: SpanReader } {
@@ -1115,11 +1072,7 @@ type CollectedSessionRows = SessionSelection & { readonly unread: UnreadSessionF
  * session that cannot be read exits 2; any other session that cannot be read
  * is skipped and named in `unread`.
  */
-async function collectSessionRows(
-  args: Args,
-  bindExplicitSource = false,
-  defaultLast = 20,
-): Promise<CollectedSessionRows> {
+async function collectSessionRows(args: Args, defaultLast: number): Promise<CollectedSessionRows> {
   const named = args.selection?.sessions ?? []
   const source = args.selection?.spans[0]
   if (source && named.length === 0) {
@@ -1132,7 +1085,6 @@ async function collectSessionRows(
     parents: false,
     maxWorkflowSessions: args.maxWorkflowSessions,
     taskScope: args.latestTurn ? 'latest' : 'all',
-    bindSources: bindExplicitSource && named.length > 0,
     home: args.selection?.home,
     onUnreadable: ({ ref, error, seed }) => {
       if (seed && named.length > 0) throw new RefError(`${ref.sessionId} could not be read (${ref.path}): ${errorText(error)}`, 'unreadable')
@@ -1140,59 +1092,6 @@ async function collectSessionRows(
     },
   })
   return { ...selection, unread }
-}
-
-async function cmdEvidence(args: Args): Promise<void> {
-  const selection = await collectSessionRows(args, true)
-  const rows = selection.rows.filter((row) => row.spans.length > 0)
-  warnUnread(args, selection.unread)
-  if (rows.length === 0) throw new Error('no spans found for the given selection')
-  warnIncompleteWorkflow(selection.workflow)
-  const otlpPath = args.otlpOut ? await writeOtlpFile(rows.flatMap((row) => row.spans), args.otlpOut) : undefined
-  const generatedAt = new Date().toISOString()
-  const records = await Promise.all(rows.map((row) =>
-    buildPolicyEvidenceRecord(row.ref, row.spans, {
-      generatedAt,
-      minLoopOccurrences: args.minLoop,
-      maxLoopExamples: 25,
-      otlpPath,
-      sourceSha256: row.sourceSha256,
-    }),
-  ))
-  if (args.out) {
-    const path = await writePolicyEvidenceFile(records, args.out)
-    console.log(`policy evidence → ${path}  (${records.length} session rows${otlpPath ? `, OTLP: ${otlpPath}` : ''})`)
-  } else {
-    process.stdout.write(serializePolicyEvidence(records))
-  }
-}
-
-async function cmdIndex(args: Args): Promise<void> {
-  const selection = await collectSessionRows(args)
-  const rows = selection.rows.filter((row) => row.spans.length > 0)
-  warnUnread(args, selection.unread)
-  if (rows.length === 0) throw new Error('no spans found for the given selection')
-  warnIncompleteWorkflow(selection.workflow)
-  const index = await buildSessionIndexFromRows(rows, {
-    minLoopOccurrences: args.minLoop,
-    selection: {
-      command: 'index',
-      harness: args.harnessExplicit ? args.harness : undefined,
-      all: !args.harnessExplicit || undefined,
-      last: args.last || undefined,
-      session: args.refs[0],
-      cwd: args.cwd,
-      since: args.since,
-      latestTurn: args.latestTurn || undefined,
-      ...(selection.workflow ? { workflow: selection.workflow } : {}),
-    },
-  })
-  if (args.out) {
-    const path = await writeSessionIndexFile(index, args.out)
-    console.log(`session index → ${path}  (${index.totals.sessions} session rows)`)
-  } else {
-    process.stdout.write(serializeSessionIndex(index))
-  }
 }
 
 async function cmdBundle(args: Args): Promise<void> {
@@ -1206,18 +1105,9 @@ async function cmdBundle(args: Args): Promise<void> {
   }
   if (!args.out) throw new Error('bundle needs --out <dir> — a new or empty directory for the bundle')
   const { adapter, ref } = named!.sessions[0]!
-  const result = await assembleSessionBundle({
-    adapter,
-    ref,
-    outDir: args.out,
-    minLoopOccurrences: args.minLoop,
-    log: analystLog,
-  })
+  const result = await assembleSessionBundle({ adapter, ref, outDir: args.out })
   const { manifest } = result
-  console.log(
-    `session bundle (${manifest.view} view) → ${result.directory}  (${manifest.files.length} file(s), ` +
-      `${manifest.ledgerSlices.length} ledger slice(s), ${manifest.absent.length} recorded absent)`,
-  )
+  console.log(`session bundle → ${result.directory}  (${manifest.files.length} file(s), ${manifest.absent.length} recorded absent)`)
 }
 
 /**
@@ -1318,40 +1208,13 @@ async function cmdBundleVerify(argv: readonly string[]): Promise<void> {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
   } else {
     const lines = [
-      `${result.ok ? 'VERIFIED' : 'FAILED'}  ${result.view} bundle ${result.directory}`,
+      `${result.ok ? 'VERIFIED' : 'FAILED'}  bundle ${result.directory}`,
       `  ${result.matched}/${result.listed} listed file(s) match their recorded size and SHA-256`,
       ...result.issues.map((issue) => `  ${issue.kind.padEnd(11)} ${issue.path}: ${issue.detail}`),
     ]
-    if (result.source) lines.push(`  source bundle manifest: ${result.source.status} (${result.source.directory})`)
     process.stdout.write(`${lines.join('\n')}\n`)
   }
   if (!result.ok) process.exitCode = 1
-}
-
-const PROJECTABLE_VIEWS: readonly SessionBundleView[] = ['evidence-only']
-
-async function cmdBundleView(args: Args): Promise<void> {
-  if (!args.input) {
-    throw new Error('bundle-view needs the bundle directory to project; run `traces bundle --out <dir>` first')
-  }
-  if (!args.view) {
-    throw new Error(`bundle-view needs --view <${PROJECTABLE_VIEWS.join('|')}>`)
-  }
-  if (!PROJECTABLE_VIEWS.includes(args.view as SessionBundleView)) {
-    throw new Error(`unknown view "${args.view}"; projectable views: ${PROJECTABLE_VIEWS.join(', ')}`)
-  }
-  if (!args.out) throw new Error('bundle-view needs --out <dir> — a new or empty directory for the view')
-  const result = await projectSessionBundle({
-    bundleDir: args.input,
-    outDir: args.out,
-    view: args.view as SessionBundleView,
-  })
-  const { manifest, leakCheck } = result
-  console.log(
-    `${manifest.view} view → ${result.directory}  (${manifest.files.length} file(s) carried, ` +
-      `${manifest.excluded.length} excluded, ${leakCheck.matches} session-text match(es) against ` +
-      `${leakCheck.sourceSignatures} signature(s) from ${leakCheck.comparedSources.length} excluded source(s))`,
-  )
 }
 
 /**
@@ -1384,7 +1247,7 @@ async function cmdFacts(args: Args): Promise<void> {
   const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
   const builder = createSessionFactsReportBuilder({ includeContent: !args.noContent, window, nameUnread: named === 0 })
   let report: SessionFactsReport
-  if (window !== undefined && !args.otlp && named === 0 && !args.sourceBundle) {
+  if (window !== undefined && !args.otlp && named === 0) {
     // Every session modified since the window opened, newest first, parsed and
     // reduced to its facts one at a time: a week of sessions is gigabytes of
     // spans, and the sheet needs only one session's at once. A file last
@@ -1439,18 +1302,6 @@ async function cmdFacts(args: Args): Promise<void> {
   process.stdout.write(rendered)
 }
 
-async function cmdInspect(args: Args): Promise<void> {
-  if (!args.input) throw new Error('inspect needs an index file; run `traces index --out session-index.json` first')
-  const index = await readSessionIndexFile(args.input)
-  const report = inspectSessionIndex(index)
-  if (args.out) {
-    const path = await writeInspectionReportFile(report, args.out)
-    console.log(`inspection report → ${path}  (${report.totals.findings} finding(s), high ${report.totals.high})`)
-  } else {
-    process.stdout.write(renderInspectionReport(report))
-  }
-}
-
 async function cmdExport(args: Args): Promise<void> {
   if (!args.input) throw new Error('export needs an input file; run `traces export --help` for examples')
   const format = traceEvidenceFormat(args.format)
@@ -1471,14 +1322,8 @@ async function cmdExport(args: Args): Promise<void> {
 
 function traceEvidenceFormat(raw: string | undefined): TraceEvidenceFormatOption {
   const format = raw ?? 'auto'
-  if (
-    format !== 'auto' &&
-    format !== 'policy-evidence' &&
-    format !== 'sandbox-events' &&
-    format !== 'openinference' &&
-    format !== 'intelligence-spans'
-  ) {
-    throw new Error('--format must be auto, policy-evidence, sandbox-events, openinference, or intelligence-spans')
+  if (format !== 'auto' && format !== 'sandbox-events' && format !== 'openinference') {
+    throw new Error('--format must be auto, sandbox-events or openinference')
   }
   return format
 }
@@ -1646,7 +1491,6 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
   const analystModel = analystModelFor(args)
   const engine = args.llm ? llmAnalysisEngine(args, analystModel) : undefined
   return runTraceInvestigation(mergeTracesConfig({
-    sourceBundle: args.sourceBundle ? { path: args.sourceBundle } : undefined,
     spans,
     harness,
     sources,
@@ -1671,7 +1515,6 @@ async function cmdImprove(args: Args): Promise<void> {
   const engine = args.llm ? llmAnalysisEngine(args, analystModel) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
-      sourceBundle: args.sourceBundle ? { path: args.sourceBundle } : undefined,
       spans,
       harness,
       sources,
@@ -1753,7 +1596,6 @@ async function cmdAsk(args: Args): Promise<void> {
       harness: collected.harness,
       concurrency: args.concurrency,
       ...(args.budget !== undefined ? { budgetUsd: args.budget } : {}),
-      ...(args.sourceBundle ? { sourceBundle: { path: args.sourceBundle } } : {}),
       otlpOutPath: args.otlpOut ?? join(directory, 'traces.otlp.jsonl'),
       signal: controller.signal,
       log: analystLog,
@@ -2213,17 +2055,12 @@ Usage:
   traces export <input.jsonl|input.json> > spans.jsonl
 
 Input formats:
-  policy-evidence  Compact JSONL rows from \`traces evidence --out policy-evidence.jsonl\`
   sandbox-events   JSON arrays with start/raw/result/done/error events
   openinference    Existing OpenInference JSONL; rewrites through traces redaction
-  intelligence-spans  JSONL rows exported from Tangle Intelligence trace spans
   auto             Detect the format from the file contents (default)
 
 Examples:
-  traces evidence --since 24h --out policy-evidence.jsonl
-  traces export policy-evidence.jsonl --out spans.openinference.jsonl
   traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
-  traces export intelligence-spans.jsonl --out spans.openinference.jsonl
   traces export sandbox-events.json --attr task.id=aec-001 --attr outcome.score=1 --out spans.openinference.jsonl
 
 Safety:
@@ -2331,12 +2168,10 @@ Commands:
             Incremental: a run reads only transcript bytes appended since the
             last run. No model call. traces skills --help
   convert   Emit OTLP-JSONL only, to --otlp-out
-  index     Emit a reusable session index JSON for later investigation
-  bundle    Assemble one session's durable evidence directory: transcript +
-            subagents, derived index/report/evidence/OTLP, the repo's .evolve
-            ledger sliced to the session window, git log, and a sha256 manifest
-            (needs --session <id|path> and --out <new-dir>). This is the FULL
-            view: it holds the session's own words, for a reader who cites them
+  bundle    Keep one session's evidence beyond log rotation: bundle <ref> --out
+            <new-dir> writes session/ (transcript and subagents byte for byte),
+            spans.otlp.jsonl, facts.json, git-log.txt and a sha256 manifest.
+            A bundle directory is a ref (traces facts <dir>)
   mcp       Serve the selected traces to an MCP client over stdio: 7 read-only,
             idempotent trace tools; spans and results redacted, results capped
             and marked untrusted (traces mcp --help)
@@ -2352,17 +2187,8 @@ Commands:
   bundle verify <bundle-dir>
             Check a bundle against its manifest: every listed file present with
             its recorded size and SHA-256, no unlisted or non-regular file beside
-            them, and for a view, the source manifest it was projected from.
-            Exit 1 on any difference (--format text|json)
-  bundle-view <bundle-dir>
-            Project an assembled bundle into a narrower view for a consumer that
-            must NOT read the session's own words. --view evidence-only carries
-            the counted artifacts and structured ledger rows, excludes the
-            transcript, the report, the spans and every prose file by name, and
-            refuses to write a view whose text repeats an excluded source
-  inspect   Read a session index and print ranked improvement findings
+            them. Exit 1 on any difference (--format text|json)
   export    Convert evidence/events files to OpenInference JSONL
-  evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
             (watch <target> tails ONE run tree instead: a run directory or a span file)
@@ -2404,18 +2230,13 @@ read is skipped and named in selection.unreadSessions):
                    that is not OTLP instead of reading it as broken spans.
                    Supported by: validate, analyze, facts, investigate, improve, ask,
                    stream, mcp. Writing commands take --otlp-out.
-  --source-bundle <dir>  Analyze a retained full bundle; explicitly grant source-field reads.
-                   Available for analyze, investigate, improve, and ask.
   --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
                    provenance / dry-run upload preview)
-  --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans
+  --format <kind>  analyze/export: auto | sandbox-events | openinference
                    facts: json (default) | text
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
   --mode <kind>    stream: visualizer | findings | agent (default visualizer)
-  --view <name>    bundle-view: which projection to write. evidence-only is the
-                   writer's view; the full view is the bundle itself, so there is
-                   nothing to project into it
   --replay, --once stream: scan once and exit (default for positional input / --session)
   --once           watch <target>: print ONE snapshot and exit, for scripts and agents
   --no-spans       stream: omit per-span pulse events
@@ -2509,7 +2330,7 @@ async function main(): Promise<void> {
     return
   }
   const validated = validateOtlpSelection(
-    validateViewSelection(validateWorkflowSelection(validateUntilSelection(applyCurrentSessionSelection(parsedArgs)))),
+    validateWorkflowSelection(validateUntilSelection(applyCurrentSessionSelection(parsedArgs))),
   )
   // check resolves its refs itself, after its contract loads: a bad contract
   // is reported before any trace is read, with check's own exit codes.
@@ -2531,12 +2352,8 @@ async function main(): Promise<void> {
     case 'ask': await cmdAsk(args); break
     case 'facts': await cmdFacts(args); break
     case 'convert': await cmdConvert(args); break
-    case 'index': await cmdIndex(args); break
     case 'bundle': await cmdBundle(args); break
-    case 'bundle-view': await cmdBundleView(args); break
-    case 'inspect': await cmdInspect(args); break
     case 'export': await cmdExport(args); break
-    case 'evidence': await cmdEvidence(args); break
     case 'stream': await cmdStream(args); break
     case 'watch': await cmdWatch(args); break
     case 'upload': await cmdUpload(args); break

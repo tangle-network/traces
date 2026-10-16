@@ -25,14 +25,11 @@ traces validate results/sessions --out conformance.md  # a whole directory of ex
 traces analyze  --otlp spans.otlp.jsonl            # analyse foreign OTLP, no adapter
 traces analyze  --otlp results/sessions --out report.md
 traces convert  --harness claude-code --last 1 --otlp-out spans.jsonl   # OTLP only
-traces index    --all --since 24h --out session-index.json
-traces bundle   --harness claude-code --session <id|path> --out bundle-dir   # one session's durable evidence dir
-traces bundle-view bundle-dir --view evidence-only --out writer-dir   # same session, without its own words
-traces bundle verify bundle-dir                                        # every file against its manifest SHA-256
-traces inspect  session-index.json --out inspection-report.md
-traces evidence --harness codex --last 20 --out policy-evidence.jsonl
-traces evidence --harness codex-exec --session /tmp/codex.jsonl --cwd "$PWD" --out policy-evidence.jsonl
-traces export   policy-evidence.jsonl --out spans.openinference.jsonl
+traces list     --format json                      # one row per session, with id, path and parent id
+traces bundle   <id|path> --out bundle-dir         # one session's durable evidence dir
+traces bundle verify bundle-dir                    # every file against its manifest SHA-256
+traces facts    bundle-dir --no-content            # a bundle is a ref; this is its evidence without its words
+traces export   sandbox-events.json --out spans.openinference.jsonl
 traces watch    --all                              # live observer; loops + semantic findings
 traces watch    runs/my-run                        # live run tree: status, budget, driver vs child spend
 traces watch    runs/my-run --once                 # one snapshot, then exit
@@ -65,8 +62,7 @@ traces help moved                                  # every 0.x command and flag 
 | `--evidence <dir>` | `check`: where evidence for a trace that did not pass goes (default `.traces/check`) |
 | `--annotations` | `check`: print GitHub workflow annotations (on by default under `GITHUB_ACTIONS=true`) |
 | `--otlp-out <path>` | **WRITE** the OTLP artifact here (also evidence provenance / dry-run upload preview) |
-| `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `policy-evidence`, `sandbox-events`, `openinference`, or `intelligence-spans` |
-| `--source-bundle <dir>` | `analyze` / `investigate` / `improve` / `ask`: read a retained full bundle and explicitly grant source-field reads |
+| `--format <kind>` | File `analyze`, `export`, or `stream`: `auto`, `sandbox-events` or `openinference` |
 | `--llm` / `--budget <usd>` | Enable agentic analysts (needs `TANGLE_API_KEY` + Python with `agent-eval-rpc[dspy]`) / cap their spend |
 | `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
 | `--questions <file>` | `ask`: JSON array of questions — strings, or `{ id?, question, instructions?, answerSchema? }` |

@@ -3,12 +3,11 @@
  *
  * `analyze`, `investigate`, `improve`, and `ask` all write the selected spans
  * to one OpenInference file and read it back through agent-eval's
- * `OtlpFileTraceStore`. Keeping that sequence here means a source-bundle grant,
- * the file ceiling, and the containment check cannot differ between them.
+ * `OtlpFileTraceStore`. Keeping that sequence here means the file ceiling
+ * cannot differ between them.
  */
 
-import { OtlpFileTraceStore, type SpanSourceReader } from '@tangle-network/agent-eval/traces'
-import { assertOutsideSourceBundle, createBundleSourceReader } from './bundle-source.js'
+import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
 
@@ -22,28 +21,14 @@ const GENERATED_TRACE_FILE_CEILING = 512 * 1024 * 1024
 
 export interface AnalysisTraceFile {
   readonly otlpPath: string
-  /** Present only when the caller explicitly granted source reads through a bundle. */
-  readonly sourceReader?: SpanSourceReader
 }
 
-/** Write the spans once and bind any explicitly granted source reader. */
+/** Write the spans once, for every store below to read. */
 export async function writeAnalysisTraceFile(
   spans: readonly OtlpSpan[],
-  opts: {
-    sourceBundle?: { path: string; maxRecordBytes?: number }
-    otlpOutPath?: string
-    signal?: AbortSignal
-  } = {},
+  opts: { otlpOutPath?: string } = {},
 ): Promise<AnalysisTraceFile> {
-  if (opts.sourceBundle && opts.otlpOutPath) await assertOutsideSourceBundle(opts.sourceBundle.path, opts.otlpOutPath)
-  const sourceReader = opts.sourceBundle
-    ? await createBundleSourceReader(opts.sourceBundle.path, spans, {
-        signal: opts.signal,
-        maxRecordBytes: opts.sourceBundle.maxRecordBytes,
-      })
-    : undefined
-  const otlpPath = await writeOtlpFile(spans, opts.otlpOutPath)
-  return sourceReader ? { otlpPath, sourceReader } : { otlpPath }
+  return { otlpPath: await writeOtlpFile(spans, opts.otlpOutPath) }
 }
 
 /**
@@ -55,7 +40,6 @@ export async function openAgenticTraceStore(file: AnalysisTraceFile): Promise<Ot
   const store = new OtlpFileTraceStore({
     path: file.otlpPath,
     maxFileBytes: GENERATED_TRACE_FILE_CEILING,
-    ...(file.sourceReader ? { sourceReader: file.sourceReader } : {}),
   })
   await store.ensureIndexed()
   return store
@@ -67,7 +51,6 @@ export async function openDeterministicTraceStore(file: AnalysisTraceFile): Prom
     path: file.otlpPath,
     maxFileBytes: GENERATED_TRACE_FILE_CEILING,
     perCallByteCeiling: GENERATED_TRACE_FILE_CEILING,
-    ...(file.sourceReader ? { sourceReader: file.sourceReader } : {}),
   })
   await store.ensureIndexed()
   return store

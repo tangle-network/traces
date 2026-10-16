@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,7 +8,6 @@ import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
 import { CodexExecAdapter, CodexExecStreamError } from '../src/adapters/codex-exec.js'
 import { resolveAdapter } from '../src/registry.js'
-import { buildPolicyEvidenceRecord } from '../src/evidence.js'
 import { parseSession } from '../src/session-source.js'
 import type { SessionRef } from '../src/types.js'
 
@@ -41,8 +40,36 @@ function kind(spans: Awaited<ReturnType<CodexExecAdapter['parse']>>, value: stri
   return spans.filter((item) => item.attributes['openinference.span.kind'] === value)
 }
 
+async function cli(args: readonly string[]): Promise<string> {
+  const { stdout } = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: dir, NO_COLOR: '1', FORCE_COLOR: '' },
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 30_000,
+  })
+  return stdout
+}
+
+interface ExecFacts {
+  sessionId: string | null
+  harness: string | null
+  spanCount: number
+  toolCalls: { value: number }
+  measurements: {
+    tools: Array<{ outcomes: { error: number } }>
+    execution: { execution: { modelCalls: { events: number }; tokenUsage: { totals: { input: number; output: number } } } }
+  }
+}
+
+/** `traces facts <path> --harness codex-exec --format json`, the one session it reads. */
+async function factsOf(path: string): Promise<ExecFacts> {
+  const report = JSON.parse(await cli(['facts', path, '--harness', 'codex-exec', '--format', 'json'])) as { sessions: ExecFacts[] }
+  expect(report.sessions).toHaveLength(1)
+  return report.sessions[0]!
+}
+
 describe('Codex exec JSONL adapter', () => {
-  it('cryptographically binds explicit evidence to the stable source file', async () => {
+  it('binds a bundle to the exact bytes of its source file', async () => {
     const path = source([
       { type: 'thread.started', thread_id: 'thread-bound' },
       { type: 'turn.started' },
@@ -62,27 +89,15 @@ describe('Codex exec JSONL adapter', () => {
       ].join('\n') + '\n')
       .digest('hex')
 
-    const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'evidence',
-      '--harness',
-      'codex-exec',
-      '--session',
-      path,
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
-    const evidence = JSON.parse(stdout) as {
-      provenance?: { sourceSha256?: string }
+    const bundle = join(dir, 'bound-bundle')
+    await cli(['bundle', path, '--harness', 'codex-exec', '--out', bundle])
+    const manifest = JSON.parse(readFileSync(join(bundle, 'manifest.json'), 'utf8')) as {
+      provenance: { transcriptSha256: string }
+      files: Array<{ path: string; sha256: string }>
     }
 
-    expect(evidence.provenance?.sourceSha256).toBe(expected)
-    expect(evidence.provenance?.sourceSha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(manifest.provenance.transcriptSha256).toBe(expected)
+    expect(manifest.files.find((file) => file.path === 'session/transcript.jsonl')?.sha256).toBe(expected)
   })
 
   it('pairs command and file lifecycles and preserves terminal usage without invented timing', async () => {
@@ -207,22 +222,12 @@ describe('Codex exec JSONL adapter', () => {
       'traces.codex.exec_time_source': 'file_mtime',
     })
 
-    const evidence = await buildPolicyEvidenceRecord(session, spans)
-    expect(evidence).toMatchObject({
-      kind: 'traces.policy_evidence.session',
-      session: { harness: 'codex-exec', sessionId: 'thread-1' },
-      metrics: {
-        spanCount: 6,
-        llmTurnCount: 1,
-        toolCallCount: 2,
-        erroredToolCallCount: 0,
-        inputTokens: 39_700,
-        outputTokens: 68,
-      },
-      provenance: {
-        notCampaignCell: true,
-        evidenceKind: 'session-summary',
-      },
+    const facts = await factsOf(session.path)
+    expect(facts).toMatchObject({ sessionId: 'thread-1', harness: 'codex-exec', spanCount: 6, toolCalls: { value: 2 } })
+    expect(facts.measurements.tools.reduce((errors, tool) => errors + tool.outcomes.error, 0)).toBe(0)
+    expect(facts.measurements.execution.execution).toMatchObject({
+      modelCalls: { events: 1 },
+      tokenUsage: { totals: { input: 39_700, output: 68 } },
     })
   })
 
@@ -251,12 +256,10 @@ describe('Codex exec JSONL adapter', () => {
     expect(tool.attributes['traces.codex.exec_item_status']).toBe('interrupted')
     expect(llm.status).toEqual({ code: 'ERROR', message: 'command execution aborted the turn' })
     expect(root.status).toEqual({ code: 'ERROR', message: 'Codex exec stream failed' })
-    const evidence = await buildPolicyEvidenceRecord(session, spans)
-    expect(evidence.metrics).toMatchObject({
-      llmTurnCount: 1,
-      toolCallCount: 1,
-      erroredToolCallCount: 1,
-    })
+    const facts = await factsOf(session.path)
+    expect(facts.toolCalls.value).toBe(1)
+    expect(facts.measurements.tools.reduce((errors, tool) => errors + tool.outcomes.error, 0)).toBe(1)
+    expect(facts.measurements.execution.execution.modelCalls.events).toBe(1)
   })
 
   it.each([
@@ -469,22 +472,8 @@ describe('Codex exec events inside a Sandbox live stream', () => {
   })
 
   it('answers through the CLI for a live-stream session', async () => {
-    const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'evidence',
-      '--harness',
-      'codex-exec',
-      '--session',
-      join(liveStreamFixtures, 'codex-director-in-progress.jsonl'),
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
-    const evidence = JSON.parse(stdout) as { metrics?: { llmTurnCount?: number; toolCallCount?: number } }
-    expect(evidence.metrics).toMatchObject({ llmTurnCount: 1, toolCallCount: 6 })
+    const facts = await factsOf(join(liveStreamFixtures, 'codex-director-in-progress.jsonl'))
+    expect(facts.toolCalls.value).toBe(6)
+    expect(facts.measurements.execution.execution.modelCalls.events).toBe(1)
   })
 })
