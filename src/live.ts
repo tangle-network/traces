@@ -4,6 +4,7 @@ import { isInnerToolCall } from './adapters/tool-io.js'
 import type { OtlpSpan } from './otlp.js'
 import type { PipelineReport } from './pipelines.js'
 import { runPipelines } from './pipelines.js'
+import { isCompletionClaim } from './session-facts.js'
 import { scanSessions, type ScanOptions } from './session-source.js'
 import type { SessionRef } from './types.js'
 
@@ -187,7 +188,6 @@ export interface TraceStreamOptions extends ScanOptions {
 
 const VERIFY_RE = /\b(test|tests|vitest|jest|pytest|go test|cargo test|tsc|typecheck|lint|biome|eslint|build|check:invariants|preflight)\b/i
 const CHANGE_RE = /\b(apply_patch|edit|write|create|delete|rename|replace|update|git apply|sed -i|perl -pi|tee\s|cat\s+>)/i
-const CLAIM_DONE_RE = /\b(done|fixed|complete|completed|implemented|merged|verified|all green|tests pass|ready|works now)\b/i
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
@@ -276,7 +276,7 @@ function actionKind(span: OtlpSpan): TraceLiveActionKind {
   if (isChange(span)) return 'edit'
   if (isRead(span)) return 'read'
   if (isTool(span)) return 'tool'
-  if (isTextSpan(span) && CLAIM_DONE_RE.test(spanContent(span))) return 'claim'
+  if (isTextSpan(span) && isCompletionClaim(spanContent(span))) return 'claim'
   return 'other'
 }
 

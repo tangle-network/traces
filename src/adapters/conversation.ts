@@ -32,9 +32,14 @@ export function capText(raw: string): string {
  *   - `subagent-spawn` a parent agent spawned a subagent with this prompt
  *   - `injected`       a synthetic harness prompt (benchmark task, memory, …)
  *   - `tool-result`    a tool result surfaced as a user turn (rare)
- * Analysts that measure human reactions must filter to `human` only.
+ *   - `fleet`          another agent or session relayed it in: a fleet message,
+ *                      an operator brief, a handoff (`authorOfTypedTurn`)
+ *   - `relay`          a person pasted another agent's output (`authorOfTypedTurn`)
+ * Adapters assign the first five from the harness's own signals; `fleet` and
+ * `relay` are org conventions the facts sheet applies to a turn an adapter
+ * called human. Analysts that measure human reactions must filter to `human` only.
  */
-export type Actor = 'human' | 'agent' | 'subagent-spawn' | 'injected' | 'tool-result'
+export type Actor = 'human' | 'agent' | 'subagent-spawn' | 'injected' | 'tool-result' | 'fleet' | 'relay'
 
 /** Span attribute key for {@link Actor}. New (additive) — not part of the
  *  `tangle.sessionId`/`tangle.ingest_source` wire contract. */

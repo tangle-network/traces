@@ -357,3 +357,24 @@ export function commandTextFromInput(input: string): string | undefined {
   }
   return words.join(' ')
 }
+
+/** A `sh -c <script>` wrapper: the commands it runs are listed after it. */
+function isShellWrapper(words: readonly string[]): boolean {
+  if (!SHELLS.has(basename(words[0] ?? ''))) return false
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index]!
+    if (!word.startsWith('-') || word.startsWith('--') || !word.slice(1).includes('c')) continue
+    return words[index + 1] !== undefined
+  }
+  return false
+}
+
+/**
+ * The simple commands `script` runs, one line each with its words joined by a
+ * space, leaving out a `sh -c` wrapper whose own commands are listed. A search
+ * anchored at `^traces ` then matches `traces facts …` wherever it ran, and
+ * never `tangle traces list`.
+ */
+export function commandLines(script: string): string[] {
+  return shellCommands(script).filter((words) => words.length > 0 && !isShellWrapper(words)).map((words) => words.join(' '))
+}

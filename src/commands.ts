@@ -69,6 +69,8 @@ export interface Args {
   format?: string
   out?: string
   noContent: boolean
+  /** `facts --match`: a regular expression over human turns, agent messages and shell commands. */
+  match?: string
   questions: string[]
   questionsFile?: string
   budget?: number
@@ -186,6 +188,19 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--format': { value: 'F', help: 'the output format', set: (a, v) => { a.format = v } },
   '--out': { value: 'PATH', help: 'write the output to PATH; stdout gets one summary line', set: (a, v) => { a.out = v } },
   '--no-content': { help: 'omit conversation, commands, paths and assignments', set: (a) => { a.noContent = true } },
+  '--match': {
+    value: 'RE',
+    help: 'one row per human turn, agent message or shell command matching RE',
+    freeText: true,
+    set: (a, v) => {
+      try {
+        new RegExp(v)
+      } catch (error) {
+        throw new UsageError(`--match is not a regular expression: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      a.match = v
+    },
+  },
   '--question': { value: 'TEXT', help: `a question (repeatable, at most ${MAX_TRACE_QUESTION_CHARS} characters)`, freeText: true, set: (a, v) => { a.questions.push(v) } },
   '--questions': { value: 'FILE', help: 'a JSON array of questions: strings or {id?, question, answerSchema?}', set: (a, v) => { a.questionsFile = v } },
   '--budget': { value: 'USD', help: 'one spending ceiling shared by every question', set: (a, v) => { a.budget = positiveNumber('--budget', v, 'USD') } },
@@ -281,18 +296,22 @@ const COMMANDS = [
   {
     name: 'facts',
     usage: 'facts <ref…> | --current | --last N | --since T [flags]',
-    job: 'What happened, exactly, for $0: tools, subagents, human turns, PRs, first failure, final message.',
-    flags: [...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--no-content', { flag: '--format', help: 'json (default) or text' }, { flag: '--out', help: 'write the sheet to PATH; stdout gets one summary line' }],
-    formats: ['json', 'text'],
+    job: 'What happened, exactly, for $0: who acted, tools, subagents, human turns, PRs, first failure.',
+    flags: [
+      ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--match', '--no-content',
+      { flag: '--format', help: 'json (default), text, or jsonl: one row per typed turn' },
+      { flag: '--out', help: 'write the sheet to PATH; stdout gets one summary line' },
+    ],
+    formats: ['json', 'text', 'jsonl'],
     refs: [0, MANY],
     select: 'required',
     jq: [
-      ['.sessions[0].humanTurns.value[].text', 'what the person asked'],
-      ['.sessions[0].firstFailure.value', 'the first failure and its blame'],
-      ['.sessions[0].pullRequests.value', 'PRs opened and merged'],
-      ['.selection.unreadSessions', 'sessions a window skipped, and why'],
+      ['.sessions[0].humanTurns.value[] | {text, reply, signals}', 'each ask, its reply, correction signals'],
+      ['.sessions[0].agent.value', 'who acted: profile, model, directive'],
+      ['.sessions[0].firstFailure', 'the first failure and its blame'],
+      ['.matches[] | {sessionId, kind, text}', 'with --match: each hit'],
     ],
-    examples: ['traces facts --current', 'traces facts 019a3c7e --format text', "traces facts --since 1d --cwd . | jq '.sessions[].finalMessages.value'"],
+    examples: ['traces facts --current', 'traces facts 019a3c7e --format jsonl', "traces facts --since 30d --match '^gh pr merge'"],
     overview: ['What happened (turns, PRs, failure)? $0', 'traces facts <ref> | --current | --since 1d'],
   },
   {

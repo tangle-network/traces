@@ -47,6 +47,7 @@ export type { SessionMeasurements, ToolMeasurement, CoveredMeasurement, Compacti
 import type { TraceAnalystDefinition } from '@tangle-network/agent-eval/analyst'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
+import { authorOfTypedTurn, isHarnessCommand } from './adapters/actor.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import {
   INHERITED_SOURCE_ATTR,
@@ -60,6 +61,15 @@ import {
 import { indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
+import {
+  AGENT_IDENTITY_KEYS,
+  identityFieldsOf,
+  mergeAgentIdentity,
+  type AgentIdentityFact,
+  type AgentIdentityLookup,
+} from './session-identity.js'
+import { commandLines, commandTextFromInput } from './shell-commands.js'
+export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
 /**
  * The cumulative harness token total for a whole session, when the adapter
@@ -94,6 +104,12 @@ export interface SessionFactsOptions {
    * {@link SessionFactsReport.selection}.
    */
   readonly window?: SessionFactsWindow
+  /**
+   * Who acted, from sources outside the spans (a session identity record),
+   * consulted after the root span's own `agent.*` attributes. Without it the
+   * `agent` fact reads the spans alone.
+   */
+  readonly agentIdentity?: AgentIdentityLookup
 }
 
 export const SESSION_TOKEN_TOTAL_ATTR = 'traces.session.total_tokens'
@@ -161,9 +177,22 @@ export interface SubagentSpawnFact {
   readonly spanIds: readonly string[]
 }
 
+/**
+ * A correction signal on a typed turn:
+ *   - `interrupt`      the person interrupted the agent since their previous turn
+ *   - `rejected-tool`  the person rejected a tool call since their previous turn
+ *   - `after-claim`    the agent message the turn answered claims completion
+ */
+export type TurnSignal = 'interrupt' | 'rejected-tool' | 'after-claim'
+
+/** Who typed a turn: a person, another agent or session relaying in (`fleet`), or a person pasting agent output (`relay`). */
+export type TurnAuthor = 'human' | 'fleet' | 'relay'
+
 /** One `user.prompt` turn, with the actor the adapter classified it as. */
 export interface SessionTurnFact {
   readonly actor: string
+  /** Who typed it. Always `human` in {@link SessionFacts.humanTurns}. */
+  readonly author: TurnAuthor
   readonly at: string
   readonly text: string
   readonly spanId: string
@@ -176,6 +205,16 @@ export interface SessionTurnFact {
   readonly answered: string | null
   /** The `message.assistant` span `answered` was read from. */
   readonly answeredSpanId: string | null
+  /**
+   * The first message this session's own agent wrote after the turn and before
+   * the next typed turn, clipped like `answered`. Null when it wrote none.
+   */
+  readonly reply: string | null
+  /** The `message.assistant` span `reply` was read from. */
+  readonly replySpanId: string | null
+  /** The person interrupted the agent's work on this turn, before their next turn. */
+  readonly interrupted: boolean
+  readonly signals: readonly TurnSignal[]
 }
 
 /** How many `user.prompt` turns each actor produced. */
@@ -193,6 +232,8 @@ export interface TurnActorCount {
  */
 export interface ExcludedTurnFact {
   readonly reason: string
+  /** Who wrote these turns: the reader's actor label, or the author the sheet assigned (`fleet`, `relay`). */
+  readonly author: string
   readonly turns: number
   readonly spanIds: readonly string[]
 }
@@ -290,6 +331,13 @@ export interface SessionFacts {
    */
   readonly firstFailure: FirstFailure
   readonly measurements: SessionMeasurements
+  /**
+   * Who acted: the profile, model, harness, skill set and directive variant,
+   * each from the first source that has it (the root span, then the session
+   * identity record, then the directives log). Null with the reason when no
+   * source names any.
+   */
+  readonly agent: SessionFact<AgentIdentityFact>
 }
 
 /** A session the report could not read, so whether it belongs in the window is unknown. */
@@ -696,10 +744,15 @@ function changedFilesFact(
 const TURN_EXCLUSION_REASONS: Readonly<Record<string, string>> = {
   injected:
     'harness-injected content rather than typed text: an instruction file, an environment-context block, ' +
-    'a system reminder, a subagent notification, a turn-aborted marker, or a skill or slash-command expansion',
+    'a system reminder, a task or subagent notification, an interrupt or turn-aborted marker, or a skill or ' +
+    'slash-command expansion',
   agent: 'a parent agent sent this prompt to this session; no person typed it',
   'subagent-spawn': 'the brief that spawned this run, written by the agent that spawned it',
   'tool-result': 'a tool result the harness surfaced as a user turn',
+  fleet:
+    'another agent or session sent this turn in: a fleet message, a session-to-session message, or an ' +
+    'operator brief or handoff; no person typed it here',
+  relay: "a person pasted another agent's output: a long, markdown-heavy turn after the session's first",
   unclassified: 'the span carries no actor, so whether a person typed it cannot be read from the spans',
 }
 
@@ -715,6 +768,28 @@ const SUBAGENT_TURN_REASON =
   'a turn inside a subagent this session spawned, not a turn of this session: the person addressed the ' +
   'session, and the brief and notifications the subagent received are the parent agent talking to it'
 
+const HARNESS_COMMAND_REASON =
+  'a command the person gave the harness (/model, /clear, …), not a message to the agent'
+
+/**
+ * An agent message that claims the work is done. A person's turn right after
+ * one is the `after-claim` signal, and the live rule
+ * `completion-claim-without-verification` fires on the same predicate.
+ */
+const CLAIM_DONE_RE = /\b(done|fixed|complete|completed|implemented|merged|verified|all green|tests pass|ready|works now)\b/i
+
+/** True when an agent message claims completion, correctness or verification. */
+export function isCompletionClaim(text: string): boolean {
+  return CLAIM_DONE_RE.test(text)
+}
+
+/** The record a harness writes when the person stops the agent: Claude Code's marker, Codex's context block. */
+const INTERRUPT_TEXT = /^(?:\[Request interrupted by user|<turn_aborted>)/iu
+
+/** A tool result saying the person refused the call (Claude Code's refusal text, Codex's rejection). */
+const REJECTED_TOOL_TEXT =
+  /The user doesn't want to proceed with this tool use|tool use was rejected|rejected by (?:the )?user|user (?:rejected|declined|denied) (?:this|the)/iu
+
 /** Spans that mean the agent acted: a person cannot have typed twice across one. */
 function isAgentActivity(span: OtlpSpan): boolean {
   if (span.name === 'user.prompt') return false
@@ -722,8 +797,12 @@ function isAgentActivity(span: OtlpSpan): boolean {
   return kind === 'TOOL' || kind === 'LLM' || span.name === 'message.assistant' || span.name.startsWith('message.agent.')
 }
 
+function rawContent(span: OtlpSpan): string {
+  return typeof span.attributes.content === 'string' ? span.attributes.content : ''
+}
+
 function turnText(span: OtlpSpan): string {
-  return capText(typeof span.attributes.content === 'string' ? span.attributes.content : '')
+  return capText(rawContent(span))
 }
 
 function normalizedTurnText(span: OtlpSpan): string {
@@ -755,9 +834,15 @@ function isOwnAgentMessage(span: OtlpSpan): boolean {
   return (
     span.name === 'message.assistant' &&
     span.attributes[INHERITED_SPAN_ATTR] !== true &&
-    typeof span.attributes.content === 'string' &&
-    span.attributes.content.trim().length > 0
+    rawContent(span).trim().length > 0
   )
+}
+
+/** A tool call of this session's agent that the person refused. */
+function isRejectedTool(span: OtlpSpan): boolean {
+  if (!isToolSpan(span) || span.status.code !== 'ERROR' || span.attributes[INHERITED_SPAN_ATTR] === true) return false
+  const output = span.attributes['output.value']
+  return REJECTED_TOOL_TEXT.test(`${span.status.message ?? ''}\n${typeof output === 'string' ? output.slice(0, 2000) : ''}`)
 }
 
 /** One excluded `user.prompt` span, with the time the window test reads. */
@@ -766,49 +851,83 @@ interface ExcludedTurn {
   readonly at: string
 }
 
+type MutableTurn = { -readonly [K in keyof SessionTurnFact]: SessionTurnFact[K] }
+
+/** The typed turns of one session, and every `user.prompt` span left out of them. */
+interface TypedTurns {
+  /** Turns a person typed, or another agent or a pasted relay sent: `human`, `fleet` and `relay`. */
+  readonly turns: readonly SessionTurnFact[]
+  /** Excluded spans by `reason\0author`. */
+  readonly excluded: ReadonlyMap<string, readonly ExcludedTurn[]>
+}
+
 /**
- * The human turns of one session, and every `user.prompt` span left out of them.
+ * The typed turns of one session, and every `user.prompt` span left out of them.
  *
- * Three filters, in order: a turn the session inherited rather than received, a
- * turn whose actor is not a person, and a second record of the turn before it.
- * `spans` is the whole trace in order, because the duplicate test asks what
- * happened between two turns.
+ * Filters, in order: a turn of a subagent folded into this trace, a turn the
+ * session inherited rather than received, a turn whose actor is not a person,
+ * harness text the reader still called human, a harness command, and a second
+ * record of the turn before it. A `fleet` or `relay` turn is a typed turn but
+ * not a human one: it is listed with its author and excluded from the count.
+ * `spans` is the whole trace in order, because the duplicate test, the reply
+ * and the signals ask what happened between two turns.
  */
-function humanTurnsOf(spans: readonly OtlpSpan[]): {
-  turns: SessionTurnFact[]
-  excluded: Map<string, ExcludedTurn[]>
-} {
+function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
   const excluded = new Map<string, ExcludedTurn[]>()
-  const drop = (reason: string, span: OtlpSpan): void => {
-    excluded.set(reason, [...(excluded.get(reason) ?? []), { spanId: span.span_id, at: span.start_time }])
+  const drop = (reason: string, author: string, span: OtlpSpan): void => {
+    const key = `${reason}\0${author}`
+    excluded.set(key, [...(excluded.get(key) ?? []), { spanId: span.span_id, at: span.start_time }])
   }
   const kept: OtlpSpan[] = []
-  const turns: SessionTurnFact[] = []
+  const turns: MutableTurn[] = []
   let sinceKept: OtlpSpan[] = []
   // The last message this session's agent wrote so far: what a turn answers.
   // Tracked over every span, so a turn just inside a time window still names
   // the message it answered when that message fell just outside it.
   let lastAgentMessage: OtlpSpan | null = null
+  let lastTurn: MutableTurn | null = null
+  let pending = new Set<TurnSignal>()
   for (const span of spans) {
-    // A subagent's records are not this session's: its prompts are not human
-    // turns here, and its activity does not separate two turns of this session.
+    // A subagent's records are not this session's: its prompts are not turns
+    // here, and its activity does not separate two turns of this session.
     if (isSubagentSpan(span.attributes)) {
-      if (span.name === 'user.prompt') drop(SUBAGENT_TURN_REASON, span)
+      if (span.name === 'user.prompt') drop(SUBAGENT_TURN_REASON, stringAttr(span, ACTOR_ATTR) ?? 'unclassified', span)
       continue
     }
     if (span.name !== 'user.prompt') {
-      if (isOwnAgentMessage(span)) lastAgentMessage = span
+      if (isOwnAgentMessage(span)) {
+        lastAgentMessage = span
+        if (lastTurn && lastTurn.replySpanId === null) {
+          lastTurn.reply = clipAnswered(rawContent(span))
+          lastTurn.replySpanId = span.span_id
+        }
+      }
+      if (isRejectedTool(span)) pending.add('rejected-tool')
       sinceKept.push(span)
       continue
     }
+    const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
     if (span.attributes[INHERITED_SPAN_ATTR] === true) {
       const source = stringAttr(span, INHERITED_SOURCE_ATTR)
-      drop(source === null ? INHERITED_TURN_REASON : `${INHERITED_TURN_REASON} (${source})`, span)
+      drop(source === null ? INHERITED_TURN_REASON : `${INHERITED_TURN_REASON} (${source})`, actor, span)
       continue
     }
-    const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
+    const text = rawContent(span)
+    if (INTERRUPT_TEXT.test(text.trim())) {
+      pending.add('interrupt')
+      if (lastTurn) lastTurn.interrupted = true
+    }
     if (actor !== 'human') {
-      drop(TURN_EXCLUSION_REASONS[actor] ?? `the adapter classified this turn as "${actor}", not as a person typing`, span)
+      drop(TURN_EXCLUSION_REASONS[actor] ?? `the adapter classified this turn as "${actor}", not as a person typing`, actor, span)
+      continue
+    }
+    const author = authorOfTypedTurn(text, { firstTurn: turns.length === 0 })
+    if (author === 'injected') {
+      drop(TURN_EXCLUSION_REASONS.injected!, 'injected', span)
+      continue
+    }
+    if (author === 'human' && isHarnessCommand(text)) {
+      drop(HARNESS_COMMAND_REASON, 'human', span)
       continue
     }
     const previous = kept[kept.length - 1]
@@ -819,39 +938,59 @@ function humanTurnsOf(spans: readonly OtlpSpan[]): {
     // that guessed from the spans collapsed a measured "continue, continue"
     // typed 1.8 s apart into one turn.
     const duplicate =
+      author === 'human' &&
       previous !== undefined &&
       previous.start_time === span.start_time &&
       normalizedTurnText(previous) === normalizedTurnText(span) &&
       normalizedTurnText(span).length > 0 &&
       !sinceKept.some(isAgentActivity)
     if (duplicate) {
-      drop(DUPLICATE_TURN_REASON, span)
+      drop(DUPLICATE_TURN_REASON, 'human', span)
       continue
     }
-    kept.push(span)
-    turns.push({
+    const answered = lastAgentMessage ? rawContent(lastAgentMessage) : null
+    if (answered !== null && isCompletionClaim(answered)) pending.add('after-claim')
+    const turn: MutableTurn = {
       actor: 'human',
+      author,
       at: span.start_time,
       text: turnText(span),
       spanId: span.span_id,
-      answered: lastAgentMessage ? clipAnswered(lastAgentMessage.attributes.content as string) : null,
+      answered: answered === null ? null : clipAnswered(answered),
       answeredSpanId: lastAgentMessage?.span_id ?? null,
-    })
-    sinceKept = []
+      reply: null,
+      replySpanId: null,
+      interrupted: false,
+      signals: SIGNAL_ORDER.filter((signal) => pending.has(signal)),
+    }
+    turns.push(turn)
+    lastTurn = turn
+    pending = new Set()
+    if (author === 'human') {
+      kept.push(span)
+      sinceKept = []
+    } else {
+      drop(TURN_EXCLUSION_REASONS[author]!, author, span)
+    }
   }
   return { turns, excluded }
 }
 
-/** The excluded turns inside the window, grouped by reason; a reason left empty is dropped. */
+const SIGNAL_ORDER: readonly TurnSignal[] = ['interrupt', 'rejected-tool', 'after-claim']
+
+/** The excluded turns inside the window, grouped by reason and author; a group left empty is dropped. */
 function excludedTurnFacts(
   excluded: ReadonlyMap<string, readonly ExcludedTurn[]>,
   keep: (at: string) => boolean,
 ): ExcludedTurnFact[] {
   return [...excluded]
-    .map(([reason, entries]) => [reason, entries.filter((entry) => keep(entry.at)).map((entry) => entry.spanId)] as const)
-    .filter(([, spanIds]) => spanIds.length > 0)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([reason, spanIds]) => ({ reason, turns: spanIds.length, spanIds }))
+    .map(([key, entries]) => {
+      const [reason, author] = key.split('\0') as [string, string]
+      return { reason, author, spanIds: entries.filter((entry) => keep(entry.at)).map((entry) => entry.spanId) }
+    })
+    .filter((entry) => entry.spanIds.length > 0)
+    .sort((left, right) => left.reason.localeCompare(right.reason) || left.author.localeCompare(right.author))
+    .map(({ reason, author, spanIds }) => ({ reason, author, turns: spanIds.length, spanIds }))
 }
 
 /** Epoch bounds of a window; `null` when the window is absent or open on both sides. */
@@ -901,7 +1040,7 @@ export function computeSessionFacts(spans: readonly OtlpSpan[], options: Session
   const bounds = windowBounds(options.window)
   return groupByTrace(spans)
     .sort((left, right) => compareIds(left.traceId, right.traceId))
-    .map((group) => sessionFactsForTrace(group.traceId, group.sessionId, group.spans, options, bounds))
+    .map((group) => readSession(group.traceId, group.sessionId, group.spans, options, bounds).facts)
 }
 
 function compareIds(left: string, right: string): number {
@@ -929,13 +1068,24 @@ function groupByTrace(spans: readonly OtlpSpan[]): TraceGroup[] {
   }))
 }
 
-function sessionFactsForTrace(
+/**
+ * One session as the sheet read it: its facts, its spans in trace order, and
+ * every typed turn (`human`, `fleet`, `relay`) inside the window, which a
+ * `--format jsonl` row and a `--match` search read.
+ */
+export interface SessionReading {
+  readonly facts: SessionFacts
+  readonly spans: readonly OtlpSpan[]
+  readonly turns: readonly SessionTurnFact[]
+}
+
+function readSession(
   traceId: string,
   sessionId: string | null,
   unordered: readonly OtlpSpan[],
   options: SessionFactsOptions,
   bounds: WindowBounds | null,
-): SessionFacts {
+): SessionReading {
   const spans = [...unordered].sort(byTraceOrder)
   const harness = spans.map((span) => stringAttr(span, 'service.name')).find((name) => name !== null) ?? null
 
@@ -957,8 +1107,9 @@ function sessionFactsForTrace(
   // The turn facts honor the window; every other fact covers the whole session.
   const inWindow = (at: string): boolean => insideWindow(bounds, at)
   const promptSpans = spans.filter((span) => span.name === 'user.prompt' && inWindow(span.start_time))
-  const turnFacts = humanTurnsOf(spans)
-  const humanTurns = turnFacts.turns.filter((turn) => inWindow(turn.at))
+  const turnFacts = typedTurnsOf(spans)
+  const typedTurns = turnFacts.turns.filter((turn) => inWindow(turn.at))
+  const humanTurns = typedTurns.filter((turn) => turn.author === 'human')
   const excludedTurns = excludedTurnFacts(turnFacts.excluded, inWindow)
   const actorCounts = new Map<string, string[]>()
   for (const span of promptSpans) {
@@ -984,6 +1135,7 @@ function sessionFactsForTrace(
   const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
   const cwdSpan = spans.find((span) => stringAttr(span, SESSION_CWD_ATTR) !== null)
+  const agent = agentFact(spans, sessionId, harness, options.agentIdentity)
 
   const facts: SessionFacts = {
     schemaVersion: 1,
@@ -1086,12 +1238,13 @@ function sessionFactsForTrace(
             `no span carries ${SESSION_TOKEN_TOTAL_ATTR}; the per-turn llm.turn deltas in this trace ` +
             'are a different quantity and summing them would not be the harness total',
         },
+    agent,
   }
-  if (options.includeContent !== false) return facts
+  if (options.includeContent !== false) return { facts, spans, turns: typedTurns }
   const withheld = <T>(): SessionFact<T> => ({
     value: null, spanIds: [], unavailable: 'Content was not requested.',
   })
-  return {
+  const withheldFacts: SessionFacts = {
     ...facts,
     cwd: withheld(),
     humanTurns: withheld(),
@@ -1108,6 +1261,34 @@ function sessionFactsForTrace(
       ? { ...facts.firstFailure, message: null, classification: facts.firstFailure.classification ? { ...facts.firstFailure.classification, reason: 'Content was not requested.' } : null }
       : facts.firstFailure,
   }
+  return { facts: withheldFacts, spans, turns: [] }
+}
+
+/**
+ * Who acted in one session: each identity key from the root span, else from
+ * the sources `lookup` names, in that order. A supervised run has one identity
+ * per node, so only the root span speaks for the session.
+ */
+function agentFact(
+  spans: readonly OtlpSpan[],
+  sessionId: string | null,
+  harness: string | null,
+  lookup: AgentIdentityLookup | undefined,
+): SessionFact<AgentIdentityFact> {
+  const root = spans.find((span) => span.parent_span_id === null)
+  const fromSpans = root ? identityFieldsOf(root.attributes) : {}
+  const outside = sessionId !== null && lookup ? lookup({ sessionId, harness }) : undefined
+  const value = mergeAgentIdentity([{ source: 'spans', fields: fromSpans }, ...(outside?.sources ?? [])])
+  if (value !== null) {
+    return { value, spanIds: root && Object.keys(fromSpans).length > 0 ? [root.span_id] : [], unavailable: null }
+  }
+  return {
+    value: null,
+    spanIds: [],
+    unavailable:
+      `no root span carries ${AGENT_IDENTITY_KEYS.map(([, key]) => key).join(', ')}; ` +
+      (outside?.reason ?? 'no source outside the spans was read'),
+  }
 }
 
 export type SessionFactsReportOptions = SessionFactsOptions & {
@@ -1119,6 +1300,8 @@ export type SessionFactsReportOptions = SessionFactsOptions & {
    * rather than report it. For a sweep, where one bad file must not end the run.
    */
   nameUnread?: boolean
+  /** Called with each session the report selects, as it is read: its facts, spans and typed turns. */
+  onSession?: (reading: SessionReading) => void
 }
 
 /** The facts sheet for a set of spans, as one report. */
@@ -1172,7 +1355,9 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
     }
     digests.push({ traceId: group.traceId, digest: digest.digest('hex') })
     spanCount += group.spans.length
-    sessions.push(sessionFactsForTrace(group.traceId, group.sessionId, group.spans, options, bounds))
+    const reading = readSession(group.traceId, group.sessionId, group.spans, options, bounds)
+    sessions.push(reading.facts)
+    options.onSession?.(reading)
   }
 
   return {
@@ -1260,6 +1445,7 @@ export function renderSessionFacts(report: SessionFactsReport): string {
   for (const facts of report.sessions) {
     lines.push('', `${facts.sessionId ?? facts.traceId} [${facts.harness ?? 'unknown harness'}] ${facts.spanCount} spans`)
     lines.push(factLine('cwd', facts.cwd, String(facts.cwd.value)))
+    lines.push(factLine('who', facts.agent, facts.agent.value ? renderAgent(facts.agent.value) : ''))
     lines.push(
       factLine(
         'tool calls',
@@ -1294,7 +1480,14 @@ export function renderSessionFacts(report: SessionFactsReport): string {
         }`,
       ),
     )
-    lines.push(factLine('human turns', facts.humanTurns, String(facts.humanTurns.value?.length ?? 0)))
+    const turns = facts.humanTurns.value ?? []
+    const signalled = (signal: TurnSignal): number => turns.filter((turn) => turn.signals.includes(signal)).length
+    lines.push(factLine(
+      'human turns',
+      facts.humanTurns,
+      `${turns.length} (after an interrupt ${signalled('interrupt')}, after a rejected tool ${signalled('rejected-tool')}, ` +
+        `after a completion claim ${signalled('after-claim')})`,
+    ))
     for (const entry of facts.excludedTurns.value ?? []) {
       lines.push(`  turns not counted: ${entry.turns} — ${entry.reason}`)
     }
@@ -1322,6 +1515,75 @@ export function renderSessionFacts(report: SessionFactsReport): string {
     }
   }
   return `${lines.join('\n')}\n`
+}
+
+/** What a `--match` row is: a turn a person typed, a message the agent wrote, or one shell command it ran. */
+export type SessionMatchKind = 'human' | 'agent' | 'command'
+
+/** Characters of text a `--match` row carries, around the first hit. */
+export const MATCH_TEXT_CAP = 300
+
+/** One hit of `traces facts --match`. */
+export interface SessionMatch {
+  readonly sessionId: string | null
+  readonly kind: SessionMatchKind
+  readonly at: string
+  readonly spanId: string
+  readonly text: string
+}
+
+/** `text` on one line, clipped to {@link MATCH_TEXT_CAP} characters around the first hit of `pattern`. */
+function matchExcerpt(text: string, pattern: RegExp): string {
+  const flat = text.replace(/\s+/gu, ' ').trim()
+  if (flat.length <= MATCH_TEXT_CAP) return flat
+  const at = pattern.exec(flat)?.index ?? 0
+  let start = Math.max(0, Math.min(at - 100, flat.length - MATCH_TEXT_CAP))
+  let end = start + MATCH_TEXT_CAP
+  if (start > 0) start += 1
+  if (end < flat.length) end -= 1
+  return `${start > 0 ? '…' : ''}${flat.slice(start, end)}${end < flat.length ? '…' : ''}`
+}
+
+/**
+ * Every hit of `pattern` in one session read: each human turn, each message
+ * the session's own agent wrote, and each simple command its shell tool calls
+ * ran (as `shell-commands.ts` splits a script, so `^` anchors to a command's
+ * start). Inside `window` when one is given. No model, deterministic.
+ */
+export function sessionMatches(reading: SessionReading, pattern: RegExp, window?: SessionFactsWindow): SessionMatch[] {
+  const bounds = windowBounds(window)
+  const sessionId = reading.facts.sessionId
+  const matches: SessionMatch[] = []
+  const add = (kind: SessionMatchKind, span: OtlpSpan, text: string): void => {
+    pattern.lastIndex = 0
+    if (!pattern.test(text)) return
+    pattern.lastIndex = 0
+    matches.push({ sessionId, kind, at: span.start_time, spanId: span.span_id, text: matchExcerpt(text, pattern) })
+  }
+  const byId = new Map(reading.spans.map((span) => [span.span_id, span]))
+  for (const turn of reading.turns) {
+    const span = byId.get(turn.spanId)
+    if (turn.author === 'human' && span) add('human', span, rawContent(span))
+  }
+  for (const span of reading.spans) {
+    if (isSubagentSpan(span.attributes) || !insideWindow(bounds, span.start_time)) continue
+    if (isOwnAgentMessage(span)) {
+      add('agent', span, rawContent(span))
+      continue
+    }
+    if (!isToolSpan(span) || isSynthesizedSpan(span)) continue
+    const script = commandTextFromInput(inputValue(span) ?? '')
+    if (script === undefined) continue
+    for (const line of commandLines(script)) add('command', span, line)
+  }
+  return matches.sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+}
+
+/** The `who:` line: profile and digest, model, directive variant. */
+function renderAgent(agent: AgentIdentityFact): string {
+  const digest = agent.profileDigest?.replace(/^(sha256:)?([0-9a-f]{4})[0-9a-f]+([0-9a-f]{4})$/u, (_, prefix: string | undefined, head: string, tail: string) => `${prefix ?? ''}${head}…${tail}`)
+  const profile = [agent.profileName, digest].filter(Boolean).join(' ')
+  return `${[profile, agent.model, agent.directiveVariant].filter(Boolean).join(' · ')} (from ${agent.source})`
 }
 
 function renderFirstFailure(failure: FirstFailure): string {
@@ -1444,6 +1706,7 @@ interface CompactFacts {
   session_id: string | null
   trace_id: string
   cwd: unknown
+  agent: unknown
   spans: number
   tool_calls: {
     count: number | null
@@ -1495,6 +1758,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
     session_id: facts.sessionId,
     trace_id: facts.traceId,
     cwd: factJson(facts.cwd),
+    agent: factJson(facts.agent),
     spans: facts.spanCount,
     tool_calls: {
       count: facts.toolCalls.value,
