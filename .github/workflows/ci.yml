@@ -28,11 +28,12 @@ jobs:
         run: pnpm check:source
       - name: Typecheck
         run: pnpm typecheck
+      # Before the tests: the CLI tests spawn the built dist/cli.js.
+      - name: Build
+        run: pnpm build
       - name: Test
         run: pnpm test
       - name: Verify the trace-contracts corpus
         run: pnpm run verify:contracts-corpus
-      - name: Build
-        run: pnpm build
       - name: Check packed CLI
         run: pnpm check:package

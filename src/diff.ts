@@ -7,13 +7,11 @@
  * only-in-b or reordered. This module reads the two runs and prints the result.
  */
 
-import { stat } from 'node:fs/promises'
 import { ATTR } from '@tangle-network/agent-trace-contract'
 import { ingestSpans } from '@tangle-network/agent-eval/diagnosis'
 import { type DiffStep, diffSteps, diffStepsFromSpans, type StepDiff } from '@tangle-network/agent-eval/pipelines'
-import { exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
-import { readOtlpInput } from './otlp-input.js'
+import { branchSpans, readRefSpans } from './refs.js'
 
 export interface RunDiffSide {
   /** The path as given, without its `#` selector. */
@@ -42,92 +40,24 @@ export interface RunDiffReport {
   readonly caveat?: string
 }
 
-/**
- * Spans of one input. OTLP (a file, or a directory of OTLP files) is read by
- * the OTLP reader; any other trace file goes through the same importer
- * `traces convert` uses, so a Sandbox SDK event stream diffs directly.
- */
-async function readSpans(path: string): Promise<OtlpSpan[]> {
-  const otlp = await readOtlpInput(path)
-  if (otlp.spans.length > 0) return [...otlp.spans]
-  if (!(await stat(path)).isFile()) {
-    throw new Error(`${path}: no OTLP spans found (${otlp.issues.length} unusable row(s))`)
-  }
-  return (await exportTraceEvidenceFile(path)).spans
-}
-
 export interface RunDiffOptions {
   /** Keep only steps of these span kinds (e.g. TOOL), so event noise does not mark a divergence. */
   readonly kinds?: readonly string[]
 }
 
 /**
- * Spans of one arm: every span whose `agent.branch.id` or `agent.branch.arm`
- * is `branch`, and every span below one. An arm is usually a subtree of a
- * search or fan-out run, so the rest of that trace is not part of it.
- *
- * The contract lets two sibling arms share one `agent.branch.id` (each
- * answers it for both), so a match on the label alone can name more than one
- * subtree. Only a matched span with no matched ancestor is a root; when
- * there is more than one, the selector is ambiguous between separate
- * subtrees and this refuses instead of silently unioning them.
- */
-function branchSpans(spans: readonly OtlpSpan[], branch: string): OtlpSpan[] {
-  const byId = new Map<string, OtlpSpan>()
-  for (const span of spans) byId.set(span.span_id, span)
-  const children = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
-    if (!span.parent_span_id) continue
-    const list = children.get(span.parent_span_id)
-    if (list) list.push(span)
-    else children.set(span.parent_span_id, [span])
-  }
-  const matched = spans.filter(
-    (span) => span.attributes[ATTR.branchId] === branch || span.attributes[ATTR.branchArm] === branch,
-  )
-  const matchedIds = new Set(matched.map((span) => span.span_id))
-  const hasMatchedAncestor = (span: OtlpSpan): boolean => {
-    let current = span
-    while (current.parent_span_id) {
-      const parent = byId.get(current.parent_span_id)
-      if (!parent) return false
-      if (matchedIds.has(parent.span_id)) return true
-      current = parent
-    }
-    return false
-  }
-  const roots = matched.filter((span) => !hasMatchedAncestor(span))
-  if (roots.length > 1) {
-    const named = roots
-      .map((span) => `${span.span_id} (${ATTR.branchId}=${JSON.stringify(span.attributes[ATTR.branchId] ?? null)})`)
-      .join(', ')
-    throw new Error(
-      `"${branch}" matches ${roots.length} separate subtrees, not one arm: ${named}` +
-        ' — sibling arms can share a branch id; select by span id, or narrow the input to one arm first',
-    )
-  }
-  const selected = new Set<OtlpSpan>()
-  const stack = [...matched]
-  while (stack.length > 0) {
-    const span = stack.pop()!
-    if (selected.has(span)) continue
-    selected.add(span)
-    stack.push(...(children.get(span.span_id) ?? []))
-  }
-  return spans.filter((span) => selected.has(span))
-}
-
-/**
- * Read one side. `path` must hold one run; `path#<trace id>` picks a run from
- * a file that holds several; `path#branch=<id>` picks one arm by its
- * `agent.branch.id` or `agent.branch.arm`, so two arms of one run compare.
+ * Read one side. A side is any ref: a session id or unique prefix or suffix, a
+ * harness session file, OTLP, or any file `traces convert` reads. It must hold
+ * one run; `path#<trace id>` picks a run from a file that holds several;
+ * `path#branch=<id>` picks one arm by its `agent.branch.id` or
+ * `agent.branch.arm`, so two arms of one run compare.
  */
 export async function readRunSide(ref: string, options: RunDiffOptions = {}): Promise<RunDiffSide> {
   const hash = ref.lastIndexOf('#')
   const path = hash > 0 ? ref.slice(0, hash) : ref
   const selector = hash > 0 ? ref.slice(hash + 1) : undefined
   const branch = selector?.startsWith('branch=') ? selector.slice('branch='.length) : undefined
-  const all = await readSpans(path)
+  const all = await readRefSpans(path)
   let spans: OtlpSpan[]
   let traceId: string
   if (branch !== undefined) {

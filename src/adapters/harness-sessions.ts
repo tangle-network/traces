@@ -3,7 +3,7 @@
  * alone interprets the harness's records, model calls, tools, and token usage. */
 import { homedir } from 'node:os'
 import { open, stat } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import {
   claudeCodeRefForFile,
   codexRefForFile,
@@ -283,7 +283,34 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       : nativeHarness === 'codex' ? new CodexAdapter() : undefined
   }
 
+  /**
+   * Sessions under `home` through the shared reader, which reads the recorded
+   * cwd and, for Codex, every Codex home and the id in `session_meta`. `home`
+   * is HOME or a store root such as a trace archive's `<host>/home`.
+   */
+  async locateIn(home: string, opts: LocateOptions & { nativeSessionId?: string } = {}): Promise<SessionRef[]> {
+    const found = await this.reader.locate(home, { nativeSessionId: opts.nativeSessionId, sinceMs: opts.sinceMs, cwd: opts.cwd })
+    const refs = found
+      .filter((native) => this.nativeHarness !== 'claude-code' || native.parentNativeSessionId === null)
+      .map((native) => {
+        const ref = tracesRef(native, this.harness)
+        // Claude Code and Codex parse a file ref the way an explicit session
+        // path parses, so the same session reads the same whichever way it
+        // was named. A shared store (OpenCode) needs the reader's own ref.
+        if (!this.scopedAdapter) this.refs.set(`${ref.sessionId}\0${ref.path}`, native)
+        return ref
+      })
+    if (this.legacyOpencode) {
+      // This machine's own legacy store follows XDG_DATA_HOME; a store root's sits in its layout.
+      const own = resolve(home) === resolve(process.env.HOME || homedir())
+      const legacy = await this.legacyOpencode.locate({ sinceMs: opts.sinceMs, cwd: opts.cwd, ...(own ? {} : { home }) })
+      refs.push(...legacy.filter((ref) => opts.nativeSessionId === undefined || ref.sessionId === opts.nativeSessionId))
+    }
+    return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  }
+
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
+    if (opts.home !== undefined) return this.locateIn(opts.home, opts)
     // Keep traces' established filesystem selection, including CODEX_HOME and
     // rollouts whose filename does not contain the metadata's session ID.
     if (this.scopedAdapter) return this.scopedAdapter.locate(opts)
@@ -300,6 +327,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async locateBySessionId(sessionId: string, opts: LocateOptions = {}): Promise<SessionRef[]> {
+    if (opts.home !== undefined) return this.locateIn(opts.home, { ...opts, nativeSessionId: sessionId })
     if (this.scopedAdapter instanceof CodexAdapter) {
       return this.scopedAdapter.locateBySessionId(sessionId, opts)
     }
@@ -490,6 +518,11 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     }
     return agentPaths.map((agentPath) => ({ agentPath, reason: 'not-found' }))
   }
+}
+
+/** True for an adapter that reads a store root (`LocateOptions.home`) instead of HOME. */
+export function readsStoreRoots(adapter: HarnessTraceAdapter): adapter is HarnessSessionsAdapter {
+  return adapter instanceof HarnessSessionsAdapter
 }
 
 export const SHARED_SESSION_ADAPTERS: readonly HarnessTraceAdapter[] = [

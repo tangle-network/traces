@@ -46,6 +46,8 @@ export interface CollectSessionSelectionOptions {
   readonly taskTurnId?: string
   /** Hash and reparse every selected file so emitted evidence binds exact bytes. */
   readonly bindSources?: boolean
+  /** The store root the groups came from (see `LocateOptions.home`). */
+  readonly home?: string
   readonly signal?: AbortSignal
 }
 
@@ -192,6 +194,7 @@ export async function collectSessionSelection(
 
     const workflow = await collectSessionWorkflow(adapter, refs, {
       maxSessions: options.maxWorkflowSessions,
+      home: options.home,
       taskScope,
       taskTurnId: options.taskTurnId,
       signal: options.signal,

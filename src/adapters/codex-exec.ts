@@ -145,6 +145,22 @@ function unwrap(raw: JsonObject): Unwrapped {
   return { kind: 'event', event, envelopeTime }
 }
 
+/** Event types only `codex exec --json` writes at top level; `error` is shared with sandbox envelopes. */
+const CODEX_EXEC_ONLY_TYPES = new Set([...SUPPORTED_EVENT_TYPES].filter((type) => type !== 'error'))
+
+/**
+ * True for a record this reader owns: a Sandbox live-stream envelope carrying
+ * a Codex event (`{ type: 'raw', data: { backend: 'codex', event } }`, the rule
+ * Discovery sorts its live streams by), or a plain `codex exec --json` event.
+ */
+export function isCodexExecRecord(row: unknown): boolean {
+  const record = objectValue(row)
+  if (!record) return false
+  const data = objectValue(record.data)
+  if (record.type === 'raw' && data?.backend === 'codex') return true
+  return data === undefined && typeof record.type === 'string' && CODEX_EXEC_ONLY_TYPES.has(record.type)
+}
+
 function earlier(left: string, right: string): string {
   return Date.parse(left) <= Date.parse(right) ? left : right
 }

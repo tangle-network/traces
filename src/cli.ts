@@ -123,7 +123,7 @@ import { createSessionFactsReportBuilder, renderSessionFacts, type SessionFactsR
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
-import { knownHarnesses, resolveAdapter, selectAdapters } from './registry.js'
+import { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession, scanSessions } from './session-source.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
 import {
@@ -143,16 +143,16 @@ import { explainTraceContract } from '@tangle-network/agent-eval'
 import {
   AmbiguousTraceInputError,
   CHECK_EXIT,
-  type CheckInputKind,
   loadContract,
   renderCheckText,
   renderGithubAnnotations,
   renderJUnit,
   runCheck,
-  sniffCheckInput,
 } from './check.js'
+import { readsStoreRoots } from './adapters/harness-sessions.js'
+import { RefError, resolveRefs, selectSpans, type ResolvedRef, type SpanReader } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
-import { executeUpload, planUpload, type RefusedSession } from './upload.js'
+import { executeUpload, planUpload, planUploadFrom, type RefusedSession, type UploadPlan } from './upload.js'
 import { formatVerdict, verdictExitCode, verifySafe } from './verify-safe.js'
 import {
   buildSkillUsageReport,
@@ -163,9 +163,27 @@ import {
   SkillUsageStore,
 } from './skill-usage.js'
 
+/**
+ * What a command's positional refs resolved to. Read once, before the command
+ * runs, so every reader below sees the same sessions and files.
+ */
+interface RefSelection {
+  /** Harness sessions a ref named: an id, a unique prefix or suffix, or a session file. */
+  readonly sessions: ReadonlyArray<{ readonly adapter: HarnessTraceAdapter; readonly ref: SessionRef }>
+  /** Span sources a ref named: OTLP or trace evidence files and directories, bundles, run directories. */
+  readonly spans: ReadonlyArray<Extract<ResolvedRef, { kind: 'spans' | 'run-dir' }>>
+  /** A store root: selection runs over it instead of HOME. */
+  readonly home?: string
+}
+
 interface Args {
   command: string
+  /** The first positional argument, for the commands that take one path. */
   input?: string
+  /** Every positional argument: refs (a session id, prefix or suffix, a file, a directory). */
+  refs: string[]
+  /** `refs`, resolved; set before a command that reads refs runs. */
+  selection?: RefSelection
   help: boolean
   harness: string
   harnessExplicit: boolean
@@ -248,6 +266,7 @@ function parseArgs(argv: string[]): Args {
   const a: Args = {
     command: argv[0] === '--help' || argv[0] === '-h' ? 'help' : argv[0] ?? 'help',
     help: argv[0] === '--help' || argv[0] === '-h',
+    refs: [],
     harness: 'claude-code',
     harnessExplicit: false,
     all: false,
@@ -342,12 +361,26 @@ function parseArgs(argv: string[]): Args {
       case '-y': a.yes = true; break
       default:
         if (arg?.startsWith('--')) throw new Error(`unknown flag: ${arg}`)
-        if (arg && !a.input) a.input = arg
-        else if (arg) throw new Error(`unexpected positional argument: ${arg}`)
+        if (arg) a.refs.push(arg)
     }
+  }
+  a.input = a.refs[0]
+  if (a.refs.length > 1 && !MULTI_REF_COMMANDS.has(a.command)) {
+    throw new Error(`unexpected positional argument: ${a.refs[1]}`)
   }
   return a
 }
+
+/** Commands whose positional arguments are refs (`refs.ts`). */
+const REF_COMMANDS = new Set([
+  'list', 'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert', 'index', 'evidence',
+  'bundle', 'upload', 'stream', 'check', 'mcp',
+])
+
+/** Ref commands that read more than one ref and combine what they name. */
+const MULTI_REF_COMMANDS = new Set([
+  'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert', 'index', 'evidence', 'upload', 'check', 'mcp',
+])
 
 /**
  * Commands that READ OTLP with `--otlp`. Everything else WRITES its OTLP
@@ -374,7 +407,7 @@ function validateOtlpSelection(args: Args): Args {
         'use --otlp-out <path> to write the artifact.',
     )
   }
-  if (args.input) throw new Error('--otlp cannot be combined with an input file')
+  if (args.input) throw new Error('--otlp cannot be combined with a positional ref; name the file once')
   if (args.session) throw new Error('--otlp reads a file and cannot be combined with --session')
   if (args.supervisorRunDir) throw new Error('--otlp cannot be combined with --supervisor-run-dir')
   if (args.workflow || args.latestTurn) {
@@ -412,7 +445,7 @@ function applyCurrentSessionSelection(args: Args): Args {
   if (!CURRENT_SESSION_COMMANDS.has(args.command)) {
     throw new Error(`--current is not supported by ${args.command}`)
   }
-  if (args.input) throw new Error('--current cannot be combined with an input file')
+  if (args.input) throw new Error('--current cannot be combined with a positional ref')
   if (args.supervisorRunDir) throw new Error('--current cannot be combined with --supervisor-run-dir')
   if (args.session) throw new Error('--current cannot be combined with --session')
   if (args.last > 0) throw new Error('--current cannot be combined with --last')
@@ -451,17 +484,75 @@ function validateWorkflowSelection(args: Args): Args {
   if (!WORKFLOW_COMMANDS.has(args.command)) {
     throw new Error(`${args.workflow ? '--workflow' : '--latest-turn'} is not supported by ${args.command}`)
   }
-  if (args.input) throw new Error('--workflow and --latest-turn cannot be combined with an input file')
+  // A ref is checked once it is resolved (`resolveSelection`): a session ref
+  // takes both, a span file takes neither.
   if (args.supervisorRunDir) {
     throw new Error('--workflow and --latest-turn cannot be combined with --supervisor-run-dir')
   }
   const selected = resolveAdapter(args.harness)
-  const supportsTaskTurns =
-    selected?.harness === 'codex' || selected?.harness === 'claude-code'
-  if (args.latestTurn && (args.all || !supportsTaskTurns)) {
+  if (args.latestTurn && (args.all || !supportsTaskTurns(selected))) {
     throw new Error('--latest-turn requires --harness codex or claude-code')
   }
   return args
+}
+
+function supportsTaskTurns(adapter: HarnessTraceAdapter | undefined): boolean {
+  return adapter?.harness === 'codex' || adapter?.harness === 'claude-code'
+}
+
+/** How a command's `--format` names its input, or undefined when it names the output or is absent. */
+function refInputFormat(args: Args): SpanReader | undefined {
+  // facts and list name their output with --format; check names its input its own way.
+  if (!args.format || args.command === 'facts' || args.command === 'list' || args.command === 'check') return undefined
+  const format = traceEvidenceFormat(args.format)
+  return format === 'auto' ? undefined : format
+}
+
+/**
+ * Resolve the positional refs. Sessions, span sources and a store root are
+ * kept apart, because each is read its own way, and a selection flag that
+ * applies only to harness sessions is refused for the rest.
+ */
+async function resolveSelection(
+  args: Args,
+  overrides: { harness?: string; format?: SpanReader } = {},
+): Promise<RefSelection | undefined> {
+  if (args.refs.length === 0) return undefined
+  if (args.session) throw new Error('--session and a positional ref both name the trace; pass one')
+  const resolved = await resolveRefs(args.refs, {
+    harness: overrides.harness ?? (args.harnessExplicit ? args.harness : undefined),
+    format: overrides.format ?? refInputFormat(args),
+  })
+  const sessions: Array<RefSelection['sessions'][number]> = []
+  const spans: Array<RefSelection['spans'][number]> = []
+  let home: string | undefined
+  for (const ref of resolved) {
+    // A session file records no cwd of its own until it is parsed; --cwd names
+    // it, as it always has for an explicit session path.
+    if (ref.kind === 'session') sessions.push({ adapter: ref.adapter, ref: { ...ref.session, cwd: ref.session.cwd ?? args.cwd ?? null } })
+    else if (ref.kind === 'store-root') home = ref.path
+    else spans.push(ref)
+  }
+  if (args.workflow || args.latestTurn) {
+    const flag = args.workflow ? '--workflow' : '--latest-turn'
+    if (spans[0]) throw new Error(`${flag} expands harness sessions; ${spans[0].ref} is a span source`)
+    const other = sessions.find(({ adapter }) => !supportsTaskTurns(adapter))
+    if (args.latestTurn && other) {
+      throw new Error(`--latest-turn reads Codex and Claude Code sessions; ${other.ref.sessionId} is ${other.adapter.harness}`)
+    }
+    // Over a store root every harness is read unless --harness names one.
+    const narrowed = args.harnessExplicit && supportsTaskTurns(resolveAdapter(args.harness))
+    if (args.latestTurn && home !== undefined && sessions.length === 0 && !narrowed) {
+      throw new Error('--latest-turn over a store root requires --harness codex or claude-code')
+    }
+  }
+  return { sessions, spans, ...(home !== undefined ? { home } : {}) }
+}
+
+/** `args` with its refs resolved, for a command that reads them. */
+async function withSelection(args: Args): Promise<Args> {
+  if (args.selection || args.refs.length === 0) return args
+  return { ...args, selection: await resolveSelection(args) }
 }
 
 /** Y/N confirm on a TTY (prompt to stderr so stdout stays clean). Non-TTY → false. */
@@ -479,7 +570,16 @@ async function confirm(question: string): Promise<boolean> {
   }
 }
 
+/**
+ * The harnesses a selection reads. Over a store root that is every harness
+ * that reads one, unless --harness names one; over HOME, `--harness` (default
+ * claude-code) or every harness with --all.
+ */
 function adaptersFor(args: Args): HarnessTraceAdapter[] {
+  if (args.selection?.home !== undefined) {
+    const named = args.harnessExplicit ? selectAdapters({ harnesses: [args.harness] }) : listAdapters()
+    return named.filter(readsStoreRoots)
+  }
   return selectAdapters({ all: args.all, harnesses: [args.harness] })
 }
 
@@ -487,7 +587,7 @@ async function discover(args: Args): Promise<{ adapter: HarnessTraceAdapter; ref
   const sinceMs = args.since ? parseSince(args.since) : undefined
   const out: { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] = []
   for (const adapter of adaptersFor(args)) {
-    let refs = await locateSessions(adapter, { cwd: args.cwd, sinceMs })
+    let refs = await locateSessions(adapter, { cwd: args.cwd, sinceMs, home: args.selection?.home })
     if (args.last > 0) refs = refs.slice(0, args.last)
     out.push({ adapter, refs })
   }
@@ -601,6 +701,10 @@ function assertRequestedAnalysesRan(
 }
 
 async function cmdList(args: Args): Promise<void> {
+  const named = args.selection?.sessions[0]?.ref.sessionId ?? args.selection?.spans[0]?.ref
+  if (named !== undefined) {
+    throw new RefError(`list finds sessions; its only ref is a store root, and ${named} is not one (read it with \`traces facts ${named}\`)`, 'usage')
+  }
   const groups = await discover({ ...args, last: args.last || 20 })
   for (const { adapter, refs } of groups) {
     console.log(`\n${adapter.harness}: ${refs.length} session(s)`)
@@ -636,7 +740,7 @@ interface CollectedSpans {
  * entirely: the analysis engine is already OTLP-native, so conforming spans
  * need no translation to be analysed.
  */
-async function collectOtlpSpans(path: string): Promise<CollectedSpans> {
+async function collectOtlpSpans(path: string, selector?: string): Promise<CollectedSpans> {
   const input = await readOtlpInput(path)
   if (input.spans.length === 0) {
     throw new Error(
@@ -648,14 +752,15 @@ async function collectOtlpSpans(path: string): Promise<CollectedSpans> {
   for (const file of input.files) {
     for (const traceId of file.traceIds) if (!fileByTrace.has(traceId)) fileByTrace.set(traceId, file.path)
   }
+  const selected = selector ? selectSpans(input.spans, selector, path) : input.spans
   const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of input.spans) {
+  for (const span of selected) {
     const grouped = byTrace.get(span.trace_id) ?? []
     grouped.push(span)
     byTrace.set(span.trace_id, grouped)
   }
   return {
-    spans: [...input.spans],
+    spans: [...selected],
     harness: 'otlp',
     cwds: [],
     sources: [...byTrace].map(([traceId, spans]) => sessionReportSource({
@@ -687,10 +792,43 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
     return collectOtlpSpans(join(args.sourceBundle, 'derived', 'trace.otlp.jsonl'))
   }
   if (args.otlp) return collectOtlpSpans(args.otlp)
-  if (args.input) {
-    if (args.workflow) throw new Error('--workflow reads discovered sessions and cannot be combined with an input file')
-    return collectImportedSpans(args)
+  if (args.refs.length > 0 && !args.selection) throw new Error(`internal: ${args.command} read its refs before resolving them`)
+  const sources = args.selection?.spans ?? []
+  if (sources.length === 0) return collectSessionSpans(args)
+  const parts: CollectedSpans[] = []
+  for (const source of sources) {
+    parts.push(source.kind === 'run-dir'
+      ? await collectOtlpSpans(source.path)
+      : source.reader === 'otlp'
+        ? await collectOtlpSpans(source.path, source.selector)
+        : await collectImportedSpans(source.path, source.reader, args, source.selector))
   }
+  if (args.selection?.sessions.length) parts.push(await collectSessionSpans(args))
+  return parts.length === 1 ? parts[0]! : mergeCollected(parts)
+}
+
+/** Spans of several refs together. A source's conformance describes that source alone, so it is not carried. */
+function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
+  const spans: OtlpSpan[] = []
+  const cwds: string[] = []
+  const sources: SelectedSessionSource[] = []
+  const workflows = parts.flatMap((part) => (part.workflow ? [part.workflow] : []))
+  for (const part of parts) {
+    appendAll(spans, part.spans)
+    appendAll(cwds, part.cwds)
+    appendAll(sources, part.sources)
+  }
+  return {
+    spans,
+    harness: [...new Set(parts.flatMap((part) => part.harness.split('+')))].join('+'),
+    cwds,
+    sources,
+    ...(workflows[0] ? { workflow: workflows[0] } : {}),
+  }
+}
+
+/** Spans of the selected harness sessions: refs, --session, or discovery. */
+async function collectSessionSpans(args: Args): Promise<CollectedSpans> {
   const selection = await collectSessionRows(args, false, args.last || 1)
   const spans: OtlpSpan[] = []
   const harnesses = new Set<string>()
@@ -750,19 +888,17 @@ async function cmdValidate(args: Args): Promise<void> {
 
 const EVIDENCE_FORMATS = new Set(['policy-evidence', 'sandbox-events', 'openinference', 'intelligence-spans', 'chat-trajectory'])
 
-/** Route a positional trace to the reader it needs; `--format` overrides the sniff. */
-async function checkInputArgs(args: Args): Promise<Args> {
-  if (!args.input) return args
-  if (args.otlp || args.session) throw new Error('name the trace once: a positional path, --otlp, or --session')
-  const info = await stat(args.input)
-  let kind: CheckInputKind
-  if (args.format && EVIDENCE_FORMATS.has(args.format)) kind = 'evidence'
-  else if (args.format === 'otlp' || args.format === 'claude-code' || args.format === 'codex') kind = args.format
-  else if (args.format) throw new Error(`unknown --format "${args.format}" (otlp, claude-code, codex, or an evidence format)`)
-  else kind = info.isDirectory() ? 'otlp' : await sniffCheckInput(args.input)
-  if (kind === 'otlp') return { ...args, otlp: args.input, input: undefined }
-  if (kind === 'evidence') return args
-  return { ...args, harness: kind, harnessExplicit: true, session: args.input, input: undefined }
+/** check's --format names its input: a span reader, or a harness whose session reader it forces. */
+function checkInputFormat(args: Args): { harness?: string; format?: SpanReader } {
+  if (!args.format || args.format === 'auto') return {}
+  if (args.format === 'otlp' || EVIDENCE_FORMATS.has(args.format)) return { format: args.format as SpanReader }
+  if (args.format === 'claude-code' || args.format === 'codex') return { harness: args.format }
+  throw new Error(`unknown --format "${args.format}" (otlp, claude-code, codex, or an evidence format)`)
+}
+
+/** check's exit for a ref that names nothing, or more than one thing. */
+function checkRefExit(error: RefError): number {
+  return error.code === 'ambiguous' ? CHECK_EXIT.ambiguous : error.code === 'usage' ? CHECK_EXIT.badContract : CHECK_EXIT.unreadable
 }
 
 /**
@@ -791,11 +927,17 @@ async function cmdCheck(args: Args): Promise<void> {
   }
   let spans: OtlpSpan[]
   try {
-    spans = (await collectSpans(await checkInputArgs(args))).spans
+    if (args.refs.length > 0 && (args.otlp || args.session)) {
+      throw new Error('name the trace once: a positional ref, --otlp, or --session')
+    }
+    const selected = { ...args, selection: await resolveSelection(args, checkInputFormat(args)) }
+    spans = (await collectSpans(selected)).spans
     if (spans.length === 0) throw new Error('the trace holds no spans')
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = error instanceof AmbiguousTraceInputError ? CHECK_EXIT.ambiguous : CHECK_EXIT.unreadable
+    process.exitCode = error instanceof RefError
+      ? checkRefExit(error)
+      : error instanceof AmbiguousTraceInputError ? CHECK_EXIT.ambiguous : CHECK_EXIT.unreadable
     return
   }
   const report = await runCheck(loaded.contract, spans, { evidenceRoot: args.evidence ?? join('.traces', 'check') })
@@ -809,11 +951,18 @@ async function cmdCheck(args: Args): Promise<void> {
   process.exitCode = report.exitCode
 }
 
+/** Where a command writes its OTLP: --out, or the older --otlp-out. */
+function otlpOutPath(args: Args): string | undefined {
+  if (args.out && args.otlpOut && args.out !== args.otlpOut) throw new Error('pass one of --out and --otlp-out; both name the OTLP file')
+  return args.out ?? args.otlpOut
+}
+
 async function cmdConvert(args: Args): Promise<void> {
+  const out = otlpOutPath(args)
   const { spans, workflow } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(workflow)
-  const path = await writeOtlpFile(spans, args.otlpOut)
+  const path = await writeOtlpFile(spans, out)
   console.log(`wrote ${spans.length} spans → ${path}`)
 }
 
@@ -846,15 +995,34 @@ async function collectSessionRows(
   bindExplicitSource = false,
   defaultLast = 20,
 ): Promise<SessionSelection> {
+  const named = args.selection?.sessions ?? []
+  const source = args.selection?.spans[0]
+  if (source && named.length === 0 && !args.session) {
+    throw new Error(`${args.command} reads harness sessions; ${source.ref} is a span source`)
+  }
   const groups = args.session
     ? [await resolveSelectedSession(args).then(({ adapter, ref }) => ({ adapter, refs: [ref] }))]
-    : await discover({ ...args, last: args.last || defaultLast })
+    : named.length > 0
+      ? groupByAdapter(named)
+      : await discover({ ...args, last: args.last || defaultLast })
   return collectSessionSelection(groups, {
     workflow: args.workflow,
     maxWorkflowSessions: args.maxWorkflowSessions,
     taskScope: args.latestTurn ? 'latest' : 'all',
-    bindSources: bindExplicitSource && Boolean(args.session),
+    bindSources: bindExplicitSource && (Boolean(args.session) || named.length > 0),
+    home: args.selection?.home,
   })
+}
+
+/** Named sessions as the per-harness groups the selection collector reads, in the order named. */
+function groupByAdapter(named: RefSelection['sessions']): { adapter: HarnessTraceAdapter; refs: SessionRef[] }[] {
+  const groups = new Map<HarnessTraceAdapter, SessionRef[]>()
+  for (const { adapter, ref } of named) {
+    const refs = groups.get(adapter)
+    if (refs) refs.push(ref)
+    else groups.set(adapter, [ref])
+  }
+  return [...groups].map(([adapter, refs]) => ({ adapter, refs }))
 }
 
 async function cmdEvidence(args: Args): Promise<void> {
@@ -909,11 +1077,16 @@ async function cmdIndex(args: Args): Promise<void> {
 }
 
 async function cmdBundle(args: Args): Promise<void> {
-  if (!args.session) {
-    throw new Error('bundle needs --session <id|path>; run `traces list` to pick a session ID')
+  const named = args.selection
+  if (!args.session && (named?.sessions.length !== 1 || named.spans.length > 0)) {
+    throw new Error(
+      named?.spans[0]
+        ? `bundle keeps one harness session's evidence; ${named.spans[0].ref} is a span source`
+        : 'bundle needs one session: traces bundle <id|path> --out <dir>; run `traces list` to pick a session ID',
+    )
   }
   if (!args.out) throw new Error('bundle needs --out <dir> — a new or empty directory for the bundle')
-  const { adapter, ref } = await resolveSelectedSession(args)
+  const { adapter, ref } = args.session ? await resolveSelectedSession(args) : named!.sessions[0]!
   const result = await assembleSessionBundle({
     adapter,
     ref,
@@ -952,7 +1125,7 @@ original source bytes cannot be redacted.
 `)
     return
   }
-  const selected = validateOtlpSelection(validateWorkflowSelection(applyCurrentSessionSelection(args)))
+  const selected = await withSelection(validateOtlpSelection(validateWorkflowSelection(applyCurrentSessionSelection(args))))
   const collected = await collectSpans(selected)
   if (collected.spans.length === 0) throw new Error('mcp: no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
@@ -1090,8 +1263,10 @@ async function cmdFacts(args: Args): Promise<void> {
     : undefined
   const builder = createSessionFactsReportBuilder({ includeContent: !args.noContent, window })
   let report: SessionFactsReport
+  // A store root alone is a place to select from, not a selection.
+  const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
   const discoversWindow = window !== undefined &&
-    !args.session && !args.otlp && !args.input && !args.sourceBundle && !args.workflow
+    !args.session && !args.otlp && named === 0 && !args.sourceBundle && !args.workflow
   if (discoversWindow) {
     // Every session modified since the window opened, newest first, parsed and
     // reduced to its facts one at a time: a week of sessions is gigabytes of
@@ -1101,6 +1276,7 @@ async function cmdFacts(args: Args): Promise<void> {
     for await (const scanned of scanSessions({
       adapters: adaptersFor(args),
       cwd: args.cwd,
+      home: args.selection?.home,
       sinceMs: window.since === undefined ? undefined : Date.parse(window.since),
       last: args.last > 0 ? args.last : undefined,
       taskScope: args.latestTurn ? 'latest' : 'all',
@@ -1280,6 +1456,12 @@ async function loadExportAttributes(args: Args): Promise<Record<string, unknown>
 
 async function cmdAnalyze(args: Args): Promise<void> {
   if (args.supervisorRunDir) return cmdAnalyzeSupervisorRun(args.supervisorRunDir, args)
+  // A Runtime run directory, or a directory of them, is a supervision tree.
+  const runDir = args.selection?.spans.find((source) => source.kind === 'run-dir')
+  if (runDir) {
+    if (args.refs.length > 1) throw new Error(`analyze reports one supervision tree at a time; ${runDir.ref} is a run directory`)
+    return cmdAnalyzeSupervisorRun(runDir.path, args)
+  }
   const result = await investigate(args, { loadDefaultConfig: false })
   let report = result.report
   let verifySummary = ''
@@ -1362,16 +1544,18 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
   }
 }
 
-async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
-  if (!args.input) throw new Error('input file missing')
+async function collectImportedSpans(
+  path: string,
+  format: TraceEvidenceFormatOption,
+  args: Args,
+  selector?: string,
+): Promise<CollectedSpans> {
   const attributes = await loadExportAttributes(args)
-  const result = await exportTraceEvidenceFile(args.input, {
-    format: traceEvidenceFormat(args.format),
-    attributes,
-  })
-  const { sessionByTrace } = indexSessionIdsByTrace(result.spans)
+  const result = await exportTraceEvidenceFile(path, { format, attributes })
+  const spans = selector ? selectSpans(result.spans, selector, path) : result.spans
+  const { sessionByTrace } = indexSessionIdsByTrace(spans)
   const sessions = new Map<string, OtlpSpan[]>()
-  for (const span of result.spans) {
+  for (const span of spans) {
     const sessionId = sessionByTrace.get(span.trace_id)
     if (!sessionId) continue
     const grouped = sessions.get(sessionId) ?? []
@@ -1379,16 +1563,16 @@ async function collectImportedSpans(args: Args): Promise<CollectedSpans> {
     sessions.set(sessionId, grouped)
   }
   return {
-    spans: result.spans,
+    spans,
     harness: result.format,
     cwds: [],
-    sources: [...sessions].map(([sessionId, spans]) => sessionReportSource({
+    sources: [...sessions].map(([sessionId, grouped]) => sessionReportSource({
       harness: result.format,
       sessionId,
-      path: args.input!,
+      path,
       cwd: null,
       mtimeMs: 0,
-    }, spans, sessionId)),
+    }, grouped, sessionId)),
   }
 }
 
@@ -1637,18 +1821,29 @@ function streamPreset(args: Args): { mode: StreamMode; includeSpans: boolean; in
   }
 }
 
-async function streamExplicitSession(args: Args, extraAnalysts: readonly TraceLiveAnalyst[] | undefined): Promise<void> {
-  if (!args.session) throw new Error('streamExplicitSession needs --session')
-  const adapter = resolveAdapter(args.harness)
-  if (!adapter) throw new Error(`unknown harness "${args.harness}"`)
+async function streamExplicitSession(
+  args: Args,
+  extraAnalysts: readonly TraceLiveAnalyst[] | undefined,
+  named?: RefSelection['sessions'][number],
+): Promise<void> {
   const preset = streamPreset(args)
-  const st = await stat(args.session)
-  const ref: SessionRef = {
-    harness: adapter.harness,
-    sessionId: basename(args.session),
-    path: resolve(args.session),
-    cwd: args.cwd ?? null,
-    mtimeMs: st.mtimeMs,
+  let adapter: HarnessTraceAdapter
+  let ref: SessionRef
+  if (named) {
+    ({ adapter, ref } = named)
+  } else {
+    if (!args.session) throw new Error('streamExplicitSession needs --session or a session ref')
+    const selected = resolveAdapter(args.harness)
+    if (!selected) throw new Error(`unknown harness "${args.harness}"`)
+    adapter = selected
+    const st = await stat(args.session)
+    ref = {
+      harness: adapter.harness,
+      sessionId: basename(args.session),
+      path: resolve(args.session),
+      cwd: args.cwd ?? null,
+      mtimeMs: st.mtimeMs,
+    }
   }
   const spans = await parseSession(adapter, ref)
   for (const event of traceStreamEventsFromSpans(spans, {
@@ -1664,11 +1859,13 @@ async function streamExplicitSession(args: Args, extraAnalysts: readonly TraceLi
 async function cmdStream(args: Args): Promise<void> {
   const config = await loadTracesConfig(args.config)
   const preset = streamPreset(args)
-  const source = args.otlp ?? args.input
+  const named = args.selection
+  if (named && named.sessions.length + named.spans.length > 1) throw new Error('stream reads one ref at a time')
+  const source = args.otlp ?? named?.spans[0]?.path
   if (source) {
     const { spans, harness } = args.otlp
       ? await collectOtlpSpans(args.otlp)
-      : await collectImportedSpans(args)
+      : await collectSpans(args)
     const ref: SessionRef = {
       harness,
       sessionId: basename(source),
@@ -1686,8 +1883,8 @@ async function cmdStream(args: Args): Promise<void> {
     }
     return
   }
-  if (args.session) {
-    await streamExplicitSession(args, config?.liveAnalysts)
+  if (args.session || named?.sessions[0]) {
+    await streamExplicitSession(args, config?.liveAnalysts, named?.sessions[0])
     return
   }
 
@@ -1703,6 +1900,8 @@ async function cmdStream(args: Args): Promise<void> {
   await streamSessions({
     all,
     harnesses: all ? undefined : [args.harness],
+    // A store root reads every harness that reads one (--harness narrows).
+    ...(named?.home !== undefined ? { adapters: adaptersFor(args), home: named.home } : {}),
     cwd: args.cwd,
     last: args.last > 0 ? args.last : args.replay ? 1 : undefined,
     windowMs: args.window * 60_000,
@@ -1792,16 +1991,54 @@ async function cmdWatchRunTarget(dir: string, args: Args): Promise<void> {
   if (result !== null && result.errorMessage !== null) process.exitCode = 1
 }
 
+/**
+ * The sessions upload's refs name, read. A span file is one upload item per
+ * run in it, keyed by its session id (or its trace id when it records none).
+ */
+async function* refSessions(args: Args): AsyncGenerator<{ ref: SessionRef; spans: OtlpSpan[] }> {
+  const named = args.selection
+  if (!named) return
+  for (const { adapter, ref } of named.sessions) yield { ref, spans: await parseSession(adapter, ref) }
+  for (const source of named.spans) {
+    const collected = source.kind === 'spans' && source.reader !== 'otlp'
+      ? await collectImportedSpans(source.path, source.reader, args, source.selector)
+      : await collectOtlpSpans(source.path, source.kind === 'spans' ? source.selector : undefined)
+    const mtimeMs = (await stat(source.path)).mtimeMs
+    const byTrace = new Map<string, OtlpSpan[]>()
+    for (const span of collected.spans) {
+      const grouped = byTrace.get(span.trace_id)
+      if (grouped) grouped.push(span)
+      else byTrace.set(span.trace_id, [span])
+    }
+    for (const [traceId, spans] of byTrace) {
+      const { sessionByTrace } = indexSessionIdsByTrace(spans)
+      const ref: SessionRef = {
+        harness: collected.harness,
+        sessionId: sessionByTrace.get(traceId) ?? traceId,
+        path: source.path,
+        cwd: args.cwd ?? null,
+        mtimeMs,
+      }
+      yield { ref, spans }
+    }
+  }
+}
+
 async function cmdUpload(args: Args): Promise<void> {
-  const sinceMs = args.since ? parseSince(args.since) : Date.now() - 24 * 60 * 60 * 1000
+  const named = args.selection
+  const fromRefs = named !== undefined && named.sessions.length + named.spans.length > 0
+  const sinceMs = fromRefs ? undefined : args.since ? parseSince(args.since) : Date.now() - 24 * 60 * 60 * 1000
   // Default to ALL harnesses unless a specific --harness was given.
   const all = args.all || !args.harnessExplicit
-  const plan = await planUpload({
-    all,
-    harnesses: args.harnessExplicit ? [args.harness] : undefined,
-    cwd: args.cwd,
-    sinceMs,
-  })
+  const plan: UploadPlan = fromRefs
+    ? await planUploadFrom(refSessions(args))
+    : await planUpload({
+        ...(named?.home !== undefined
+          ? { adapters: adaptersFor(args), home: named.home }
+          : { all, harnesses: args.harnessExplicit ? [args.harness] : undefined }),
+        cwd: args.cwd,
+        sinceMs,
+      })
 
   const redactorParts = args.redactorCmd?.split(/\s+/).filter(Boolean) ?? []
   const redactor = redactorParts[0] ? commandRedactor({ command: redactorParts[0], args: redactorParts.slice(1) }) : undefined
@@ -1815,7 +2052,7 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   const w = (s: string) => process.stderr.write(s)
-  w(`\nWindow: since ${new Date(sinceMs).toISOString()}\n`)
+  w(sinceMs === undefined ? `\nRefs: ${args.refs.join(' ')}\n` : `\nWindow: since ${new Date(sinceMs).toISOString()}\n`)
   w(`Sessions found: ${plan.items.length}  ·  final privacy-mode dedup runs before upload\n`)
   w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byDetector).length ? ` (${Object.entries(byDetector).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
   for (const i of candidates.slice(0, 25)) {
@@ -1829,7 +2066,7 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   if (args.dryRun) {
-    const res = await executeUpload(plan, { dryRun: true, otlpOut: args.otlpOut, stripContent: args.noContent, redactor })
+    const res = await executeUpload(plan, { dryRun: true, otlpOut: otlpOutPath(args), stripContent: args.noContent, redactor })
     reportRefused(res.refused)
     console.log(`dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
@@ -2075,6 +2312,15 @@ Two ways in:
   --harness <id>      Run an adapter over a coding agent's proprietary session
                       store (Claude Code, Codex, OpenCode, …) — the legacy edge,
                       for formats we do not control.
+
+A ref names what to read, by what it is (traces facts 019a3c7e --format json):
+  a session id, or a unique prefix or suffix of 8+ characters, on any harness;
+  a session file; OTLP or trace evidence (a Sandbox live stream reads as
+  codex-exec); a directory of OTLP files; a bundle or Runtime run directory;
+  or a store root, a directory that holds harness stores the way a home does,
+  which selection then reads instead of HOME. file#<trace id> and
+  file#branch=<id> pick one run. --harness forces the reader of a file ref.
+  A ref that names nothing, or more than one session, exits 2.
 
 Commands:
   validate  Report what a trace can and cannot answer (exit 1 on error findings)
@@ -2323,9 +2569,14 @@ async function main(): Promise<void> {
     else usage()
     return
   }
-  const args = validateOtlpSelection(
+  const validated = validateOtlpSelection(
     validateViewSelection(validateWorkflowSelection(validateUntilSelection(applyCurrentSessionSelection(parsedArgs)))),
   )
+  // check resolves its refs itself, after its contract loads: a bad contract
+  // is reported before any trace is read, with check's own exit codes.
+  const args = REF_COMMANDS.has(validated.command) && validated.command !== 'check'
+    ? await withSelection(validated)
+    : validated
   switch (args.command) {
     case 'help':
       if (args.input === 'import-codetracebench') usageImportCodeTraceBench()
@@ -2356,8 +2607,23 @@ async function main(): Promise<void> {
   }
 }
 
+/** `--format json|jsonl` on the command line: errors are then one JSON object on stderr. */
+function wantsJsonErrors(argv: readonly string[]): boolean {
+  const at = argv.indexOf('--format')
+  return at >= 0 && (argv[at + 1] === 'json' || argv[at + 1] === 'jsonl')
+}
+
 main().catch((err) => {
-  process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
+  const message = err instanceof Error ? err.message : String(err)
+  if (err instanceof RefError) {
+    // A ref that names nothing, or more than one session, could not be answered: exit 2.
+    process.stderr.write(wantsJsonErrors(process.argv)
+      ? `${JSON.stringify({ error: message, code: err.code, ...(err.candidates.length > 0 ? { candidates: err.candidates } : {}) })}\n`
+      : `error: ${message}\n`)
+    process.exitCode = 2
+    return
+  }
+  process.stderr.write(`error: ${message}\n`)
   // A check that did not complete is neither a pass nor a proven failure.
   process.exitCode = process.argv[2] === 'check' ? CHECK_EXIT.badContract : 1
 })

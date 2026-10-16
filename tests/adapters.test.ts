@@ -3185,8 +3185,8 @@ describe('conversation capture — single-JSON adapters', () => {
 
 describe('opencode adapter (split-dir conversation capture)', () => {
   it('reads message text parts as user.prompt + assistant content', async () => {
-    // opencode resolves `part/` from XDG_DATA_HOME/opencode/storage, not relative
-    // to the message dir, so point XDG_DATA_HOME at the fixture root.
+    // `part/` sits beside `message/` under the storage root, which locate finds
+    // through XDG_DATA_HOME; point it at the fixture root.
     const base = mkdtempSync(join(tmpdir(), 'tt-oc-'))
     const storage = join(base, 'opencode', 'storage')
     const w = (rel: string, body: unknown) => {
