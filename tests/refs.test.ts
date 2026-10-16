@@ -174,9 +174,11 @@ describe('refs: files and directories are read by their content', () => {
 
     const positional = await run(['analyze', runDir])
     const flagged = await run(['analyze', '--supervisor-run-dir', runDir])
+    // The two reports differ only in when each was generated.
+    const generated = (text: string) => text.replace(/^- Generated: .*$/mu, '- Generated: <time>')
     expect(positional.code).toBe(0)
-    expect(positional.stdout).not.toBe('')
-    expect(positional.stdout).toBe(flagged.stdout)
+    expect(positional.stdout).toContain('# Run report — sup-1')
+    expect(generated(positional.stdout)).toBe(generated(flagged.stdout))
   })
 })
 
