@@ -60,6 +60,12 @@ describe('facts: who typed each turn', () => {
     const excludedIds = new Set(excluded.flatMap((entry) => entry.spanIds))
     for (const turn of session!.humanTurns.value!) expect(excludedIds.has(turn.spanId)).toBe(false)
   })
+
+  it('lists a long first turn as a lane brief another agent sent', async () => {
+    const [session] = await facts([fx.paths.unknown])
+    expect(session!.humanTurns.value).toEqual([])
+    expect(session!.excludedTurns.value).toEqual([expect.objectContaining({ author: 'fleet', turns: 1 })])
+  })
 })
 
 describe('facts: replies and correction signals', () => {

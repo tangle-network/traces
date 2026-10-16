@@ -287,8 +287,12 @@ const FLEET_TURN_PREFIXES: readonly RegExp[] = [
   /^Handoff from the Mac operator/u, /^You run on [\w.-]+ as a/u, /^Read (?:~|\/home\/drew|\/Users\/drew)\/code\/_handoff\//u,
 ]
 
-/** Above this length a mid-session turn may be pasted agent output (`multi_extract.py`). */
-const RELAY_MIN_CHARS = 1500
+/**
+ * Above this length a session's first turn is a brief another agent or an
+ * operator sent (`extract.mjs`), and a later turn may be pasted agent output
+ * (`multi_extract.py`).
+ */
+const LONG_TURN_CHARS = 1500
 
 function count(text: string, needle: string): number {
   return text.split(needle).length - 1
@@ -298,19 +302,22 @@ function count(text: string, needle: string): number {
  * Who typed a turn the session reader called human, by org convention:
  *   harness text (a notification, a hook wrapper)  → `injected`
  *   a fleet, session or operator relay prefix      → `fleet`
+ *   a first turn over 1,500 characters             → `fleet` (a lane or operator brief)
  *   a long, markdown-heavy turn after the first    → `relay` (pasted agent output)
  *   otherwise                                      → `human`
- * The relay rule is voice-ledger's: over 1,500 characters with more than 3
- * table rows, 2 headings or 8 bullets. A session's first turn is never a
- * relay; whether a long first brief is a person's is the reader's call.
+ * The brief rule is trace-mine's; the relay rule is voice-ledger's: over 1,500
+ * characters with more than 3 table rows, 2 headings or 8 bullets. Measured on
+ * a week of GTR Claude Code sessions, every first turn over 1,500 characters
+ * was a lane brief (`You own …`, `Continue lane …`) typed in by a tool.
  */
 export function authorOfTypedTurn(text: string, options: { readonly firstTurn: boolean }): 'human' | 'injected' | 'fleet' | 'relay' {
   const trimmed = text.trim()
   if (HARNESS_TURN_PREFIXES.some((prefix) => prefix.test(trimmed))) return 'injected'
   if (FLEET_TURN_PREFIXES.some((prefix) => prefix.test(trimmed))) return 'fleet'
+  if (options.firstTurn && trimmed.length > LONG_TURN_CHARS) return 'fleet'
   if (
     !options.firstTurn &&
-    trimmed.length > RELAY_MIN_CHARS &&
+    trimmed.length > LONG_TURN_CHARS &&
     (count(trimmed, '\n|') > 3 || count(trimmed, '\n#') > 2 || count(trimmed, '\n- ') > 8)
   ) return 'relay'
   return 'human'

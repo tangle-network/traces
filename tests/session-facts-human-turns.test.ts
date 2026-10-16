@@ -206,7 +206,7 @@ describe('session facts: human turns', () => {
     expect(facts.turnsByActor.value).toEqual([expect.objectContaining({ actor: 'human', turns: 2 })])
   })
 
-  it("takes Codex's own item labelling over what the text looks like", async () => {
+  it("takes Codex's own item labelling for the actor, and calls a long first brief a fleet turn", async () => {
     const brief = `You are the reviewer for this change. ${'Read every file. '.repeat(120)}`
     const labelledFacts = await factsFor('brief-labelled', [
       { t: 0, type: 'session_meta', payload: { id: 'facts-session', cwd: '/workspace/demo' } },
@@ -214,9 +214,12 @@ describe('session facts: human turns', () => {
       labelled(2, [brief], ['user.text']),
       task(3, 'task_complete', 'turn-1'),
     ])
-    // Long, and it opens like an agent brief — but Codex recorded it as the
-    // person's own text, and that is what the session log says happened.
-    expect(labelledFacts.humanTurns.value).toHaveLength(1)
+    // Codex recorded it as the person's own text, and the actor says so. Who
+    // typed it is the sheet's judgment: a first turn over 1,500 characters is
+    // a lane or operator brief (spec row 20), listed as `fleet`, not counted.
+    expect(labelledFacts.turnsByActor.value).toEqual([expect.objectContaining({ actor: 'human', turns: 1 })])
+    expect(labelledFacts.humanTurns.value).toEqual([])
+    expect(labelledFacts.excludedTurns.value).toEqual([expect.objectContaining({ author: 'fleet', turns: 1 })])
 
     const unlabelledFacts = await factsFor('brief-unlabelled', [
       { t: 0, type: 'session_meta', payload: { id: 'facts-session', cwd: '/workspace/demo' } },

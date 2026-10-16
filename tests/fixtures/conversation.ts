@@ -30,7 +30,7 @@ export const CONVERSATION = {
   claude: 'c0a7e2a1-1111-4111-8111-111111111111',
   /** Claude Code: no identity record; the directives log names its variant. */
   logged: 'c0a7e2a2-2222-4222-8222-222222222222',
-  /** Claude Code: no source names who acted. */
+  /** Claude Code: no source names who acted; its first turn is a long lane brief. */
   unknown: 'c0a7e2a3-3333-4333-8333-333333333333',
   /** Codex: a fork the person made, then typed into. */
   fork: '0199f7c0-aaaa-7aaa-8aaa-aaaaaaaaaaaa',
@@ -61,6 +61,9 @@ export const TEXT = {
     "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, " +
     'the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.',
 } as const
+
+/** A lane brief a tool typed in as a session's first turn: over 1,500 characters. */
+export const BRIEF = `You own ops-board #1: the flaky parser. ${'Read every file, then fix the parser and prove it. '.repeat(35)}`
 
 /** Another agent's report, pasted: over 1,500 characters, with more than 8 bullets. */
 export const RELAY = [
@@ -180,7 +183,7 @@ export async function makeConversationHome(): Promise<ConversationHome> {
   const project = join(home, '.claude', 'projects', cwd.replace(/[/.]/gu, '-'))
   const claude = await put(join(project, `${CONVERSATION.claude}.jsonl`), claudeSession(CONVERSATION.claude, cwd))
   const logged = await put(join(project, `${CONVERSATION.logged}.jsonl`), claudeShort(CONVERSATION.logged, cwd, 'Summarize the run.'))
-  const unknown = await put(join(project, `${CONVERSATION.unknown}.jsonl`), claudeShort(CONVERSATION.unknown, cwd, 'List the open PRs.'))
+  const unknown = await put(join(project, `${CONVERSATION.unknown}.jsonl`), claudeShort(CONVERSATION.unknown, cwd, BRIEF))
   const fork = await put(
     join(home, '.codex', 'sessions', '2026', '10', '14', `rollout-2026-10-14T10-03-20-${CONVERSATION.fork}.jsonl`),
     codexUserFork(cwd),

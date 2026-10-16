@@ -752,8 +752,8 @@ const TURN_EXCLUSION_REASONS: Readonly<Record<string, string>> = {
   'subagent-spawn': 'the brief that spawned this run, written by the agent that spawned it',
   'tool-result': 'a tool result the harness surfaced as a user turn',
   fleet:
-    'another agent or session sent this turn in: a fleet message, a session-to-session message, or an ' +
-    'operator brief or handoff; no person typed it here',
+    'another agent or session sent this turn in: a fleet message, a session-to-session message, an ' +
+    'operator handoff, or a lane brief (a first turn over 1,500 characters); no person typed it here',
   relay: "a person pasted another agent's output: a long, markdown-heavy turn after the session's first",
   unclassified: 'the span carries no actor, so whether a person typed it cannot be read from the spans',
 }
