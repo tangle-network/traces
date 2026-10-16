@@ -4,7 +4,17 @@
  * (`fixtures/home.ts`) and asserts stdout, stderr and the exit code.
  */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { IDS, MTIME_ORDER, makeFixtureHome, type FixtureHome } from './fixtures/home.js'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import {
+  codexChildRollout,
+  codexParentRollout,
+  IDS,
+  MTIME_ORDER,
+  makeFixtureHome,
+  unreadableRollout,
+  type FixtureHome,
+} from './fixtures/home.js'
 import { runCli, type CliRun } from './run-cli.js'
 
 let fx: FixtureHome
@@ -146,6 +156,23 @@ describe('selection: one unreadable session never ends a sweep', () => {
     const report = await facts(['--last', '3', '--harness', 'codex'])
     expect(report.selection?.unreadSessions.map((entry) => entry.sessionId)).toEqual([IDS.unreadable])
     expect(report.sessions.map((entry) => entry.sessionId)).not.toContain(IDS.unreadable)
+  })
+
+  it('skips and names a spawned child that cannot be read, and reads the rest of the tree', async () => {
+    const home = join(fx.root, 'home-unreadable-child')
+    const day = join(home, '.codex', 'sessions', '2026', '10', '14')
+    await mkdir(day, { recursive: true })
+    const named = (id: string) => join(day, `rollout-2026-10-14T10-30-00-${id}.jsonl`)
+    await writeFile(named(IDS.parent), codexParentRollout(fx.repo, 30))
+    await writeFile(named(IDS.child1), codexChildRollout(IDS.child1, '/root/lint', fx.repo, 31))
+    await writeFile(named(IDS.child2), unreadableRollout(fx.repo, 33, IDS.child2, { parent_thread_id: IDS.parent }))
+
+    const result = await run(['facts', IDS.parent, '--format', 'json'], { HOME: home })
+    expect(result.code).toBe(0)
+    const report = JSON.parse(result.stdout) as FactsJson
+    expect(report.sessions.map((entry) => entry.sessionId)).toEqual([IDS.parent, IDS.child1])
+    expect(report.selection?.unreadSessions.map((entry) => entry.sessionId)).toEqual([IDS.child2])
+    expect(result.stderr).toContain(`1 unreadable: traces facts ${IDS.parent} --format json | jq .selection`)
   })
 
   it('exits 2 when the unreadable session is the one named', async () => {

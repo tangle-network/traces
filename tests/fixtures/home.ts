@@ -209,7 +209,7 @@ export function codexParentRollout(cwd: string, minute: number): string {
 }
 
 /** A child the parent spawned: its session_meta names the parent and the task path. */
-function codexChildRollout(id: string, path: string, cwd: string, minute: number): string {
+export function codexChildRollout(id: string, path: string, cwd: string, minute: number): string {
   return codexRollout(id, cwd, minute, `Do ${path}.`, {
     parent_thread_id: IDS.parent,
     agent_path: path,
@@ -218,9 +218,9 @@ function codexChildRollout(id: string, path: string, cwd: string, minute: number
 }
 
 /** Two prompts in Codex's older plain-string form at one instant: they read as one span identity twice. */
-function unreadableRollout(cwd: string, minute: number): string {
+export function unreadableRollout(cwd: string, minute: number, id: string = IDS.unreadable, meta: Record<string, unknown> = {}): string {
   return jsonl([
-    { timestamp: at(minute), type: 'session_meta', payload: { id: IDS.unreadable, timestamp: at(minute), cwd, originator: 'codex_cli_rs' } },
+    { timestamp: at(minute), type: 'session_meta', payload: { id, timestamp: at(minute), cwd, originator: 'codex_cli_rs', ...meta } },
     { timestamp: at(minute, 1), type: 'response_item', payload: { type: 'message', role: 'user', content: 'Same words.' } },
     { timestamp: at(minute, 1), type: 'response_item', payload: { type: 'message', role: 'user', content: 'Same words.' } },
   ])
