@@ -1,5 +1,4 @@
-import { access, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { access, mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
@@ -39,7 +38,7 @@ import type {
 import { createFindingRejectionTally, type FindingRejectionCounts } from './finding-rejections.js'
 import { spanEvidenceUri } from './analyst-citations.js'
 import type { TraceLiveAnalyst } from './live.js'
-import type { OtlpSpan } from './otlp.js'
+import { type OtlpSpan, writeOtlpFile } from './otlp.js'
 import { type PipelineReport, runPipelines } from './pipelines.js'
 import { analyzeReactions, type ReactionReport } from './reactions.js'
 import {
@@ -74,7 +73,6 @@ export interface TraceInvestigationOptions {
   readonly registry?: AnalystRegistry
   /** Agentic registry override for custom trace-analysis agents. */
   readonly agenticRegistry?: AnalystRegistry
-  readonly otlpOutPath?: string
   readonly generatedAt?: string
   /**
    * Conformance of the SOURCE the spans were read from. Supply it when the
@@ -128,7 +126,6 @@ export interface TraceInvestigationResult {
   readonly sources?: readonly ReportSource[]
   readonly workflow?: SessionWorkflowSummary
   readonly spanCount: number
-  readonly otlpPath: string
   /**
    * What these spans can and cannot answer. Every report carries it: a thin
    * report that does not explain its own thinness reads as "the agent did
@@ -202,7 +199,8 @@ export interface TraceImprovementResult extends Omit<TraceInvestigationResult, '
 }
 
 export interface TraceImprovementOptions extends TraceInvestigationOptions {
-  readonly outDir?: string
+  /** The artifact directory. Nothing is written outside it. */
+  readonly outDir: string
 }
 
 const severityRank: Record<AnalystFinding['severity'], number> = {
@@ -583,7 +581,6 @@ function renderInvestigationReport(
       sessionCount: result.sessionCount,
       unassignedTraceCount: result.unassignedTraceCount,
       spanCount: result.spanCount,
-      otlpPath: result.otlpPath,
       execution: result.execution,
       deterministic: summarizeDeterministicSignals(result.pipelines, result.reactions),
       sources: result.sources,
@@ -680,7 +677,6 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     agenticRegistry: opts.agenticRegistry,
     agenticKinds: agenticRoute ? traceAgenticKinds(agenticRoute) : undefined,
     agenticPriorFindings: deterministic,
-    otlpOutPath: opts.otlpOutPath,
     runId: `traces-investigation-${Date.parse(generatedAt) || Date.now()}`,
     signal: opts.signal,
     log,
@@ -697,7 +693,6 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     sources: opts.sources,
     workflow: opts.workflow,
     spanCount: opts.spans.length,
-    otlpPath: analysis.otlpPath,
     conformance: opts.conformance ?? conformanceOfSpans(opts.spans),
     execution: analysis.execution,
     analystResult: analysis.result,
@@ -799,24 +794,27 @@ export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOp
   }
 }
 
+/** Write the result, its evidence rows, the report and the analyzed spans into `outDir`, and nowhere else. */
 export async function writeTraceImprovementArtifacts(
   result: Omit<TraceImprovementResult, 'artifacts'>,
-  outDir?: string,
+  spans: readonly OtlpSpan[],
+  outDir: string,
 ): Promise<TraceImprovementArtifacts> {
-  const directory = outDir ? resolve(outDir) : await mkdtemp(join(tmpdir(), 'traces-improvement-'))
+  const directory = resolve(outDir)
   await mkdir(directory, { recursive: true })
   const paths: TraceImprovementArtifacts = {
     directory,
     result: join(directory, 'result.json'),
     evidence: join(directory, 'evidence.jsonl'),
     report: join(directory, 'report.md'),
-    traces: result.otlpPath,
+    traces: join(directory, 'traces.otlp.jsonl'),
   }
   const { report, ...machineResult } = result
   await Promise.all([
     writeFile(paths.result, json(machineResult), 'utf8'),
     writeFile(paths.evidence, jsonl(buildEvidenceRows(result.findings)), 'utf8'),
     writeFile(paths.report, report, 'utf8'),
+    writeOtlpFile(spans, paths.traces),
   ])
   return paths
 }
@@ -824,21 +822,16 @@ export async function writeTraceImprovementArtifacts(
 export async function runTraceImprovement(
   opts: TraceImprovementOptions,
 ): Promise<TraceImprovementResult> {
-  const directory = opts.outDir
-    ? resolve(opts.outDir)
-    : await mkdtemp(join(tmpdir(), 'traces-improvement-'))
-  await mkdir(directory, { recursive: true })
-  const investigation = await runTraceInvestigation({
-    ...opts,
-    otlpOutPath: opts.otlpOutPath ?? join(directory, 'traces.otlp.jsonl'),
-  })
+  // Before the analysis: a directory that cannot be made must not cost the run.
+  await mkdir(resolve(opts.outDir), { recursive: true })
+  const investigation = await runTraceInvestigation(opts)
   const result: Omit<TraceImprovementResult, 'artifacts'> = {
     ...investigation,
     kind: 'traces.improvement',
   }
   return {
     ...result,
-    artifacts: await writeTraceImprovementArtifacts(result, directory),
+    artifacts: await writeTraceImprovementArtifacts(result, opts.spans, opts.outDir),
   }
 }
 

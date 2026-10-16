@@ -6,7 +6,8 @@
  * stdio core. This module only binds them to the spans a user selected:
  *
  * - Every tool is published with `readOnlyHint` and `idempotentHint` taken from
- *   its descriptor, and `openWorldHint: false`: it reads one local trace file.
+ *   its descriptor, and `openWorldHint: false`: it reads one in-memory store of
+ *   the selected spans, and nothing is written to disk.
  * - Spans are redacted (`redactSpans`, `default` profile: name, attributes,
  *   status message and causal links' attributes — every span field
  *   `openAgenticTraceStore` reads) before the store is built, and every
@@ -23,11 +24,9 @@
  *   redaction rule in either, so no boundary redaction can make it safe.
  */
 
-import { rm } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { buildTraceAnalysisToolDescriptors, redact, shareAllowed, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
 import { createStdioToolServer, type McpToolDescriptor } from '@tangle-network/agent-runtime/mcp'
-import { openAgenticTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
+import { openAgenticTraceStore } from './analysis-store.js'
 import type { OtlpSpan } from './otlp.js'
 import { assessSpans, redactSpans } from './redact.js'
 import { tracesVersion } from './version.js'
@@ -39,10 +38,8 @@ export interface TraceMcpServerOptions {
   readonly spans: readonly OtlpSpan[]
 }
 
-/** Build the MCP tools over the selected spans, and the redacted span file they read. */
-async function traceMcpTools(
-  options: TraceMcpServerOptions,
-): Promise<{ tools: McpToolDescriptor[]; otlpPath: string }> {
+/** Build the MCP tools over the selected spans, redacted. */
+function traceMcpTools(options: TraceMcpServerOptions): McpToolDescriptor[] {
   const { spans } = redactSpans(options.spans)
   // Gate on what would actually be served, the same way upload gates on what
   // would actually be sent: a detector gap in redactSpans shows up here as
@@ -56,10 +53,9 @@ async function traceMcpTools(
         (verdict.unreadable.length > 0 ? `; unreadable: ${verdict.unreadable.join('; ')}` : ''),
     )
   }
-  const file = await writeAnalysisTraceFile(spans)
-  const store = await openAgenticTraceStore(file)
+  const store = openAgenticTraceStore(spans)
   const descriptors = buildTraceAnalysisToolDescriptors({ store }).filter((d) => d.name !== 'readSpanSource')
-  const tools = descriptors.map((descriptor): McpToolDescriptor => ({
+  return descriptors.map((descriptor): McpToolDescriptor => ({
     name: descriptor.name,
     description: descriptor.description,
     inputSchema: descriptor.parameters,
@@ -81,17 +77,11 @@ async function traceMcpTools(
       return result
     },
   }))
-  return { tools, otlpPath: file.otlpPath }
 }
 
 /** Serve the tools on stdin/stdout until the client closes the stream. */
 export async function serveTraceMcp(options: TraceMcpServerOptions): Promise<void> {
-  const { tools, otlpPath } = await traceMcpTools(options)
+  const tools = traceMcpTools(options)
   const server = createStdioToolServer({ serverName: 'traces', serverVersion: tracesVersion(), tools })
-  try {
-    await server.serve()
-  } finally {
-    // The span file is this server's own temporary copy (mkdtemp under the OS temp dir).
-    await rm(dirname(otlpPath), { recursive: true, force: true })
-  }
+  await server.serve()
 }

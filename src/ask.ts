@@ -25,7 +25,7 @@ import {
   type TraceAnalystLimits,
 } from '@tangle-network/agent-eval/analyst'
 import type { TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
-import { openAgenticTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
+import { openAgenticTraceStore } from './analysis-store.js'
 import { type AnswerSchema, answerSchemaErrors, assertAnswerSchema, parseJsonAnswer } from './answer-schema.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import {
@@ -120,9 +120,9 @@ export interface TraceQuestionsTotals {
   readonly providerCalls: number
   /** Total spend with its provenance; `uncaptured` carries a null amount, never 0. */
   readonly cost: CostProvenance
-  /** Wall time of the whole run, from the first span written to the last answer. */
+  /** Wall time of the whole run, from building the trace store to the last answer. */
   readonly wallTimeMs: number
-  /** Part of `wallTimeMs` spent writing and indexing the trace file, before any question ran. */
+  /** Part of `wallTimeMs` spent building the trace store, before any question ran. */
   readonly setupTimeMs: number
   /** Sum of the questions' own latencies; above `wallTimeMs` when questions overlapped. */
   readonly questionTimeMs: number
@@ -147,7 +147,6 @@ export interface TraceQuestionsResult {
   /** The engine's wall-clock deadline for one question, when it declares one. */
   readonly questionTimeoutMs: number | null
   readonly spanCount: number
-  readonly otlpPath: string
   readonly traces: readonly TraceQuestionTrace[]
   readonly questions: readonly TraceQuestionAnswer[]
   readonly totals: TraceQuestionsTotals
@@ -167,8 +166,6 @@ export interface TraceQuestionsOptions {
   /** Shared USD ceiling across every question. Omit for no shared ceiling. */
   readonly budgetUsd?: number
   readonly limits?: Partial<TraceAnalystLimits>
-  /** Where to write the OpenInference file the engine reads. Default: a temp file. */
-  readonly otlpOutPath?: string
   readonly generatedAt?: string
   readonly signal?: AbortSignal
   readonly log?: (msg: string, fields?: Record<string, unknown>) => void
@@ -178,7 +175,6 @@ export interface TraceQuestionsArtifacts {
   readonly directory: string
   readonly result: string
   readonly report: string
-  readonly traces: string
 }
 
 export const DEFAULT_ASK_CONCURRENCY = 4
@@ -591,13 +587,12 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   }
   opts.signal?.throwIfAborted()
 
-  // The clock covers the whole command's work, not only the questions: writing
-  // and indexing a large session's OTLP file is part of the wall time `ask`
+  // The clock covers the whole command's work, not only the questions:
+  // building a large session's trace store is part of the wall time `ask`
   // exists to shorten, and `setupTimeMs` says how much of it that was.
   const runStarted = performance.now()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const traceFile = await writeAnalysisTraceFile(opts.spans, { otlpOutPath: opts.otlpOutPath })
-  const store = await openAgenticTraceStore(traceFile)
+  const store = openAgenticTraceStore(opts.spans)
   const traces = describeTraces(opts.spans)
   const context = preparedContext(traces, opts.spans)
   const runId = `traces-ask-${Date.parse(generatedAt) || Date.now()}`
@@ -785,7 +780,6 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
       ? opts.engine.executionConfig.timeout_ms
       : null,
     spanCount: opts.spans.length,
-    otlpPath: traceFile.otlpPath,
     traces,
     questions: answers,
     totals,
@@ -859,7 +853,7 @@ export function renderTraceQuestionsReport(result: Omit<TraceQuestionsResult, 'r
   lines.push('')
   lines.push(
     `**${totals.answered} answered, ${totals.failed} failed.** Wall time ${seconds(totals.wallTimeMs)} ` +
-      `(${seconds(totals.setupTimeMs)} of it writing and indexing the trace file) ` +
+      `(${seconds(totals.setupTimeMs)} of it building the trace store) ` +
       `against ${seconds(totals.questionTimeMs)} of question time (peak ${totals.peakConcurrency} at once). ` +
       `Cost ${costText(totals.cost)} over ${totals.providerCalls} provider call(s); ` +
       `${countText(totals.modelCalls)} model call(s), ${countText(totals.toolCalls)} tool call(s).`,
@@ -915,7 +909,7 @@ export function renderTraceQuestionsReport(result: Omit<TraceQuestionsResult, 'r
   return lines.join('\n')
 }
 
-/** Write `answers.json` and `report.md` next to the trace file the engine read. */
+/** Write `answers.json` and `report.md` to `outDir`. */
 export async function writeTraceQuestionsArtifacts(
   result: TraceQuestionsResult,
   outDir: string,
@@ -926,7 +920,6 @@ export async function writeTraceQuestionsArtifacts(
     directory,
     result: join(directory, 'answers.json'),
     report: join(directory, 'report.md'),
-    traces: result.otlpPath,
   }
   const { report, ...machine } = result
   await Promise.all([

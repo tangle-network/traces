@@ -1,57 +1,34 @@
 /**
- * The trace file and stores every analysis path reads.
+ * The store every analysis path reads: `analyze`, `ask` and `mcp`.
  *
- * `analyze`, `investigate`, `improve`, and `ask` all write the selected spans
- * to one OpenInference file and read it back through agent-eval's
- * `OtlpFileTraceStore`. Keeping that sequence here means the file ceiling
- * cannot differ between them.
+ * The selected spans become agent-eval's indexed, bounded store in memory
+ * (`otlpTextToTraceAnalysisStore`), so an analysis writes no file. The store
+ * reads this package's OpenInference export exactly as agent-eval's
+ * `OtlpFileTraceStore` reads it from a file: the same bytes, projected line by
+ * line with `projectOtlpFlatLine`. The text is dropped once the store holds
+ * its bytes, so a store costs the export's size once, as the file did.
  */
 
-import { OtlpFileTraceStore } from '@tangle-network/agent-eval/traces'
-import type { OtlpSpan } from './otlp.js'
-import { writeOtlpFile } from './otlp.js'
+import { otlpTextToTraceAnalysisStore, type TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
+import { type OtlpSpan, serializeSpans } from './otlp.js'
 
 /**
- * `viewTrace` and generated-file ceiling. The default 150KB cap exists to
- * protect an LLM's context window, and a single coding session is one trace
- * whose full span list routinely exceeds 150KB. The fixed ceiling covers large
- * sessions without disabling agent-eval's file-size guard.
+ * Per-call ceiling for deterministic analysts. agent-eval's default exists to
+ * bound a model's context window, and a single coding session is one trace
+ * whose full span list routinely exceeds it.
  */
-const GENERATED_TRACE_FILE_CEILING = 512 * 1024 * 1024
-
-export interface AnalysisTraceFile {
-  readonly otlpPath: string
-}
-
-/** Write the spans once, for every store below to read. */
-export async function writeAnalysisTraceFile(
-  spans: readonly OtlpSpan[],
-  opts: { otlpOutPath?: string } = {},
-): Promise<AnalysisTraceFile> {
-  return { otlpPath: await writeOtlpFile(spans, opts.otlpOutPath) }
-}
+const DETERMINISTIC_PER_CALL_CEILING = 512 * 1024 * 1024
 
 /**
  * Store for model-driven analysis. It keeps agent-eval's default per-call byte
  * ceiling, so each tool result stays bounded for a model's context; the
  * engine drills in with `viewSpans` and `searchTrace` from a summary.
  */
-export async function openAgenticTraceStore(file: AnalysisTraceFile): Promise<OtlpFileTraceStore> {
-  const store = new OtlpFileTraceStore({
-    path: file.otlpPath,
-    maxFileBytes: GENERATED_TRACE_FILE_CEILING,
-  })
-  await store.ensureIndexed()
-  return store
+export function openAgenticTraceStore(spans: readonly OtlpSpan[]): TraceAnalysisStore {
+  return otlpTextToTraceAnalysisStore(serializeSpans(spans))
 }
 
 /** Store for deterministic analysts, which have no context window to protect. */
-export async function openDeterministicTraceStore(file: AnalysisTraceFile): Promise<OtlpFileTraceStore> {
-  const store = new OtlpFileTraceStore({
-    path: file.otlpPath,
-    maxFileBytes: GENERATED_TRACE_FILE_CEILING,
-    perCallByteCeiling: GENERATED_TRACE_FILE_CEILING,
-  })
-  await store.ensureIndexed()
-  return store
+export function openDeterministicTraceStore(spans: readonly OtlpSpan[]): TraceAnalysisStore {
+  return otlpTextToTraceAnalysisStore(serializeSpans(spans), { perCallByteCeiling: DETERMINISTIC_PER_CALL_CEILING })
 }

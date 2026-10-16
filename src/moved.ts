@@ -64,6 +64,13 @@ function dropFlag(argv: readonly string[], flag: string, takesValue: boolean): s
   return argv.filter((_, i) => !drop.has(i))
 }
 
+/** `from` renamed to `to` where it is used as a flag; `undefined` when argv already uses `to`. */
+function renameFlag(argv: readonly string[], from: string, to: string): string[] | undefined {
+  if (flagIndexes(argv, to).length > 0) return undefined
+  const at = new Set(flagIndexes(argv, from))
+  return argv.map((word, i) => (at.has(i) ? to : word))
+}
+
 /** `--flag X` becomes the positional ref `X`, right after the command and any refs already given. */
 function flagToPositional(argv: readonly string[], flag: string): string[] {
   const values = flagIndexes(argv, flag).flatMap((i) => (argv[i + 1] === undefined ? [] : [argv[i + 1]!]))
@@ -168,9 +175,7 @@ export const MOVED: readonly MovedRow[] = [
     now: '--out F on convert and upload --dry-run; analyze and ask keep no span copy, so write one with traces convert <ref> --out F',
     rewrite: (argv) => {
       const command = commandOf(argv)
-      if (command === undefined || !OTLP_OUT_COMMANDS.has(command) || flagIndexes(argv, '--out').length > 0) return undefined
-      const at = new Set(flagIndexes(argv, '--otlp-out'))
-      return argv.map((word, i) => (at.has(i) ? '--out' : word))
+      return command !== undefined && OTLP_OUT_COMMANDS.has(command) ? renameFlag(argv, '--otlp-out', '--out') : undefined
     },
   },
   { was: ['--metadata', '--attr'], now: 'removed', pinned: true },
@@ -180,6 +185,11 @@ export const MOVED: readonly MovedRow[] = [
     rewrite: (argv) => dropFlag(argv, '--min-loop', true),
   },
   { was: [], label: 'upload with no selection', now: 'traces upload --since 24h (upload needs a ref, --current or --since)' },
+  {
+    was: ['--evidence'],
+    now: 'check … --out DIR: evidence for each trace that did not pass; without --out, check writes nothing',
+    rewrite: (argv) => renameFlag(argv, '--evidence', '--out'),
+  },
 ]
 
 export interface MovedSpelling {

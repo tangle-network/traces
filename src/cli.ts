@@ -12,9 +12,8 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { basename, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { findingRejectionDetail } from './finding-rejections.js'
@@ -667,7 +666,8 @@ async function cmdValidate(args: CliArgs): Promise<void> {
  * could not decide: the contract is missing or malformed, a rule could not
  * run (`code: unknown-verdict`), or the trace is unreadable or ambiguous. The
  * verdict always goes to stdout in `--format`, because CI reads it; evidence
- * for every trace that did not pass goes to `--evidence`.
+ * for every trace that did not pass goes under `--out DIR`, and without it
+ * nothing is written.
  */
 async function cmdCheck(args: CliArgs): Promise<void> {
   if (!args.contract) throw new UsageError('check needs --contract <contract.json>')
@@ -691,10 +691,9 @@ async function cmdCheck(args: CliArgs): Promise<void> {
   }
   if (spans.length === 0) throw new CliError('the trace holds no spans', 'unreadable')
   const json = args.format === 'json'
-  const report = await runCheck(loaded.contract, spans, { evidenceRoot: args.evidence ?? join('.traces', 'check') })
+  const report = await runCheck(loaded.contract, spans, args.out === undefined ? {} : { evidenceRoot: args.out })
   process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : `${renderCheckText(report)}\n`)
   if (args.junit) await writeFile(args.junit, renderJUnit(report), 'utf8')
-  if (args.out) await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
   // Annotations are lines of text: they would corrupt a JSON verdict on stdout.
   if (!json && (args.annotations || process.env.GITHUB_ACTIONS === 'true')) {
     const annotations = renderGithubAnnotations(report)
@@ -936,7 +935,7 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
     await saveReport(args.out, result.report)
     console.log(
       `report → ${args.out}  (${result.findings.length} findings, ` +
-        `${result.pipelines.stuckLoops.findings.length} loops, OTLP: ${result.otlpPath})`,
+        `${result.pipelines.stuckLoops.findings.length} loops)`,
     )
   } else {
     console.log(result.report)
@@ -1005,10 +1004,17 @@ async function collectImportedSpans(
   }
 }
 
+/** A registry or engine line that reports a failure, not progress. */
+const ANALYST_FAILURE = /\[analyst\] (?:FAIL|WARN) |\bmodel call \d+ FAIL\b/u
+
 /**
- * Analyst progress log for stderr. The registry's `[analyst] FAIL <id>` line
- * carries its reason only in the structured fields; a message-only sink turns
- * every engine-startup failure into an unactionable one-liner.
+ * The analysts' log on stderr: what failed, and nothing else. Progress (the
+ * registry's `[analyst] ok <id>` and `skip` lines, each analyst's own notes,
+ * the engine's `model call N ok`) is not printed: the report carries every
+ * analyst's status, and stderr is for what went wrong. The registry's
+ * `[analyst] FAIL <id>` line carries its reason only in the structured
+ * fields; a message-only sink turns every engine-startup failure into an
+ * unactionable one-liner.
  */
 function analystLog(msg: string, fields?: Record<string, unknown>): void {
   // A gate rejection names its cause only in the fields; without them the
@@ -1018,6 +1024,7 @@ function analystLog(msg: string, fields?: Record<string, unknown>): void {
     process.stderr.write(rejection ? `${msg} — ${rejection}\n` : `${msg}\n`)
     return
   }
+  if (!ANALYST_FAILURE.test(msg)) return
   const error = typeof fields?.error === 'string' && fields.error ? fields.error : undefined
   const errorClass = typeof fields?.error_class === 'string' && fields.error_class ? `${fields.error_class}: ` : ''
   process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
@@ -1060,6 +1067,8 @@ async function investigate(args: CliArgs) {
 
 /** `traces improve` (hidden; `analyze --out DIR` in 1.0): the review packet, written to `--dir`. */
 async function cmdImprove(args: CliArgs): Promise<void> {
+  const outDir = args.dir ?? args.out
+  if (outDir === undefined) throw new UsageError('improve needs --dir DIR for its artifacts')
   const collected = await collectSpans(args)
   const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
@@ -1079,14 +1088,11 @@ async function cmdImprove(args: CliArgs): Promise<void> {
       log: analystLog,
       ...conformanceOptions(collected),
     }, config),
-    outDir: args.dir ?? args.out,
+    outDir,
   })
   const dir = result.artifacts?.directory
   if (!dir) throw new Error('improve did not produce an artifact directory')
-  console.log(
-    `improvement artifacts → ${dir}  ` +
-      `(${result.findings.length} findings with actions and checks, OTLP: ${result.otlpPath})`,
-  )
+  console.log(`improvement artifacts → ${dir}  (${result.findings.length} findings with actions and checks)`)
   failUnlessRequestedAnalysesRan(args, result)
 }
 
@@ -1123,8 +1129,9 @@ async function cmdAsk(args: CliArgs): Promise<void> {
   const collected = await collectSpans(args)
   if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
-  const directory = resolve(args.dir ?? await mkdtemp(join(tmpdir(), 'traces-ask-')))
-  await mkdir(directory, { recursive: true })
+  // Answers are files only under --dir; without it the report on stdout is the whole output.
+  const directory = args.dir === undefined ? undefined : resolve(args.dir)
+  if (directory !== undefined) await mkdir(directory, { recursive: true })
   const controller = new AbortController()
   const interrupt = () => controller.abort(new Error('ask interrupted'))
   process.once('SIGINT', interrupt)
@@ -1137,24 +1144,25 @@ async function cmdAsk(args: CliArgs): Promise<void> {
       harness: collected.harness,
       concurrency: args.concurrency,
       ...(args.budget !== undefined ? { budgetUsd: args.budget } : {}),
-      otlpOutPath: join(directory, 'traces.otlp.jsonl'),
       signal: controller.signal,
       log: analystLog,
     })
   } finally {
     process.removeListener('SIGINT', interrupt)
   }
-  const artifacts = await writeTraceQuestionsArtifacts(result, directory)
+  const artifacts = directory === undefined ? undefined : await writeTraceQuestionsArtifacts(result, directory)
   process.stdout.write(result.report)
   for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`)
-  process.stderr.write(
-    `ask artifacts → ${artifacts.directory}  (${result.totals.answered}/${result.totals.questions} answered, ` +
-      `wall ${(result.totals.wallTimeMs / 1000).toFixed(1)} s, answers: ${artifacts.result})\n`,
-  )
+  if (artifacts) {
+    process.stderr.write(
+      `ask artifacts → ${artifacts.directory}  (${result.totals.answered}/${result.totals.questions} answered, ` +
+        `wall ${(result.totals.wallTimeMs / 1000).toFixed(1)} s, answers: ${artifacts.result})\n`,
+    )
+  }
   if (result.ok) return
   const failed = result.questions.filter((answer) => answer.status === 'failed')
   const lines = [
-    `${failed.length} of ${result.questions.length} question(s) failed; the answers file holds every result.`,
+    `${failed.length} of ${result.questions.length} question(s) failed; ${artifacts ? 'the answers file' : 'the report above'} holds every result.`,
     ...failed.map((answer) => `  ${answer.id}: ${answer.failure?.kind}: ${answer.failure?.message.slice(0, 300)}`),
   ]
   // Any kind, not only `error`: the hint is decided by the message, and a
@@ -1438,7 +1446,10 @@ async function cmdUpload(args: CliArgs): Promise<void> {
   if (args.dryRun) {
     const res = await executeUpload(plan, { dryRun: true, otlpOut: args.out, stripContent: args.noContent })
     reportRefused(res.refused)
-    console.log(`dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
+    console.log(
+      `dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s).` +
+        (res.otlpPath ? ` Redacted OTLP -> ${res.otlpPath}` : ' Pass --out FILE to keep the redacted OTLP.'),
+    )
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
     return
   }

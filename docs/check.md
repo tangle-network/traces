@@ -39,5 +39,5 @@ With `--format json`, the verdict is the full report on stdout, and an exit 2 th
 
 `--junit` writes one test case per rule, and GitHub annotations print under `GITHUB_ACTIONS=true` or `--annotations`.
 `traces check --contract <file> --explain` prints what each compiled rule checks and reads no trace.
-For a trace that does not pass, the verdict, the contract, its plain-language statement, and the redacted spans the violations cite go to `--evidence` (default `.traces/check`).
+For a trace that does not pass, the verdict, the contract, its plain-language statement, and the redacted spans the violations cite go under `--out DIR`. Without `--out`, `check` writes nothing.
 The contract keys and rule semantics are in [agent-eval's trace-contract guide](https://github.com/tangle-network/agent-eval/blob/main/docs/trace-contracts.md).

@@ -1,7 +1,8 @@
 /**
  * `traces check`: run a trace contract over a recorded run and report in a
- * form CI reads — an exit code, JUnit XML, GitHub annotations, and an
- * evidence directory when a contract does not pass.
+ * form CI reads — an exit code, JUnit XML, GitHub annotations, and, under
+ * `--out`, evidence for each trace that does not pass. Without `--out` it
+ * writes nothing.
  *
  * The contract engine is agent-eval's and the input is a ref (`refs.ts`);
  * this module maps OTLP spans to the spans a contract reads and renders the
@@ -145,22 +146,22 @@ export interface CheckReport {
 }
 
 export interface RunCheckOptions {
-  /** Written only when a trace does not pass. */
-  evidenceRoot: string
+  /** Where evidence for each trace that does not pass goes. Omitted, no evidence is written. */
+  evidenceRoot?: string
 }
 
-/** Evaluate the contract over every trace in the input and write evidence for
- *  each trace that does not pass. */
+/** Evaluate the contract over every trace in the input and, when `evidenceRoot`
+ *  is given, write evidence for each trace that does not pass. */
 export async function runCheck(
   contract: TraceContract,
   spans: readonly OtlpSpan[],
-  opts: RunCheckOptions,
+  opts: RunCheckOptions = {},
 ): Promise<CheckReport> {
   const traces: TraceCheck[] = []
   for (const group of groupByTrace(spans)) {
     const verdict = evaluateTraceContract(contract, contractSpansFromOtlp(group.spans))
     const check: TraceCheck = { traceId: group.traceId, spanCount: group.spans.length, verdict }
-    if (verdict.status !== 'pass') {
+    if (verdict.status !== 'pass' && opts.evidenceRoot !== undefined) {
       check.evidenceDir = await writeEvidence(opts.evidenceRoot, contract, group.traceId, group.spans, verdict)
     }
     traces.push(check)

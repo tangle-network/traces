@@ -122,7 +122,6 @@ describe.each(['function', 'custom'] as const)('Codex %s tool outcomes', (varian
     const investigation = await runTraceInvestigation({
       spans,
       harness: 'codex',
-      otlpOutPath: join(dir, `${variant}.otlp.jsonl`),
     })
     const report = investigation.pipelines
     expect(report.toolUse[0]).toMatchObject({ totalCalls: 2, errorRate: 0, retryRate: 0 })

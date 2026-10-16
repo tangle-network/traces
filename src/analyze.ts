@@ -1,14 +1,14 @@
 /**
  * Run the agent-eval analyst suite over normalized spans.
  *
- * Spans → OTLP-JSONL file → `OtlpFileTraceStore` → `buildDefaultAnalystRegistry`.
- * With no Ax service the deterministic behavioral analyst runs alone (zero
- * LLM, model-agnostic). Supply `ai` to add the agentic RLM kinds
- * (failure-mode / knowledge-gap / knowledge-poisoning / improvement).
+ * Spans → an in-memory analysis store (`analysis-store.ts`) →
+ * `buildDefaultAnalystRegistry`. Nothing is written to disk. With no engine
+ * the deterministic behavioral analyst runs alone (zero LLM, model-agnostic).
+ * Supply `engine` to add the agentic RLM kinds (failure-mode / knowledge-gap /
+ * knowledge-poisoning / improvement).
  *
- * The written file is canonical OpenInference (see otlp.ts), so any tool that
- * reads OpenInference can read the same artifact with no conversion
- * (`traces convert X --out f`, then the tool on `f`).
+ * A tool that wants the spans as a file gets canonical OpenInference from
+ * `traces convert X --out f`.
  */
 
 import type { CostProvenance } from '@tangle-network/agent-eval'
@@ -22,7 +22,7 @@ import {
   type TraceAnalysisEngine,
   type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
-import { openAgenticTraceStore, openDeterministicTraceStore, writeAnalysisTraceFile } from './analysis-store.js'
+import { openAgenticTraceStore, openDeterministicTraceStore } from './analysis-store.js'
 import { normalizeAnalystCitations } from './analyst-citations.js'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -62,16 +62,12 @@ export interface AnalyzeOptions {
   sessionFactsContext?: boolean
   /** Compact deterministic findings that agents receive before reading spans. */
   agenticPriorFindings?: readonly AnalystFinding[]
-  /** Where to write the OTLP-JSONL artifact. Defaults to a temp file. */
-  otlpOutPath?: string
   runId?: string
   signal?: AbortSignal
   log?: (msg: string, fields?: Record<string, unknown>) => void
 }
 
 export interface AnalyzeResult {
-  /** Path to the OTLP-JSONL artifact. */
-  otlpPath: string
   execution: ExecutionReport
   result: Awaited<ReturnType<ReturnType<typeof buildDefaultAnalystRegistry>['run']>>
   /**
@@ -99,9 +95,6 @@ function mergeCostProvenance(
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
-  const traceFile = await writeAnalysisTraceFile(spans, { otlpOutPath: opts.otlpOutPath })
-  const { otlpPath } = traceFile
-  opts.signal?.throwIfAborted()
   const runId = opts.runId ?? `traces-${Date.now()}`
   const execution = summarizeSpanExecution(spans, {
     experimentId: runId,
@@ -110,7 +103,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   // Deterministic pass — high ceiling so the behavioral analyst sees the whole
   // trace. No LLM context to protect here. A caller-supplied registry (custom
   // analysts / their own agents) runs here instead of the built-in suite.
-  const detStore = await openDeterministicTraceStore(traceFile)
+  const detStore = openDeterministicTraceStore(spans)
   opts.signal?.throwIfAborted()
   const detRegistry = opts.registry ?? buildDefaultAnalystRegistry({ registry: { log: opts.log } })
   const result = await detRegistry.run(runId, { traceStore: detStore }, { signal: opts.signal })
@@ -120,14 +113,14 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
   let agenticPerAnalyst: readonly AnalystRunSummary[] | undefined
   if (opts.engine || opts.agenticRegistry) {
-    const agStore = await openAgenticTraceStore(traceFile)
+    const agStore = openAgenticTraceStore(spans)
     // The sheet reaches the model through each definition's `prepareContext`,
     // which runs before the first model call. Its facts are exact where the
     // bounded trace tools force a guess, and it costs nothing to compute. A
     // caller-supplied agentic registry owns its own prepared context, so the
     // sheet is built only when this call builds the registry.
     const buildRegistry = (): AnalystRegistry => {
-      // The store above is written from these spans, so citations are
+      // The store above is built from these spans, so citations are
       // normalized against exactly the content the evidence gate re-reads.
       const kinds = normalizeAnalystCitations(opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS, spans)
       return buildDefaultAnalystRegistry({
@@ -159,5 +152,5 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   }
 
   opts.signal?.throwIfAborted()
-  return { otlpPath, execution, result, ...(agenticPerAnalyst ? { agenticPerAnalyst } : {}) }
+  return { execution, result, ...(agenticPerAnalyst ? { agenticPerAnalyst } : {}) }
 }
