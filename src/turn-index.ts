@@ -22,8 +22,8 @@
  * whole read's, row for row, however a file was appended.
  */
 
-import { createHash } from 'node:crypto'
-import { appendFile, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { appendFile, link, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -126,9 +126,12 @@ interface FileEntry {
   mode: 'pieces' | 'whole'
   ino: number
   size: number
+  mtimeMs: number
   version: string
   /** Pieces: bytes whose rows are committed; the next read starts here. */
   offset: number
+  /** Pieces: a digest of the committed bytes' first and last 4 KB, so a file rewritten in place is read again. */
+  mark: string
   carry: PieceCarry | null
   turn: TurnFoldState
   /** The session as the committed rows describe it. */
@@ -239,6 +242,26 @@ function parseRecord(line: string): PieceRecord {
   }
 }
 
+/** Bytes at each end of the committed bytes that {@link markOf} digests. */
+const MARK_BYTES = 4096
+
+/** A digest of the first and last {@link MARK_BYTES} of `path`'s first `offset` bytes; empty when there are none. */
+async function markOf(path: string, offset: number): Promise<string> {
+  if (offset === 0) return ''
+  const handle = await open(path, 'r')
+  try {
+    const hash = createHash('sha256')
+    for (const start of [0, Math.max(0, offset - MARK_BYTES)]) {
+      const buffer = Buffer.alloc(Math.min(MARK_BYTES, offset - start))
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, start)
+      hash.update(buffer.subarray(0, bytesRead))
+    }
+    return hash.digest('hex').slice(0, 32)
+  } finally {
+    await handle.close()
+  }
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -249,6 +272,9 @@ export class TurnIndex {
   /** Whole reads, one after another. */
   private queue: Promise<void> = Promise.resolve()
   private changed = false
+
+  /** What this process writes into the lock, so it removes only its own. */
+  private readonly token = `${process.pid} ${randomUUID()}`
 
   private constructor(readonly dir: string) {}
 
@@ -284,37 +310,61 @@ export class TurnIndex {
     for (;;) {
       try {
         const handle = await open(this.lockPath, 'wx')
-        await handle.writeFile(String(process.pid))
+        await handle.writeFile(this.token)
         await handle.close()
         return
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       }
-      if (await this.lockIsStale()) {
-        await unlink(this.lockPath).catch(() => {})
-        continue
-      }
-      await sleep(100)
+      const stale = await this.staleLock()
+      if (stale === null) await sleep(100)
+      else await this.removeStale(stale)
     }
   }
 
-  /** A lock whose process is gone was left by one that died holding it. */
-  private async lockIsStale(): Promise<boolean> {
+  /**
+   * The inode of the lock when the process that wrote it is gone, which left
+   * it behind; null while a live process holds it, or once it is gone.
+   */
+  private async staleLock(): Promise<number | null> {
+    let handle
     try {
-      const [text, info] = await Promise.all([readFile(this.lockPath, 'utf8'), stat(this.lockPath)])
-      const pid = Number(text)
+      handle = await open(this.lockPath, 'r')
+    } catch {
+      return null
+    }
+    try {
+      // One open file, so the pid and the inode are the same lock's.
+      const [info, text] = await Promise.all([handle.stat(), handle.readFile('utf8')])
+      const pid = Number(text.split(' ')[0])
       // A lock with no pid yet is being written; one that stays so was left half-written.
-      if (!Number.isInteger(pid) || pid <= 0) return Date.now() - info.mtimeMs > 60_000
+      if (!Number.isInteger(pid) || pid <= 0) return Date.now() - info.mtimeMs > 60_000 ? info.ino : null
       try {
         process.kill(pid, 0)
-        return false
+        return null
       } catch (error) {
-        return (error as NodeJS.ErrnoException).code === 'ESRCH'
+        return (error as NodeJS.ErrnoException).code === 'ESRCH' ? info.ino : null
       }
-    } catch {
-      // Removed between the attempt and this read: try again.
-      return true
+    } finally {
+      await handle.close()
     }
+  }
+
+  /**
+   * Remove the stale lock `ino`, and only that one: two processes can find
+   * the same lock stale, and the second must not remove the lock the first
+   * then took. The lock is moved aside first; when what moved is another
+   * process's new lock, it goes back.
+   */
+  private async removeStale(ino: number): Promise<void> {
+    const aside = `${this.lockPath}.${this.token.replace(' ', '.')}`
+    try {
+      await rename(this.lockPath, aside)
+    } catch {
+      return
+    }
+    if ((await stat(aside)).ino !== ino) await link(aside, this.lockPath).catch(() => {})
+    await unlink(aside)
   }
 
   /** Save what was read and let the next process in. */
@@ -325,7 +375,8 @@ export class TurnIndex {
       await writeFile(temporary, JSON.stringify({ version: 1, files: this.files } satisfies StoreV1))
       await rename(temporary, join(this.dir, 'index.json'))
     } finally {
-      await unlink(this.lockPath).catch(() => {})
+      const held = await readFile(this.lockPath, 'utf8').catch(() => '')
+      if (held === this.token) await unlink(this.lockPath).catch(() => {})
     }
   }
 
@@ -367,7 +418,7 @@ export class TurnIndex {
     try {
       info = await stat(ref.path)
     } catch (error) {
-      const entry = this.blank({ ino: 0, size: 0 }, 'whole')
+      const entry = this.blank({ ino: 0, size: 0, mtimeMs: 0 }, 'whole')
       entry.unread = errorText(error)
       this.files[key] = entry
       return { bytes: 0, rows: 0, whole: false }
@@ -388,14 +439,15 @@ export class TurnIndex {
     return this.readWhole(key, adapter, ref, info, version)
   }
 
-  private blank(info: { ino: number; size: number }, mode: FileEntry['mode']): FileEntry {
+  private blank(info: { ino: number; size: number; mtimeMs: number }, mode: FileEntry['mode']): FileEntry {
     return {
-      mode, ino: info.ino, size: info.size, version: '', offset: 0, carry: null, turn: TURN_FOLD_START, session: EMPTY_SESSION, tail: null, unread: null,
+      mode, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, version: '', offset: 0, mark: '',
+      carry: null, turn: TURN_FOLD_START, session: EMPTY_SESSION, tail: null, unread: null,
     }
   }
 
   /** Read a session whole, as `facts <ref>` reads it, replacing every row it had. */
-  private async readWhole(key: string, adapter: HarnessTraceAdapter, ref: SessionRef, info: { ino: number; size: number }, version: string): Promise<{ bytes: number; rows: number; whole: boolean }> {
+  private async readWhole(key: string, adapter: HarnessTraceAdapter, ref: SessionRef, info: { ino: number; size: number; mtimeMs: number }, version: string): Promise<{ bytes: number; rows: number; whole: boolean }> {
     const entry = this.blank(info, 'whole')
     entry.version = version
     // One whole read at a time: a large session's spans are the largest thing a refresh holds.
@@ -427,12 +479,22 @@ export class TurnIndex {
     key: string,
     adapter: HarnessSessionsAdapter,
     ref: SessionRef,
-    info: { ino: number; size: number },
+    info: { ino: number; size: number; mtimeMs: number },
     previous: FileEntry | undefined,
   ): Promise<{ bytes: number; rows: number; whole: boolean } | null> {
-    const from = resumeOffset(previous?.mode === 'pieces' ? previous : undefined, info)
-    if (from === null) return null
-    const entry: FileEntry = from === 0 || !previous ? this.blank(info, 'pieces') : { ...previous, tail: null }
+    const old = previous?.mode === 'pieces' ? previous : undefined
+    let from = resumeOffset(old, info)
+    // A file rewritten in place keeps its inode and can keep or pass its size;
+    // its committed bytes then no longer match their digest.
+    if (old && (from === null ? old.mtimeMs !== info.mtimeMs : from > 0) && old.mark !== await markOf(ref.path, old.offset)) from = 0
+    if (from === null) {
+      if (old && old.mtimeMs !== info.mtimeMs) {
+        this.files[key] = { ...old, mtimeMs: info.mtimeMs }
+        this.changed = true
+      }
+      return null
+    }
+    const entry: FileEntry = from === 0 || !old ? this.blank(info, 'pieces') : { ...old, tail: null }
     let carry = entry.carry ?? PIECE_START
     let pending: { records: PieceRecord[]; bytes: number[] } = { records: [], bytes: [] }
     const committed: StoredRow[] = []
@@ -471,6 +533,8 @@ export class TurnIndex {
     }
     entry.ino = info.ino
     entry.size = info.size
+    entry.mtimeMs = info.mtimeMs
+    entry.mark = await markOf(ref.path, entry.offset)
     if (from === 0) await writeFile(this.rowsPath(key), serialize(committed))
     else if (committed.length > 0) await appendFile(this.rowsPath(key), serialize(committed))
     this.files[key] = entry

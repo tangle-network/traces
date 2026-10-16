@@ -4,7 +4,8 @@
  * however its file was appended. Every case spawns the built CLI with HOME
  * and XDG_STATE_HOME inside a synthetic home.
  */
-import { appendFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { appendFile, mkdir, mkdtemp, readdir, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
@@ -290,6 +291,45 @@ describe('turn index: a session read as it is written', () => {
     const indexed = answer.matches.filter((match) => match.sessionId === CLAUDE_ID)
     expect(indexed).toEqual((await parsed(fx.env, fx.claude, CLAUDE_ID))!.map((match) => ({ ...match, source: fx.claude })))
     expect(indexed.find((match) => match.kind === 'human')?.text).toBe('Rewritten: only the tests.')
+  }, 60_000)
+})
+
+describe('turn index: a file rewritten in place, and a left-behind lock', () => {
+  it('reads a session rewritten over the same inode again, whether it kept its size or grew', async () => {
+    const fx = await growingHome()
+    const original = claudeRecords(fx.cwd).map(line).join('')
+    await writeFile(fx.claude, original)
+    await search(fx.env)
+    const human = async (): Promise<string[]> => {
+      const answer = await search(fx.env)
+      const indexed = answer.matches.filter((match) => match.sessionId === CLAUDE_ID)
+      expect(indexed).toEqual((await parsed(fx.env, fx.claude, CLAUDE_ID))!.map((match) => ({ ...match, source: fx.claude })))
+      return indexed.filter((match) => match.kind === 'human').map((match) => match.text)
+    }
+    // The same number of bytes, other words; the file's mtime moves, its inode does not.
+    await writeFile(fx.claude, original.replace('Ship the parser fix.', 'Skip the parser fix.'))
+    await utimes(fx.claude, new Date('2026-10-14T11:00:00Z'), new Date('2026-10-14T11:00:00Z'))
+    expect(await human()).toEqual(['Skip the parser fix.', 'Good, now merge it.'])
+    // Rewritten longer: the old offset falls inside the new text.
+    await writeFile(fx.claude, original.replace('Ship the parser fix.', 'Ship the parser fix, then rewrite the lexer.'))
+    expect(await human()).toEqual(['Ship the parser fix, then rewrite the lexer.', 'Good, now merge it.'])
+  }, 60_000)
+
+  it('takes over a lock its process left behind, once, while several searches start together', async () => {
+    const fx = await growingHome()
+    await writeFile(fx.claude, claudeRecords(fx.cwd).map(line).join(''))
+    await writeFile(fx.codex, codexRecords(fx.cwd).map(line).join(''))
+    const child = spawn(process.execPath, ['-e', ''])
+    const dead = await new Promise<number>((resolve) => child.on('exit', () => resolve(child.pid!)))
+    const dir = join(fx.env.XDG_STATE_HOME!, 'traces', 'turn-index')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'lock'), `${dead} left-behind`)
+    const runs = await Promise.all(Array.from({ length: 6 }, () => runCli(['facts', ...WINDOW, '--match', EVERY_ROW, '--format', 'json'], { env: fx.env })))
+    for (const run of runs) expect(run.code, run.stderr).toBe(0)
+    const answers = runs.map((run) => (JSON.parse(run.stdout) as Search).matches)
+    for (const answer of answers) expect(answer).toEqual(answers[0])
+    expect(answers[0]!.length).toBeGreaterThan(5)
+    expect((await readdir(dir)).filter((name) => name.startsWith('lock'))).toEqual([])
   }, 60_000)
 })
 
