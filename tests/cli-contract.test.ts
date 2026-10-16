@@ -289,9 +289,13 @@ describe('the command table', () => {
     expect((await runCli(['help', ...command.split(' ')], { env })).stdout).toBe(run.stdout)
   })
 
-  it('takes the 1.0 options and no others', () => {
-    expect([...new Set(Object.values(COMMAND_FLAGS).flat())].sort()).toEqual([...OPTIONS].sort())
-  })
+  it('takes the 1.0 options and no others', async () => {
+    const listed = new Set<string>()
+    for (const command of Object.keys(COMMAND_FLAGS)) {
+      for (const flag of listedFlags((await runCli([...command.split(' '), '--help'], { env })).stdout)) listed.add(flag)
+    }
+    expect([...listed].sort()).toEqual([...OPTIONS].sort())
+  }, 60_000)
 
   it('refuses a flag a command does not take, naming the commands that take it', async () => {
     const contract = await runCli(['facts', '--contract', 'x'], { env })
