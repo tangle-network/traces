@@ -1526,6 +1526,19 @@ function reading(handler: (args: CliArgs) => Promise<void>): Handler {
   return async (args) => handler(await withSelection(prepare(args)))
 }
 
+/**
+ * Node 22 warns when `node:sqlite` first loads (the OpenCode store reader). The
+ * warning is not this command's output, and on stderr it would break the
+ * contract that an error under `--format json` is one JSON object there.
+ */
+const emitWarning = process.emitWarning.bind(process) as (warning: string | Error, ...rest: unknown[]) => void
+process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+  const type = typeof rest[0] === 'string' ? rest[0] : (rest[0] as { type?: unknown } | undefined)?.type
+  const text = typeof warning === 'string' ? warning : warning.message
+  if (type === 'ExperimentalWarning' && /SQLite/u.test(text)) return
+  emitWarning(warning, ...rest)
+}) as typeof process.emitWarning
+
 await runTraces(process.argv.slice(2), {
   list: reading(cmdList),
   facts: reading(cmdFacts),
