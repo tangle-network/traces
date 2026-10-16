@@ -35,11 +35,11 @@ import {
   totalFindingRejections,
 } from './finding-rejections.js'
 import { ASK_QUESTION_HEADER, MAX_TRACE_QUESTION_CHARS, QUESTION_LABEL } from './ask-defaults.js'
-
-export { MAX_TRACE_QUESTION_CHARS }
 import { isBridgeMismatchError } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
 import { sessionFactsContext } from './session-facts.js'
+
+export { MAX_TRACE_QUESTION_CHARS }
 
 /** One question to ask of the selected traces. */
 export interface TraceQuestion {
