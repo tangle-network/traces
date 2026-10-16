@@ -219,7 +219,7 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
 
 type CodexHead = { timestamp?: string; type?: string; payload?: {
   type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string;
-  forked_from_id?: string; thread_source?: string; originator?: string;
+  forked_from_id?: string; thread_source?: string; originator?: string; cwd?: string; model_provider?: string;
   agent_role?: string; agent_path?: string; parent_thread_id?: string;
   git?: { repository_url?: unknown }; source?: { subagent?: { thread_spawn?: {
     depth?: number; agent_nickname?: string; agent_role?: string; agent_path?: string; parent_thread_id?: string
