@@ -65,7 +65,8 @@ describe('facts: who acted', () => {
     const convert = await runCli(['convert', fx.paths.unknown, '--out', spansFile], { env: fx.env })
     expect(convert.code).toBe(0)
     const lines = (await readFile(spansFile, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
-    const root = lines.find((line) => line.parent_span_id === null || line.parent_span_id === undefined)!
+    // The OpenInference line writes a root's parent as ''.
+    const root = lines.find((line) => !line.parent_span_id)!
     root.attributes = { ...(root.attributes as object), 'agent.profile.name': 'coder', 'agent.model': 'gpt-6', 'agent.harness': 'codex' }
     await writeFile(spansFile, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`)
     const agent = await agentOf(spansFile)
