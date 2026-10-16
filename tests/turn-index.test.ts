@@ -59,7 +59,7 @@ const byTime = (rows: readonly Match[]): Match[] => [...rows].sort((left, right)
 
 /** Every session the window selects, newest first, as `list` names it. */
 async function listed(env: Env): Promise<Array<{ id: string; path: string }>> {
-  const run = await runCli(['list', ...WINDOW, '--format', 'json'], { env })
+  const run = await runCli(['list', '--since', WINDOW[1], '--format', 'json'], { env })
   expect(run.code, run.stderr).toBe(0)
   return (JSON.parse(run.stdout) as { sessions: Array<{ id: string; path: string }> }).sessions
 }
