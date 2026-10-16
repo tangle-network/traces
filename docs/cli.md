@@ -5,10 +5,10 @@
 The common commands and flags. `traces --help` lists every command and option, and `traces <command> --help` prints that command's own flags.
 
 ```bash
-traces list     --harness claude-code --last 20    # discover sessions
+traces list     --cwd . --last 20                  # one row per session: ref, harness, last activity, turns, cwd, first prompt
 traces analyze  --harness codex --session <id>     # pin one ID printed by `list`
-traces analyze  --harness codex --current          # this session, even when a child wrote later
-traces analyze --harness codex --current --latest-turn --workflow  # current turn plus workers
+traces analyze  --current                          # this session (Codex or Claude Code), with its spawned children
+traces analyze --current --latest-turn             # current turn plus the workers it spawned
 traces analyze --harness claude-code --session <path> --latest-turn # latest task plus its subagents
 traces investigate --all --last 10 --out report.md  # explicit investigation alias
 traces improve --all --last 10 --dir .traces/improvement
@@ -58,15 +58,12 @@ See [Replay verification](./replay-verify.md) for setup, semantics, and honest l
 
 | Flag | Meaning |
 |---|---|
-| `--harness <id>` | Harness or alias (default: `claude-code`) |
-| `--all` | Every known harness |
-| `--last <n>` | Most-recent N sessions |
-| `--current` | Active Codex session from `CODEX_THREAD_ID` |
+| `--harness <id>` | Read only this harness; the default is every harness |
+| `--last <n>` | The N sessions with the newest file mtime, never the caller's own |
+| `--current` | The caller's own session: `CODEX_THREAD_ID` (Codex) wins, else `CLAUDE_CODE_SESSION_ID` (Claude Code) |
 | `--latest-turn` | Limit a resumed Codex or Claude Code session to its latest task turn |
-| `--session <id\|path>` | One listed session ID or explicit session file |
-| `--workflow` | Expand selected files through stable parent and child session IDs |
-| `--max-workflow-sessions <n>` | Stop workflow expansion before parsing more than `n` files; default `100` |
-| `--cwd <dir>` | Filter by working directory |
+| `--session <id\|path>` | The session a ref names (same as the positional ref) |
+| `--cwd <dir>` | Sessions recorded in `<dir>` or under it on a path boundary, in a live worktree of its repository, or in a removed worktree whose recorded repository (Codex) is its |
 | `--since <t>` | `30m`/`2h`/`7d` before now, or an ISO date. Commands that select sessions read those modified at or after it; `upload`: its window (default 24h); `facts`: opens a time window — see [Session facts](facts.md) |
 | `--until <t>` | `facts`: closes the time window (exclusive), same forms as `--since` |
 | `--out <path>` | Write the report to a file |

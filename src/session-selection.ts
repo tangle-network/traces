@@ -45,8 +45,7 @@ export interface CollectSessionSelectionOptions {
   readonly maxWorkflowSessions?: number
   /**
    * With `workflow`, follow parent links too (default true). With false, each
-   * seed brings its descendants, and rows come seed by seed in the order the
-   * groups list them, each seed followed by its children.
+   * seed brings its descendants and is followed by them, group by group.
    */
   readonly parents?: boolean
   /** A session that cannot be parsed: return to skip it, throw to stop. Without it, a parse error ends the selection. */
@@ -171,15 +170,14 @@ export async function collectSessionSelection(
   const rows: SessionSelectionRow[] = []
   const workflows: SessionWorkflowSummary[] = []
   const taskScope = options.taskScope ?? 'all'
-  // Seed order across every group, so rows can follow the order the caller chose.
-  const seedIndex = new Map<string, number>()
-  for (const { adapter, refs } of groups) {
-    for (const ref of refs) {
-      const key = `${adapter.harness}\0${ref.path}`
-      if (!seedIndex.has(key)) seedIndex.set(key, seedIndex.size)
-    }
+  // A session reached twice (a seed that is also a child of an earlier seed) is read once.
+  const read = new Set<string>()
+  const add = (row: SessionSelectionRow): void => {
+    const key = `${row.adapter.harness}\0${row.ref.path}`
+    if (read.has(key)) return
+    read.add(key)
+    rows.push(row)
   }
-  const blocks: Array<{ readonly index: number; readonly rows: SessionSelectionRow[] }> = []
 
   for (const { adapter, refs } of groups) {
     options.signal?.throwIfAborted()
@@ -187,7 +185,7 @@ export async function collectSessionSelection(
     if (!options.workflow) {
       for (const ref of refs) {
         try {
-          rows.push(options.bindSources
+          add(options.bindSources
             ? await boundSessionRow(
                 adapter,
                 ref,
@@ -225,9 +223,8 @@ export async function collectSessionSelection(
       ...(options.onUnreadable ? { onUnreadable: options.onUnreadable } : {}),
     })
     workflows.push(workflow)
-    let block: (typeof blocks)[number] | undefined
     for (const session of workflow.sessions) {
-      const row: SessionSelectionRow = options.bindSources
+      add(options.bindSources
         ? await boundSessionRow(
             adapter,
             session.ref,
@@ -242,18 +239,9 @@ export async function collectSessionSelection(
             spans: session.spans,
             taskScope: session.taskScope,
             ...(session.taskTurnId ? { taskTurnId: session.taskTurnId } : {}),
-          }
-      if (options.parents !== false) {
-        rows.push(row)
-        continue
-      }
-      // Seed-first order: a seed opens its block, and its descendants follow it.
-      const index = seedIndex.get(`${adapter.harness}\0${session.ref.path}`)
-      if (index !== undefined || !block) blocks.push(block = { index: index ?? Number.MAX_SAFE_INTEGER, rows: [] })
-      block.rows.push(row)
+          })
     }
   }
-  for (const block of blocks.sort((a, b) => a.index - b.index)) rows.push(...block.rows)
 
   const workflow = summarizeWorkflows(workflows)
   return { rows, ...(workflow ? { workflow } : {}) }
