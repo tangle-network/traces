@@ -80,7 +80,7 @@ export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, Agent
  * deltas, which is a different (and smaller) number.
  */
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '4'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '5'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
