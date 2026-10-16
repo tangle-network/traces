@@ -26,7 +26,7 @@
 
 import { buildTraceAnalysisToolDescriptors, redact, shareAllowed, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
 import { createStdioToolServer, type McpToolDescriptor } from '@tangle-network/agent-runtime/mcp'
-import { analysisRecords, openAgenticTraceStore } from './analysis-store.js'
+import { openAgenticTraceStore } from './analysis-store.js'
 import type { OtlpSpan } from './otlp.js'
 import { assessSpans, redactSpans } from './redact.js'
 import { tracesVersion } from './version.js'
@@ -53,7 +53,7 @@ function traceMcpTools(options: TraceMcpServerOptions): McpToolDescriptor[] {
         (verdict.unreadable.length > 0 ? `; unreadable: ${verdict.unreadable.join('; ')}` : ''),
     )
   }
-  const store = openAgenticTraceStore(analysisRecords(spans))
+  const store = openAgenticTraceStore(spans)
   const descriptors = buildTraceAnalysisToolDescriptors({ store }).filter((d) => d.name !== 'readSpanSource')
   return descriptors.map((descriptor): McpToolDescriptor => ({
     name: descriptor.name,

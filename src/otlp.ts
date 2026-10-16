@@ -212,9 +212,9 @@ export type ExportRule = 'faithful' | 'declared-or-analysed' | 'analysed'
  *   what keeps `unknown-span-kind` alive across the trip.
  * - `analysed` — this package's value regardless. `trace_id` is the one field
  *   here, and it is not a choice: `agent-eval`'s `projectOtlpFlatLine`, which
- *   both this package's analysis store and its `OtlpFileTraceStore` read every
- *   exported line through, drops a row with a falsy `trace_id`, and each store
- *   then refuses the trace. A faithful (absent) trace id makes the artifact
+ *   this package's analysis store and agent-eval's `OtlpFileTraceStore` read
+ *   every exported line through, drops a row with a falsy `trace_id`, and the
+ *   store then refuses the trace. A faithful (absent) trace id makes the artifact
  *   unreadable by the tool that reads it, so `missing-trace-id` CANNOT survive
  *   the trip. The
  *   substitution is disclosed instead — the span carries the pairing, and

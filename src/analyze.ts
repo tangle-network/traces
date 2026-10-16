@@ -22,7 +22,7 @@ import {
   type TraceAnalysisEngine,
   type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
-import { analysisRecords, openAgenticTraceStore, openDeterministicTraceStore } from './analysis-store.js'
+import { openAgenticTraceStore, openDeterministicTraceStore } from './analysis-store.js'
 import { normalizeAnalystCitations } from './analyst-citations.js'
 import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -95,8 +95,6 @@ function mergeCostProvenance(
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
-  const records = analysisRecords(spans)
-  opts.signal?.throwIfAborted()
   const runId = opts.runId ?? `traces-${Date.now()}`
   const execution = summarizeSpanExecution(spans, {
     experimentId: runId,
@@ -105,7 +103,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   // Deterministic pass — high ceiling so the behavioral analyst sees the whole
   // trace. No LLM context to protect here. A caller-supplied registry (custom
   // analysts / their own agents) runs here instead of the built-in suite.
-  const detStore = openDeterministicTraceStore(records)
+  const detStore = openDeterministicTraceStore(spans)
   opts.signal?.throwIfAborted()
   const detRegistry = opts.registry ?? buildDefaultAnalystRegistry({ registry: { log: opts.log } })
   const result = await detRegistry.run(runId, { traceStore: detStore }, { signal: opts.signal })
@@ -115,7 +113,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   // the RLM kinds drill via viewSpans/searchTrace from a summary.
   let agenticPerAnalyst: readonly AnalystRunSummary[] | undefined
   if (opts.engine || opts.agenticRegistry) {
-    const agStore = openAgenticTraceStore(records)
+    const agStore = openAgenticTraceStore(spans)
     // The sheet reaches the model through each definition's `prepareContext`,
     // which runs before the first model call. Its facts are exact where the
     // bounded trace tools force a guess, and it costs nothing to compute. A

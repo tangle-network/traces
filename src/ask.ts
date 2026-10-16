@@ -25,7 +25,7 @@ import {
   type TraceAnalystLimits,
 } from '@tangle-network/agent-eval/analyst'
 import type { TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
-import { analysisRecords, openAgenticTraceStore } from './analysis-store.js'
+import { openAgenticTraceStore } from './analysis-store.js'
 import { type AnswerSchema, answerSchemaErrors, assertAnswerSchema, parseJsonAnswer } from './answer-schema.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import {
@@ -592,7 +592,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   // exists to shorten, and `setupTimeMs` says how much of it that was.
   const runStarted = performance.now()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const store = openAgenticTraceStore(analysisRecords(opts.spans))
+  const store = openAgenticTraceStore(opts.spans)
   const traces = describeTraces(opts.spans)
   const context = preparedContext(traces, opts.spans)
   const runId = `traces-ask-${Date.parse(generatedAt) || Date.now()}`
