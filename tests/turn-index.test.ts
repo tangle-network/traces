@@ -193,10 +193,7 @@ async function growingHome(): Promise<GrowingHome> {
   const claude = join(home, '.claude', 'projects', cwd.replace(/[/.]/gu, '-'), `${CLAUDE_ID}.jsonl`)
   const codex = join(home, '.codex', 'sessions', '2026', '10', '14', `rollout-2026-10-14T10-00-00-${CODEX_ID}.jsonl`)
   const fork = join(home, '.codex', 'sessions', '2026', '10', '14', `rollout-2026-10-14T10-00-30-${FORK_ID}.jsonl`)
-  for (const path of [claude, codex, fork]) {
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, '')
-  }
+  for (const path of [claude, codex, fork]) await mkdir(dirname(path), { recursive: true })
   return {
     claude,
     codex,
