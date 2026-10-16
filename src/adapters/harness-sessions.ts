@@ -23,7 +23,7 @@ import type { OtlpSpan } from '../otlp.js'
 import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { ClaudeAdapter } from './claude.js'
-import { CodexAdapter } from './codex.js'
+import { CodexAdapter, spawnAgentPath } from './codex.js'
 import { multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { OpencodeAdapter } from './opencode.js'
 
@@ -176,7 +176,12 @@ function decorateCodexTools(session: HarnessSession, spans: OtlpSpan[]): void {
       ? [...new Set([...children, ...spawnedSessionIds(call.result?.output)])]
       : targetedSessionIds(operation, call.inputText ?? call.input)
     if (ids.length > 0) item.attributes['traces.codex.agent_session_ids'] = JSON.stringify(ids)
-    if (operation === 'spawn_agent') item.attributes['traces.agent.spawn'] = true
+    if (operation !== 'spawn_agent') continue
+    item.attributes['traces.agent.spawn'] = true
+    // The task path the child stamps in its own session_meta: its name, and
+    // the join key when the spawn returned no child id.
+    const path = spawnAgentPath(call.input) ?? spawnAgentPath(call.inputText) ?? spawnAgentPath(call.result?.output)
+    if (path) item.attributes['traces.codex.spawn_agent_path'] = path
   }
 }
 
@@ -211,10 +216,26 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
 
 type CodexHead = { timestamp?: string; type?: string; payload?: {
   type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string;
-  agent_role?: string; source?: { subagent?: { thread_spawn?: {
-    depth?: number; agent_nickname?: string; agent_role?: string; agent_path?: string
+  agent_role?: string; agent_path?: string; parent_thread_id?: string;
+  git?: { repository_url?: unknown }; source?: { subagent?: { thread_spawn?: {
+    depth?: number; agent_nickname?: string; agent_role?: string; agent_path?: string; parent_thread_id?: string
   } } }
 } }
+
+/** A Codex rollout's `session_meta` payload, from the head of the file; a torn head has none. */
+async function codexMeta(path: string): Promise<NonNullable<CodexHead['payload']> | undefined> {
+  try {
+    const head = await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} })
+    return head.find((row) => row.type === 'session_meta')?.payload
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function ownHome(): string {
+  return process.env.HOME || homedir()
+}
 
 async function decorateCodexMetadata(path: string, session: HarnessSession, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
   const head = await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} })
@@ -302,48 +323,31 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       })
     if (this.legacyOpencode) {
       // This machine's own legacy store follows XDG_DATA_HOME; a store root's sits in its layout.
-      const own = resolve(home) === resolve(process.env.HOME || homedir())
+      const own = resolve(home) === resolve(ownHome())
       const legacy = await this.legacyOpencode.locate({ sinceMs: opts.sinceMs, cwd: opts.cwd, ...(own ? {} : { home }) })
       refs.push(...legacy.filter((ref) => opts.nativeSessionId === undefined || ref.sessionId === opts.nativeSessionId))
     }
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   }
 
+  /** Sessions under HOME, or under the store root `opts.home` names, through the shared reader. */
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
-    if (opts.home !== undefined) return this.locateIn(opts.home, opts)
-    // Keep traces' established filesystem selection, including CODEX_HOME and
-    // rollouts whose filename does not contain the metadata's session ID.
-    if (this.scopedAdapter) return this.scopedAdapter.locate(opts)
-    const found = await this.reader.locate(homedir(), { sinceMs: opts.sinceMs, cwd: opts.cwd })
-    const refs = found.filter((native) => this.nativeHarness !== 'claude-code' || native.parentNativeSessionId === null).map((native) => {
-      const ref = tracesRef(native, this.harness)
-      this.refs.set(`${ref.sessionId}\0${ref.path}`, native)
-      return ref
-    })
-    // OpenCode's earlier JSON store is a different native format from the
-    // current SQLite store. Keep those historical sessions addressable.
-    if (this.legacyOpencode) refs.push(...await this.legacyOpencode.locate(opts))
-    return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    return this.locateIn(opts.home ?? ownHome(), opts)
   }
 
   async locateBySessionId(sessionId: string, opts: LocateOptions = {}): Promise<SessionRef[]> {
-    if (opts.home !== undefined) return this.locateIn(opts.home, { ...opts, nativeSessionId: sessionId })
-    if (this.scopedAdapter instanceof CodexAdapter) {
-      return this.scopedAdapter.locateBySessionId(sessionId, opts)
-    }
-    if (this.scopedAdapter instanceof ClaudeAdapter) {
-      return (await this.scopedAdapter.locate(opts)).filter((ref) => ref.sessionId === sessionId)
-    }
-    const refs = await this.reader.locate(homedir(), { nativeSessionId: sessionId, sinceMs: opts.sinceMs, cwd: opts.cwd })
-    const selected = refs.map((native) => {
-      const ref = tracesRef(native, this.harness)
-      this.refs.set(`${ref.sessionId}\0${ref.path}`, native)
-      return ref
-    })
-    if (this.legacyOpencode) {
-      selected.push(...(await this.legacyOpencode.locate(opts)).filter((ref) => ref.sessionId === sessionId))
-    }
-    return selected
+    return this.locateIn(opts.home ?? ownHome(), { ...opts, nativeSessionId: sessionId })
+  }
+
+  /**
+   * The repository a session recorded for itself, normalized by the caller:
+   * Codex writes `git.repository_url` into `session_meta`. Other harnesses
+   * record no repository, so they have none.
+   */
+  async recordedRepository(ref: SessionRef): Promise<string | null> {
+    if (this.nativeHarness !== 'codex') return null
+    const url = (await codexMeta(ref.path))?.git?.repository_url
+    return typeof url === 'string' && url.length > 0 ? url : null
   }
 
   async sourcePaths(ref: SessionRef): Promise<readonly string[]> {
@@ -434,7 +438,9 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     // The directory the shared reader read from the session's own records.
     if (session.cwd) root.attributes[SESSION_CWD_ATTR] = session.cwd
     if (session.parentNativeSessionId) root.attributes['traces.parent_session_id'] = session.parentNativeSessionId
-    if (session.children.length > 0) {
+    // Children a selection joins as their own sessions. Claude Code subagent
+    // transcripts are folded into this trace below instead, so they are not.
+    if (session.children.length > 0 && session.harness !== 'claude-code') {
       root.attributes['traces.child_session_ids'] = JSON.stringify(session.children.map((child) => child.nativeSessionId))
     }
     root.attributes['traces.session.corruption_count'] = session.integrity.unparsedRecords
@@ -466,7 +472,6 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
         .filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
         .map((item) => [item.attributes['gen_ai.tool.call.id'], item]))
       let childSpanCount = 0
-      const childIds = new Set(session.children.map((child) => child.nativeSessionId))
       const readIds = new Set<string>()
       for (const path of childPaths) {
         const childRef = claudeCodeRefForFile(path, session.nativeSessionId)
@@ -479,7 +484,6 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
         const child = repeated
           ? { ...read, nativeSessionId: `${read.nativeSessionId}@${basename(dirname(path))}` }
           : read
-        childIds.add(read.nativeSessionId)
         if (!child.startedAt) continue
         const binding = repeated ? undefined : session.children.find((item) => item.nativeSessionId === child.nativeSessionId)
         const parent = binding?.toolCallId ? toolByCallId.get(binding.toolCallId) : undefined
@@ -490,11 +494,14 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
           item.trace_id = root.trace_id
           item.attributes['traces.span.subagent'] = true
           item.attributes['service.name'] = this.harness
+          // Folded into this session's trace, the subagent's records belong to
+          // this session: its own id stays in `traces.claude.source_trace_id`,
+          // so the trace keeps one session identity.
+          delete item.attributes['tangle.sessionId']
           spans.push(item)
           childSpanCount += 1
         }
       }
-      if (childIds.size > 0) root.attributes['traces.child_session_ids'] = JSON.stringify([...childIds])
       if (childSpanCount > 0) root.attributes['traces.session.subagent_span_count'] = childSpanCount
     }
     if (session.harness === 'claude-code') {
@@ -512,11 +519,37 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     return { kind: 'unavailable', reason: 'parent-turn-metadata-missing' }
   }
 
-  async locateSpawnedChildren(parentSessionId: string, agentPaths: readonly string[], options?: LocateOptions & Pick<ParseOptions, 'corruptionMode' | 'signal'>): Promise<readonly SpawnedChildResolution[]> {
-    if (this.scopedAdapter instanceof CodexAdapter) {
-      return this.scopedAdapter.locateSpawnedChildren(parentSessionId, agentPaths, options)
+  /**
+   * Join a Codex parent's `spawn_agent` calls to the child rollouts they made,
+   * by the exact pair (parent thread id, agent path) each child stamps in its
+   * `session_meta`. Candidates come from the shared reader under the same home
+   * or store root the parent was read from; only their heads are read.
+   */
+  async locateSpawnedChildren(
+    parentSessionId: string,
+    agentPaths: readonly string[],
+    options: LocateOptions & Pick<ParseOptions, 'corruptionMode' | 'signal'> = {},
+  ): Promise<readonly SpawnedChildResolution[]> {
+    const wanted = [...new Set(agentPaths)].filter((path) => path.length > 0)
+    if (this.nativeHarness !== 'codex') return wanted.map((agentPath) => ({ agentPath, reason: 'not-found' as const }))
+    if (wanted.length === 0 || parentSessionId.length === 0) return []
+    const children = (await this.reader.locate(options.home ?? ownHome()))
+      .filter((native) => native.parentNativeSessionId === parentSessionId)
+    const matches = new Map<string, SessionRef[]>()
+    for (const native of children) {
+      options.signal?.throwIfAborted()
+      const meta = await codexMeta(native.path)
+      const spawn = meta?.source?.subagent?.thread_spawn
+      const agentPath = meta?.agent_path ?? spawn?.agent_path
+      if (typeof agentPath !== 'string' || !wanted.includes(agentPath)) continue
+      matches.set(agentPath, [...(matches.get(agentPath) ?? []), tracesRef(native, this.harness)])
     }
-    return agentPaths.map((agentPath) => ({ agentPath, reason: 'not-found' }))
+    return wanted.map((agentPath) => {
+      const found = matches.get(agentPath) ?? []
+      if (found.length === 1) return { agentPath, ref: found[0]! }
+      if (found.length === 0) return { agentPath, reason: 'not-found' as const }
+      return { agentPath, reason: 'ambiguous' as const, candidates: found.map((ref) => ref.sessionId).sort() }
+    })
   }
 }
 

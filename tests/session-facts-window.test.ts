@@ -135,7 +135,8 @@ describe('traces facts --since/--until', () => {
     expect(report.selection!.unreadSessions).toEqual([
       expect.objectContaining({ sessionId: 'garbage', reason: expect.any(String) }),
     ])
-    expect(stderr).toContain('could not be read')
+    // One stderr line says how many were skipped and how to see each reason.
+    expect(stderr).toMatch(/^1 unreadable: traces facts .*--format json \| jq \.selection$/mu)
   })
 
   it('reads the same window in the relative forms other commands accept', async () => {

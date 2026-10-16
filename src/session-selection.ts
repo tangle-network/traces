@@ -8,6 +8,7 @@ import {
 import { parseSession } from './session-source.js'
 import {
   collectSessionWorkflow,
+  type CollectSessionWorkflowOptions,
   type SessionWorkflowIssue,
   type SessionWorkflowSummary,
 } from './session-workflow.js'
@@ -42,6 +43,13 @@ export interface SessionSelection {
 export interface CollectSessionSelectionOptions {
   readonly workflow?: boolean
   readonly maxWorkflowSessions?: number
+  /**
+   * With `workflow`, follow parent links too (default true). With false, each
+   * seed brings its descendants and is followed by them, group by group.
+   */
+  readonly parents?: boolean
+  /** A session that cannot be parsed: return to skip it, throw to stop. Without it, a parse error ends the selection. */
+  readonly onUnreadable?: CollectSessionWorkflowOptions['onUnreadable']
   readonly taskScope?: 'all' | 'latest' | 'turn'
   readonly taskTurnId?: string
   /** Hash and reparse every selected file so emitted evidence binds exact bytes. */
@@ -162,32 +170,45 @@ export async function collectSessionSelection(
   const rows: SessionSelectionRow[] = []
   const workflows: SessionWorkflowSummary[] = []
   const taskScope = options.taskScope ?? 'all'
+  // A session reached twice (a seed that is also a child of an earlier seed) is read once.
+  const read = new Set<string>()
+  const add = (row: SessionSelectionRow): void => {
+    const key = `${row.adapter.harness}\0${row.ref.path}`
+    if (read.has(key)) return
+    read.add(key)
+    rows.push(row)
+  }
 
   for (const { adapter, refs } of groups) {
     options.signal?.throwIfAborted()
     if (refs.length === 0) continue
     if (!options.workflow) {
       for (const ref of refs) {
-        rows.push(options.bindSources
-          ? await boundSessionRow(
-              adapter,
-              ref,
-              taskScope,
-              options.taskTurnId,
-              undefined,
-              options.signal,
-            )
-          : {
-              adapter,
-              ref,
-              spans: await parseSession(adapter, ref, {
+        try {
+          add(options.bindSources
+            ? await boundSessionRow(
+                adapter,
+                ref,
                 taskScope,
-                taskTurnId: options.taskTurnId,
-                signal: options.signal,
-              }),
-              taskScope,
-              ...(options.taskTurnId ? { taskTurnId: options.taskTurnId } : {}),
-            })
+                options.taskTurnId,
+                undefined,
+                options.signal,
+              )
+            : {
+                adapter,
+                ref,
+                spans: await parseSession(adapter, ref, {
+                  taskScope,
+                  taskTurnId: options.taskTurnId,
+                  signal: options.signal,
+                }),
+                taskScope,
+                ...(options.taskTurnId ? { taskTurnId: options.taskTurnId } : {}),
+              })
+        } catch (error) {
+          if (!options.onUnreadable || options.signal?.aborted) throw error
+          options.onUnreadable({ ref, error, seed: true })
+        }
       }
       continue
     }
@@ -198,10 +219,12 @@ export async function collectSessionSelection(
       taskScope,
       taskTurnId: options.taskTurnId,
       signal: options.signal,
+      ...(options.parents === false ? { parents: false } : {}),
+      ...(options.onUnreadable ? { onUnreadable: options.onUnreadable } : {}),
     })
     workflows.push(workflow)
     for (const session of workflow.sessions) {
-      rows.push(options.bindSources
+      add(options.bindSources
         ? await boundSessionRow(
             adapter,
             session.ref,

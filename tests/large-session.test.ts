@@ -33,6 +33,8 @@ async function writeGiantRowSession(path: string): Promise<void> {
         type: 'user',
         uuid: 'turn-one',
         sessionId: 'giant',
+        // Claude Code records the cwd on every row; locating reads it from the head.
+        cwd: '/tmp/giant',
         timestamp: '2026-01-01T00:00:00Z',
         message: { role: 'user', content: 'start the run' },
       })}\n`,

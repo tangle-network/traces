@@ -30,28 +30,24 @@ The root span keeps them as `gen_ai.tool.definitions` and `run.status`, so a tra
 Exported native-session span IDs derive deterministically from the session and record IDs.
 The adapter preserves Claude source UUIDs in `traces.claude.source_*` attributes and derives valid OTLP IDs for the exported graph.
 The Claude transcript proves turns and tool calls, but does not prove loop iterations or causal links, so those fields remain absent.
-Codex stores each worker in a separate session file; add `--workflow` to resolve the connected coordinator and worker files.
+Codex stores each worker in a separate session file; a named session brings the workers it spawned.
 `github-copilot` is the one exception: its log format carries no user prompt.
 Factory stores token totals in `.settings.json`, not per turn.
 ACP-only bridges may not persist a local transcript.
 
 ## Choose sessions
 
-Without `--workflow`, each selected Codex file is analyzed independently.
-With it, `traces` follows stable parent and child session IDs, up to 100 files by default.
+Every harness is read unless `--harness` names one.
+A named session (a ref or `--current`) and a `--last` selection bring each session's spawned children, up to 100: the named session is `sessions[0]`, and each child follows it in the order it started, with `parentSessionId`. No number of the named session includes a child's. A child named alone is read without its parent.
 `--latest-turn` keeps a long-lived resumed Codex or Claude Code session scoped to its most recent task and the workers spawned from that task.
 
-Use `--max-workflow-sessions <n>` to set a different bound.
-
-`--last` follows recent file activity and may select a child session in multi-agent work.
-Use `--harness codex --current --latest-turn --workflow` for the invoking Codex turn plus its connected workers.
+`--last` follows recent file activity across every harness and never selects the caller's own session (`CODEX_THREAD_ID`, else `CLAUDE_CODE_SESSION_ID`).
+`--current` is that session; on a harness that sets neither variable, `traces list --cwd . --last 1` names it.
 Omit `--latest-turn` when the full history of a resumed session is the intended unit.
-Workflow expansion follows session IDs, never timestamps or worker names.
-For a latest Codex child, it selects the last parent task that structurally spawned or targeted that child ID, then includes only workers referenced by that parent task.
-This requires the parent log to record the child ID on a spawn, send, follow-up, or lifecycle event and to associate that event with a stable turn ID.
-If either field is absent, the workflow is reported incomplete instead of widening to the parent's full history.
+In a window, `--last` or a machine-wide selection, a session that cannot be read is skipped and named in `selection.unreadSessions` with its reason; a named session that cannot be read exits 2.
+Children are found by session ID, or by the task path a child records beside its parent's ID, never by timestamps or worker names.
 Missing files, duplicate IDs, contradictory parents, and cycles are reported explicitly.
-Claude Code subagent files are already folded into their parent trace, so `--workflow` normally resolves one Claude session file.
+Claude Code subagent files are already folded into their parent trace, so a Claude session reads as one session.
 With `--latest-turn`, ordinary Claude subagents are selected by their parent tool call ID.
 Claude Workflow subagents are selected by the run ID and transcript directory returned by the parent `Workflow` call.
 Each Workflow child attaches to the latest matching call that started before the child.

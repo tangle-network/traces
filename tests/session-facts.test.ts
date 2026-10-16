@@ -345,11 +345,12 @@ describe('traces facts', () => {
   it('exits non-zero when a session cannot be read', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-facts-unreadable-'))
     // A file that is not a session, and a path that does not exist. Neither may
-    // be reported as a session with no facts.
+    // be reported as a session with no facts. A named session that cannot be
+    // read could not answer: exit 2.
     const garbage = join(dir, 'not-a-session.jsonl')
     await writeFile(garbage, 'this is not a rollout\n', 'utf8')
     await expect(cli(['facts', '--harness', 'codex', '--session', garbage]))
-      .rejects.toMatchObject({ code: 1 })
+      .rejects.toMatchObject({ code: 2 })
     await expect(cli(['facts', '--otlp', join(dir, 'absent.otlp.jsonl')]))
       .rejects.toMatchObject({ code: 1 })
   })

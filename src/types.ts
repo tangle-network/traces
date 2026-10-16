@@ -85,7 +85,7 @@ export interface SessionRef {
 }
 
 export interface LocateOptions {
-  /** Limit discovery to sessions whose cwd matches (exact or prefix). */
+  /** Limit discovery to sessions whose recorded cwd is this directory or under it on a path boundary. */
   cwd?: string
   /** Only sessions modified at/after this epoch ms. */
   sinceMs?: number
@@ -106,6 +106,11 @@ export interface HarnessTraceAdapter {
   locate(opts?: LocateOptions): Promise<SessionRef[]>
   /** Resolve all files for one stable session ID without cataloging unrelated sessions. */
   locateBySessionId?(sessionId: string, opts?: LocateOptions): Promise<SessionRef[]>
+  /**
+   * The repository URL the session recorded for itself (Codex `session_meta.git`),
+   * or null. `--cwd` reads it for a session whose recorded cwd no longer exists.
+   */
+  recordedRepository?(ref: SessionRef): Promise<string | null>
   /** Parse one discovered session into normalized OTLP spans. */
   parse(ref: SessionRef, options?: ParseOptions): Promise<OtlpSpan[]>
   /** Every file whose bytes can affect parse output. Defaults to ref.path. */

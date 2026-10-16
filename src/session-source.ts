@@ -11,7 +11,17 @@ import type { OtlpSpan } from './otlp.js'
 import { stampEnvironmentAttrs, stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
 import { type AdapterSelection, selectAdapters } from './registry.js'
-import { cwdMatchesSelection, cwdMatchesSelectionResolved, equivalentGitCwds, resolveSessionRepoAttrs, stampRepoAttrs, stampSpanWorkdirRepoAttrs } from './repo.js'
+import {
+  cwdMatchesSelection,
+  cwdMatchesSelectionResolved,
+  equivalentGitCwds,
+  normalizeRemote,
+  pathIsGone,
+  repositoryIdentity,
+  resolveSessionRepoAttrs,
+  stampRepoAttrs,
+  stampSpanWorkdirRepoAttrs,
+} from './repo.js'
 import { validateOtlpSpans } from './span-validation.js'
 import type { HarnessTraceAdapter, ParseOptions, SessionRef } from './types.js'
 
@@ -40,12 +50,11 @@ async function awaitWithAbort<T>(operation: Promise<T>, signal?: AbortSignal): P
 }
 
 /**
- * Parse one session to spans and stamp per-session repo/git resource attrs
- * (`tangle.subject.key` etc.) derived from the ref's cwd. Every OTLP-producing
- * path funnels through here so the spine can group by repo. Repo resolution is
- * computed ONCE per session; it is fail-safe and never throws.
+ * Parse one session to validated spans, stamped with its identity, integrity
+ * and recorded environment, without resolving its repository. A reader that
+ * needs only the session's own records (`list`) stops here.
  */
-export async function parseSession(
+export async function readSessionSpans(
   adapter: HarnessTraceAdapter,
   ref: SessionRef,
   options: ParseOptions = {},
@@ -63,6 +72,21 @@ export async function parseSession(
   // (the image/cwd the session actually ran in) outranks host-side inference.
   stampEnvironmentAttrs(spans, ref.environment)
   if (ref.cwd === null && ref.environment?.cwd) ref.cwd = ref.environment.cwd
+  return spans
+}
+
+/**
+ * Parse one session to spans and stamp per-session repo/git resource attrs
+ * (`tangle.subject.key` etc.) derived from the ref's cwd. Every OTLP-producing
+ * path funnels through here so the spine can group by repo. Repo resolution is
+ * computed ONCE per session; it is fail-safe and never throws.
+ */
+export async function parseSession(
+  adapter: HarnessTraceAdapter,
+  ref: SessionRef,
+  options: ParseOptions = {},
+): Promise<OtlpSpan[]> {
+  const spans = await readSessionSpans(adapter, ref, options)
   // A session recorded inside a sandbox names the sandbox's paths. Resolving
   // them on this host would attach whatever repo happens to live at the same
   // path here (a host `/work` checkout, say), so repo labels stay unresolved.
@@ -88,8 +112,13 @@ function refKey(ref: SessionRef): string {
   return `${ref.harness}\0${ref.path}\0${ref.sessionId}`
 }
 
-/** Locate through every equivalent git worktree for the selected cwd, then
- *  dedupe and apply a boundary-aware final filter. */
+/**
+ * Sessions whose recorded cwd is the selected directory or under it on a path
+ * boundary (`/w/agent` never selects `/w/agent-dev-container`), or under a live
+ * worktree of the same repository, or, when the recorded cwd no longer exists
+ * (a removed `_wt/` worktree), whose recorded repository is the selected
+ * directory's. Newest first, deduplicated.
+ */
 export async function locateSessions(
   adapter: HarnessTraceAdapter,
   opts: { cwd?: string; sinceMs?: number; home?: string } = {},
@@ -97,22 +126,38 @@ export async function locateSessions(
   // An adapter that reads HOME alone would answer a store root with this
   // machine's sessions, so it has none there.
   if (opts.home !== undefined && !readsStoreRoots(adapter)) return []
-  const where = { sinceMs: opts.sinceMs, ...(opts.home !== undefined ? { home: opts.home } : {}) }
-  if (!opts.cwd) return adapter.locate(where)
+  const refs = await adapter.locate({ sinceMs: opts.sinceMs, ...(opts.home !== undefined ? { home: opts.home } : {}) })
+  return opts.cwd ? sessionsInCwd(adapter, refs, opts.cwd) : refs
+}
 
-  const cwdSelections = await equivalentGitCwds(opts.cwd)
-  const refs = await adapter.locate(where)
+/** The `refs` that `cwd` selects, by the rule `locateSessions` states. */
+export async function sessionsInCwd(adapter: HarnessTraceAdapter, refs: readonly SessionRef[], cwd: string): Promise<SessionRef[]> {
+  const cwdSelections = await equivalentGitCwds(cwd)
   const byKey = new Map<string, SessionRef>()
-  // Symlink-resolved matching is per distinct cwd, cached: locate can return
-  // thousands of refs, and most share a handful of working directories.
-  const resolvedMatch = new Map<string, boolean>()
+  // Per distinct recorded cwd, cached: locate can return thousands of refs,
+  // and most share a handful of working directories.
+  const resolvedMatch = new Map<string, Promise<boolean>>()
+  const gone = new Map<string, Promise<boolean>>()
+  let repository: Promise<string | null> | undefined
+  const sameRepository = async (ref: SessionRef): Promise<boolean> => {
+    if (!adapter.recordedRepository || ref.cwd === null) return false
+    let missing = gone.get(ref.cwd)
+    if (!missing) gone.set(ref.cwd, missing = pathIsGone(ref.cwd))
+    if (!(await missing)) return false
+    repository ??= repositoryIdentity(cwd)
+    const wanted = await repository
+    if (wanted === null) return false
+    const recorded = await adapter.recordedRepository(ref)
+    return recorded !== null && normalizeRemote(recorded) === wanted
+  }
   for (const ref of refs) {
     let matched = cwdMatchesSelection(ref.cwd, cwdSelections)
     if (!matched && ref.cwd !== null) {
-      const cached = resolvedMatch.get(ref.cwd)
-      matched = cached ?? (await cwdMatchesSelectionResolved(ref.cwd, cwdSelections))
-      if (cached === undefined) resolvedMatch.set(ref.cwd, matched)
+      let resolved = resolvedMatch.get(ref.cwd)
+      if (!resolved) resolvedMatch.set(ref.cwd, resolved = cwdMatchesSelectionResolved(ref.cwd, cwdSelections))
+      matched = await resolved
     }
+    if (!matched) matched = await sameRepository(ref)
     if (!matched && !(ref.cwd === null && ref.integrity)) continue
     byKey.set(refKey(ref), ref)
   }
@@ -120,7 +165,7 @@ export async function locateSessions(
 }
 
 export interface ScanOptions extends AdapterSelection, ParseOptions {
-  /** Filter by working directory (exact/prefix). */
+  /** Sessions recorded in this directory, a live worktree of its repository, or a removed worktree of it (see `locateSessions`). */
   cwd?: string
   /** Only sessions modified at/after this epoch ms. */
   sinceMs?: number
