@@ -345,7 +345,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /** The `session_meta` fields traces reads, without the instructions it also carries. */
 function codexMetaSummary(meta: NonNullable<CodexHead['payload']>): NonNullable<CodexHead['payload']> {
-  const keep = ['id', 'forked_from_id', 'thread_source', 'originator', 'source', 'agent_nickname', 'agent_role', 'agent_path', 'parent_thread_id'] as const
+  const keep = ['id', 'cwd', 'model_provider', 'forked_from_id', 'thread_source', 'originator', 'source', 'agent_nickname', 'agent_role', 'agent_path', 'parent_thread_id'] as const
   return Object.fromEntries(keep.filter((key) => meta[key] !== undefined).map((key) => [key, meta[key]])) as NonNullable<CodexHead['payload']>
 }
 
@@ -360,6 +360,8 @@ function codexMetaSummary(meta: NonNullable<CodexHead['payload']>): NonNullable<
  * response's first record. Codex holds a response open until a person's
  * message or a new turn starts, a turn ends, or a cumulative token count
  * moves with the response's own usage; a piece ends at the last of those.
+ * A Codex fork first replays the history of the thread it came from, from
+ * that thread's `session_meta` to its own first turn; no piece ends inside it.
  */
 export function pieceBoundary(harness: string, records: readonly PieceRecord[], carry: PieceCarry = PIECE_START): number {
   if (harness === 'claude-code') {
@@ -376,11 +378,41 @@ export function pieceBoundary(harness: string, records: readonly PieceRecord[], 
     })
     return start
   }
+  return codexScan(records, carry).cut
+}
+
+/**
+ * A Codex piece read the way the fold reads it: where it may end (see
+ * {@link pieceBoundary}) and the last cumulative token usage the fold took
+ * in, which a replayed fork's history does not set.
+ */
+function codexScan(records: readonly PieceRecord[], carry: PieceCarry): { cut: number; tokens: Record<string, unknown> | null } {
   let cut = 0
-  let total = carry.tokens?.total_tokens
+  let tokens = carry.tokens
+  let sawMeta = carry.lines > 0
+  let forked = typeof carry.meta?.forked_from_id === 'string'
+  let sessionId = carry.nativeSessionId ?? ''
+  let inherited = false
   records.forEach((record, index) => {
     const payload = record && isPlainObject(record.payload) ? record.payload : null
     if (!record || !payload) return
+    if (record.type === 'session_meta') {
+      if (sawMeta) inherited ||= forked
+      else {
+        sawMeta = true
+        forked = typeof payload.forked_from_id === 'string'
+        if (typeof payload.id === 'string') sessionId = payload.id
+      }
+      return
+    }
+    if (inherited) {
+      // The fork's own first turn: its id sorts at or after the session's (UUIDv7).
+      if (record.type === 'event_msg' && payload.type === 'task_started' && typeof payload.turn_id === 'string' && payload.turn_id >= sessionId) {
+        inherited = false
+        cut = index
+      }
+      return
+    }
     if (record.type === 'response_item' && payload.type === 'message' && payload.role === 'user') cut = index
     else if (record.type === 'event_msg' && payload.type === 'task_started') cut = index
     else if (record.type === 'event_msg' && (payload.type === 'task_complete' || payload.type === 'turn_aborted')) cut = index + 1
@@ -388,11 +420,11 @@ export function pieceBoundary(harness: string, records: readonly PieceRecord[], 
       const usage = payload.info.total_token_usage
       if (!isPlainObject(usage)) return
       const last = payload.info.last_token_usage
-      if (typeof usage.total_tokens === 'number' && usage.total_tokens !== total && isPlainObject(last) && typeof last.output_tokens === 'number') cut = index + 1
-      total = usage.total_tokens
+      if (typeof usage.total_tokens === 'number' && usage.total_tokens !== tokens?.total_tokens && isPlainObject(last) && typeof last.output_tokens === 'number') cut = index + 1
+      tokens = usage
     }
   })
-  return cut
+  return { cut, tokens }
 }
 
 /** Relabel and stamp a Codex session's spans from its `session_meta`. Returns whether it has had a person's prompt. */
@@ -712,9 +744,9 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
    * True when the turn index may read this session's file a piece at a time
    * (Claude Code and Codex JSONL); any other session it reads whole whenever
    * the session changes. `first` is the file's first piece, which says
-   * whether its layout allows it: `claude -p` stream-json, a Codex fork that
-   * replays its parent's history, and a Codex rollout in the older
-   * plain-string prompt form are read whole.
+   * whether its layout allows it: `claude -p` stream-json, a Codex rollout
+   * with no `session_meta` at its head, and one in the older plain-string
+   * prompt form are read whole.
    */
   readsPieces(ref: SessionRef, first?: readonly PieceRecord[]): boolean {
     if (!ref.path.endsWith('.jsonl') || ref.sessionId.startsWith('unattributed:')) return false
@@ -722,8 +754,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     if (first === undefined) return true
     const records = first.filter((record): record is Record<string, unknown> => record !== null)
     if (this.nativeHarness === 'claude-code') return !records.some((record) => record.type === 'system' && record.subtype === 'init')
-    const meta = records.find((record) => record.type === 'session_meta')?.payload as CodexHead['payload']
-    return meta !== undefined && typeof meta.forked_from_id !== 'string' && !records.slice(0, 40).some((record) => isLegacyPrompt(record as CodexHead))
+    return records.some((record) => record.type === 'session_meta') && !records.slice(0, 40).some((record) => isLegacyPrompt(record as CodexHead))
   }
 
   /**
@@ -737,11 +768,13 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
    */
   async readPiece(ref: SessionRef, records: readonly PieceRecord[], carry: PieceCarry = PIECE_START): Promise<{ spans: OtlpSpan[]; carry: PieceCarry }> {
     const native = nativeRef(this.nativeHarness, ref)
-    // Codex numbers its responses from the session's start, and skips a token
-    // count that repeats the last one: replay both before the piece, as records
-    // whose own output is dropped below.
+    // Codex reads its session_meta once, numbers its responses from the
+    // session's start, and skips a token count that repeats the last one:
+    // replay all three before the piece, as records whose own output is
+    // dropped below.
     const primer: Record<string, unknown>[] = []
     if (this.nativeHarness === 'codex') {
+      if (carry.meta) primer.push({ type: 'session_meta', payload: carry.meta })
       if (carry.tokens) primer.push({ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: carry.tokens } } })
       for (let call = 0; call < carry.calls; call += 1) primer.push({ type: 'event_msg', payload: { type: 'stream_error', message: 'earlier piece' } })
     }
@@ -764,11 +797,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     const present = records.filter((record): record is Record<string, unknown> => record !== null)
     const metaRecord = present.find((record) => record.type === 'session_meta')?.payload as CodexHead['payload'] | undefined
     const meta = carry.meta ?? (metaRecord ? codexMetaSummary(metaRecord) : null)
-    const tokens = present
-      .map((record) => (record.type === 'event_msg' ? (record.payload as { type?: string; info?: { total_token_usage?: unknown } } | undefined) : undefined))
-      .filter((payload) => payload?.type === 'token_count' && isPlainObject(payload.info?.total_token_usage))
-      .map((payload) => payload!.info!.total_token_usage as Record<string, unknown>)
-      .pop() ?? carry.tokens
+    const tokens = this.nativeHarness === 'codex' ? codexScan(records, carry).tokens : null
     let spans: OtlpSpan[] = []
     let promptSeen = carry.promptSeen
     if (session.startedAt) {

@@ -91,6 +91,8 @@ describe('turn index: the window answer is the union of whole reads', () => {
 const at = (second: number): string => new Date(Date.parse('2026-10-14T10:00:00.000Z') + second * 1000).toISOString()
 const CLAUDE_ID = 'c1a0de02-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const CODEX_ID = '0199f00e-cccc-7ccc-8ccc-cccccccccccc'
+/** A Codex subagent: a fork of {@link CODEX_ID} that first replays that thread's history. */
+const FORK_ID = '0199f00f-dddd-7ddd-8ddd-dddddddddddd'
 
 function claudeRecords(cwd: string): unknown[] {
   const base = { sessionId: CLAUDE_ID, cwd, version: '2.1.0', gitBranch: 'main', userType: 'external' }
@@ -148,10 +150,38 @@ function codexRecords(cwd: string): unknown[] {
   ]
 }
 
+/** A spawned Codex subagent's rollout: its own session_meta, the parent's history replayed, then its own turn. */
+function forkRecords(cwd: string): unknown[] {
+  const event = (second: number, payload: unknown) => ({ timestamp: at(second), type: 'event_msg', payload })
+  const item = (second: number, payload: unknown) => ({ timestamp: at(second), type: 'response_item', payload })
+  const tokens = (second: number, total: number) =>
+    event(second, { type: 'token_count', info: { total_token_usage: { input_tokens: total - 20, output_tokens: 20, total_tokens: total }, last_token_usage: { input_tokens: 40, output_tokens: 10, total_tokens: 50 } } })
+  const say = (second: number, text: string) => item(second, { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] })
+  const spawn = { subagent: { thread_spawn: { parent_thread_id: CODEX_ID, depth: 1, agent_path: '/root/lint' } } }
+  return [
+    { timestamp: at(30), type: 'session_meta', payload: { id: FORK_ID, forked_from_id: CODEX_ID, thread_source: 'subagent', source: spawn, timestamp: at(30), cwd, originator: 'codex_exec' } },
+    { timestamp: at(30), type: 'session_meta', payload: { id: CODEX_ID, timestamp: at(0), cwd, originator: 'codex_cli_rs' } },
+    event(30, { type: 'task_started', turn_id: `${CODEX_ID}-t1` }),
+    item(30, { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Fix the flaky test.' }] }),
+    say(30, 'Looking at the sentinel-otter test.'),
+    tokens(30, 100),
+    event(31, { type: 'task_started', turn_id: '0199f00f-eeee-7eee-8eee-eeeeeeeeeeee' }),
+    item(32, { type: 'agent_message', id: 'amsg-1', content: [{ type: 'input_text', text: 'Lint the parser package.' }] }),
+    say(33, 'Linting now.'),
+    item(34, { type: 'function_call', name: 'shell', call_id: 'call-lint', arguments: JSON.stringify({ command: ['bash', '-lc', 'pnpm lint'] }) }),
+    tokens(35, 140),
+    item(36, { type: 'function_call_output', call_id: 'call-lint', output: JSON.stringify({ output: 'clean', metadata: { exit_code: 0 } }) }),
+    say(37, 'Lint is clean.'),
+    tokens(38, 190),
+    event(39, { type: 'task_complete', turn_id: '0199f00f-eeee-7eee-8eee-eeeeeeeeeeee' }),
+  ]
+}
+
 interface GrowingHome {
   readonly env: Env
   readonly claude: string
   readonly codex: string
+  readonly fork: string
   readonly cwd: string
 }
 
@@ -162,13 +192,15 @@ async function growingHome(): Promise<GrowingHome> {
   await mkdir(cwd, { recursive: true })
   const claude = join(home, '.claude', 'projects', cwd.replace(/[/.]/gu, '-'), `${CLAUDE_ID}.jsonl`)
   const codex = join(home, '.codex', 'sessions', '2026', '10', '14', `rollout-2026-10-14T10-00-00-${CODEX_ID}.jsonl`)
-  for (const path of [claude, codex]) {
+  const fork = join(home, '.codex', 'sessions', '2026', '10', '14', `rollout-2026-10-14T10-00-30-${FORK_ID}.jsonl`)
+  for (const path of [claude, codex, fork]) {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, '')
   }
   return {
     claude,
     codex,
+    fork,
     cwd,
     env: { HOME: home, XDG_STATE_HOME: join(root, 'state'), XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_CACHE_HOME: join(root, 'cache') },
   }
@@ -179,13 +211,15 @@ const line = (record: unknown): string => `${JSON.stringify(record)}\n`
 describe('turn index: a session read as it is written', () => {
   it('answers like a whole read after every appended record, wherever a response is cut', async () => {
     const fx = await growingHome()
-    const claude = claudeRecords(fx.cwd)
-    const codex = codexRecords(fx.cwd)
-    for (let k = 0; k < Math.max(claude.length, codex.length); k += 1) {
-      if (k < claude.length) await appendFile(fx.claude, line(claude[k]))
-      if (k < codex.length) await appendFile(fx.codex, line(codex[k]))
+    const files = [
+      { id: CLAUDE_ID, path: fx.claude, records: claudeRecords(fx.cwd) },
+      { id: CODEX_ID, path: fx.codex, records: codexRecords(fx.cwd) },
+      { id: FORK_ID, path: fx.fork, records: forkRecords(fx.cwd) },
+    ]
+    for (let k = 0; k < Math.max(...files.map((file) => file.records.length)); k += 1) {
+      for (const file of files) if (k < file.records.length) await appendFile(file.path, line(file.records[k]))
       const answer = await search(fx.env)
-      for (const [id, path] of [[CLAUDE_ID, fx.claude], [CODEX_ID, fx.codex]] as const) {
+      for (const { id, path } of files) {
         const whole = await parsed(fx.env, path, id)
         const indexed = answer.matches.filter((match) => match.sessionId === id)
         if (whole === null) expect(indexed, `${id} after ${k + 1} records`).toEqual([])
@@ -197,7 +231,14 @@ describe('turn index: a session read as it is written', () => {
       ['agent', 'Looking at the sentinel-otter test.'],
       ['agent', 'Part one. Part two: the sentinel-otter test passes.'],
     ])
-  }, 240_000)
+    // The fork's replay of its parent's history is not the fork's; its own turn is.
+    const fork = await search(fx.env, '[Ll]int')
+    expect(fork.matches.map((match) => [match.sessionId, match.kind, match.text])).toEqual([
+      [FORK_ID, 'agent', 'Linting now.'],
+      [FORK_ID, 'command', 'pnpm lint'],
+      [FORK_ID, 'agent', 'Lint is clean.'],
+    ])
+  }, 300_000)
 
   it('reads only what was appended, and what an unchanged session needs, nothing', async () => {
     const fx = await growingHome()
