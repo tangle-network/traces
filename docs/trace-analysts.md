@@ -6,8 +6,7 @@ Keeping them separate prevents an exploratory model output from being reported a
 | Question | Tool | Output |
 | --- | --- | --- |
 | What happened? | Built-in local checks | Findings from explicit trace facts |
-| Why might it have happened? | `--llm`, HALO, or a custom analyst | Findings or a diagnosis report with cited spans |
-| What behavior should we inspect? | Hodoscope | Samples marked `needs_review` |
+| Why might it have happened? | `--llm` or a custom analyst | Findings with cited spans |
 | What exactly does this session say about X? | `traces ask` | An answer per question, with checked `trace://` citations |
 | What does this session state, exactly and for free? | `traces facts` | A deterministic facts sheet, no model call |
 
@@ -40,7 +39,7 @@ Which sessions these commands select, and how `--workflow` and `--latest-turn` e
   traces.otlp.jsonl
 ```
 
-The OpenInference file is the shared input for external engines.
+The OpenInference file is the input any other tool can read.
 The original trace and exact cited span remain available for review.
 
 ## Ask free-form questions
@@ -63,16 +62,6 @@ Without the reason, a report showing "0 findings" reads as "the model found noth
 - `result.findingRejections` (investigation and improvement) and `answers.json` (`ask`) hold the counts per analyst and reason.
 
 The common reasons are an excerpt the cited span does not contain, a span the trace does not hold, and too few distinct citations for the kind.
-
-## External analyzer failures exit non-zero
-
-`--analyzer halo|hodoscope|prime|<command>` promises that engine's output.
-An analyzer that fails now writes its error into the report as before, and then the command exits 1 naming every analyzer that failed.
-Scripts that treated exit 0 as "the analyzer ran" were reading a report that said otherwise.
-
-The check runs on `analyze`, `investigate`, and `improve`, and it covers every analyzer the run requested, not only the ones named on the command line.
-`investigate` and `improve` load the default traces config file, so an analyzer declared in `externalAnalyzers` there is a requested analyzer too, and a flaky one now turns those two commands red.
-`analyze` does not load a default config, so only its own `--analyzer` flags reach the check.
 
 ## Codex tool outcomes
 
@@ -110,122 +99,6 @@ Wrapped analysts report a version ending in `+traces-citations-1`.
 
 A custom analyst built with `createTraceAnalyst` gets the same behavior through `normalizeAnalystCitations(definitions, spans)`.
 Pass the spans that the analyst's trace store was written from.
-
-## External engines
-
-External engines are optional tools that you install separately.
-One engine failing does not discard the other results.
-
-```bash
-# Recursive diagnosis over the same OpenInference trace.
-traces analyze --last 1 --analyzer halo --analyzer-prompt "find unsupported completion claims"
-
-# Sample distinct actions across a larger set of sessions.
-traces analyze --all --last 20 --analyzer hodoscope
-
-# Run any installed command that accepts an OpenInference file path.
-traces analyze --last 1 --analyzer my-trace-tool
-
-# One-shot prime-RLM analysis through a local OpenAI-compatible bridge.
-traces analyze --last 1 --analyzer prime --analyzer-prompt "find unsupported completion claims"
-```
-
-`--model` is forwarded to the built-in model-assisted analysts, HALO, Hodoscope, and prime.
-HALO and Hodoscope use their own provider clients and credentials.
-The Hodoscope adapter pins version `0.2.4` and uses Python 3.11 through `uvx`.
-
-External results have one of three explicit kinds:
-
-```ts
-type ExternalAnalysisResult =
-  | { kind: 'report'; output: string }
-  | { kind: 'findings'; findings: AnalystFinding[] }
-  | { kind: 'discovery'; candidates: ExternalDiscoveryCandidate[] }
-```
-
-Raw JSON is still a `report`.
-Only an adapter that validates the full finding shape may return `findings`.
-Hodoscope always returns `discovery`, and each candidate has `status: 'needs_review'` plus its source trace and span.
-
-### Prime engine
-
-`--analyzer prime` runs a one-shot analyst over the emitted OTLP artifact through an OpenAI-compatible bridge, such as cli-bridge's prime backend.
-Unlike the `--llm` analysts, which drill into the trace with paged tools, prime is a recursive language model with its own REPL, so the trajectory reaches it one of two ways:
-
-- **Inline (small traces):** the full span projection is inlined into a single prompt as JSON. Oversized projections are re-rendered with a per-attribute character cap.
-- **File (large traces):** when even the capped projection exceeds the inline budget, the artifact is copied into a per-run directory, that directory is sent as `cwd` on the chat-completions request (cli-bridge starts prime there), and the prompt tells prime to load `trajectory.otlp.jsonl` itself and fan out with `rlm()` — so the trajectory travels as a readable file, not prompt bytes, and no trace is refused for size. The bridge must be able to read that directory: host-mode bridges do by construction; a jailed or remote bridge needs the directory registered or uploaded on the bridge side.
-
-Span-id grounding is identical in both modes: every cited id is validated against the artifact, and the delivery decision is recorded in the result output.
-
-Prerequisites:
-
-- A running bridge that accepts `POST /v1/chat/completions` and routes the configured model to the prime backend.
-- No key handling here: the bridge owns provider credentials.
-
-Configuration (flags first, then environment, then defaults):
-
-| Setting | Source | Default |
-| --- | --- | --- |
-| Bridge root URL | `TRACES_PRIME_BRIDGE_URL` | `http://localhost:4181` |
-| Model | `--model`, then `TRACES_PRIME_MODEL` | `prime/zai/glm-5.2` |
-| Per-call deadline | `TRACES_PRIME_TIMEOUT_MS` | `1200000` (20 min) |
-| Question | `--analyzer-prompt` | a general diagnosis question |
-
-```bash
-traces analyze --last 1 --analyzer prime
-TRACES_PRIME_BRIDGE_URL=http://localhost:4181 traces analyze --last 1 --analyzer prime --analyzer-prompt "find unsupported completion claims"
-```
-
-Output expectations:
-
-- The reply contract is one fenced JSON block of short strings citing span ids verbatim; a structurally malformed reply gets exactly one bounded repair turn that carries the malformed reply and the contract, never the trajectory.
-- A still-malformed reply after repair is a failed result (`ok: false`) with the raw reply preserved for inspection; one failed engine never discards the other results.
-- Valid rows become full `findings` with `trace://` span evidence, validated against the artifact like every other findings-kind engine; rows citing unknown or ambiguous span ids are rejected with a recorded reason.
-- Zero findings from a well-formed reply is an honest null, not a failure.
-- Bridge-reported token usage and call counts are recorded in the result output; cost stays uncaptured because this adapter has no pricing table.
-
-The scored prime-vs-dspy comparison — same trajectories, same scoring — lives in `@tangle-network/agent-eval`'s analyst benchmark (`runAnalystBenchmark`); this engine is the capture-side entry point, not the scoreboard.
-
-### Verifying against a real prime
-
-The suite above runs against a scripted bridge over real HTTP. A full real run — real
-prime-agent, real model, real REPL — is a manual, credentials-on-the-host affair:
-
-1. **Install prime-agent the way cli-bridge pins it.** It is a hard fork of pi that reuses
-   pi's npm name, so `npm i` gives you the WRONG agent: clone
-   `PrimeIntellect-ai/prime-agent`, `git checkout <the commit src/backends/prime.ts names>`
-   (be9e2fa0 at the time of writing), build, and expose the bundle as `prime-agent`
-   (cli-bridge's `pnpm install:harness prime` does exactly this).
-2. **Start cli-bridge with the prime backend**: `BRIDGE_BACKENDS=prime
-   PRIME_MODELS_JSON=<operator models.json> BRIDGE_PORT=4181 pnpm start`. The
-   models.json names an `apiKey` as an exported ENV VAR (not a literal — prime
-   resolves env-var-first, so an unforwarded name becomes the literal key), and the
-   bridge forwards exactly the names the file names into prime's neutral child env.
-   Mind which endpoint a key is funded on: a coding-plan GLM key only works on the
-   coding endpoint, and the same key 402s on the general one.
-3. **Give the kernel a persistent interpreter.** Prime's Python kernel bootstraps a
-   venv under its HOME, and the bridge gives every run an isolated one — a
-   uv-managed interpreter installed inside an ephemeral HOME dies with it. Pre-provision
-   a venv (ipykernel + the default rlm extras + an editable
-   `prime-agent-runtime`) from a system Python and export
-   `PRIME_AGENT_KERNEL_PYTHON=<that venv's python>` to the bridge; prime skips
-   auto-bootstrap when the named interpreter already passes its checks.
-4. Run with `TRACES_PRIME_BRIDGE_URL=http://localhost:4181 TRACES_PRIME_MODEL=prime/<provider>/<model>`.
-   The opt-in suite (`TRACES_PRIME_REAL_E2E=1` in `tests/analyst-engine-prime.test.ts`)
-   exercises the same path from vitest.
-
-What real runs have shown (GLM-5.3 via a coding-plan endpoint, fork at the pinned commit):
-
-- **Inline, small session:** clean single-call success — one fenced JSON block, five findings,
-  all grounded, exit 0.
-- **File, ~121 spans / 788 KB artifact:** the RLM loads and pages the file (14 calls, ~156k input
-  tokens); its first reply gets cut by the endpoint's output limit mid-JSON, and the
-  truncation-aware repair turn (re-emit at most 3 findings, terse strings) recovers it — ok:true,
-  findings grounded, exit 0.
-- **File, ~794 spans / 2.1 MB artifact:** the reply channel alone never survived the endpoint's
-  output cap. The findings.json payload channel finishes it — the analyzer writes the result with
-  its tools before replying — measured live at **8 findings, 0 rejected, exit 0**, 53 model calls,
-  ~3.1M input tokens of REPL inspection.
 
 ## Write one analyst
 
@@ -305,79 +178,6 @@ Its stable fields are:
 
 `pnpm tsx examples/custom-analyst.ts --good-fixture` returns `[]`.
 
-## Test an analyst
-
-A useful analyst must beat a trivial no-findings baseline on labeled trajectories.
-It must also avoid inventing issues on clean trajectories.
-
-`agent-eval` provides adapters for two public datasets:
-
-| Dataset | Labels used |
-| --- | --- |
-| AgentRx | Failure category, failed step, and root-cause step |
-| CodeTraceBench | Incorrect and unhelpful action steps; solved label-empty rows are clean controls |
-
-Use `runAnalystBenchmark` to report recall, precision, F1, root-step accuracy, citation coverage, citation validity, clean-case false positives, repeat agreement, latency, calls, tokens, and known cost.
-Use `compareAnalystRunners` for paired baseline and candidate comparisons.
-Failed label-empty CodeTraceBench rows are unlabeled, not clean controls.
-
-```ts
-import {
-  codeTraceBenchCase,
-  registryBenchmarkRunner,
-  renderAnalystBenchmarkMarkdown,
-  runAnalystBenchmark,
-} from '@tangle-network/agent-eval/analyst'
-import { otlpTextToTraceAnalysisStore } from '@tangle-network/agent-eval/traces'
-import { chatTrajectoryToSpans, serializeSpans } from '@tangle-network/traces'
-
-const cases = rows.map(({ label, trajectory }) => {
-  const spans = chatTrajectoryToSpans(trajectory, { traceId: label.traj_id })
-  const traceStore = otlpTextToTraceAnalysisStore(serializeSpans(spans))
-  return codeTraceBenchCase(label, { traceStore })
-})
-
-const result = await runAnalystBenchmark({
-  cases,
-  runners: [registryBenchmarkRunner({ id: 'candidate', registry })],
-  repetitions: 3,
-  maxConcurrency: 4,
-})
-
-console.log(renderAnalystBenchmarkMarkdown(result))
-```
-
-Public labels test the measurement code, not the quality of every built-in analyst automatically.
-A real quality claim requires running the analyst over the corresponding trajectories, retaining all rows, and comparing it with named alternatives at equal model and request limits.
-
-## Verified findings (executed replay)
-
-An analyst finding is a cited claim until something executes it.
-`traces analyze --verify-findings` (and the standalone `traces verify-findings`) replays each finding's trajectory prefix in a real sandbox, re-runs the accused step, and annotates every finding with an executed verdict:
-
-| Verdict | Meaning |
-|---|---|
-| `reproduced` | the recorded failure signature (returncode + stable output substring) reproduced when the accused step re-ran |
-| `fix-flipped` | reproduced, and a supplied corrected command made the failure vanish in a fresh replay |
-| `divergent` | the step executed but the recorded failure did not reproduce — evidence against the finding, or against replay fidelity (the receipt carries prefix divergences so you can tell which) |
-| `not-replayable` | the finding could not be executed; the receipt names the precise reason (no step subject, unknown trajectory, no docker image, submit step, …) |
-
-```bash
-# Verify the findings an analyze run produced (marks each finding in the report):
-traces analyze --last 1 --llm --verify-findings \
-  --replay-corpus holdout=labels.json::prepared/ --verify-out ./receipts
-
-# Verify findings recorded earlier (e.g. extracted from an eval result.json):
-traces verify-findings --findings findings.json --out ./receipts \
-  --steps normalized/<traj>/steps.json --image <replay-ready-image> --cwd /app
-```
-
-Findings are matched by the shape analysts emit: subject `incorrect-step-<n>` (or the wire form `incorrect-steps-<f>-<l>-…`), `metadata.block_first_step`, and `trace://<trajectory>/…` evidence refs.
-Findings accusing the same step share one executed proof; each finding still gets its own receipt directory (`receipt.json` plus, when executed, `replay-verdict.json` and `report.md` with real stdout/stderr).
-Verification is execution, not generation: no LLM is involved unless you pass `--fix-command`.
-A missing sandbox is an error when any finding is replayable — verification never silently skips.
-Sandbox setup, execution semantics, and honest limits are in [Replay verification](./replay-verify.md).
-
 ## Turn findings into improvement
 
 Do not train or rewrite policy from an analyst's own prose alone.
@@ -404,7 +204,6 @@ traces analyze --source-bundle ./session-bundle --llm
 `investigate` and `improve` accept the same flag.
 The SDK accepts `sourceBundle: { path, maxRecordBytes? }` in analysis and investigation options.
 This authorization exposes `traces.readSpanSource` to local analysts through the existing trace store.
-External analyzers receive normalized OTLP without this capability.
 Ordinary OTLP input does not authorize source reads.
 
 The tool selects a trace, span, attribute, and optional `source_index`.

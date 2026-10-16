@@ -3,16 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { AmpAdapter } from '../src/adapters/amp.js'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
 import { CodexAdapter } from '../src/adapters/codex.js'
 import { CodexExecAdapter } from '../src/adapters/codex-exec.js'
-import { CopilotAdapter } from '../src/adapters/copilot.js'
-import { FactoryAdapter } from '../src/adapters/factory.js'
-import { GeminiAdapter } from '../src/adapters/gemini.js'
 import { OpencodeAdapter } from '../src/adapters/opencode.js'
-import { PiAdapter } from '../src/adapters/pi.js'
-import { QwenAdapter } from '../src/adapters/qwen.js'
 import { assembleSessionBundle } from '../src/bundle.js'
 import { createBundleSourceReader } from '../src/bundle-source.js'
 import { readOtlpInput } from '../src/otlp-input.js'
@@ -31,32 +25,10 @@ const blocks = [{ type: 'text', text }, { type: 'tool_use', id: 'call', name: 'R
 const resultBlocks = [{ type: 'tool_result', tool_use_id: 'call', content: output }]
 const timestamp = '2026-01-01T00:00:00Z'
 const cases: Array<{ harness: string; adapter: HarnessTraceAdapter; json?: unknown; lines?: unknown[] }> = [
-  { harness: 'amp', adapter: new AmpAdapter(), json: { id: 'fixture', messages: [{ role: 'assistant', messageId: 1, content: blocks }, { role: 'user', content: resultBlocks }] } },
   { harness: 'claude-code', adapter: new ClaudeAdapter(), lines: [
     { type: 'assistant', uuid: 'a', sessionId: 'fixture', timestamp, message: { id: 'm', role: 'assistant', content: blocks } },
     { type: 'user', uuid: 'b', sessionId: 'fixture', timestamp, message: { role: 'user', content: resultBlocks } },
   ] },
-  { harness: 'factory', adapter: new FactoryAdapter(), lines: [
-    { type: 'session_start', id: 'fixture', timestamp },
-    { type: 'message', id: 'a', timestamp, message: { role: 'assistant', content: blocks } },
-    { type: 'message', id: 'b', timestamp, message: { role: 'user', content: resultBlocks } },
-  ] },
-  { harness: 'github-copilot', adapter: new CopilotAdapter(), lines: [
-    { type: 'assistant.message', timestamp, data: { messageId: 'm', content: text } },
-    { type: 'tool.execution_start', timestamp, data: { toolCallId: 'call', toolName: 'Read', arguments: args } },
-    { type: 'tool.execution_complete', timestamp, data: { toolCallId: 'call', success: true, output } },
-  ] },
-  { harness: 'qwen', adapter: new QwenAdapter(), lines: [
-    { type: 'assistant', sessionId: 'fixture', timestamp, message: { role: 'model', parts: [{ text }, { functionCall: { name: 'Read', args } }] } },
-    { type: 'tool_result', sessionId: 'fixture', timestamp, message: { role: 'user', parts: [{ functionResponse: { name: 'Read', response: output } }] } },
-  ] },
-  { harness: 'pi', adapter: new PiAdapter(), lines: [
-    { type: 'session', id: 'fixture', timestamp },
-    { type: 'message', id: 'm', timestamp, message: { role: 'assistant', content: [{ type: 'text', text }, { type: 'tool_call', id: 'call', toolName: 'Read', input: args }] } },
-    { type: 'message', id: 'r', timestamp, message: { role: 'toolResult', toolCallId: 'call', toolName: 'Read', content: [{ type: 'text', text: output }] } },
-  ] },
-  { harness: 'gemini', adapter: new GeminiAdapter(), json: { sessionId: 'fixture', startTime: timestamp, messages: [{ id: 'm', type: 'assistant', timestamp, content: text, toolCalls: [{ id: 'call', name: 'Read', args, result: output, status: 'ok' }] }] } },
-  { harness: 'gemini', adapter: new GeminiAdapter(), json: { sessionId: 'fixture', startTime: timestamp, messages: [{ id: 'm', type: 'assistant', timestamp, content: { text, structured: true }, toolCalls: [{ id: 'call', name: 'Read', args, result: output, status: 'ok' }] }] } },
   { harness: 'codex', adapter: new CodexAdapter(), lines: [
     { type: 'session_meta', timestamp, payload: { id: 'fixture' } },
     { type: 'response_item', timestamp, payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } },

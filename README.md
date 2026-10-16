@@ -1,6 +1,6 @@
 # traces
 
-> Point `traces` at any agent trace — OTLP spans your own system emits, or the session logs Claude Code, Codex, OpenCode, Pi, Kimi, Factory and Gemini already write to disk. Get failure-mode and efficiency findings, exact session facts, and a straight answer about what the trace cannot tell you. A CLI *and* an SDK.
+> Point `traces` at any agent trace — OTLP spans your own system emits, or the session logs Claude Code, Codex, OpenCode, Pi, Kimi and Factory already write to disk. Get failure-mode and efficiency findings, exact session facts, and a straight answer about what the trace cannot tell you. A CLI *and* an SDK.
 
 ![traces analyzing a real Claude Code session](https://raw.githubusercontent.com/tangle-network/traces/main/docs/demo.gif)
 
@@ -45,7 +45,6 @@ traces check   run.jsonl --contract contract.json           # fail CI when a run
 | Keep one session's evidence after the logs rotate | `bundle` | [Session bundle](docs/bundle.md) |
 | Export rows for mining or OpenInference | `index`, `evidence`, `export` | [Index, evidence and export](docs/evidence.md) |
 | Upload, or check files before sharing | `upload`, `verify-safe` | [Upload and share safely](docs/upload.md) |
-| Prove a finding by replaying it | `replay-verify`, `verify-findings` | [Replay verification](docs/replay-verify.md) |
 
 The common commands and flags are in the [CLI reference](docs/cli.md). `traces --help` lists every command and option, and `traces <command> --help` prints that command's own flags.
 
@@ -73,5 +72,5 @@ The CLI is a thin consumer of the SDK. The main exports are in [Library (SDK)](d
 ## Docs
 
 - **Guides:** the pages in the table above.
-- **Reference:** [CLI](docs/cli.md) · [Library (SDK)](docs/sdk.md) · [Supported harnesses and session selection](docs/harnesses.md) · [Trace analysts](docs/trace-analysts.md) (engines, custom analysts, benchmarks) · [Agent skills](docs/agent-skills.md)
+- **Reference:** [CLI](docs/cli.md) · [Library (SDK)](docs/sdk.md) · [Supported harnesses and session selection](docs/harnesses.md) · [Trace analysts](docs/trace-analysts.md) (custom analysts, benchmarks) · [Agent skills](docs/agent-skills.md)
 - **Contribute:** [Develop and release](docs/develop.md) (local setup, releases, the audit benchmark)

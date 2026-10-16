@@ -38,7 +38,12 @@ export function sessionHash(spans: readonly OtlpSpan[]): string {
 
 export interface UploadIdentity {
   stripContent: boolean
-  redactor: string | null
+  /**
+   * Always null: the external redactor hook is gone (1.0). The field stays in
+   * the hashed identity so a session uploaded before 1.0 still matches its
+   * recorded hash and is not sent twice.
+   */
+  redactor: null
   redactionVersion: string
 }
 

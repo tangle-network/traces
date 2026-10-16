@@ -27,19 +27,10 @@ It runs over every span attribute, including the captured prompt/response text.
 It does **not** catch names, postal addresses or account numbers written in prose. Those need a context-aware model. Three postures, strongest first:
 
 1. **`--no-content`**: upload metadata only (tool calls, tokens, timing, loop signal); no prose leaves the machine.
-2. **`--redactor <cmd>`**: run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) after the redaction core.
+2. **Your own scrubber on a file**: `traces convert <ref> --out spans.jsonl`, run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) on `spans.jsonl`, then `traces upload spans.jsonl`. Upload still applies the redaction core and the share-safety check to that file.
 3. Default: the redaction core.
 
 Always `--dry-run` first to see exactly what would be sent.
-
-## External redactors
-
-**Redactors** scrub prompt/response prose with an external PII model (catching names/addresses the regex pass can't), running *after* the built-in redaction:
-
-```bash
-# the command reads a JSON array of strings on stdin, writes the scrubbed array on stdout
-traces upload --since 24h --dry-run --redactor "my-pii-scrubber"
-```
 
 ## Check before sharing
 

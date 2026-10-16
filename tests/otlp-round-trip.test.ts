@@ -25,7 +25,6 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { traceContractBuildId } from '../src/contract-build.js'
 import {
   deriveHexId,
   type FindingCode,
@@ -496,15 +495,12 @@ describe('re-exporting a trace does not change what a validator says about it', 
     })
   }
 
-  it('every exported span names the contract build that produced it', async () => {
-    // The artifact's verdicts are one build's reading (see src/contract-build.ts),
-    // so every line this package writes must say WHICH — the same stamp
-    // cli-bridge puts on its request spans and VB puts on its run spans, at the
-    // resource level so it survives further round trips. Omit-never-fake: the
-    // attribute is the installed tree's digest or absent, never a placeholder —
-    // here the tree is readable, so it must be present and must be THE digest.
-    const expected = traceContractBuildId()
-    expect(expected).toMatch(/^[0-9a-f]{64}$/)
+  it('every exported span names the traces version that produced it', async () => {
+    // The artifact's verdicts are one build's reading, so every line this
+    // package writes says WHICH, at the resource level so it survives further
+    // round trips. traces pins agent-trace-contract to one exact version, so
+    // its own version also names the contract build.
+    const expected = (JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 
     const dir = await mkdtemp(join(tmpdir(), 'traces-contract-stamp-'))
     const sourcePath = join(dir, 'source.otlp.jsonl')
@@ -517,7 +513,7 @@ describe('re-exporting a trace does not change what a validator says about it', 
     expect(lines.length).toBe(3)
     for (const line of lines) {
       const exported = JSON.parse(line) as { resource?: { attributes?: Record<string, unknown> } }
-      expect(exported.resource?.attributes?.['traces.trace_contract.build']).toBe(expected)
+      expect(exported.resource?.attributes?.['traces.version']).toBe(expected)
     }
 
     // The stamp survives a second hop: a re-export signs with ITS build too.
@@ -526,7 +522,7 @@ describe('re-exporting a trace does not change what a validator says about it', 
     await writeOtlpFile(artifact.spans, secondPath)
     for (const line of (await readFile(secondPath, 'utf8')).trim().split('\n')) {
       const exported = JSON.parse(line) as { resource?: { attributes?: Record<string, unknown> } }
-      expect(exported.resource?.attributes?.['traces.trace_contract.build']).toBe(expected)
+      expect(exported.resource?.attributes?.['traces.version']).toBe(expected)
     }
   })
 

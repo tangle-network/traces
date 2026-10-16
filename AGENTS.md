@@ -10,11 +10,9 @@ content itself — see Ownership.
   [docs/sdk.md](docs/sdk.md). Both are curated: `traces --help` and [src/index.ts](src/index.ts) are the
   complete inventories. Do not duplicate command inventories here. [README.md](README.md) stays a short
   front page that links to one guide per task.
-- For the analyst engine (built-in vs `--llm` vs external engines like HALO/Hodoscope/Prime), read
-  [docs/trace-analysts.md](docs/trace-analysts.md).
-- For executed-replay proofs of a finding (`replay-verify`, `verify-findings`), read
-  [docs/replay-verify.md](docs/replay-verify.md), including its Honest limits section before trusting
-  a replay verdict.
+- For the analyst engine (built-in vs `--llm`), read [docs/trace-analysts.md](docs/trace-analysts.md).
+- Every 0.x command and flag that 1.0 removed is a row in [src/moved.ts](src/moved.ts): using it exits 2
+  and prints the replacement (`traces help moved`). Remove a spelling only by adding its row.
 - Resolve current exports and signatures from [src/index.ts](src/index.ts) and `src/cli.ts`'s `usage()`
   function (`traces --help`), not from memory of an older version.
 

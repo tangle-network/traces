@@ -27,8 +27,7 @@ import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-i
 import { ATTR, INGEST_SOURCE_CLI } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
-import type { Redactor } from './external.js'
-import { applyRedactor, redactSpans } from './redact.js'
+import { redactSpans } from './redact.js'
 import { type ScanOptions, scanSessions } from './session-source.js'
 import { parseIsoToEpochMs } from './time.js'
 import type { SessionRef } from './types.js'
@@ -206,9 +205,6 @@ export interface ExecuteOptions {
   /** Metadata-only upload: drop captured prompt/response/tool values before the
    *  spans leave the machine (still keeps tool names, tokens, timing, and loop signal). */
   stripContent?: boolean
-  /** External PII scrubber applied to captured conversation and tool values
-   *  AFTER the regex pass. Ignored if stripContent. */
-  redactor?: Redactor
   log?: (msg: string) => void
 }
 
@@ -236,19 +232,13 @@ async function prepareOutbound(
   uploadedAt: string,
 ): Promise<{ items: OutboundItem[]; skipped: number; refused: RefusedSession[] }> {
   let candidates = plan.items
-  if (opts.redactor && !opts.stripContent) {
-    const redactor = opts.redactor
-    candidates = await Promise.all(
-      candidates.map(async (item) => ({ ...item, spans: (await applyRedactor(item.spans, redactor)).spans })),
-    )
-  }
   if (opts.stripContent) {
     candidates = candidates.map((item) => ({ ...item, spans: stripSpanContent(item.spans) }))
   }
 
   const identity: UploadIdentity = {
     stripContent: opts.stripContent === true,
-    redactor: opts.stripContent ? null : (opts.redactor?.name ?? null),
+    redactor: null,
     redactionVersion: REDACTION_VERSION,
   }
   const items: OutboundItem[] = []
@@ -270,8 +260,8 @@ async function prepareOutbound(
       events = eventsAt(eventTimestamp)
       hash = outboundHash(events, identity)
     }
-    // The check reads exactly what would be sent: redacted spans after the
-    // external redactor and privacy mode, plus the session metadata added above.
+    // The check reads exactly what would be sent: redacted spans after privacy
+    // mode, plus the session metadata added above.
     const verdict = assessShareSafety(events)
     if (!shareAllowed(verdict)) {
       refused.push({ harness: item.ref.harness, sessionId: item.ref.sessionId, verdict })

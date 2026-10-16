@@ -79,6 +79,8 @@ describe('traces CLI', () => {
     const reportText = await readFile(report, 'utf8')
     expect(reportText).toContain('intelligence-spans')
     expect(reportText).toContain('1 session(s), 2 spans')
+    // The external-engine footer went with the engines (1.0).
+    expect(reportText).not.toContain('--analyzer')
     const outputRows = parseRows(await readFile(otlp, 'utf8'))
     expect(outputRows).toHaveLength(2)
     expect(outputRows[0]!.attributes).toEqual(expect.objectContaining({
@@ -210,7 +212,7 @@ describe('traces CLI', () => {
         extra: { 'session.id': 'session-config' },
       }),
     ]), 'utf8')
-    await writeFile(config, `export default { externalAnalyzers: [{ name: 'configured', async analyze() { return { analyzer: 'configured', kind: 'report', ok: true, output: 'explicit config executed' } } }] }\n`, 'utf8')
+    await writeFile(config, `export default { analysts: [{ id: 'configured-analyst', description: 'runs only from an explicit config', inputKind: 'trace-store', cost: { kind: 'deterministic' }, version: '1.0.0', async analyze() { return [] } }] }\n`, 'utf8')
 
     const run = (report: string, extra: string[] = []) => execFileAsync(process.execPath, [
       '--import',
@@ -231,10 +233,10 @@ describe('traces CLI', () => {
     })
 
     await run(defaultReport)
-    expect(await readFile(defaultReport, 'utf8')).not.toContain('explicit config executed')
+    expect(await readFile(defaultReport, 'utf8')).not.toContain('`configured-analyst`')
 
     await run(configuredReport, ['--config', config])
-    expect(await readFile(configuredReport, 'utf8')).toContain('explicit config executed')
+    expect(await readFile(configuredReport, 'utf8')).toContain('`configured-analyst`')
   })
 
   it('keeps a trace with conflicting session identities in improvement output', async () => {
@@ -1169,49 +1171,6 @@ describe('traces analyze --llm failure surfacing', () => {
     const reportText = await readFile(report, 'utf8')
     expect(reportText).toContain('| Analyst | Status | Findings | Latency | Detail |')
     expect(reportText).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
-  }, 60_000)
-})
-
-describe('traces analyze external analyzer failure', () => {
-  it('writes the report, then exits 1 when a requested analyzer fails', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-external-fail-'))
-    const input = join(dir, 'spans.openinference.jsonl')
-    const report = join(dir, 'report.md')
-    await writeFile(input, serializeSpans([
-      span({
-        traceId: 'trace-external-fail',
-        spanId: 'root',
-        name: 'session',
-        kind: 'AGENT',
-        startTime: '2026-01-01T00:00:00.000Z',
-        service: 'claude-code',
-        extra: { 'session.id': 'session-external-fail' },
-      }),
-    ]), 'utf8')
-
-    const failure = await execFileAsync(process.execPath, [
-      '--import', 'tsx', 'src/cli.ts', 'analyze', input,
-      '--format', 'openinference',
-      // `false` is an installed command that exits 1 whatever its arguments.
-      '--analyzer', 'false',
-      '--out', report,
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 60_000,
-    }).then(
-      () => {
-        throw new Error('analyze exited 0 although its requested analyzer failed')
-      },
-      (error: Error & { code?: number; stdout?: string; stderr?: string }) => error,
-    )
-    expect(failure.code).toBe(1)
-    expect(failure.stderr).toContain('1 of 1 external analyzer(s) failed')
-    expect(failure.stderr).toContain('false: exit 1')
-    const reportText = await readFile(report, 'utf8')
-    expect(reportText).toContain('### false (report)')
-    expect(reportText).toContain('failed: exit 1')
   }, 60_000)
 })
 

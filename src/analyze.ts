@@ -6,9 +6,9 @@
  * LLM, model-agnostic). Supply `ai` to add the agentic RLM kinds
  * (failure-mode / knowledge-gap / knowledge-poisoning / improvement).
  *
- * The written file is canonical OpenInference (see otlp.ts), so it feeds our
- * analysts AND external engines directly — `--analyzer halo` runs HALO over the
- * same artifact, no conversion. Analysis is never locked to one engine.
+ * The written file is canonical OpenInference (see otlp.ts), so any tool that
+ * reads OpenInference can read the same artifact with no conversion
+ * (`traces convert X --out f`, then the tool on `f`).
  */
 
 import type { CostProvenance } from '@tangle-network/agent-eval'
@@ -72,7 +72,7 @@ export interface AnalyzeOptions {
 }
 
 export interface AnalyzeResult {
-  /** Path to the OTLP-JSONL artifact (convert to canonical for HALO). */
+  /** Path to the OTLP-JSONL artifact. */
   otlpPath: string
   execution: ExecutionReport
   result: Awaited<ReturnType<ReturnType<typeof buildDefaultAnalystRegistry>['run']>>

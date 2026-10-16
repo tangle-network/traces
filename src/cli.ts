@@ -21,7 +21,6 @@
  *   traces bundle-view <bundle-dir> --view evidence-only --out <dir>
  *   traces inspect session-index.json [--out inspection-report.md]
  *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
- *   traces import-codetracebench <rows.jsonl> --trajectory-dir <dir> --out <dir> --revision <40-or-64-character-hex>
  *   traces evidence [--harness claude-code] [--last 20] --out policy-evidence.jsonl
  *   traces stream  [input.jsonl] [--replay] [--all] [--format auto]
  *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
@@ -51,24 +50,8 @@ import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
-import { importCodeTraceBench } from './codetracebench.js'
 import { buildPolicyEvidenceRecord, serializePolicyEvidence, writePolicyEvidenceFile } from './evidence.js'
-import {
-  parseCorpusFlag,
-  renderVerifiedFindingsSection,
-  type VerifyFindingsRun,
-} from '@tangle-network/agent-eval/trajectory-replay'
-import {
-  cmdReplayVerify,
-  cmdReplayVerifyBatch,
-  cmdVerifyFindings,
-  DEFAULT_SANDBOX_BASE_URL,
-  verifyFindingsInSandbox,
-} from './replay.js'
-import { commandAnalyzer, commandRedactor, externalFailureMessage, haloAnalyzer } from './external.js'
 import { findingRejectionDetail } from './finding-rejections.js'
-import { hodoscopeAnalyzer } from './hodoscope.js'
-import { primeAnalyzer } from './analyst-engine-prime.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
 import { inspectSessionIndex, readSessionIndexFile, renderInspectionReport, writeInspectionReportFile } from './inspect.js'
 import {
@@ -81,6 +64,7 @@ import {
   totalAgenticFailureMessage,
   type TraceInvestigationResult,
 } from './improvement.js'
+import { findMoved, movedMessage, renderMovedTable, shellWord } from './moved.js'
 import {
   serializeTraceStreamEvent,
   streamSessions,
@@ -222,9 +206,6 @@ interface Args {
   dryRun: boolean
   yes: boolean
   noContent: boolean
-  analyzers: string[]
-  analyzerPrompt?: string
-  redactorCmd?: string
   model?: string
   config?: string
   format?: string
@@ -239,15 +220,7 @@ interface Args {
   metadata?: string
   attrs: string[]
   supervisorRunDir?: string
-  trajectoryDir?: string
-  revision?: string
   concurrency: number
-  /** analyze --verify-findings: execute analyst findings as sandbox replay proofs. */
-  verifyFindings: boolean
-  /** Repeatable `name=<labels>::<prepared>` corpora resolving finding trajectories. */
-  replayCorpora: string[]
-  /** Receipt root for --verify-findings; defaults next to --out. */
-  verifyOut?: string
   /** ask: repeatable `--question` texts. */
   questions: string[]
   /** ask: JSON file of questions, with optional IDs, guidance, and answer schemas. */
@@ -289,15 +262,12 @@ function parseArgs(argv: string[]): Args {
     dryRun: false,
     yes: false,
     noContent: false,
-    analyzers: [],
     replay: false,
     once: false,
     noSpans: false,
     noFindings: false,
     attrs: [],
     concurrency: 4,
-    verifyFindings: false,
-    replayCorpora: [],
     questions: [],
     annotations: false,
     explain: false,
@@ -316,8 +286,6 @@ function parseArgs(argv: string[]): Args {
       case '--session': a.session = next(); break
       case '--cwd': { const v = next(); if (v !== undefined) a.cwd = resolve(v); break }
       case '--supervisor-run-dir': a.supervisorRunDir = next(); break
-      case '--trajectory-dir': a.trajectoryDir = next(); break
-      case '--revision': a.revision = next(); break
       case '--concurrency': a.concurrency = Number(next()); break
       case '--since': a.since = next(); break
       case '--until': a.until = next(); break
@@ -345,16 +313,10 @@ function parseArgs(argv: string[]): Args {
       case '--once': a.once = true; a.replay = true; break
       case '--no-spans': a.noSpans = true; break
       case '--no-findings': a.noFindings = true; break
-      case '--analyzer': { const v = next(); if (v) a.analyzers.push(v); break }
-      case '--verify-findings': a.verifyFindings = true; break
-      case '--replay-corpus': { const v = next(); if (v) a.replayCorpora.push(v); break }
-      case '--verify-out': a.verifyOut = next(); break
-      case '--analyzer-prompt': a.analyzerPrompt = next(); break
       case '--question': { const v = next(); if (v !== undefined) a.questions.push(v); break }
       case '--questions': a.questionsFile = next(); break
       case '--question-budget': a.questionBudget = Number(next()); break
       case '--question-timeout': a.questionTimeout = Number(next()); break
-      case '--redactor': a.redactorCmd = next(); break
       case '--format': a.format = next(); break
       case '--contract': a.contract = next(); break
       case '--junit': a.junit = next(); break
@@ -699,10 +661,6 @@ function warnUnread(args: Args, unread: readonly UnreadSessionFact[], command: '
   process.stderr.write(`${unread.length} unreadable: ${['traces', command, ...select].join(' ')} --format json | jq .selection\n`)
 }
 
-function shellWord(word: string): string {
-  return /^[\w@%+=:,./-]+$/u.test(word) ? word : `'${word.replace(/'/gu, `'\\''`)}'`
-}
-
 /**
  * `--llm` engine. It forwards the whole `--budget` as the per-analyst provider
  * ceiling: the registry already splits `--budget` across analysts, so this only
@@ -735,24 +693,19 @@ function requiredBridgeVersion(): string {
 }
 
 /**
- * `--llm` promises agentic findings, and `--analyzer` promises that engine's
- * output. Delivering the deterministic report with exit 0 when a requested
- * analysis died reads as success. Throwing after the report is written keeps
- * the deterministic output AND fails loud. The bridge-version read happens
- * only once total agentic failure is established, so a package.json problem
- * can never turn a successful run into exit 1.
+ * `--llm` promises agentic findings. Delivering the deterministic report with
+ * exit 0 when the requested analysis died reads as success. Throwing after the
+ * report is written keeps the deterministic output AND fails loud. The
+ * bridge-version read happens only once total agentic failure is established,
+ * so a package.json problem can never turn a successful run into exit 1.
  */
 function assertRequestedAnalysesRan(
   args: Args,
-  result: Pick<TraceInvestigationResult, 'agenticPerAnalyst' | 'external'>,
+  result: Pick<TraceInvestigationResult, 'agenticPerAnalyst'>,
 ): void {
-  const messages: string[] = []
   if (args.llm && totalAgenticFailureMessage(result.agenticPerAnalyst)) {
-    messages.push(totalAgenticFailureMessage(result.agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })!)
+    throw new Error(totalAgenticFailureMessage(result.agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })!)
   }
-  const external = externalFailureMessage(result.external)
-  if (external) messages.push(external)
-  if (messages.length > 0) throw new Error(messages.join('\n'))
 }
 
 /** One `traces list` row: the facts a person picks a session by. */
@@ -935,7 +888,7 @@ async function collectOtlpSpans(path: string, selector?: string): Promise<Collec
 async function collectSpans(args: Args): Promise<CollectedSpans> {
   if (args.sourceBundle) {
     if (!['analyze', 'investigate', 'improve', 'ask'].includes(args.command)) throw new Error('--source-bundle is an analysis option')
-    if (args.otlp || args.input || args.current || args.workflow || args.noContent || args.redactorCmd) {
+    if (args.otlp || args.input || args.current || args.workflow || args.noContent) {
       throw new Error('--source-bundle cannot be combined with another input, redaction, or metadata-only selection')
     }
     for (const output of [args.out, args.dir, args.otlpOut]) {
@@ -1048,7 +1001,7 @@ async function cmdValidate(args: Args): Promise<void> {
   process.exitCode = validationExitCode(validation)
 }
 
-const EVIDENCE_FORMATS = new Set(['policy-evidence', 'sandbox-events', 'openinference', 'intelligence-spans', 'chat-trajectory'])
+const EVIDENCE_FORMATS = new Set(['policy-evidence', 'sandbox-events', 'openinference', 'intelligence-spans'])
 
 /** check's --format names its input: a span reader, or a harness whose session reader it forces. */
 function checkInputFormat(args: Args): { harness?: string; format?: SpanReader } {
@@ -1516,55 +1469,6 @@ async function cmdExport(args: Args): Promise<void> {
   for (const line of iterSerializedSpans(result.spans)) process.stdout.write(line)
 }
 
-async function cmdImportCodeTraceBench(args: Args): Promise<void> {
-  if (!args.input) {
-    throw new Error(
-      'import-codetracebench needs the native CodeTraceBench rows JSON or JSONL file',
-    )
-  }
-  if (!args.trajectoryDir) {
-    throw new Error(
-      'import-codetracebench needs --trajectory-dir with <traj_id>/steps.json directories',
-    )
-  }
-  if (!args.out) {
-    throw new Error('import-codetracebench needs a new --out directory')
-  }
-  if (!args.revision) {
-    throw new Error(
-      'import-codetracebench needs --revision with a full 40- or 64-character hexadecimal commit or digest',
-    )
-  }
-  const controller = new AbortController()
-  const interrupt = () => controller.abort(
-    new Error('import-codetracebench interrupted'),
-  )
-  process.once('SIGINT', interrupt)
-  process.once('SIGTERM', interrupt)
-  try {
-    const result = await importCodeTraceBench({
-      rowsPath: args.input,
-      trajectoryDir: args.trajectoryDir,
-      outDir: args.out,
-      revision: args.revision,
-      concurrency: args.concurrency,
-      signal: controller.signal,
-    })
-    const traceCount = result.receipt.counts.traces
-    const stepCount = result.receipt.counts.steps
-    const spanCount = result.receipt.counts.spans
-    console.log(
-      `imported ${traceCount} CodeTraceBench ${traceCount === 1 ? 'trajectory' : 'trajectories'} ` +
-        `(${stepCount} ${stepCount === 1 ? 'step' : 'steps'}, ` +
-        `${spanCount} ${spanCount === 1 ? 'span' : 'spans'}) ` +
-        `→ ${result.directory}; receipt: ${result.receiptPath}`,
-    )
-  } finally {
-    process.removeListener('SIGINT', interrupt)
-    process.removeListener('SIGTERM', interrupt)
-  }
-}
-
 function traceEvidenceFormat(raw: string | undefined): TraceEvidenceFormatOption {
   const format = raw ?? 'auto'
   if (
@@ -1572,10 +1476,9 @@ function traceEvidenceFormat(raw: string | undefined): TraceEvidenceFormatOption
     format !== 'policy-evidence' &&
     format !== 'sandbox-events' &&
     format !== 'openinference' &&
-    format !== 'intelligence-spans' &&
-    format !== 'chat-trajectory'
+    format !== 'intelligence-spans'
   ) {
-    throw new Error('--format must be auto, policy-evidence, sandbox-events, openinference, intelligence-spans, or chat-trajectory')
+    throw new Error('--format must be auto, policy-evidence, sandbox-events, openinference, or intelligence-spans')
   }
   return format
 }
@@ -1616,54 +1519,16 @@ async function cmdAnalyze(args: Args): Promise<void> {
     return cmdAnalyzeSupervisorRun(runDir.path, args)
   }
   const result = await investigate(args, { loadDefaultConfig: false })
-  let report = result.report
-  let verifySummary = ''
-  if (args.verifyFindings) {
-    const run = await verifyAnalyzeFindings(args, result)
-    report = `${report}\n${renderVerifiedFindingsSection(run)}`
-    verifySummary =
-      `, verified: ${run.counts.reproduced} reproduced / ${run.counts['fix-flipped']} fix-flipped / ` +
-      `${run.counts.divergent} divergent / ${run.counts['not-replayable']} not-replayable → ${run.out}`
-  }
   if (args.out) {
-    await saveReport(args.out, report)
+    await saveReport(args.out, result.report)
     console.log(
       `report → ${args.out}  (${result.findings.length} findings, ` +
-        `${result.pipelines.stuckLoops.findings.length} loops, OTLP: ${result.otlpPath}${verifySummary})`,
+        `${result.pipelines.stuckLoops.findings.length} loops, OTLP: ${result.otlpPath})`,
     )
   } else {
-    console.log(report)
+    console.log(result.report)
   }
   assertRequestedAnalysesRan(args, result)
-}
-
-/**
- * Executes the analyze run's findings as sandbox replay proofs. Findings name
- * their trajectory through trace:// evidence; the executable steps and docker
- * image come from --replay-corpus, because harness session stores carry no
- * docker_config to replay — requiring the corpus up front fails louder than
- * annotating every finding as not-replayable for the same missing reason.
- */
-async function verifyAnalyzeFindings(args: Args, result: TraceInvestigationResult): Promise<VerifyFindingsRun> {
-  if (args.replayCorpora.length === 0) {
-    throw new Error(
-      'analyze --verify-findings needs the executable trajectory source: pass ' +
-        '--replay-corpus name=<labels.json>::<preparedDir> (repeatable). Harness sessions ' +
-        'carry no docker_config, so findings cannot be replayed from the session store alone.',
-    )
-  }
-  if (result.findings.length === 0) {
-    throw new Error('analyze --verify-findings: the analysis produced no findings to verify')
-  }
-  const out = args.verifyOut ?? (args.out ? `${args.out}.verify` : 'traces-verify-findings')
-  return verifyFindingsInSandbox(result.findings, {
-    source: { kind: 'corpus', corpora: args.replayCorpora.map(parseCorpusFlag) },
-    out,
-    sandbox: {
-      apiKey: process.env.SANDBOX_API_KEY ?? '',
-      baseUrl: process.env.SANDBOX_API_URL ?? DEFAULT_SANDBOX_BASE_URL,
-    },
-  })
 }
 
 /**
@@ -1747,18 +1612,6 @@ function analystLog(msg: string, fields?: Record<string, unknown>): void {
   process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
 }
 
-function externalAnalyzersFromArgs(args: Args) {
-  return args.analyzers.map((spec) =>
-    spec === 'halo'
-      ? haloAnalyzer({ defaultPrompt: args.analyzerPrompt, model: args.model })
-      : spec === 'hodoscope'
-        ? hodoscopeAnalyzer({ summarizeModel: args.model })
-      : spec === 'prime'
-        ? primeAnalyzer({ defaultPrompt: args.analyzerPrompt, ...(args.model ? { model: args.model } : {}) })
-      : commandAnalyzer({ name: spec, command: spec, args: (p, prompt) => (prompt ? [p, prompt] : [p]) }),
-  )
-}
-
 async function cmdInvestigate(args: Args): Promise<void> {
   const result = await investigate(args)
   if (args.out) {
@@ -1804,8 +1657,6 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
     model: args.llm ? analystModel : args.model,
     budgetUsd: args.budget,
     otlpOutPath: args.otlpOut,
-    externalAnalyzers: externalAnalyzersFromArgs(args),
-    analyzerPrompt: args.analyzerPrompt,
     log: analystLog,
     ...conformanceOptions(collected),
   }, config))
@@ -1831,8 +1682,6 @@ async function cmdImprove(args: Args): Promise<void> {
       model: args.llm ? analystModel : args.model,
       budgetUsd: args.budget,
       otlpOutPath: args.otlpOut,
-      externalAnalyzers: externalAnalyzersFromArgs(args),
-      analyzerPrompt: args.analyzerPrompt,
       log: analystLog,
       ...conformanceOptions(collected),
     }, config),
@@ -2180,9 +2029,6 @@ async function cmdUpload(args: Args): Promise<void> {
       })
   warnUnread(args, unread)
 
-  const redactorParts = args.redactorCmd?.split(/\s+/).filter(Boolean) ?? []
-  const redactor = redactorParts[0] ? commandRedactor({ command: redactorParts[0], args: redactorParts.slice(1) }) : undefined
-
   const candidates = plan.items
   const byDetector: Record<string, number> = {}
   let totalRedactions = 0
@@ -2206,7 +2052,7 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   if (args.dryRun) {
-    const res = await executeUpload(plan, { dryRun: true, otlpOut: otlpOutPath(args), stripContent: args.noContent, redactor })
+    const res = await executeUpload(plan, { dryRun: true, otlpOut: otlpOutPath(args), stripContent: args.noContent })
     reportRefused(res.refused)
     console.log(`dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
@@ -2221,7 +2067,7 @@ async function cmdUpload(args: Args): Promise<void> {
     }
   }
 
-  const res = await executeUpload(plan, { log: (m) => w(`${m}\n`), stripContent: args.noContent, redactor })
+  const res = await executeUpload(plan, { log: (m) => w(`${m}\n`), stripContent: args.noContent })
   reportRefused(res.refused)
   console.log(
     `Uploaded ${res.uploadedSessions} session(s), ${res.acceptedSpans} spans accepted, ` +
@@ -2371,7 +2217,6 @@ Input formats:
   sandbox-events   JSON arrays with start/raw/result/done/error events
   openinference    Existing OpenInference JSONL; rewrites through traces redaction
   intelligence-spans  JSONL rows exported from Tangle Intelligence trace spans
-  chat-trajectory  A message array or objects with a messages array
   auto             Detect the format from the file contents (default)
 
 Examples:
@@ -2380,28 +2225,10 @@ Examples:
   traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
   traces export intelligence-spans.jsonl --out spans.openinference.jsonl
   traces export sandbox-events.json --attr task.id=aec-001 --attr outcome.score=1 --out spans.openinference.jsonl
-  halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 
 Safety:
   export runs the same local redaction (agent-eval's redaction core) used by upload before writing spans.
   --metadata must be a JSON object; --attr key=value is repeatable and overrides matching metadata keys.`)
-}
-
-function usageImportCodeTraceBench(): void {
-  console.log(`traces import-codetracebench: write one label-free OTLP file per trajectory
-
-Usage:
-  traces import-codetracebench <rows.jsonl|rows.json> \\
-    --trajectory-dir <normalized-dir> --out <new-trace-dir> \\
-    --revision <40-or-64-character-hex> [--concurrency 4]
-
-Input layout:
-  <normalized-dir>/<traj_id>/steps.json
-  <normalized-dir>/<traj_id>/task.md    optional
-
-The command validates every native step, rejects annotation leakage, writes
-<traj_id>.otlp.jsonl files, and records input and output SHA-256 hashes in
-codetracebench-import.json. The output directory must not already exist.`)
 }
 
 function usageValidate(): void {
@@ -2503,7 +2330,7 @@ Commands:
             machine, and list installed skills with no use in the window.
             Incremental: a run reads only transcript bytes appended since the
             last run. No model call. traces skills --help
-  convert   Emit OTLP-JSONL only, to --otlp-out (HALO: use analyze --analyzer halo)
+  convert   Emit OTLP-JSONL only, to --otlp-out
   index     Emit a reusable session index JSON for later investigation
   bundle    Assemble one session's durable evidence directory: transcript +
             subagents, derived index/report/evidence/OTLP, the repo's .evolve
@@ -2534,19 +2361,7 @@ Commands:
             transcript, the report, the spans and every prose file by name, and
             refuses to write a view whose text repeats an excluded source
   inspect   Read a session index and print ranked improvement findings
-  export    Convert evidence/events files to OpenInference JSONL for HALO
-  import-codetracebench
-            Convert CodeTracer-normalized CodeTraceBench trajectories in bulk
-  replay-verify
-            Replay a trajectory prefix in a sandbox, execute step k both recorded
-            and corrected, and emit an executed-proof verdict (--help for flags)
-  replay-verify-batch
-            Measure replayability + fix-flip rates across gold-labeled corpora:
-            arm A per replayable case, LLM-generated arm-B fixes (--help for flags)
-  verify-findings
-            Execute recorded analyst findings as sandbox replay proofs: each
-            finding → reproduced | fix-flipped | divergent | not-replayable,
-            with a receipt directory per finding (--help for flags)
+  export    Convert evidence/events files to OpenInference JSONL
   evidence  Emit compact session-evidence JSONL for downstream policy miners
   stream    Emit JSONL trace stream events for live visualizers or replay
   watch     Online observer: tail active sessions, notify on loops + semantic findings
@@ -2593,7 +2408,7 @@ read is skipped and named in selection.unreadSessions):
                    Available for analyze, investigate, improve, and ask.
   --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
                    provenance / dry-run upload preview)
-  --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans | chat-trajectory
+  --format <kind>  analyze/export: auto | policy-evidence | sandbox-events | openinference | intelligence-spans
                    facts: json (default) | text
   --metadata <json> analyze/export file: attach JSON object fields as span attributes
   --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
@@ -2612,8 +2427,8 @@ read is skipped and named in selection.unreadSessions):
                    version-matched to this package's @tangle-network/agent-eval.
                    Exits 1 when every agentic analyst fails, with each reason.
                    ask uses the same engine and credentials without --llm.
-  --model <id>     Model for --llm, HALO, and Hodoscope (default for --llm: ${DEFAULT_ANALYST_MODEL})
-  --config <path>  investigate/improve/stream: JS config with analysts, liveAnalysts, or external analyzers
+  --model <id>     Model for --llm and ask (default: ${DEFAULT_ANALYST_MODEL})
+  --config <path>  investigate/improve/stream: JS config with analysts or liveAnalysts
   --budget <usd>   USD cap for agentic analysts; ask: one ceiling shared by every question
   --question <text> ask: a question (repeatable, at most ${MAX_TRACE_QUESTION_CHARS} characters)
   --questions <file> ask: JSON array of questions, strings or
@@ -2624,30 +2439,18 @@ read is skipped and named in selection.unreadSessions):
   --question-timeout <seconds>
                    ask: wall-clock deadline for one question's investigation
                    (default: ${DEFAULT_QUESTION_TIMEOUT_MS / 1000})
-  --concurrency <n> ask: questions running at once (default 4);
-                   import-codetracebench: trajectories imported at once
-  --analyzer <id>  analyze: also run halo, hodoscope, prime, or an installed command (repeatable);
-                   exits 1 after writing the report when any requested analyzer fails
-                   prime posts the full span projection to an OpenAI-compatible bridge
-                   (TRACES_PRIME_BRIDGE_URL, default http://localhost:4181;
-                   TRACES_PRIME_MODEL, default prime/zai/glm-5.2; TRACES_PRIME_TIMEOUT_MS)
-  --analyzer-prompt <p>  analyze: prompt passed to external analyzers (default: diagnose)
-  --verify-findings analyze: execute the findings as sandbox replay proofs and mark
-                   each VERIFIED (receipt path) or UNVERIFIABLE (reason). Needs
-                   --replay-corpus + a running sandbox (SANDBOX_API_KEY/_URL)
-  --replay-corpus name=<labels.json>::<preparedDir>
-                   trajectory source for --verify-findings (repeatable)
-  --verify-out <dir> receipt root for --verify-findings (default: <--out>.verify)
+  --concurrency <n> ask: questions running at once (default 4)
   --interval <s>   watch/stream: poll interval seconds (sessions 5, run tree 2)
   --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
   --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
   --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
   --no-content     facts: omit conversation, commands, paths and assignments;\n                   upload: strip prompt/response text; send metadata only
-  --redactor <cmd> upload: external PII scrubber (JSON array stdin→stdout) after the redaction core
   --yes, -y        upload: skip the confirmation prompt
   --version, -v    Print the installed traces version
-  --help, -h       Show help (use \`traces validate --help\`, \`traces export --help\`,
-                   or \`traces import-codetracebench --help\`)
+  --help, -h       Show help (use \`traces validate --help\` or \`traces export --help\`)
+
+Moved from 0.x: traces help moved prints every removed command and flag
+and what replaces it.
 
 Watch a run tree (any depth; driver spend and child spend stay separate,
 and a cost the harness never priced reads "unknown", never $0):
@@ -2665,19 +2468,13 @@ async function main(): Promise<void> {
     console.log(`traces ${tracesVersion()}`)
     return
   }
-  // replay-verify and replay-verify-batch own their flag sets; dispatch before the shared parser.
-  if (rawArgs[0] === 'replay-verify') {
-    await cmdReplayVerify(rawArgs.slice(1))
+  if (rawArgs[0] === 'help' && rawArgs[1] === 'moved') {
+    process.stdout.write(renderMovedTable())
     return
   }
-  if (rawArgs[0] === 'replay-verify-batch') {
-    await cmdReplayVerifyBatch(rawArgs.slice(1))
-    return
-  }
-  if (rawArgs[0] === 'verify-findings') {
-    await cmdVerifyFindings(rawArgs.slice(1))
-    return
-  }
+  // A removed spelling exits 2 with its replacement, before any parser sees it.
+  const moved = findMoved(rawArgs)
+  if (moved) throw new RefError(movedMessage(moved, rawArgs), 'usage')
   if (rawArgs[0] === 'mcp') {
     await cmdMcp(parseArgs(rawArgs))
     return
@@ -2706,11 +2503,7 @@ async function main(): Promise<void> {
   }
   const parsedArgs = parseArgs(rawArgs)
   if (parsedArgs.help) {
-    if (
-      parsedArgs.command === 'import-codetracebench' ||
-      (parsedArgs.command === 'help' && parsedArgs.input === 'import-codetracebench')
-    ) usageImportCodeTraceBench()
-    else if (parsedArgs.command === 'export' || (parsedArgs.command === 'help' && parsedArgs.input === 'export')) usageExport()
+    if (parsedArgs.command === 'export' || (parsedArgs.command === 'help' && parsedArgs.input === 'export')) usageExport()
     else if (parsedArgs.command === 'validate' || (parsedArgs.command === 'help' && parsedArgs.input === 'validate')) usageValidate()
     else usage()
     return
@@ -2725,8 +2518,7 @@ async function main(): Promise<void> {
     : validated
   switch (args.command) {
     case 'help':
-      if (args.input === 'import-codetracebench') usageImportCodeTraceBench()
-      else if (args.input === 'export') usageExport()
+      if (args.input === 'export') usageExport()
       else if (args.input === 'validate') usageValidate()
       else usage()
       break
@@ -2744,7 +2536,6 @@ async function main(): Promise<void> {
     case 'bundle-view': await cmdBundleView(args); break
     case 'inspect': await cmdInspect(args); break
     case 'export': await cmdExport(args); break
-    case 'import-codetracebench': await cmdImportCodeTraceBench(args); break
     case 'evidence': await cmdEvidence(args); break
     case 'stream': await cmdStream(args); break
     case 'watch': await cmdWatch(args); break

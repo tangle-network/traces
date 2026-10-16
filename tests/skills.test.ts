@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const skillNames = ['inspect-agent-traces', 'build-trace-analyst'] as const
+const skillNames = ['inspect-agent-traces'] as const
 
 describe.each(skillNames)('%s skill', (name) => {
   const skillSpecifier = `@tangle-network/traces/skills/${name}/SKILL.md`

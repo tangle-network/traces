@@ -552,7 +552,7 @@ function placeInnerSpans(
 
 /**
  * One CHAIN span per command. Command text, cwd, and output stay in the tool
- * I/O keys, which metadata-only upload strips and external redactors scrub.
+ * I/O keys, which metadata-only upload strips and redaction scrubs.
  */
 function commandSpan(context: ItemSpanContext, item: object, command: CodexCommandExecution, recordTime: string): PendingInnerSpan {
   const { start, end, timeSource } = itemTimes(command, recordTime)

@@ -115,5 +115,5 @@ Check `manifest.view` and the rules and hashes in `manifest.excluded`.
 
 ## Then consider
 
-- Use `build-trace-analyst` when deterministic findings cannot answer a repeated trace question.
+- Write an analyst with the SDK (`examples/custom-analyst.ts`) when deterministic findings cannot answer a repeated trace question.
 - Use `autopsy` when the result is empty, surprising, or suspiciously strong.
