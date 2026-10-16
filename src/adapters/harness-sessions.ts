@@ -494,6 +494,10 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
           item.trace_id = root.trace_id
           item.attributes['traces.span.subagent'] = true
           item.attributes['service.name'] = this.harness
+          // Folded into this session's trace, the subagent's records belong to
+          // this session: its own id stays in `traces.claude.source_trace_id`,
+          // so the trace keeps one session identity.
+          delete item.attributes['tangle.sessionId']
           spans.push(item)
           childSpanCount += 1
         }

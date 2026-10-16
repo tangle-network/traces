@@ -108,6 +108,25 @@ export function claudeTranscript(id: string, cwd: string, minute: number, prompt
   ])
 }
 
+/** The agent id of the subagent {@link IDS.claude} ran. */
+export const CLAUDE_AGENT_ID = 'a5b1a6e7c0de4e11'
+
+/** A Claude Code subagent transcript: the brief it was given and its reply. */
+function claudeSubagentTranscript(sessionId: string, agentId: string, cwd: string, minute: number): string {
+  const base = { sessionId, agentId, isSidechain: true, cwd, version: '2.1.0', gitBranch: 'main' }
+  return jsonl([
+    { ...base, type: 'user', uuid: `${agentId}-u1`, parentUuid: null, timestamp: at(minute), message: { role: 'user', content: 'Read the build log.' } },
+    {
+      ...base,
+      type: 'assistant',
+      uuid: `${agentId}-a1`,
+      parentUuid: `${agentId}-u1`,
+      timestamp: at(minute, 5),
+      message: { id: `msg-${agentId}-1`, role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'The log is clean.' }], usage: { input_tokens: 4, output_tokens: 2 } },
+    },
+  ])
+}
+
 /** The same session as `claude -p --output-format stream-json --verbose` prints it. */
 export function claudeStreamJson(id: string, cwd: string, minute: number): string {
   return jsonl([
@@ -299,6 +318,11 @@ export async function makeFixtureHome(): Promise<FixtureHome> {
   }
   const projects = join(home, '.claude', 'projects')
   const claude = await write(IDS.claude, join(projects, claudeProject(repo), `${IDS.claude}.jsonl`), claudeTranscript(IDS.claude, repo, 0, 'Fix the build.'))
+  // Its subagent's transcript, which Claude Code writes beside the session.
+  await put(
+    join(projects, claudeProject(repo), IDS.claude, 'subagents', `agent-${CLAUDE_AGENT_ID}.jsonl`),
+    claudeSubagentTranscript(IDS.claude, CLAUDE_AGENT_ID, repo, 1),
+  )
   await write(IDS.claudeTwin, join(projects, claudeProject(sibling), `${IDS.claudeTwin}.jsonl`), claudeTranscript(IDS.claudeTwin, sibling, 5, 'Tidy the README.'))
   const day = join('2026', '10', '14')
   const rollouts = join(home, '.codex', 'sessions', day)

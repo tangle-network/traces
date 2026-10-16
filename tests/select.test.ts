@@ -112,6 +112,11 @@ describe('selection: --cwd', () => {
 describe('selection: --current and --last', () => {
   const both = (): Record<string, string> => ({ CLAUDE_CODE_SESSION_ID: IDS.claude, CODEX_THREAD_ID: IDS.codex })
 
+  it('keeps a Claude Code session\'s own id when its subagent is read with it', async () => {
+    const report = await facts([IDS.claude])
+    expect(report.sessions.map((entry) => entry.sessionId)).toEqual([IDS.claude])
+  })
+
   it('reads CODEX_THREAD_ID before CLAUDE_CODE_SESSION_ID', async () => {
     expect((await facts(['--current'], both())).sessions[0]!.sessionId).toBe(IDS.codex)
     expect((await facts(['--current'], { CLAUDE_CODE_SESSION_ID: IDS.claude })).sessions[0]!.sessionId).toBe(IDS.claude)
