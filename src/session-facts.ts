@@ -861,7 +861,25 @@ interface TypedTurns {
   readonly turns: readonly SessionTurnFact[]
   /** Excluded spans by `reason\0author`. */
   readonly excluded: ReadonlyMap<string, readonly ExcludedTurn[]>
+  /** What the next span of the same session needs to be classified as if read in one piece. */
+  readonly state: TurnFoldState
 }
+
+/**
+ * What deciding a turn's author needs from the spans before it, so a session
+ * read in pieces (the turn index reads only appended bytes) classifies each
+ * turn exactly as one read of the whole session does.
+ */
+export interface TurnFoldState {
+  /** A typed turn came before: the next one is not the session's first. */
+  readonly typed: boolean
+  /** The last human turn kept, for the second-record test: its start and normalized text. */
+  readonly kept: { readonly at: string; readonly text: string } | null
+  /** The agent acted after {@link TurnFoldState.kept}. */
+  readonly activity: boolean
+}
+
+export const TURN_FOLD_START: TurnFoldState = { typed: false, kept: null, activity: false }
 
 /**
  * The typed turns of one session, and every `user.prompt` span left out of them.
@@ -872,17 +890,19 @@ interface TypedTurns {
  * record of the turn before it. A `fleet` or `relay` turn is a typed turn but
  * not a human one: it is listed with its author and excluded from the count.
  * `spans` is the whole trace in order, because the duplicate test, the reply
- * and the signals ask what happened between two turns.
+ * and the signals ask what happened between two turns. A session read in
+ * pieces passes the `state` the previous piece returned.
  */
-function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
+function typedTurnsOf(spans: readonly OtlpSpan[], start: TurnFoldState = TURN_FOLD_START): TypedTurns {
   const excluded = new Map<string, ExcludedTurn[]>()
   const drop = (reason: string, author: string, span: OtlpSpan): void => {
     const key = `${reason}\0${author}`
     excluded.set(key, [...(excluded.get(key) ?? []), { spanId: span.span_id, at: span.start_time }])
   }
-  const kept: OtlpSpan[] = []
   const turns: MutableTurn[] = []
-  let sinceKept: OtlpSpan[] = []
+  // The last human turn kept, and whether the agent acted since: a person cannot have typed twice across that.
+  let kept = start.kept
+  let activity = start.activity
   // The last message this session's agent wrote so far: what a turn answers.
   // Tracked over every span, so a turn just inside a time window still names
   // the message it answered when that message fell just outside it.
@@ -911,7 +931,7 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
         awaitingReply = []
       }
       if (isRejectedTool(span)) pending.add('rejected-tool')
-      sinceKept.push(span)
+      if (isAgentActivity(span)) activity = true
       continue
     }
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
@@ -929,7 +949,7 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
       drop(TURN_EXCLUSION_REASONS[actor] ?? `the adapter classified this turn as "${actor}", not as a person typing`, actor, span)
       continue
     }
-    const author = authorOfTypedTurn(text, { firstTurn: turns.length === 0 })
+    const author = authorOfTypedTurn(text, { firstTurn: !start.typed && turns.length === 0 })
     if (author === 'injected') {
       drop(TURN_EXCLUSION_REASONS.injected!, 'injected', span)
       continue
@@ -938,20 +958,20 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
       drop(HARNESS_COMMAND_REASON, 'human', span)
       continue
     }
-    const previous = kept[kept.length - 1]
     // Two records of ONE submission describe one instant, so they carry the
     // same start time; a person who sends the same short message twice is
     // seconds apart. Pairing records that are merely close is the adapter's
     // job, where the records themselves say which log each came from — a sheet
     // that guessed from the spans collapsed a measured "continue, continue"
     // typed 1.8 s apart into one turn.
+    const normalized = normalizedTurnText(span)
     const duplicate =
       author === 'human' &&
-      previous !== undefined &&
-      previous.start_time === span.start_time &&
-      normalizedTurnText(previous) === normalizedTurnText(span) &&
-      normalizedTurnText(span).length > 0 &&
-      !sinceKept.some(isAgentActivity)
+      kept !== null &&
+      kept.at === span.start_time &&
+      kept.text === normalized &&
+      normalized.length > 0 &&
+      !activity
     if (duplicate) {
       drop(DUPLICATE_TURN_REASON, 'human', span)
       continue
@@ -976,15 +996,15 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
     lastTurn = turn
     awaitingReply.push(turn)
     if (author === 'human') {
-      kept.push(span)
-      sinceKept = []
+      kept = { at: span.start_time, text: normalized }
+      activity = false
       pending = new Set()
       agentWroteSinceHuman = false
     } else {
       drop(TURN_EXCLUSION_REASONS[author]!, author, span)
     }
   }
-  return { turns, excluded }
+  return { turns, excluded, state: { typed: start.typed || turns.length > 0, kept, activity } }
 }
 
 const SIGNAL_ORDER: readonly TurnSignal[] = ['interrupt', 'rejected-tool', 'after-claim']
@@ -1555,39 +1575,123 @@ function matchExcerpt(text: string, pattern: RegExp): string {
   return `${start > 0 ? '…' : ''}${flat.slice(start, end)}${end < flat.length ? '…' : ''}`
 }
 
+/** One row a `--match` search tests, with the whole text the pattern is tested on. */
+export interface SessionRow {
+  readonly kind: SessionMatchKind
+  readonly at: string
+  readonly spanId: string
+  readonly text: string
+}
+
 /**
- * Every hit of `pattern` in one session read: each human turn, each message
- * the session's own agent wrote, and each simple command its shell tool calls
- * ran (as `shell-commands.ts` splits a script, so `^` anchors to a command's
- * start). Inside `window` when one is given. No model, deterministic.
+ * The rows of one session a `--match` search tests: each human turn, each
+ * message the session's own agent wrote, and each simple command its shell
+ * tool calls ran (as `shell-commands.ts` splits a script, so `^` anchors to a
+ * command's start). Human turns first, then the rest in trace order. `spans`
+ * is the session in trace order and `turns` its typed turns. A search over
+ * parsed sessions and the turn index both take their rows from here.
  */
-export function sessionMatches(reading: SessionReading, pattern: RegExp, window?: SessionFactsWindow): SessionMatch[] {
-  const bounds = windowBounds(window)
-  const sessionId = reading.facts.sessionId
-  const matches: SessionMatch[] = []
-  const add = (kind: SessionMatchKind, span: OtlpSpan, text: string): void => {
-    pattern.lastIndex = 0
-    if (!pattern.test(text)) return
-    pattern.lastIndex = 0
-    matches.push({ sessionId, kind, at: span.start_time, spanId: span.span_id, text: matchExcerpt(text, pattern) })
-  }
-  const byId = new Map(reading.spans.map((span) => [span.span_id, span]))
-  for (const turn of reading.turns) {
+export function sessionRows(spans: readonly OtlpSpan[], turns: readonly SessionTurnFact[]): SessionRow[] {
+  const rows: SessionRow[] = []
+  const byId = new Map(spans.map((span) => [span.span_id, span]))
+  for (const turn of turns) {
     const span = byId.get(turn.spanId)
-    if (turn.author === 'human' && span) add('human', span, rawContent(span))
+    if (turn.author === 'human' && span) rows.push({ kind: 'human', at: span.start_time, spanId: span.span_id, text: rawContent(span) })
   }
-  for (const span of reading.spans) {
-    if (isSubagentSpan(span.attributes) || !insideWindow(bounds, span.start_time)) continue
+  for (const span of spans) {
+    if (isSubagentSpan(span.attributes)) continue
     if (isOwnAgentMessage(span)) {
-      add('agent', span, rawContent(span))
+      rows.push({ kind: 'agent', at: span.start_time, spanId: span.span_id, text: rawContent(span) })
       continue
     }
     if (!isToolSpan(span) || isSynthesizedSpan(span)) continue
     const script = commandTextFromInput(inputValue(span) ?? '')
     if (script === undefined) continue
-    for (const line of commandLines(script)) add('command', span, line)
+    for (const line of commandLines(script)) rows.push({ kind: 'command', at: span.start_time, spanId: span.span_id, text: line })
+  }
+  return rows
+}
+
+/** The rows of one session that `pattern` matches inside `window`, oldest first, each clipped around its hit. */
+export function matchRows(
+  sessionId: string | null,
+  rows: Iterable<SessionRow>,
+  pattern: RegExp,
+  window?: SessionFactsWindow,
+): SessionMatch[] {
+  const bounds = windowBounds(window)
+  const matches: SessionMatch[] = []
+  for (const row of rows) {
+    if (!insideWindow(bounds, row.at)) continue
+    pattern.lastIndex = 0
+    if (!pattern.test(row.text)) continue
+    pattern.lastIndex = 0
+    matches.push({ sessionId, kind: row.kind, at: row.at, spanId: row.spanId, text: matchExcerpt(row.text, pattern) })
   }
   return matches.sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+}
+
+/** Every hit of `pattern` in one session read (see {@link sessionRows}), inside `window` when one is given. No model, deterministic. */
+export function sessionMatches(reading: SessionReading, pattern: RegExp, window?: SessionFactsWindow): SessionMatch[] {
+  return matchRows(reading.facts.sessionId, sessionRows(reading.spans, reading.turns), pattern, window)
+}
+
+/** What the turn index keeps of a session it read, whole or one appended piece at a time. */
+export interface SessionIndexRead {
+  readonly sessionId: string | null
+  readonly parentSessionId: string | null
+  readonly cwd: string | null
+  /** The earliest start and latest end of the session's own spans in this read. */
+  readonly firstAt: string | null
+  readonly lastAt: string | null
+  /** Spans built from the session's records: not its root, not an integrity receipt. */
+  readonly records: number
+  /** The span ids of the human turns, in order. */
+  readonly humanTurns: readonly string[]
+  /** The first human turn, as {@link SessionFacts.humanTurns} words it. */
+  readonly firstPrompt: string | null
+  readonly rows: readonly SessionRow[]
+  /** What the next piece of the same session starts from. */
+  readonly state: TurnFoldState
+}
+
+/**
+ * The facts `list` and a `--match` search need from one session's spans: the
+ * same turns, rows and times the sheet computes, from the same functions, plus
+ * the turn-fold state that lets the next appended piece continue where this
+ * one ended. `sessionId` picks the session's trace when `spans` holds more.
+ */
+export function readSessionIndex(
+  spans: readonly OtlpSpan[],
+  options: { readonly sessionId?: string; readonly state?: TurnFoldState } = {},
+): SessionIndexRead {
+  const groups = groupByTrace(spans)
+  const group = groups.find((entry) => entry.sessionId === options.sessionId) ?? groups[0]
+  const ordered = [...(group?.spans ?? [])].sort(byTraceOrder)
+  const own = ordered.filter((span) => !isSubagentSpan(span.attributes))
+  const typed = typedTurnsOf(ordered, options.state)
+  const human = typed.turns.filter((turn) => turn.author === 'human')
+  let firstAt: string | null = null
+  let lastAt: string | null = null
+  for (const span of own) {
+    if (Number.isFinite(Date.parse(span.start_time)) && (firstAt === null || Date.parse(span.start_time) < Date.parse(firstAt))) firstAt = span.start_time
+    if (Number.isFinite(Date.parse(span.end_time)) && (lastAt === null || Date.parse(span.end_time) > Date.parse(lastAt))) lastAt = span.end_time
+  }
+  return {
+    sessionId: group?.sessionId ?? null,
+    parentSessionId: ordered
+      .filter((span) => span.parent_span_id === null)
+      .map((span) => stringAttr(span, 'traces.parent_session_id'))
+      .find((id) => id !== null) ?? null,
+    cwd: ordered.map((span) => stringAttr(span, SESSION_CWD_ATTR)).find((cwd) => cwd !== null) ?? null,
+    firstAt,
+    lastAt,
+    records: ordered.filter(isRecordSpan).length,
+    humanTurns: human.map((turn) => turn.spanId),
+    firstPrompt: human[0]?.text ?? null,
+    rows: sessionRows(ordered, typed.turns),
+    state: typed.state,
+  }
 }
 
 /** The `who:` line: profile and digest, model, directive variant. */

@@ -68,11 +68,12 @@ import type {
 } from './otlp-input.js'
 import { readOtlpInput } from './otlp-input.js'
 import {
-  computeSessionFacts,
   createSessionFactsReportBuilder,
+  matchRows,
   renderSessionFacts,
   sessionMatches,
   type SessionFactsReport,
+  type SessionFactsWindow,
   type SessionMatch,
   type SessionReading,
   type UnreadSessionFact,
@@ -82,7 +83,7 @@ import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
 import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
-import { locateSessions, parseSession, readSessionSpans, sessionsInCwd } from './session-source.js'
+import { locateSessions, parseSession, sessionsInCwd } from './session-source.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
 import {
   type SessionWorkflowIssue,
@@ -118,6 +119,7 @@ import {
   SkillUsageStore,
 } from './skill-usage.js'
 import { type Args, CliError, type Handler, runTraces, UsageError, writeError } from './commands.js'
+import { type IndexedSession, TurnIndex } from './turn-index.js'
 
 /**
  * What a command's positional refs resolved to. Read once, before the command
@@ -414,41 +416,38 @@ function formatDuration(ms: number | null): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
-/** The facts of one session's own trace, as a list row. */
-async function listRow(adapter: HarnessTraceAdapter, ref: SessionRef, shortRef: string): Promise<ListRow> {
-  const spans = await readSessionSpans(adapter, ref)
-  const sessions = computeSessionFacts(spans)
-  const facts = sessions.find((entry) => entry.sessionId === ref.sessionId) ?? sessions[0]
-  if (!facts || facts.recordSpans === 0) throw new Error('no record could be read')
-  const first = facts.firstRecordAt.value
-  const last = facts.lastRecordAt.value
+/** A session as the turn index holds it, as a list row. */
+async function listRow(adapter: HarnessTraceAdapter, ref: SessionRef, shortRef: string, session: IndexedSession): Promise<ListRow> {
+  const first = session.firstAt
+  const last = session.lastAt
   let bytes: number | null = null
   try {
     bytes = (await stat(ref.path)).size
   } catch {
     // A store that moved between locate and read has no size to report.
   }
-  const turns = facts.humanTurns.value
   return {
     ref: shortRef,
     id: ref.sessionId,
     harness: adapter.harness,
     path: ref.path,
     bytes,
-    parentSessionId: facts.parentSessionId,
+    parentSessionId: session.parentSessionId,
     lastActivity: last ?? new Date(ref.mtimeMs).toISOString(),
     durationMs: first !== null && last !== null ? Date.parse(last) - Date.parse(first) : null,
-    humanTurns: turns?.length ?? null,
-    cwd: facts.cwd.value ?? ref.cwd,
-    firstPrompt: turns?.[0] ? oneLine(turns[0].text, PROMPT_CHARS) : null,
+    humanTurns: session.humanTurns.length,
+    cwd: session.cwd ?? ref.cwd,
+    firstPrompt: session.firstPrompt === null ? null : oneLine(session.firstPrompt, PROMPT_CHARS),
   }
 }
 
 /**
  * `traces list`: one row per session, newest first, across every harness.
  * `--last 20` by default, never the caller's own session; `--since` lists
- * every session active in the window. A session that cannot be read is
- * counted in the footer and named in the JSON's `selection.unreadSessions`.
+ * every session active in the window. Rows come from the turn index, so a
+ * warm run reads only what the listed sessions appended. A session that
+ * cannot be read is counted in the footer and named in the JSON's
+ * `selection.unreadSessions`.
  */
 async function cmdList(args: CliArgs): Promise<void> {
   const named = args.selection?.sessions[0]?.ref.sessionId ?? args.selection?.spans[0]?.ref
@@ -461,16 +460,21 @@ async function cmdList(args: CliArgs): Promise<void> {
   const found = await narrow(args, every, 20)
   const rows: ListRow[] = []
   const unread: UnreadSessionFact[] = [...found.unread]
-  for (const { adapter, ref } of found.sessions) {
-    try {
-      rows.push(await listRow(adapter, ref, shortRefs.get(ref.sessionId) ?? ref.sessionId))
-    } catch (error) {
-      unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: errorText(error) })
+  const stats = await TurnIndex.with(async (index) => {
+    const refreshed = await index.refresh(found.sessions)
+    for (const { adapter, ref } of found.sessions) {
+      const held = index.session(adapter, ref)
+      if (!held || held.unread !== null) {
+        unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: held?.unread ?? 'not indexed' })
+        continue
+      }
+      rows.push(await listRow(adapter, ref, shortRefs.get(ref.sessionId) ?? ref.sessionId, held.session))
     }
-  }
+    return refreshed
+  })
   warnUnread(args, unread, 'list')
   if (args.format === 'json') {
-    process.stdout.write(`${JSON.stringify({ sessions: rows, selection: { unreadSessions: unread } }, null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ sessions: rows, selection: { unreadSessions: unread, index: stats } }, null, 2)}\n`)
     return
   }
   const footer = `${rows.length} session${rows.length === 1 ? '' : 's'} · ${unread.length} unreadable`
@@ -906,7 +910,7 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   let readingFrom: string | null = null
   const host = hostOf(args)
   const rows: TurnRow[] = []
-  const matches: Array<SessionMatch & { readonly source: string | null }> = []
+  const matches: SourcedMatch[] = []
   const onSession = (reading: SessionReading): void => {
     const source = readingFrom ?? sourceOf.get(reading.facts.sessionId ?? '') ?? null
     if (pattern !== undefined) {
@@ -933,6 +937,7 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   }
   // A store root alone is a place to select from, not a selection.
   const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
+  if (pattern !== undefined && window !== undefined && named === 0) return searchWindow(args, pattern, window, format)
   const builder = createSessionFactsReportBuilder({
     includeContent: !args.noContent,
     window,
@@ -993,38 +998,111 @@ async function cmdFacts(args: CliArgs): Promise<void> {
       'unreadable',
     )
   }
-  let rendered: string
-  let summary: string
   if (pattern !== undefined) {
-    matches.sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
-    const document = {
-      schemaVersion: 1,
-      kind: 'traces.session_matches',
+    return writeMatches(args, format, {
       generatedAt: report.generatedAt,
-      pattern: args.match,
       sessions: report.sessions.length,
       selection: report.selection,
       matches,
-    }
-    rendered = format === 'json'
-      ? `${JSON.stringify(document, null, 2)}\n`
-      : format === 'jsonl'
-        ? matches.map((match) => `${JSON.stringify(match)}\n`).join('')
-        : renderMatches(document.pattern!, report.sessions.length, matches)
-    summary = `matches → ${args.out}  (${matches.length} in ${report.sessions.length} session(s), $0, no model call)`
-  } else if (format === 'jsonl') {
+    })
+  }
+  let rendered: string
+  let summary: string
+  if (format === 'jsonl') {
     rendered = rows.map((row) => `${JSON.stringify(row)}\n`).join('')
     summary = `turns → ${args.out}  (${rows.length} typed turn(s) in ${report.sessions.length} session(s), $0, no model call)`
   } else {
     rendered = format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderSessionFacts(report)
     summary = `session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`
   }
+  await writeOutput(args, rendered, summary)
+}
+
+/** `rendered` to `--out` with a one-line summary on stdout, or to stdout. */
+async function writeOutput(args: CliArgs, rendered: string, summary: string): Promise<void> {
   if (args.out) {
     await writeFile(args.out, rendered, 'utf8')
     console.log(summary)
     return
   }
   process.stdout.write(rendered)
+}
+
+type SourcedMatch = SessionMatch & { readonly source: string | null }
+
+/** The hits of `facts --match`, oldest first, in `format`. */
+async function writeMatches(
+  args: CliArgs,
+  format: string,
+  found: { readonly generatedAt: string; readonly sessions: number; readonly selection: unknown; readonly matches: SourcedMatch[] },
+): Promise<void> {
+  const matches = [...found.matches].sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+  const document = {
+    schemaVersion: 1,
+    kind: 'traces.session_matches',
+    generatedAt: found.generatedAt,
+    pattern: args.match,
+    sessions: found.sessions,
+    selection: found.selection,
+    matches,
+  }
+  const rendered = format === 'json'
+    ? `${JSON.stringify(document, null, 2)}\n`
+    : format === 'jsonl'
+      ? matches.map((match) => `${JSON.stringify(match)}\n`).join('')
+      : renderMatches(args.match!, found.sessions, matches)
+  await writeOutput(args, rendered, `matches → ${args.out}  (${matches.length} in ${found.sessions} session(s), $0, no model call)`)
+}
+
+/**
+ * `facts --match` over a window: every session with a record in it, searched
+ * through the turn index, which reads only what each session appended since
+ * the last search. Its rows are the rows a whole read of each session gives
+ * (`tests/turn-index.test.ts`). A named ref is parsed instead.
+ */
+async function searchWindow(args: CliArgs, pattern: RegExp, window: SessionFactsWindow, format: string): Promise<void> {
+  const found = await discover(args)
+  const unread: UnreadSessionFact[] = [...found.unread]
+  const outsideWindow: string[] = []
+  const matches: SourcedMatch[] = []
+  const since = window.since === undefined ? Number.NEGATIVE_INFINITY : Date.parse(window.since)
+  const until = window.until === undefined ? Number.POSITIVE_INFINITY : Date.parse(window.until)
+  let sessions = 0
+  const stats = await TurnIndex.with(async (index) => {
+    const refreshed = await index.refresh(found.sessions)
+    for (const { adapter, ref } of found.sessions) {
+      const held = index.session(adapter, ref)
+      if (!held || held.unread !== null) {
+        unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: held?.unread ?? 'not indexed' })
+        continue
+      }
+      const { session } = held
+      if (Date.parse(session.lastAt ?? '') < since || Date.parse(session.firstAt ?? '') >= until) {
+        outsideWindow.push(session.sessionId ?? ref.sessionId)
+        continue
+      }
+      sessions += 1
+      for (const match of matchRows(session.sessionId, await index.rows(adapter, ref), pattern, window)) {
+        matches.push({ ...match, source: ref.path })
+      }
+    }
+    return refreshed
+  })
+  warnUnread(args, unread)
+  await writeMatches(args, format, {
+    generatedAt: new Date().toISOString(),
+    sessions,
+    selection: {
+      since: window.since ?? null,
+      until: window.until ?? null,
+      sessionRule: 'a session is searched when its records, first to last, overlap [since, until)',
+      turnRule: 'only rows that started inside [since, until) match',
+      outsideWindow: outsideWindow.sort(),
+      unreadSessions: unread,
+      index: stats,
+    },
+    matches,
+  })
 }
 
 /** `facts --match` as text: one line per hit, oldest first. */

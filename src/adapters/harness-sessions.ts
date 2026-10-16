@@ -14,6 +14,7 @@ import {
   opencodeSessionsInStore,
   piRefForFile,
   readerFor,
+  readSessionInput,
   toOtlpSpans,
   type HarnessSession,
   type SessionRef as NativeRef,
@@ -240,6 +241,11 @@ function ownHome(): string {
   return process.env.HOME || homedir()
 }
 
+/** A user-role message record of a rollout: a turn typed into it. */
+function isCodexUserMessage(row: CodexHead): boolean {
+  return row.type === 'response_item' && row.payload?.type === 'message' && row.payload.role === 'user'
+}
+
 /** When each user-role message a rollout records was written: the turns typed into it. */
 async function codexUserMessageTimes(path: string): Promise<Set<number>> {
   const times = new Set<number>()
@@ -248,9 +254,7 @@ async function codexUserMessageTimes(path: string): Promise<Set<number>> {
     if (!line.includes('"response_item"') || !line.includes('"user"')) continue
     try {
       const row = JSON.parse(line) as CodexHead
-      if (row.type === 'response_item' && row.payload?.type === 'message' && row.payload.role === 'user' && row.timestamp) {
-        times.add(Date.parse(row.timestamp))
-      }
+      if (isCodexUserMessage(row) && row.timestamp) times.add(Date.parse(row.timestamp))
     } catch {
       // A torn line is the shared reader's integrity decision.
     }
@@ -266,10 +270,10 @@ async function codexUserMessageTimes(path: string): Promise<Set<number>> {
  * person's does not. Its user-role messages are the person's again, and the
  * session is an operator's. Messages another agent sent stay as they are.
  */
-async function relabelUserFork(path: string, meta: NonNullable<CodexHead['payload']>, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
+async function relabelUserFork(typedTimes: () => Promise<Set<number>>, meta: NonNullable<CodexHead['payload']>, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
   if (typeof meta.forked_from_id !== 'string' || meta.thread_source === 'subagent' || meta.source?.subagent !== undefined) return
   root.attributes['traces.session.role'] = 'operator'
-  const typed = await codexUserMessageTimes(path)
+  const typed = await typedTimes()
   for (const item of spans) {
     if (item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'subagent-spawn' && typed.has(Date.parse(item.start_time))) {
       item.attributes['tangle.actor'] = 'human'
@@ -282,24 +286,122 @@ async function relabelUserFork(path: string, meta: NonNullable<CodexHead['payloa
  * calls a person's. `codex exec` runs a script's prompt, so its first turn is
  * the launcher's brief, as traces' own Codex reader says (`codexActor`); a
  * session the Claude Code plugin opened takes every prompt from Claude.
+ * `promptSeen` says an earlier piece of the session already held its first
+ * prompt. Returns whether this session has had a person's prompt by now.
  */
-function relabelLaunched(meta: NonNullable<CodexHead['payload']>, spans: OtlpSpan[]): void {
+function relabelLaunched(meta: NonNullable<CodexHead['payload']>, spans: OtlpSpan[], promptSeen = false): boolean {
   const prompts = spans
     .filter((item) => item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'human')
     .sort((left, right) => Date.parse(left.start_time) - Date.parse(right.start_time))
   if (meta.originator === 'Claude Code') {
     for (const item of prompts) item.attributes['tangle.actor'] = 'agent'
   } else if (meta.originator === 'codex_exec' || (meta.source as unknown) === 'exec') {
-    if (prompts[0]) prompts[0].attributes['tangle.actor'] = 'injected'
+    if (prompts[0] && !promptSeen) prompts[0].attributes['tangle.actor'] = 'injected'
   }
+  return promptSeen || prompts.length > 0
 }
 
-async function decorateCodexMetadata(path: string, session: HarnessSession, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
-  const head = await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} })
-  const meta = head.find((row) => row.type === 'session_meta')?.payload
+/** What a Codex session's own records say about it, beside what the shared reader reads. */
+interface CodexDecoration {
+  readonly meta: NonNullable<CodexHead['payload']> | undefined
+  /** When each user-role message of the session was written. */
+  readonly typedTimes: () => Promise<Set<number>>
+  readonly promptSeen?: boolean
+  /** The head of the file, read whole: its older plain-string prompts. */
+  readonly legacyHead?: readonly CodexHead[]
+}
+
+/** One line of a session file as the turn index read it: the record, or null for a blank or unreadable line. */
+export type PieceRecord = Record<string, unknown> | null
+
+/**
+ * What the pieces of a session file read so far established, which the next
+ * piece needs to read as one read of the whole file would. Plain JSON: the
+ * turn index stores it with the file's byte cursor.
+ */
+export interface PieceCarry {
+  /** Lines of the file before the next piece. */
+  readonly lines: number
+  readonly nativeSessionId: string | null
+  readonly parentNativeSessionId: string | null
+  readonly cwd: string | null
+  /** Codex: model calls the fold made before the next piece. */
+  readonly calls: number
+  /** Codex: the last cumulative token usage recorded before the next piece. */
+  readonly tokens: Record<string, unknown> | null
+  /** Codex: the fields of `session_meta` that relabel turns and stamp the root. */
+  readonly meta: NonNullable<CodexHead['payload']> | null
+  /** Codex: a person's prompt came before the next piece. */
+  readonly promptSeen: boolean
+}
+
+export const PIECE_START: PieceCarry = {
+  lines: 0, nativeSessionId: null, parentNativeSessionId: null, cwd: null, calls: 0, tokens: null, meta: null, promptSeen: false,
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** The `session_meta` fields traces reads, without the instructions it also carries. */
+function codexMetaSummary(meta: NonNullable<CodexHead['payload']>): NonNullable<CodexHead['payload']> {
+  const keep = ['id', 'forked_from_id', 'thread_source', 'originator', 'source', 'agent_nickname', 'agent_role', 'agent_path', 'parent_thread_id'] as const
+  return Object.fromEntries(keep.filter((key) => meta[key] !== undefined).map((key) => [key, meta[key]])) as NonNullable<CodexHead['payload']>
+}
+
+/**
+ * Where a piece of `records` may end so the next piece, read on its own,
+ * reads as one read of both: the index of the first record that waits for
+ * the next piece.
+ *
+ * Claude Code writes each content block of a response as its own record,
+ * repeating the response's `message.id`, and may write tool results between
+ * them; the blocks are one message. So a piece ends before the last
+ * response's first record. Codex holds a response open until a person's
+ * message or a new turn starts, a turn ends, or a cumulative token count
+ * moves with the response's own usage; a piece ends at the last of those.
+ */
+export function pieceBoundary(harness: string, records: readonly PieceRecord[], carry: PieceCarry = PIECE_START): number {
+  if (harness === 'claude-code') {
+    let start = records.length
+    let last: unknown
+    records.forEach((record, index) => {
+      if (!record || record.isSidechain === true || record.type !== 'assistant') return
+      const message = isPlainObject(record.message) ? record.message : {}
+      const id = typeof message.id === 'string' ? message.id : `${String(record.uuid)}#${index}`
+      if (id !== last) {
+        start = index
+        last = id
+      }
+    })
+    return start
+  }
+  let cut = 0
+  let total = carry.tokens?.total_tokens
+  records.forEach((record, index) => {
+    const payload = record && isPlainObject(record.payload) ? record.payload : null
+    if (!record || !payload) return
+    if (record.type === 'response_item' && payload.type === 'message' && payload.role === 'user') cut = index
+    else if (record.type === 'event_msg' && payload.type === 'task_started') cut = index
+    else if (record.type === 'event_msg' && (payload.type === 'task_complete' || payload.type === 'turn_aborted')) cut = index + 1
+    else if (record.type === 'event_msg' && payload.type === 'token_count' && isPlainObject(payload.info)) {
+      const usage = payload.info.total_token_usage
+      if (!isPlainObject(usage)) return
+      const last = payload.info.last_token_usage
+      if (typeof usage.total_tokens === 'number' && usage.total_tokens !== total && isPlainObject(last) && typeof last.output_tokens === 'number') cut = index + 1
+      total = usage.total_tokens
+    }
+  })
+  return cut
+}
+
+/** Relabel and stamp a Codex session's spans from its `session_meta`. Returns whether it has had a person's prompt. */
+async function decorateCodexMeta(decoration: CodexDecoration, root: OtlpSpan, spans: OtlpSpan[]): Promise<boolean> {
+  const { meta } = decoration
+  let promptSeen = decoration.promptSeen ?? false
   if (meta) {
-    await relabelUserFork(path, meta, root, spans)
-    relabelLaunched(meta, spans)
+    await relabelUserFork(decoration.typedTimes, meta, root, spans)
+    promptSeen = relabelLaunched(meta, spans, promptSeen)
   }
   const spawn = meta?.source?.subagent?.thread_spawn
   if (typeof spawn?.depth === 'number') root.attributes['traces.codex.agent_depth'] = spawn.depth
@@ -308,14 +410,23 @@ async function decorateCodexMetadata(path: string, session: HarnessSession, root
   const role = meta?.agent_role ?? spawn?.agent_role
   if (role) root.attributes['traces.codex.agent_role'] = role
   if (spawn?.agent_path) root.attributes['traces.codex.agent_path'] = spawn.agent_path
+  return promptSeen
+}
 
-  // Older Codex rollouts can put a plain string in a user message. The shared
-  // reader's 0.1.0 normalized parts omit it; retain the visible subject here.
+/** A user-role message in Codex's older plain-string form, which the shared reader's parts omit. */
+function isLegacyPrompt(row: CodexHead): boolean {
+  return isCodexUserMessage(row) && typeof row.payload?.content === 'string'
+}
+
+/**
+ * Older Codex rollouts can put a plain string in a user message. The shared
+ * reader's 0.1.0 normalized parts omit it; retain the visible subject here
+ * from the head of the file.
+ */
+function addLegacyPrompts(head: readonly CodexHead[], session: HarnessSession, root: OtlpSpan, spans: OtlpSpan[]): void {
   if (session.messages.some((message) => message.role === 'user' && messageText(message))) return
   for (const row of head) {
-    if (row.type !== 'response_item' || row.payload?.type !== 'message'
-      || row.payload.role !== 'user' || typeof row.payload.content !== 'string'
-      || !row.timestamp) continue
+    if (!isLegacyPrompt(row) || !row.timestamp) continue
     spans.push(asTracesSpan(contractSpan({
       traceId: root.trace_id,
       spanId: deriveHexId(`codex:${session.nativeSessionId}:legacy-prompt:${row.payload.id ?? row.timestamp}`, 8),
@@ -492,41 +603,16 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     // A missing timestamp is not epoch work. Exclude it rather than allowing the
     // projection's display fallback to enter measured totals.
     if (!session.startedAt) return []
-    const spans = toOtlpSpans(session).map(asTracesSpan)
-    const root = spans[0]!
-    root.attributes['service.name'] = this.harness
-    root.attributes['traces.session.role'] = session.parentNativeSessionId ? 'child' : 'operator'
-    // The directory the shared reader read from the session's own records.
-    if (session.cwd) root.attributes[SESSION_CWD_ATTR] = session.cwd
-    if (session.parentNativeSessionId) root.attributes['traces.parent_session_id'] = session.parentNativeSessionId
-    // Children a selection joins as their own sessions. Claude Code subagent
-    // transcripts are folded into this trace below instead, so they are not.
-    if (session.children.length > 0 && session.harness !== 'claude-code') {
-      root.attributes['traces.child_session_ids'] = JSON.stringify(session.children.map((child) => child.nativeSessionId))
-    }
-    root.attributes['traces.session.corruption_count'] = session.integrity.unparsedRecords
-    root.attributes['traces.session.integrity'] = session.integrity.unparsedRecords > 0
-      || session.integrity.truncated || session.integrity.gaps.length > 0
-      ? 'degraded_not_lossless' : 'complete'
-    if (session.integrity.unparsedRecords > 0) {
-      root.attributes['traces.source.unreadable_rows'] = session.integrity.unparsedRecords
-    }
-    // The session-total counter is distinct from a sum of individual calls.
-    if ((session.harness === 'codex' || session.harness === 'factory-droids')
-      && session.usage?.input != null && session.usage.output != null) {
-      root.attributes['traces.session.total_tokens'] = session.usage.input + session.usage.output
-        + (session.usage.cacheRead ?? 0) + (session.usage.cacheWrite ?? 0)
-      root.attributes['traces.session.total_input_tokens'] = session.usage.input
-      root.attributes['traces.session.total_output_tokens'] = session.usage.output
-      root.attributes['traces.session.total_tokens_source'] = '@tangle-network/harness-sessions'
-    }
-    spans.push(...presentationSpans(session, root))
+    let codex: CodexDecoration | undefined
     if (session.harness === 'codex') {
-      decorateCodexTools(session, spans)
-      await decorateCodexMetadata(ref.path, session, root, spans)
+      const head = await takeJsonl<CodexHead>(ref.path, 40, { mode: 'recover', onCorruption: () => {} })
+      codex = {
+        meta: head.find((row) => row.type === 'session_meta')?.payload,
+        typedTimes: () => codexUserMessageTimes(ref.path),
+        legacyHead: head,
+      }
     }
-    stampNativeProvenance(session, spans)
-    spans.push(...lifecycleSpans(session, root, spans))
+    const { spans, root } = await this.project(session, codex)
     if (session.harness === 'claude-code' && source.parentNativeSessionId === null) {
       const childPaths = source.files.filter((path) => path !== source.path && path.endsWith('.jsonl'))
       const toolByCallId = new Map(spans
@@ -565,12 +651,149 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       }
       if (childSpanCount > 0) root.attributes['traces.session.subagent_span_count'] = childSpanCount
     }
+    return this.finish(session, spans)
+  }
+
+  /**
+   * The shared reader's session as traces' spans, before any subagent is
+   * folded in: the one projection a whole read and a piece read both take.
+   */
+  private async project(session: HarnessSession, codex?: CodexDecoration): Promise<{ spans: OtlpSpan[]; root: OtlpSpan; promptSeen: boolean }> {
+    const spans = toOtlpSpans(session).map(asTracesSpan)
+    const root = spans[0]!
+    root.attributes['service.name'] = this.harness
+    root.attributes['traces.session.role'] = session.parentNativeSessionId ? 'child' : 'operator'
+    // The directory the shared reader read from the session's own records.
+    if (session.cwd) root.attributes[SESSION_CWD_ATTR] = session.cwd
+    if (session.parentNativeSessionId) root.attributes['traces.parent_session_id'] = session.parentNativeSessionId
+    // Children a selection joins as their own sessions. Claude Code subagent
+    // transcripts are folded into this trace instead, so they are not.
+    if (session.children.length > 0 && session.harness !== 'claude-code') {
+      root.attributes['traces.child_session_ids'] = JSON.stringify(session.children.map((child) => child.nativeSessionId))
+    }
+    root.attributes['traces.session.corruption_count'] = session.integrity.unparsedRecords
+    root.attributes['traces.session.integrity'] = session.integrity.unparsedRecords > 0
+      || session.integrity.truncated || session.integrity.gaps.length > 0
+      ? 'degraded_not_lossless' : 'complete'
+    if (session.integrity.unparsedRecords > 0) {
+      root.attributes['traces.source.unreadable_rows'] = session.integrity.unparsedRecords
+    }
+    // The session-total counter is distinct from a sum of individual calls.
+    if ((session.harness === 'codex' || session.harness === 'factory-droids')
+      && session.usage?.input != null && session.usage.output != null) {
+      root.attributes['traces.session.total_tokens'] = session.usage.input + session.usage.output
+        + (session.usage.cacheRead ?? 0) + (session.usage.cacheWrite ?? 0)
+      root.attributes['traces.session.total_input_tokens'] = session.usage.input
+      root.attributes['traces.session.total_output_tokens'] = session.usage.output
+      root.attributes['traces.session.total_tokens_source'] = '@tangle-network/harness-sessions'
+    }
+    spans.push(...presentationSpans(session, root))
+    let promptSeen = false
+    if (session.harness === 'codex' && codex) {
+      decorateCodexTools(session, spans)
+      promptSeen = await decorateCodexMeta(codex, root, spans)
+      if (codex.legacyHead) addLegacyPrompts(codex.legacyHead, session, root, spans)
+    }
+    stampNativeProvenance(session, spans)
+    spans.push(...lifecycleSpans(session, root, spans))
+    return { spans, root, promptSeen }
+  }
+
+  private finish(session: HarnessSession, spans: OtlpSpan[]): OtlpSpan[] {
     if (session.harness === 'claude-code') {
       const traceId = deriveHexId(session.nativeSessionId, 16)
       for (const item of spans) item.trace_id = traceId
     }
     for (const item of spans) item.attributes['service.name'] ??= this.harness
     return spans
+  }
+
+  /**
+   * True when the turn index may read this session's file a piece at a time
+   * (Claude Code and Codex JSONL); any other session it reads whole whenever
+   * the session changes. `first` is the file's first piece, which says
+   * whether its layout allows it: `claude -p` stream-json, a Codex fork that
+   * replays its parent's history, and a Codex rollout in the older
+   * plain-string prompt form are read whole.
+   */
+  readsPieces(ref: SessionRef, first?: readonly PieceRecord[]): boolean {
+    if (!ref.path.endsWith('.jsonl') || ref.sessionId.startsWith('unattributed:')) return false
+    if (this.nativeHarness !== 'claude-code' && this.nativeHarness !== 'codex') return false
+    if (first === undefined) return true
+    const records = first.filter((record): record is Record<string, unknown> => record !== null)
+    if (this.nativeHarness === 'claude-code') return !records.some((record) => record.type === 'system' && record.subtype === 'init')
+    const meta = records.find((record) => record.type === 'session_meta')?.payload as CodexHead['payload']
+    return meta !== undefined && typeof meta.forked_from_id !== 'string' && !records.slice(0, 40).some((record) => isLegacyPrompt(record as CodexHead))
+  }
+
+  /**
+   * One piece of a session file read on its own: records the turn index found
+   * appended since it last read the file, one entry per line (null for a
+   * blank or unreadable line). `carry` is what the pieces before it
+   * established; the next piece starts from the carry this returns. The fold
+   * and projection are `parse`'s, so a session read in pieces cut where
+   * {@link pieceBoundary} says yields the spans one read of it does, less the
+   * subagents a whole read folds in.
+   */
+  async readPiece(ref: SessionRef, records: readonly PieceRecord[], carry: PieceCarry = PIECE_START): Promise<{ spans: OtlpSpan[]; carry: PieceCarry }> {
+    const native = nativeRef(this.nativeHarness, ref)
+    // Codex numbers its responses from the session's start, and skips a token
+    // count that repeats the last one: replay both before the piece, as records
+    // whose own output is dropped below.
+    const primer: Record<string, unknown>[] = []
+    if (this.nativeHarness === 'codex') {
+      if (carry.tokens) primer.push({ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: carry.tokens } } })
+      for (let call = 0; call < carry.calls; call += 1) primer.push({ type: 'event_msg', payload: { type: 'stream_error', message: 'earlier piece' } })
+    }
+    if (primer.length > carry.lines) throw new Error(`${ref.path}: ${carry.calls} model calls in ${carry.lines} lines cannot be replayed before the piece`)
+    // Lines before the piece keep their numbers: a record without an id is named by its line.
+    const input: unknown[] = new Array<unknown>(carry.lines - primer.length).fill(null)
+    input.push(...primer, ...records)
+    const read = readSessionInput(this.nativeHarness, { records: input }, {
+      nativeSessionId: carry.nativeSessionId ?? native.nativeSessionId,
+      parentNativeSessionId: carry.parentNativeSessionId ?? native.parentNativeSessionId,
+      label: ref.path,
+    })
+    const session: HarnessSession = {
+      ...read,
+      nativeSessionId: carry.nativeSessionId ?? read.nativeSessionId,
+      parentNativeSessionId: carry.parentNativeSessionId ?? read.parentNativeSessionId,
+      cwd: carry.cwd ?? read.cwd,
+      modelCalls: read.modelCalls.slice(carry.calls),
+    }
+    const present = records.filter((record): record is Record<string, unknown> => record !== null)
+    const metaRecord = present.find((record) => record.type === 'session_meta')?.payload as CodexHead['payload'] | undefined
+    const meta = carry.meta ?? (metaRecord ? codexMetaSummary(metaRecord) : null)
+    const tokens = present
+      .map((record) => (record.type === 'event_msg' ? (record.payload as { type?: string; info?: { total_token_usage?: unknown } } | undefined) : undefined))
+      .filter((payload) => payload?.type === 'token_count' && isPlainObject(payload.info?.total_token_usage))
+      .map((payload) => payload!.info!.total_token_usage as Record<string, unknown>)
+      .pop() ?? carry.tokens
+    let spans: OtlpSpan[] = []
+    let promptSeen = carry.promptSeen
+    if (session.startedAt) {
+      const typed = new Set(present
+        .filter((record) => isCodexUserMessage(record as CodexHead) && typeof record.timestamp === 'string')
+        .map((record) => Date.parse(record.timestamp as string)))
+      const projected = await this.project(session, this.nativeHarness === 'codex'
+        ? { meta: meta ?? undefined, typedTimes: async () => typed, promptSeen }
+        : undefined)
+      spans = this.finish(session, projected.spans)
+      promptSeen = projected.promptSeen
+    }
+    return {
+      spans,
+      carry: {
+        lines: carry.lines + records.length,
+        nativeSessionId: session.nativeSessionId,
+        parentNativeSessionId: session.parentNativeSessionId,
+        cwd: session.cwd,
+        calls: read.modelCalls.length,
+        tokens,
+        meta,
+        promptSeen,
+      },
+    }
   }
 
   async resolveParentTask(ref: SessionRef, childSessionId: string, options?: Pick<ParseOptions, 'corruptionMode' | 'signal'>): Promise<ParentTaskResolution> {
