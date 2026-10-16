@@ -1531,11 +1531,13 @@ function reading(handler: (args: CliArgs) => Promise<void>): Handler {
  * warning is not this command's output, and on stderr it would break the
  * contract that an error under `--format json` is one JSON object there.
  */
+// Node's exact text, so an unrelated warning that merely mentions SQLite still reaches stderr and listeners.
+const NODE_SQLITE_WARNING = 'SQLite is an experimental feature and might change at any time'
 const emitWarning = process.emitWarning.bind(process) as (warning: string | Error, ...rest: unknown[]) => void
 process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
   const type = typeof rest[0] === 'string' ? rest[0] : (rest[0] as { type?: unknown } | undefined)?.type
   const text = typeof warning === 'string' ? warning : warning.message
-  if (type === 'ExperimentalWarning' && /SQLite/u.test(text)) return
+  if (type === 'ExperimentalWarning' && text === NODE_SQLITE_WARNING) return
   emitWarning(warning, ...rest)
 }) as typeof process.emitWarning
 
