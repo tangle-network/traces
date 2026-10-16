@@ -17,6 +17,8 @@ export interface CliOptions {
   readonly env?: Readonly<Record<string, string>>
   readonly cwd?: string
   readonly timeoutMs?: number
+  /** Another build of the CLI to run instead of this checkout's `dist/cli.js`. */
+  readonly cli?: string
 }
 
 /**
@@ -25,7 +27,8 @@ export interface CliOptions {
  * variable on the machine running the tests cannot change what is selected.
  */
 export function runCli(argv: readonly string[], options: CliOptions = {}): Promise<CliRun> {
-  if (!existsSync(CLI)) throw new Error(`${CLI} is missing; run \`pnpm build\` before these tests`)
+  const cli = options.cli ?? CLI
+  if (!existsSync(cli)) throw new Error(`${cli} is missing; run \`pnpm build\` before these tests`)
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? '',
     TMPDIR: process.env.TMPDIR ?? '/tmp',
@@ -33,7 +36,7 @@ export function runCli(argv: readonly string[], options: CliOptions = {}): Promi
     ...options.env,
   }
   return new Promise((resolve, reject) => {
-    execFile(process.execPath, [CLI, ...argv], {
+    execFile(process.execPath, [cli, ...argv], {
       cwd: options.cwd ?? process.cwd(),
       env,
       maxBuffer: 64 * 1024 * 1024,

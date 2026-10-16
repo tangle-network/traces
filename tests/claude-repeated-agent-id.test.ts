@@ -63,7 +63,7 @@ describe('traces facts when one agent ID has two transcripts', () => {
 
     const run = (extra: string[]) => execFileAsync(
       process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'facts', '--harness', 'claude-code', '--session', file, '--format', 'json', ...extra],
+      ['--import', 'tsx', 'src/cli.ts', 'facts', file, '--harness', 'claude-code', '--format', 'json', ...extra],
       { cwd: process.cwd(), env: { ...process.env, HOME: dir, NO_COLOR: '1', FORCE_COLOR: '' }, maxBuffer: 16 * 1024 * 1024 },
     )
     const first = JSON.parse((await run([])).stdout) as SessionFactsReport

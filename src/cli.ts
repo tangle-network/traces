@@ -1,52 +1,24 @@
 #!/usr/bin/env node
 /**
- * `traces`: analyze agent traces — yours, or any system's.
+ * `traces`: the command handlers. `src/commands.ts` owns the command table
+ * (parsing, the per-command flag allowlist, help and dispatch); `src/moved.ts`
+ * owns every 0.x spelling 1.0 removed. `traces --help` lists the commands and
+ * `traces <command> --help` each one's flags.
  *
- *   traces validate <file|dir>
- *   traces check   <trace> --contract contract.json [--junit out.xml] [--evidence dir]
- *   traces analyze --otlp <file|dir> [--out report.md] [--llm]
- *   traces list    [--cwd .] [--last 20] [--harness codex]
- *   traces analyze [--harness claude-code] [--last 1] [--out report.md] [--llm]
- *   traces analyze --harness codex --current --latest-turn --workflow
- *   traces analyze --harness claude-code --session <path> --latest-turn --workflow
- *   traces analyze <evidence.jsonl|spans.jsonl> [--format auto] [--out report.md]
- *   traces investigate [input.jsonl] [--format auto] [--out report.md]
- *   traces improve [input.jsonl] [--format auto] --dir .traces/improvement
- *   traces ask --harness codex --session <id> --question "..." [--questions q.json] [--dir <dir>]
- *   traces facts [--harness codex] [--last 5] [--format json|text] [--out facts.json]
- *   traces facts --harness claude-code --since 7d [--until 2026-10-14] [--all]
- *   traces convert [--harness claude-code] [--last 1] --otlp-out spans.jsonl
- *   traces bundle  <id|path> --out <dir>
- *   traces export  <file.jsonl|file.json> --out spans.openinference.jsonl
- *   traces stream  [input.jsonl] [--replay] [--all] [--format auto]
- *   traces watch   [--all] [--interval 5] [--window 30] [--min-loop 3]
- *   traces watch   <run-dir | spans.otlp.jsonl> [--once] [--interval 2]
- *
- * Two ways in. `--otlp` reads spans a system already emitted in the
- * `@tangle-network/agent-trace-contract` shape and skips translation entirely —
- * the way to integrate a system you control. `--harness` runs an adapter over a
- * proprietary session store, for the coding agents whose format we do not own.
- *
- * `analyze` runs the agent-eval analyst suite (deterministic + the shipped
- * loop/waste pipelines; +agentic RLM kinds with `--llm`) and reports which
- * analyses the spans could not support, and why. `validate` reports that
- * conformance alone, before a run is spent. `watch` is the online observer:
- * with no path it tails active sessions and prints notifications when a stuck
- * loop or semantic live finding appears; given a run directory or an OTLP span
- * file it tails that run's tree instead. `stream` emits the same live feed as
- * JSONL for visualizers, dashboards, and external agents.
- *
- * `--otlp <file|dir>` READS OTLP; `--otlp-out <path>` WRITES the artifact.
+ * A ref names what to read by what it is (`src/refs.ts`): a session id or a
+ * unique 8+ character prefix or suffix, a session file, OTLP or trace
+ * evidence, a bundle or Runtime run directory, or a store root. With no ref, a
+ * selection flag (`--current`, `--last`, `--since`) names the sessions.
  */
 
 import { readFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { findingRejectionDetail } from './finding-rejections.js'
-import { type TraceEvidenceFormatOption, exportTraceEvidenceFile, writeTraceEvidenceExportFile } from './file-export.js'
+import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
 import {
   loadTracesConfig,
   mergeTracesConfig,
@@ -57,7 +29,7 @@ import {
   totalAgenticFailureMessage,
   type TraceInvestigationResult,
 } from './improvement.js'
-import { findMoved, movedMessage, renderMovedTable, shellWord } from './moved.js'
+import { shellWord } from './moved.js'
 import {
   serializeTraceStreamEvent,
   streamSessions,
@@ -76,10 +48,9 @@ import {
 import { fileRunContextSupervisorRunReader } from './supervisor-run-context.js'
 import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
 import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL, DEFAULT_QUESTION_MAX_COST_USD, DEFAULT_QUESTION_TIMEOUT_MS } from './analyst-model-call.js'
+import { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL, DEFAULT_QUESTION_MAX_COST_USD } from './analyst-model-call.js'
 import {
   loadTraceQuestionsFile,
-  MAX_TRACE_QUESTION_CHARS,
   normalizeTraceQuestions,
   runTraceQuestions,
   type TraceQuestion,
@@ -106,7 +77,7 @@ import {
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
-import { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
+import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession, readSessionSpans, sessionsInCwd } from './session-source.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
 import {
@@ -115,7 +86,6 @@ import {
 } from './session-workflow.js'
 import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
 import { diffRuns, renderRunDiff } from './diff.js'
-import { tracesVersion } from './version.js'
 import { serveTraceMcp } from './mcp.js'
 import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
@@ -131,7 +101,7 @@ import {
   runCheck,
 } from './check.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
-import { RefError, resolveRefs, selectSpans, shortestRefs, type ResolvedRef, type SpanReader } from './refs.js'
+import { RefError, resolveRefs, selectSpans, shortestRefs, type ResolvedRef } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import { executeUpload, planUpload, planUploadFrom, type RefusedSession, type UploadPlan } from './upload.js'
 import { formatVerdict, verdictExitCode, verifySafe } from './verify-safe.js'
@@ -143,6 +113,7 @@ import {
   renderSkillUsage,
   SkillUsageStore,
 } from './skill-usage.js'
+import { type Args, type Handler, runTraces, UsageError } from './commands.js'
 
 /**
  * What a command's positional refs resolved to. Read once, before the command
@@ -157,244 +128,11 @@ interface RefSelection {
   readonly home?: string
 }
 
-interface Args {
-  command: string
-  /** The first positional argument, for the commands that take one path. */
-  input?: string
-  /** Every positional argument: refs (a session id, prefix or suffix, a file, a directory). */
-  refs: string[]
-  /** `refs`, resolved; set before a command that reads refs runs. */
-  selection?: RefSelection
-  help: boolean
-  harness: string
-  harnessExplicit: boolean
-  all: boolean
-  last: number
-  current: boolean
-  latestTurn: boolean
-  workflow: boolean
-  maxWorkflowSessions: number
-  session?: string
-  cwd?: string
-  since?: string
-  /** facts: exclusive upper bound of the time window. */
-  until?: string
-  out?: string
-  dir?: string
-  /** OTLP-JSONL file or directory to READ. */
-  otlp?: string
-  /** Where to WRITE the OTLP-JSONL artifact. */
-  otlpOut?: string
-  llm: boolean
-  budget?: number
-  interval: number
-  /** True when `--interval` was given, so a command can keep its own default. */
-  intervalExplicit: boolean
-  window: number
-  minLoop: number
-  dryRun: boolean
-  yes: boolean
-  noContent: boolean
-  model?: string
-  config?: string
-  format?: string
-  mode?: string
-  replay: boolean
-  /** `--once`: a single pass instead of a live tail. */
-  once: boolean
-  noSpans: boolean
-  noFindings: boolean
-  metadata?: string
-  attrs: string[]
-  supervisorRunDir?: string
-  concurrency: number
-  /** ask: repeatable `--question` texts. */
-  questions: string[]
-  /** ask: JSON file of questions, with optional IDs, guidance, and answer schemas. */
-  questionsFile?: string
-  /** ask: provider ceiling for one question; `--budget` bounds all of them together. */
-  questionBudget?: number
-  /** ask: wall-clock deadline for one question's investigation, in seconds. */
-  questionTimeout?: number
-  /** check: the declarative contract file. */
-  contract?: string
-  /** check: JUnit XML output path. */
-  junit?: string
-  /** check: where evidence for a trace that did not pass is written. */
-  evidence?: string
-  /** check: print GitHub workflow annotations (also on when GITHUB_ACTIONS=true). */
-  annotations: boolean
-  /** check: print what the contract checks, one rule per line, and read no trace. */
-  explain: boolean
-}
+/** A parsed command line, with its refs resolved for the commands that read them. */
+type CliArgs = Args & { selection?: RefSelection }
 
-function parseArgs(argv: string[]): Args {
-  const a: Args = {
-    command: argv[0] === '--help' || argv[0] === '-h' ? 'help' : argv[0] ?? 'help',
-    help: argv[0] === '--help' || argv[0] === '-h',
-    refs: [],
-    harness: 'claude-code',
-    harnessExplicit: false,
-    all: false,
-    last: 0,
-    current: false,
-    latestTurn: false,
-    workflow: false,
-    maxWorkflowSessions: 100,
-    llm: false,
-    interval: 5,
-    intervalExplicit: false,
-    window: 30,
-    minLoop: 3,
-    dryRun: false,
-    yes: false,
-    noContent: false,
-    replay: false,
-    once: false,
-    noSpans: false,
-    noFindings: false,
-    attrs: [],
-    concurrency: 4,
-    questions: [],
-    annotations: false,
-    explain: false,
-  }
-  for (let i = 1; i < argv.length; i++) {
-    const arg = argv[i]
-    const next = () => argv[++i]
-    switch (arg) {
-      case '--harness': a.harness = next() ?? a.harness; a.harnessExplicit = true; break
-      case '--all': a.all = true; break
-      case '--last': a.last = Number(next()); break
-      case '--current': a.current = true; break
-      case '--latest-turn': a.latestTurn = true; break
-      case '--workflow': a.workflow = true; break
-      case '--max-workflow-sessions': a.maxWorkflowSessions = Number(next()); break
-      case '--session': a.session = next(); break
-      case '--cwd': { const v = next(); if (v !== undefined) a.cwd = resolve(v); break }
-      case '--supervisor-run-dir': a.supervisorRunDir = next(); break
-      case '--concurrency': a.concurrency = Number(next()); break
-      case '--since': a.since = next(); break
-      case '--until': a.until = next(); break
-      case '--out': a.out = next(); break
-      case '--dir': a.dir = next(); break
-      case '--otlp': a.otlp = next(); break
-      case '--otlp-out': a.otlpOut = next(); break
-      case '--llm': a.llm = true; break
-      case '--budget': a.budget = Number(next()); break
-      case '--model': a.model = next(); break
-      case '--config': a.config = next(); break
-      case '--mode': a.mode = next(); break
-      case '--metadata': a.metadata = next(); break
-      case '--attr': { const v = next(); if (v) a.attrs.push(v); break }
-      case '--interval': a.interval = Number(next()); a.intervalExplicit = true; break
-      case '--window': a.window = Number(next()); break
-      case '--min-loop': a.minLoop = Number(next()); break
-      case '--dry-run': a.dryRun = true; break
-      case '--no-content': a.noContent = true; break
-      case '--replay': a.replay = true; break
-      // `stream --once` has always meant "one pass"; `watch --once` means the
-      // same thing over a run directory, so one flag drives both.
-      case '--once': a.once = true; a.replay = true; break
-      case '--no-spans': a.noSpans = true; break
-      case '--no-findings': a.noFindings = true; break
-      case '--question': { const v = next(); if (v !== undefined) a.questions.push(v); break }
-      case '--questions': a.questionsFile = next(); break
-      case '--question-budget': a.questionBudget = Number(next()); break
-      case '--question-timeout': a.questionTimeout = Number(next()); break
-      case '--format': a.format = next(); break
-      case '--contract': a.contract = next(); break
-      case '--junit': a.junit = next(); break
-      case '--evidence': a.evidence = next(); break
-      case '--annotations': a.annotations = true; break
-      case '--explain': a.explain = true; break
-      case '--help':
-      case '-h': a.help = true; break
-      case '--yes':
-      case '-y': a.yes = true; break
-      default:
-        if (arg?.startsWith('--')) throw new Error(`unknown flag: ${arg}`)
-        if (arg) a.refs.push(arg)
-    }
-  }
-  // `--session X` names the same session as the ref X; it is read as one.
-  if (a.session !== undefined && REF_COMMANDS.has(a.command)) {
-    if (a.refs.length > 0) throw new Error('--session and a positional ref both name the trace; pass one')
-    a.refs.push(a.session)
-    a.session = undefined
-  }
-  a.input = a.refs[0]
-  if (a.refs.length > 1 && !MULTI_REF_COMMANDS.has(a.command)) {
-    throw new Error(`unexpected positional argument: ${a.refs[1]}`)
-  }
-  return a
-}
-
-/** Commands whose positional arguments are refs (`refs.ts`). */
-const REF_COMMANDS = new Set([
-  'list', 'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert',
-  'bundle', 'upload', 'stream', 'check', 'mcp',
-])
-
-/** Ref commands that read more than one ref and combine what they name. */
-const MULTI_REF_COMMANDS = new Set([
-  'facts', 'analyze', 'investigate', 'improve', 'ask', 'convert', 'upload', 'check', 'mcp',
-])
-
-/**
- * Commands that READ OTLP with `--otlp`. Everything else WRITES its OTLP
- * artifact with `--otlp-out`: one flag, one direction, no command where the
- * same word means read here and write there.
- */
-const OTLP_INPUT_COMMANDS = new Set([
-  'analyze',
-  'check',
-  'facts',
-  'investigate',
-  'improve',
-  'ask',
-  'stream',
-  'validate',
-  'mcp',
-])
-
-function validateOtlpSelection(args: Args): Args {
-  if (args.otlp === undefined) return args
-  if (!OTLP_INPUT_COMMANDS.has(args.command)) {
-    throw new Error(
-      `${args.command} does not read --otlp. --otlp reads OTLP-JSONL on ${[...OTLP_INPUT_COMMANDS].join(', ')}; ` +
-        'use --otlp-out <path> to write the artifact.',
-    )
-  }
-  if (args.input) throw new Error('--otlp cannot be combined with a positional ref; name the file once')
-  if (args.supervisorRunDir) throw new Error('--otlp cannot be combined with --supervisor-run-dir')
-  if (args.workflow || args.latestTurn) {
-    throw new Error('--workflow and --latest-turn expand harness sessions and cannot be combined with --otlp')
-  }
-  return args
-}
-
-const CURRENT_SESSION_COMMANDS = new Set([
-  'analyze',
-  'facts',
-  'mcp',
-  'upload',
-  'investigate',
-  'improve',
-  'ask',
-  'convert',
-  'bundle',
-  'stream',
-])
-
-const WORKFLOW_COMMANDS = new Set([
-  'analyze',
-  'facts',
-  'investigate',
-  'improve',
-  'ask',
-  'convert',
-])
+/** The most spawned children a named session brings with it. */
+const MAX_CHILD_SESSIONS = 100
 
 /**
  * The caller's own session, from the variable its harness sets. Codex's wins:
@@ -412,67 +150,37 @@ function callerSession(harness?: string): { readonly harness: 'codex' | 'claude-
 const CURRENT_VARIABLES = 'CODEX_THREAD_ID (Codex) or CLAUDE_CODE_SESSION_ID (Claude Code)'
 
 /** `--current` is the caller's own session, named by id. */
-function applyCurrentSessionSelection(args: Args): Args {
+function applyCurrentSessionSelection(args: CliArgs): CliArgs {
   if (!args.current) return args
-  if (!CURRENT_SESSION_COMMANDS.has(args.command)) {
-    throw new Error(`--current is not supported by ${args.command}`)
-  }
-  if (args.refs.length > 0) throw new RefError('--current names the caller\'s own session; pass --current or a ref, not both', 'usage')
-  if (args.supervisorRunDir) throw new RefError('--current cannot be combined with --supervisor-run-dir', 'usage')
-  if (args.otlp) throw new RefError('--current cannot be combined with --otlp', 'usage')
-  if (args.last > 0) throw new RefError('--current cannot be combined with --last', 'usage')
+  if (args.refs.length > 0) throw new UsageError('--current names the caller\'s own session; pass --current or a ref, not both')
+  if (args.last > 0) throw new UsageError('--current cannot be combined with --last')
   const named = args.harnessExplicit ? resolveAdapter(args.harness)?.harness ?? args.harness : undefined
   if (named !== undefined && named !== 'codex' && named !== 'claude-code') {
-    throw new RefError(
+    throw new UsageError(
       `--current reads ${CURRENT_VARIABLES}; ${named} sets neither. ` +
         'Name this session with `traces list --cwd . --last 1`',
-      'usage',
     )
   }
   const caller = callerSession(named)
   if (!caller) {
-    throw new RefError(
+    throw new UsageError(
       `--current needs ${CURRENT_VARIABLES}, and neither is set. ` +
         'On another harness, `traces list --cwd . --last 1` names this session',
-      'usage',
     )
   }
   return { ...args, refs: [caller.sessionId], input: caller.sessionId, harness: caller.harness, harnessExplicit: true }
-}
-
-/** `--until` closes the facts time window; no other command reads a window's upper bound. */
-function validateUntilSelection(args: Args): Args {
-  if (args.until === undefined || args.command === 'facts') return args
-  throw new Error(`--until is not supported by ${args.command}; it bounds the facts window (traces facts --since <t> --until <t>)`)
-}
-
-function validateWorkflowSelection(args: Args): Args {
-  if (!args.workflow && !args.latestTurn) return args
-  if (!WORKFLOW_COMMANDS.has(args.command)) {
-    throw new Error(`${args.workflow ? '--workflow' : '--latest-turn'} is not supported by ${args.command}`)
-  }
-  // A ref is checked once it is resolved (`resolveSelection`): a session ref
-  // takes both, a span file takes neither.
-  if (args.supervisorRunDir) {
-    throw new Error('--workflow and --latest-turn cannot be combined with --supervisor-run-dir')
-  }
-  // Without --harness, --latest-turn reads the harnesses that record task turns.
-  if (args.latestTurn && args.harnessExplicit && !supportsTaskTurns(resolveAdapter(args.harness))) {
-    throw new Error('--latest-turn reads Codex and Claude Code sessions; pass --harness codex or claude-code, or no --harness')
-  }
-  return args
 }
 
 function supportsTaskTurns(adapter: HarnessTraceAdapter | undefined): boolean {
   return adapter?.harness === 'codex' || adapter?.harness === 'claude-code'
 }
 
-/** How a command's `--format` names its input, or undefined when it names the output or is absent. */
-function refInputFormat(args: Args): SpanReader | undefined {
-  // facts and list name their output with --format; check names its input its own way.
-  if (!args.format || args.command === 'facts' || args.command === 'list' || args.command === 'check') return undefined
-  const format = traceEvidenceFormat(args.format)
-  return format === 'auto' ? undefined : format
+/** `--latest-turn` reads the harnesses that record task turns. */
+function validateLatestTurn(args: CliArgs): CliArgs {
+  if (args.latestTurn && args.harnessExplicit && !supportsTaskTurns(resolveAdapter(args.harness))) {
+    throw new UsageError('--latest-turn reads Codex and Claude Code sessions; pass --harness codex or claude-code, or no --harness')
+  }
+  return args
 }
 
 /**
@@ -480,15 +188,9 @@ function refInputFormat(args: Args): SpanReader | undefined {
  * kept apart, because each is read its own way, and a selection flag that
  * applies only to harness sessions is refused for the rest.
  */
-async function resolveSelection(
-  args: Args,
-  overrides: { harness?: string; format?: SpanReader } = {},
-): Promise<RefSelection | undefined> {
+async function resolveSelection(args: CliArgs): Promise<RefSelection | undefined> {
   if (args.refs.length === 0) return undefined
-  const resolved = await resolveRefs(args.refs, {
-    harness: overrides.harness ?? (args.harnessExplicit ? args.harness : undefined),
-    format: overrides.format ?? refInputFormat(args),
-  })
+  const resolved = await resolveRefs(args.refs, { harness: args.harnessExplicit ? args.harness : undefined })
   const sessions: Array<RefSelection['sessions'][number]> = []
   const spans: Array<RefSelection['spans'][number]> = []
   let home: string | undefined
@@ -499,24 +201,21 @@ async function resolveSelection(
     else if (ref.kind === 'store-root') home = ref.path
     else spans.push(ref)
   }
-  if (args.workflow || args.latestTurn) {
-    const flag = args.workflow ? '--workflow' : '--latest-turn'
-    if (spans[0]) throw new Error(`${flag} expands harness sessions; ${spans[0].ref} is a span source`)
+  if (args.latestTurn) {
+    if (spans[0]) throw new UsageError(`--latest-turn reads harness sessions; ${spans[0].ref} is a span source`)
     const other = sessions.find(({ adapter }) => !supportsTaskTurns(adapter))
-    if (args.latestTurn && other) {
-      throw new Error(`--latest-turn reads Codex and Claude Code sessions; ${other.ref.sessionId} is ${other.adapter.harness}`)
-    }
+    if (other) throw new UsageError(`--latest-turn reads Codex and Claude Code sessions; ${other.ref.sessionId} is ${other.adapter.harness}`)
     // Over a store root every harness is read unless --harness names one.
     const narrowed = args.harnessExplicit && supportsTaskTurns(resolveAdapter(args.harness))
-    if (args.latestTurn && home !== undefined && sessions.length === 0 && !narrowed) {
-      throw new Error('--latest-turn over a store root requires --harness codex or claude-code')
+    if (home !== undefined && sessions.length === 0 && !narrowed) {
+      throw new UsageError('--latest-turn over a store root requires --harness codex or claude-code')
     }
   }
   return { sessions, spans, ...(home !== undefined ? { home } : {}) }
 }
 
 /** `args` with its refs resolved, for a command that reads them. */
-async function withSelection(args: Args): Promise<Args> {
+async function withSelection(args: CliArgs): Promise<CliArgs> {
   if (args.selection || args.refs.length === 0) return args
   return { ...args, selection: await resolveSelection(args) }
 }
@@ -541,7 +240,7 @@ async function confirm(question: string): Promise<boolean> {
  * Over a store root, only those that read one. `--latest-turn` with no
  * `--harness` reads the harnesses that record task turns.
  */
-function adaptersFor(args: Args): HarnessTraceAdapter[] {
+function adaptersFor(args: CliArgs): HarnessTraceAdapter[] {
   let adapters = args.harnessExplicit ? selectAdapters({ harnesses: [args.harness] }) : [...listAdapters()]
   if (args.latestTurn && !args.harnessExplicit) adapters = adapters.filter(supportsTaskTurns)
   return args.selection?.home !== undefined ? adapters.filter(readsStoreRoots) : adapters
@@ -561,12 +260,12 @@ interface Discovered {
  * when neither `--last` nor `--since` is given, keeps the newest N, and never
  * the caller's own session.
  */
-async function discover(args: Args, defaultLast?: number): Promise<Discovered> {
+async function discover(args: CliArgs, defaultLast?: number): Promise<Discovered> {
   return narrow(args, await locateAll(args, args.since ? parseSince(args.since) : undefined), defaultLast)
 }
 
 /** Every session of the selected harnesses (modified since `sinceMs`, when given), newest first. */
-async function locateAll(args: Args, sinceMs?: number): Promise<Discovered> {
+async function locateAll(args: CliArgs, sinceMs?: number): Promise<Discovered> {
   const sessions: Array<Discovered['sessions'][number]> = []
   const unread: UnreadSessionFact[] = []
   for (const adapter of adaptersFor(args)) {
@@ -580,7 +279,7 @@ async function locateAll(args: Args, sinceMs?: number): Promise<Discovered> {
 }
 
 /** `located`, narrowed by `--since`, `--cwd` and `--last` (see `discover`). */
-async function narrow(args: Args, located: Discovered, defaultLast?: number): Promise<Discovered> {
+async function narrow(args: CliArgs, located: Discovered, defaultLast?: number): Promise<Discovered> {
   const sinceMs = args.since ? parseSince(args.since) : undefined
   let sessions = sinceMs === undefined ? located.sessions : located.sessions.filter(({ ref }) => ref.mtimeMs >= sinceMs)
   if (args.cwd) {
@@ -616,7 +315,7 @@ function errorText(error: unknown): string {
  * Name the sessions a sweep skipped, in one stderr line that says how to see
  * each with its reason: `command` with the same selection, as JSON.
  */
-function warnUnread(args: Args, unread: readonly UnreadSessionFact[], command: 'facts' | 'list' = 'facts'): void {
+function warnUnread(args: CliArgs, unread: readonly UnreadSessionFact[], command: 'facts' | 'list' = 'facts'): void {
   if (unread.length === 0) return
   const select: string[] = args.current ? ['--current'] : args.refs.map(shellWord)
   if (args.harnessExplicit && !args.current) select.push('--harness', args.harness)
@@ -633,11 +332,11 @@ function warnUnread(args: Args, unread: readonly UnreadSessionFact[], command: '
  * ceiling: the registry already splits `--budget` across analysts, so this only
  * stops the engine's own $1 default from cutting runs short.
  */
-function llmAnalysisEngine(args: Args, model: string): TraceAnalysisEngine {
+function llmAnalysisEngine(args: CliArgs, model: string): TraceAnalysisEngine {
   return analysisEngineFromEnv({ model, maxCostUsd: args.budget, log: analystLog })
 }
 
-function analystModelFor(args: Args): string {
+function analystModelFor(args: CliArgs): string {
   return args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
 }
 
@@ -661,18 +360,19 @@ function requiredBridgeVersion(): string {
 
 /**
  * `--llm` promises agentic findings. Delivering the deterministic report with
- * exit 0 when the requested analysis died reads as success. Throwing after the
- * report is written keeps the deterministic output AND fails loud. The
- * bridge-version read happens only once total agentic failure is established,
- * so a package.json problem can never turn a successful run into exit 1.
+ * exit 0 when the requested analysis died reads as success, so the report is
+ * written and the run then exits 1 with each reason. The bridge-version read
+ * happens only once total agentic failure is established, so a package.json
+ * problem can never turn a successful run into a failure.
  */
-function assertRequestedAnalysesRan(
-  args: Args,
+function failUnlessRequestedAnalysesRan(
+  args: CliArgs,
   result: Pick<TraceInvestigationResult, 'agenticPerAnalyst'>,
 ): void {
-  if (args.llm && totalAgenticFailureMessage(result.agenticPerAnalyst)) {
-    throw new Error(totalAgenticFailureMessage(result.agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })!)
-  }
+  if (!args.llm || !totalAgenticFailureMessage(result.agenticPerAnalyst)) return
+  const message = totalAgenticFailureMessage(result.agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })
+  process.stderr.write(`error: ${message}\n`)
+  process.exitCode = 1
 }
 
 /** One `traces list` row: the facts a person picks a session by. */
@@ -746,13 +446,11 @@ async function listRow(adapter: HarnessTraceAdapter, ref: SessionRef, shortRef: 
  * every session active in the window. A session that cannot be read is
  * counted in the footer and named in the JSON's `selection.unreadSessions`.
  */
-async function cmdList(args: Args): Promise<void> {
+async function cmdList(args: CliArgs): Promise<void> {
   const named = args.selection?.sessions[0]?.ref.sessionId ?? args.selection?.spans[0]?.ref
   if (named !== undefined) {
-    throw new RefError(`list finds sessions; its only ref is a store root, and ${named} is not one (read it with \`traces facts ${named}\`)`, 'usage')
+    throw new UsageError(`list finds sessions; its only ref is a store root, and ${named} is not one (read it with \`traces facts ${named}\`)`)
   }
-  const format = args.format ?? 'text'
-  if (format !== 'text' && format !== 'json') throw new RefError(`list prints text or json, not "${format}"`, 'usage')
   // Every session a ref could name, so each row's short ref names it alone.
   const every = await locateAll(args)
   const shortRefs = shortestRefs(every.sessions.map(({ ref }) => ref.sessionId))
@@ -767,7 +465,7 @@ async function cmdList(args: Args): Promise<void> {
     }
   }
   warnUnread(args, unread, 'list')
-  if (format === 'json') {
+  if (args.format === 'json') {
     process.stdout.write(`${JSON.stringify({ sessions: rows, selection: { unreadSessions: unread } }, null, 2)}\n`)
     return
   }
@@ -813,7 +511,17 @@ interface CollectedSpans {
  * need no translation to be analysed.
  */
 async function collectOtlpSpans(path: string, selector?: string): Promise<CollectedSpans> {
-  const input = await readOtlpInput(path)
+  let input: Awaited<ReturnType<typeof readOtlpInput>>
+  try {
+    input = await readOtlpInput(path)
+  } catch (error) {
+    if (!(await stat(path).catch(() => undefined))?.isDirectory()) throw error
+    // A directory that is no run, store root or bundle is read as OTLP: say what else it could have been.
+    throw new Error(
+      `${errorText(error)}. A directory ref is read as OTLP-JSONL unless it is a Runtime run ` +
+        '(spawn-journal.jsonl, observer.jsonl or failure.json), a harness store root, or a bundle (manifest.json)',
+    )
+  }
   if (input.spans.length === 0) {
     throw new Error(
       `no analyzable spans in ${path} (${input.files.length} file(s), ${input.rows.length} row(s), ` +
@@ -852,8 +560,7 @@ async function collectOtlpSpans(path: string, selector?: string): Promise<Collec
   }
 }
 
-async function collectSpans(args: Args): Promise<CollectedSpans> {
-  if (args.otlp) return collectOtlpSpans(args.otlp)
+async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   if (args.refs.length > 0 && !args.selection) throw new Error(`internal: ${args.command} read its refs before resolving them`)
   const sources = args.selection?.spans ?? []
   if (sources.length === 0) {
@@ -867,7 +574,7 @@ async function collectSpans(args: Args): Promise<CollectedSpans> {
       ? await collectOtlpSpans(source.path)
       : source.reader === 'otlp'
         ? await collectOtlpSpans(source.path, source.selector)
-        : await collectImportedSpans(source.path, source.reader, args, source.selector))
+        : await collectImportedSpans(source.path, source.reader, source.selector))
   }
   if (args.selection?.sessions.length) parts.push(await collectSessionSpans(args))
   const collected = parts.length === 1 ? parts[0]! : mergeCollected(parts)
@@ -898,8 +605,8 @@ function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
   }
 }
 
-/** Spans of the selected harness sessions: refs, --session, or discovery. */
-async function collectSessionSpans(args: Args): Promise<CollectedSpans> {
+/** Spans of the selected harness sessions: refs, `--current`, or discovery. */
+async function collectSessionSpans(args: CliArgs): Promise<CollectedSpans> {
   const selection = await collectSessionRows(args, args.last || 1)
   const spans: OtlpSpan[] = []
   const harnesses = new Set<string>()
@@ -922,17 +629,14 @@ async function collectSessionSpans(args: Args): Promise<CollectedSpans> {
 }
 
 /**
- * `traces validate <file|dir>` — what a trace can and cannot answer, before
- * anyone spends a run on it. Exits non-zero on exactly one condition: the input
- * is not a trace, because not one entry in it could be read as a span. A
- * degraded trace exits 0 and states its degradation per capability; a gate that
- * fails on thinness would stop every real-world trace on day one.
+ * `traces validate <file|dir>` (hidden; `check --contract conformance` in
+ * 1.0): what a trace can and cannot answer, before anyone spends a run on it.
+ * Exits non-zero on exactly one condition: the input is not a trace, because
+ * not one entry in it could be read as a span. A degraded trace exits 0 and
+ * states its degradation per capability.
  */
-async function cmdValidate(args: Args): Promise<void> {
-  const path = args.otlp ?? args.input
-  if (!path) {
-    throw new Error('validate needs an OTLP-JSONL file or directory: `traces validate <file|dir>`')
-  }
+async function cmdValidate(args: CliArgs): Promise<void> {
+  const path = args.input!
   const input = await readOtlpInput(path)
   const report = renderValidation(input.validation, {
     subject: path,
@@ -958,18 +662,8 @@ async function cmdValidate(args: Args): Promise<void> {
   process.exitCode = validationExitCode(validation)
 }
 
-const EVIDENCE_FORMATS = new Set(['sandbox-events', 'openinference'])
-
-/** check's --format names its input: a span reader, or a harness whose session reader it forces. */
-function checkInputFormat(args: Args): { harness?: string; format?: SpanReader } {
-  if (!args.format || args.format === 'auto') return {}
-  if (args.format === 'otlp' || EVIDENCE_FORMATS.has(args.format)) return { format: args.format as SpanReader }
-  if (args.format === 'claude-code' || args.format === 'codex') return { harness: args.format }
-  throw new Error(`unknown --format "${args.format}" (otlp, claude-code, codex, or an evidence format)`)
-}
-
 /** check's exit for a ref that names nothing, or more than one thing. */
-function checkRefExit(error: RefError): number {
+function checkRefExit(error: RefError | UsageError): number {
   return error.code === 'ambiguous' ? CHECK_EXIT.ambiguous : error.code === 'usage' ? CHECK_EXIT.badContract : CHECK_EXIT.unreadable
 }
 
@@ -978,7 +672,7 @@ function checkRefExit(error: RefError): number {
  * contract or a rule that could not run, 3 unreadable trace, 4 ambiguous trace
  * reference. Evidence for every trace that did not pass goes to `--evidence`.
  */
-async function cmdCheck(args: Args): Promise<void> {
+async function cmdCheck(args: CliArgs): Promise<void> {
   if (!args.contract) {
     process.stderr.write('error: check needs --contract <contract.json>\n')
     process.exitCode = CHECK_EXIT.badContract
@@ -999,15 +693,11 @@ async function cmdCheck(args: Args): Promise<void> {
   }
   let spans: OtlpSpan[]
   try {
-    if (args.refs.length > 0 && args.otlp) {
-      throw new Error('name the trace once: a positional ref, --otlp, or --session')
-    }
-    const selected = { ...args, selection: await resolveSelection(args, checkInputFormat(args)) }
-    spans = (await collectSpans(selected)).spans
+    spans = (await collectSpans(await withSelection(args))).spans
     if (spans.length === 0) throw new Error('the trace holds no spans')
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = error instanceof RefError
+    process.exitCode = error instanceof RefError || error instanceof UsageError
       ? checkRefExit(error)
       : error instanceof AmbiguousTraceInputError ? CHECK_EXIT.ambiguous : CHECK_EXIT.unreadable
     return
@@ -1023,18 +713,17 @@ async function cmdCheck(args: Args): Promise<void> {
   process.exitCode = report.exitCode
 }
 
-/** Where a command writes its OTLP: --out, or the older --otlp-out. */
-function otlpOutPath(args: Args): string | undefined {
-  if (args.out && args.otlpOut && args.out !== args.otlpOut) throw new Error('pass one of --out and --otlp-out; both name the OTLP file')
-  return args.out ?? args.otlpOut
-}
-
-async function cmdConvert(args: Args): Promise<void> {
-  const out = otlpOutPath(args)
+/** `traces convert`: contract OTLP-JSONL to `--out`, or to stdout. */
+async function cmdConvert(args: CliArgs): Promise<void> {
   const { spans, workflow } = await collectSpans(args)
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(workflow)
-  const path = await writeOtlpFile(spans, out)
+  if (args.out === undefined) {
+    // Streamed line by line: a conversion can outgrow V8's maximum string length.
+    for (const line of iterSerializedSpans(spans)) process.stdout.write(line)
+    return
+  }
+  const path = await writeOtlpFile(spans, args.out)
   console.log(`wrote ${spans.length} spans → ${path}`)
 }
 
@@ -1072,7 +761,7 @@ type CollectedSessionRows = SessionSelection & { readonly unread: UnreadSessionF
  * session that cannot be read exits 2; any other session that cannot be read
  * is skipped and named in `unread`.
  */
-async function collectSessionRows(args: Args, defaultLast: number): Promise<CollectedSessionRows> {
+async function collectSessionRows(args: CliArgs, defaultLast: number): Promise<CollectedSessionRows> {
   const named = args.selection?.sessions ?? []
   const source = args.selection?.spans[0]
   if (source && named.length === 0) {
@@ -1083,7 +772,7 @@ async function collectSessionRows(args: Args, defaultLast: number): Promise<Coll
   const selection = await collectSessionSelection(groupsInOrder(found.sessions), {
     workflow: named.length > 0 || !args.since,
     parents: false,
-    maxWorkflowSessions: args.maxWorkflowSessions,
+    maxWorkflowSessions: MAX_CHILD_SESSIONS,
     taskScope: args.latestTurn ? 'latest' : 'all',
     home: args.selection?.home,
     onUnreadable: ({ ref, error, seed }) => {
@@ -1094,17 +783,17 @@ async function collectSessionRows(args: Args, defaultLast: number): Promise<Coll
   return { ...selection, unread }
 }
 
-async function cmdBundle(args: Args): Promise<void> {
+async function cmdBundle(args: CliArgs): Promise<void> {
   const named = args.selection
   if (named?.sessions.length !== 1 || named.spans.length > 0) {
-    throw new Error(
+    throw new UsageError(
       named?.spans[0]
         ? `bundle keeps one harness session's evidence; ${named.spans[0].ref} is a span source`
         : 'bundle needs one session: traces bundle <id|path> --out <dir>; run `traces list` to pick a session ID',
     )
   }
-  if (!args.out) throw new Error('bundle needs --out <dir> — a new or empty directory for the bundle')
-  const { adapter, ref } = named!.sessions[0]!
+  if (!args.out) throw new UsageError('bundle needs --out <dir>: a new or empty directory for the bundle')
+  const { adapter, ref } = named.sessions[0]!
   const result = await assembleSessionBundle({ adapter, ref, outDir: args.out })
   const { manifest } = result
   console.log(`session bundle → ${result.directory}  (${manifest.files.length} file(s), ${manifest.absent.length} recorded absent)`)
@@ -1114,28 +803,8 @@ async function cmdBundle(args: Args): Promise<void> {
  * `traces mcp`: serve the selected spans to an MCP client over stdio. Stdout
  * carries the protocol, so everything else this command says goes to stderr.
  */
-async function cmdMcp(args: Args): Promise<void> {
-  if (args.help) {
-    process.stdout.write(`traces mcp — read-only MCP server over stdio for the selected traces
-
-Usage:
-  traces mcp --otlp <file|dir>                  any OTLP-JSONL
-  traces mcp --harness claude-code --last 5     recent harness sessions (any selection flag)
-
-Register with a client, for example:
-  claude mcp add traces -- traces mcp --otlp ./spans.otlp.jsonl
-
-Every tool is read-only and idempotent and says so in its MCP annotations.
-Spans (including causal links) and results are redacted, the server refuses
-to start if the redacted spans are still UNSAFE or UNKNOWN, each result
-carries an untrusted-text notice, and a result above 512 KiB is refused
-rather than truncated. readSpanSource is not served: windowed reads of
-original source bytes cannot be redacted.
-`)
-    return
-  }
-  const selected = await withSelection(validateOtlpSelection(validateWorkflowSelection(applyCurrentSessionSelection(args))))
-  const collected = await collectSpans(selected)
+async function cmdMcp(args: CliArgs): Promise<void> {
+  const collected = await collectSpans(args)
   if (collected.spans.length === 0) throw new Error('mcp: no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
   process.stderr.write(`traces mcp: serving ${collected.spans.length} span(s) over stdio\n`)
@@ -1143,68 +812,26 @@ original source bytes cannot be redacted.
 }
 
 /**
- * `traces diff <a> <b> [--format text|json]`: pair the two runs' steps and
- * mark where they first diverge. Exit 1 when they diverge, like diff(1); exit
- * 3 when they don't diverge but there is nothing to agree on (see below).
+ * `traces diff <a> <b>`: pair the two runs' steps and mark where they first
+ * diverge. Exit 1 when they diverge, like diff(1); exit 3 when they don't
+ * diverge but neither side records an outcome to call agreement on.
  */
-async function cmdDiff(argv: readonly string[]): Promise<void> {
-  const inputs: string[] = []
-  const kinds: string[] = []
-  let format = 'text'
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!
-    if (arg === '--help' || arg === '-h') {
-      process.stdout.write(`traces diff — where two runs of one task first diverge
-
-Usage:
-  traces diff <a> <b> [--kind TOOL]... [--format text|json]
-
-Each side is an OTLP file or directory, any file convert reads, file#<trace id>,
-or file#branch=<id> for one arm (agent.branch.id or agent.branch.arm, and every
-span below it — refused if the label names more than one subtree). Steps pair
-by span id, then position with the same name and kind, then name and kind
-anywhere. Exit 0 when the runs agree on outcome, 1 when they diverge, 2 when a
-side cannot be read, 3 when the steps line up with no divergence but neither
-side carries a definitive OK/ERROR status or a TOOL step — there is no
-recorded outcome to call agreement on.
-`)
-      return
-    }
-    if (arg === '--format') format = argv[++i] ?? ''
-    else if (arg === '--kind') kinds.push(argv[++i] ?? '')
-    else if (arg.startsWith('--')) throw new Error(`diff: unknown flag ${arg}`)
-    else inputs.push(arg)
-  }
-  if (inputs.length !== 2) {
-    throw new Error('diff needs two runs: traces diff <a> <b> (a file, a directory, file#<trace id> or file#branch=<id>)')
-  }
-  if (format !== 'json' && format !== 'text') throw new Error(`diff: --format must be json or text, got "${format}"`)
-  if (kinds.some((kind) => !kind)) throw new Error('diff: --kind needs a span kind, e.g. --kind TOOL')
-  const report = await diffRuns(inputs[0]!, inputs[1]!, { kinds })
-  process.stdout.write(format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
+async function cmdDiff(args: CliArgs): Promise<void> {
+  if (args.kinds.some((kind) => !kind)) throw new UsageError('diff: --kind needs a span kind, e.g. --kind TOOL')
+  const report = await diffRuns(args.refs[0]!, args.refs[1]!, { kinds: args.kinds })
+  process.stdout.write(args.format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
   if (report.diff.firstDivergence) process.exitCode = 1
   else if (report.caveat) process.exitCode = 3
 }
 
 /**
- * `traces bundle verify <dir> [--format json|text]`: every listed file is on
- * disk with its recorded size and SHA-256, and nothing unlisted sits beside
- * them. Exit 0 when the bundle verifies, 1 when it does not.
+ * `traces bundle verify <dir>`: every listed file is on disk with its recorded
+ * size and SHA-256, and nothing unlisted sits beside them. Exit 0 when the
+ * bundle verifies, 1 when it does not.
  */
-async function cmdBundleVerify(argv: readonly string[]): Promise<void> {
-  let dir: string | undefined
-  let format = 'text'
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!
-    if (arg === '--format') format = argv[++i] ?? ''
-    else if (arg.startsWith('--')) throw new Error(`bundle verify: unknown flag ${arg}`)
-    else if (dir === undefined) dir = arg
-    else throw new Error(`bundle verify: unexpected argument ${arg}`)
-  }
-  if (!dir) throw new Error('bundle verify needs the bundle directory: traces bundle verify <dir>')
-  if (format !== 'json' && format !== 'text') throw new Error(`bundle verify: --format must be json or text, got "${format}"`)
-  const result = await verifySessionBundle(dir)
-  if (format === 'json') {
+async function cmdBundleVerify(args: CliArgs): Promise<void> {
+  const result = await verifySessionBundle(args.input!)
+  if (args.format === 'json') {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
   } else {
     const lines = [
@@ -1223,7 +850,7 @@ async function cmdBundleVerify(argv: readonly string[]): Promise<void> {
  * No model, no engine, no budget: the numbers come out of the spans. JSON by
  * default because the sheet's consumers are programs; `--format text` prints
  * the short readable form. Every fact names the span ids it came from, so any
- * number here can be checked with `traces export` or a trace tool.
+ * number here can be checked with `traces convert` or a trace tool.
  *
  * A named session (a ref or `--current`) comes first, its spawned children
  * after it, and one that cannot be read exits 2. A sweep (`--last`, a window)
@@ -1232,11 +859,8 @@ async function cmdBundleVerify(argv: readonly string[]): Promise<void> {
  * With `--since`/`--until` the selection is every session with a record in
  * the window, read one at a time.
  */
-async function cmdFacts(args: Args): Promise<void> {
+async function cmdFacts(args: CliArgs): Promise<void> {
   const format = args.format ?? 'json'
-  if (format !== 'json' && format !== 'text') {
-    throw new Error(`unknown facts format "${format}" (expected json or text)`)
-  }
   const window = args.since !== undefined || args.until !== undefined
     ? {
         ...(args.since !== undefined ? { since: new Date(parseSince(args.since)).toISOString() } : {}),
@@ -1247,7 +871,7 @@ async function cmdFacts(args: Args): Promise<void> {
   const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
   const builder = createSessionFactsReportBuilder({ includeContent: !args.noContent, window, nameUnread: named === 0 })
   let report: SessionFactsReport
-  if (window !== undefined && !args.otlp && named === 0) {
+  if (window !== undefined && named === 0) {
     // Every session modified since the window opened, newest first, parsed and
     // reduced to its facts one at a time: a week of sessions is gigabytes of
     // spans, and the sheet needs only one session's at once. A file last
@@ -1302,68 +926,14 @@ async function cmdFacts(args: Args): Promise<void> {
   process.stdout.write(rendered)
 }
 
-async function cmdExport(args: Args): Promise<void> {
-  if (!args.input) throw new Error('export needs an input file; run `traces export --help` for examples')
-  const format = traceEvidenceFormat(args.format)
-  const attributes = await loadExportAttributes(args)
-  const outPath = args.out ?? args.otlpOut
-  if (outPath) {
-    const result = await writeTraceEvidenceExportFile(args.input, outPath, { format, attributes })
-    console.log(
-      `exported ${result.spans.length} OpenInference span(s) from ${result.format} → ${result.path}` +
-        ` (${result.redactionCount} redaction${result.redactionCount === 1 ? '' : 's'})`,
-    )
-    return
-  }
-  const result = await exportTraceEvidenceFile(args.input, { format, attributes })
-  // Streamed line by line: an export can outgrow V8's maximum string length.
-  for (const line of iterSerializedSpans(result.spans)) process.stdout.write(line)
-}
-
-function traceEvidenceFormat(raw: string | undefined): TraceEvidenceFormatOption {
-  const format = raw ?? 'auto'
-  if (format !== 'auto' && format !== 'sandbox-events' && format !== 'openinference') {
-    throw new Error('--format must be auto, sandbox-events or openinference')
-  }
-  return format
-}
-
-function parseAttributeValue(raw: string): unknown {
-  if (raw === 'true') return true
-  if (raw === 'false') return false
-  if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
-    const number = Number(raw)
-    if (Number.isFinite(number)) return number
-  }
-  return raw
-}
-
-async function loadExportAttributes(args: Args): Promise<Record<string, unknown>> {
-  const attributes: Record<string, unknown> = {}
-  if (args.metadata) {
-    const parsed: unknown = JSON.parse(await readFile(args.metadata, 'utf8'))
-    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('--metadata must point to a JSON object')
-    }
-    Object.assign(attributes, parsed as Record<string, unknown>)
-  }
-  for (const attr of args.attrs) {
-    const eq = attr.indexOf('=')
-    if (eq <= 0) throw new Error(`--attr must be key=value, got ${attr}`)
-    attributes[attr.slice(0, eq)] = parseAttributeValue(attr.slice(eq + 1))
-  }
-  return attributes
-}
-
-async function cmdAnalyze(args: Args): Promise<void> {
-  if (args.supervisorRunDir) return cmdAnalyzeSupervisorRun(args.supervisorRunDir, args)
+async function cmdAnalyze(args: CliArgs): Promise<void> {
   // A Runtime run directory, or a directory of them, is a supervision tree.
   const runDir = args.selection?.spans.find((source) => source.kind === 'run-dir')
   if (runDir) {
-    if (args.refs.length > 1) throw new Error(`analyze reports one supervision tree at a time; ${runDir.ref} is a run directory`)
+    if (args.refs.length > 1) throw new UsageError(`analyze reports one supervision tree at a time; ${runDir.ref} is a run directory`)
     return cmdAnalyzeSupervisorRun(runDir.path, args)
   }
-  const result = await investigate(args, { loadDefaultConfig: false })
+  const result = await investigate(args)
   if (args.out) {
     await saveReport(args.out, result.report)
     console.log(
@@ -1373,7 +943,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
   } else {
     console.log(result.report)
   }
-  assertRequestedAnalysesRan(args, result)
+  failUnlessRequestedAnalysesRan(args, result)
 }
 
 /**
@@ -1384,7 +954,7 @@ async function cmdAnalyze(args: Args): Promise<void> {
  * Eval owns Runtime run discovery and analysis. Traces adds coordination-log
  * evidence through its reader, then prints a single report or a rollup.
  */
-async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void> {
+async function cmdAnalyzeSupervisorRun(runDir: string, args: CliArgs): Promise<void> {
   const single = await isRuntimeSupervisorRunDir(runDir)
   const runDirs = single ? [runDir] : await findSupervisorRunDirs(runDir)
   if (runDirs.length === 0) {
@@ -1410,11 +980,9 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: Args): Promise<void
 async function collectImportedSpans(
   path: string,
   format: TraceEvidenceFormatOption,
-  args: Args,
   selector?: string,
 ): Promise<CollectedSpans> {
-  const attributes = await loadExportAttributes(args)
-  const result = await exportTraceEvidenceFile(path, { format, attributes })
+  const result = await exportTraceEvidenceFile(path, { format })
   const spans = selector ? selectSpans(result.spans, selector, path) : result.spans
   const { sessionByTrace } = indexSessionIdsByTrace(spans)
   const sessions = new Map<string, OtlpSpan[]>()
@@ -1457,17 +1025,6 @@ function analystLog(msg: string, fields?: Record<string, unknown>): void {
   process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
 }
 
-async function cmdInvestigate(args: Args): Promise<void> {
-  const result = await investigate(args)
-  if (args.out) {
-    await saveReport(args.out, result.report)
-    console.log(`investigation report → ${args.out}  (${result.findings.length} findings with actions, OTLP: ${result.otlpPath})`)
-  } else {
-    console.log(result.report)
-  }
-  assertRequestedAnalysesRan(args, result)
-}
-
 /** Conformance fields threaded from the source into the investigation options. */
 function conformanceOptions(collected: CollectedSpans) {
   return {
@@ -1481,13 +1038,12 @@ function conformanceOptions(collected: CollectedSpans) {
   }
 }
 
-async function investigate(args: Args, options: { loadDefaultConfig?: boolean } = {}) {
+/** The analyze run: a traces config is loaded only when `--config` names one. */
+async function investigate(args: CliArgs) {
   const collected = await collectSpans(args)
   const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const config = args.config !== undefined || options.loadDefaultConfig !== false
-    ? await loadTracesConfig(args.config)
-    : undefined
+  const config = args.config !== undefined ? await loadTracesConfig(args.config) : undefined
   const analystModel = analystModelFor(args)
   const engine = args.llm ? llmAnalysisEngine(args, analystModel) : undefined
   return runTraceInvestigation(mergeTracesConfig({
@@ -1496,17 +1052,16 @@ async function investigate(args: Args, options: { loadDefaultConfig?: boolean } 
     sources,
     workflow,
     cwds,
-    minLoopOccurrences: args.minLoop,
     engine,
     model: args.llm ? analystModel : args.model,
     budgetUsd: args.budget,
-    otlpOutPath: args.otlpOut,
     log: analystLog,
     ...conformanceOptions(collected),
   }, config))
 }
 
-async function cmdImprove(args: Args): Promise<void> {
+/** `traces improve` (hidden; `analyze --out DIR` in 1.0): the review packet, written to `--dir`. */
+async function cmdImprove(args: CliArgs): Promise<void> {
   const collected = await collectSpans(args)
   const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
@@ -1520,11 +1075,9 @@ async function cmdImprove(args: Args): Promise<void> {
       sources,
       workflow,
       cwds,
-      minLoopOccurrences: args.minLoop,
       engine,
       model: args.llm ? analystModel : args.model,
       budgetUsd: args.budget,
-      otlpOutPath: args.otlpOut,
       log: analystLog,
       ...conformanceOptions(collected),
     }, config),
@@ -1536,41 +1089,31 @@ async function cmdImprove(args: Args): Promise<void> {
     `improvement artifacts → ${dir}  ` +
       `(${result.findings.length} findings with actions and checks, OTLP: ${result.otlpPath})`,
   )
-  assertRequestedAnalysesRan(args, result)
+  failUnlessRequestedAnalysesRan(args, result)
 }
 
 /**
  * `traces ask`: free-form questions over the selected sessions. Every question
  * is its own recursive investigation; they run concurrently under one shared
- * ledger, so `--budget` bounds the whole run and `--question-budget` bounds
- * each question. The answers, their citation checks, and per-question cost and
- * time are written before the exit code is decided, so a failed question never
- * costs the others' answers. Ctrl-C is one of those failures: `runTraceQuestions`
- * records it on the questions the run never reached and still returns, so the
- * artifacts below are written for the answers already paid for.
+ * ledger, so `--budget` bounds the whole run and each question's ceiling is
+ * the smaller of it and the per-question default. The answers, their citation
+ * checks, and per-question cost and time are written before the exit code is
+ * decided, so a failed question never costs the others' answers. Ctrl-C is
+ * one of those failures: `runTraceQuestions` records it on the questions the
+ * run never reached and still returns, so the artifacts below are written for
+ * the answers already paid for.
  */
-async function cmdAsk(args: Args): Promise<void> {
-  if (args.out) throw new Error('ask writes a directory of artifacts; pass --dir <dir> instead of --out')
-  if (args.llm) throw new Error('ask always uses the model-backed engine; drop --llm')
+async function cmdAsk(args: CliArgs): Promise<void> {
   const questions: TraceQuestion[] = [
     ...(args.questionsFile ? await loadTraceQuestionsFile(args.questionsFile) : []),
     ...args.questions.map((question) => ({ question })),
   ]
   if (questions.length === 0) {
-    throw new Error('ask needs --question "<text>" (repeatable) or --questions <questions.json>')
+    throw new UsageError('ask needs --question "<text>" (repeatable) or --questions <questions.json>')
   }
   // Reject a bad question before any session is parsed or process started.
   normalizeTraceQuestions(questions)
-  if (args.questionBudget !== undefined && (!Number.isFinite(args.questionBudget) || args.questionBudget <= 0)) {
-    throw new Error('--question-budget must be a positive number of USD')
-  }
-  if (args.budget !== undefined && (!Number.isFinite(args.budget) || args.budget <= 0)) {
-    throw new Error('--budget must be a positive number of USD')
-  }
   const questionTimeoutMs = args.questionTimeout === undefined ? undefined : Math.round(args.questionTimeout * 1000)
-  if (questionTimeoutMs !== undefined && (!Number.isSafeInteger(questionTimeoutMs) || questionTimeoutMs < 1000)) {
-    throw new Error('--question-timeout must be a number of seconds, at least 1')
-  }
   // Before the adapter pass: a missing API key must not cost an operator the
   // wait for a large session to be parsed before it is reported.
   const engine = analysisEngineFromEnv({
@@ -1596,7 +1139,7 @@ async function cmdAsk(args: Args): Promise<void> {
       harness: collected.harness,
       concurrency: args.concurrency,
       ...(args.budget !== undefined ? { budgetUsd: args.budget } : {}),
-      otlpOutPath: args.otlpOut ?? join(directory, 'traces.otlp.jsonl'),
+      otlpOutPath: join(directory, 'traces.otlp.jsonl'),
       signal: controller.signal,
       log: analystLog,
     })
@@ -1610,22 +1153,22 @@ async function cmdAsk(args: Args): Promise<void> {
     `ask artifacts → ${artifacts.directory}  (${result.totals.answered}/${result.totals.questions} answered, ` +
       `wall ${(result.totals.wallTimeMs / 1000).toFixed(1)} s, answers: ${artifacts.result})\n`,
   )
-  if (!result.ok) {
-    const failed = result.questions.filter((answer) => answer.status === 'failed')
-    const lines = [
-      `${failed.length} of ${result.questions.length} question(s) failed; the answers file holds every result.`,
-      ...failed.map((answer) => `  ${answer.id}: ${answer.failure?.kind}: ${answer.failure?.message.slice(0, 300)}`),
-    ]
-    // Any kind, not only `error`: the hint is decided by the message, and a
-    // mismatch that also exhausted the budget still needs the reinstall line.
-    if (failed.some((answer) => isBridgeMismatchError(answer.failure?.message ?? ''))) {
-      lines.push(
-        'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
-          `agent-eval-rpc[dspy]==${requiredBridgeVersion()} (matching this package's @tangle-network/agent-eval).`,
-      )
-    }
-    throw new Error(lines.join('\n'))
+  if (result.ok) return
+  const failed = result.questions.filter((answer) => answer.status === 'failed')
+  const lines = [
+    `${failed.length} of ${result.questions.length} question(s) failed; the answers file holds every result.`,
+    ...failed.map((answer) => `  ${answer.id}: ${answer.failure?.kind}: ${answer.failure?.message.slice(0, 300)}`),
+  ]
+  // Any kind, not only `error`: the hint is decided by the message, and a
+  // mismatch that also exhausted the budget still needs the reinstall line.
+  if (failed.some((answer) => isBridgeMismatchError(answer.failure?.message ?? ''))) {
+    lines.push(
+      'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
+        `agent-eval-rpc[dspy]==${requiredBridgeVersion()} (matching this package's @tangle-network/agent-eval).`,
+    )
   }
+  process.stderr.write(`error: ${lines.join('\n')}\n`)
+  process.exitCode = 1
 }
 
 function summarizeFindingEvidence(finding: TraceLiveFinding): string {
@@ -1651,10 +1194,10 @@ type StreamMode = 'visualizer' | 'findings' | 'agent'
 function streamMode(raw: string | undefined): StreamMode {
   if (raw === undefined) return 'visualizer'
   if (raw === 'visualizer' || raw === 'findings' || raw === 'agent') return raw
-  throw new Error(`unknown stream mode "${raw}" (expected visualizer, findings, or agent)`)
+  throw new UsageError(`unknown stream mode "${raw}" (expected visualizer, findings, or agent)`)
 }
 
-function streamPreset(args: Args): { mode: StreamMode; includeSpans: boolean; includeFindings: boolean; includeBatches: boolean; includeReports: boolean } {
+function streamPreset(args: CliArgs): { mode: StreamMode; includeSpans: boolean; includeFindings: boolean; includeBatches: boolean; includeReports: boolean } {
   const mode = streamMode(args.mode)
   return {
     mode,
@@ -1666,7 +1209,7 @@ function streamPreset(args: Args): { mode: StreamMode; includeSpans: boolean; in
 }
 
 async function streamExplicitSession(
-  args: Args,
+  args: CliArgs,
   extraAnalysts: readonly TraceLiveAnalyst[] | undefined,
   { adapter, ref }: RefSelection['sessions'][number],
 ): Promise<void> {
@@ -1682,16 +1225,15 @@ async function streamExplicitSession(
   }
 }
 
-async function cmdStream(args: Args): Promise<void> {
+/** `traces stream` (hidden; `watch --format jsonl` in 1.0): live trace events as JSONL. */
+async function cmdStream(args: CliArgs): Promise<void> {
   const config = await loadTracesConfig(args.config)
   const preset = streamPreset(args)
   const named = args.selection
-  if (named && named.sessions.length + named.spans.length > 1) throw new Error('stream reads one ref at a time')
-  const source = args.otlp ?? named?.spans[0]?.path
+  if (named && named.sessions.length + named.spans.length > 1) throw new UsageError('stream reads one ref at a time')
+  const source = named?.spans[0]?.path
   if (source) {
-    const { spans, harness } = args.otlp
-      ? await collectOtlpSpans(args.otlp)
-      : await collectSpans(args)
+    const { spans, harness } = await collectSpans(args)
     const ref: SessionRef = {
       harness,
       sessionId: basename(source),
@@ -1752,12 +1294,11 @@ async function cmdStream(args: Args): Promise<void> {
 /**
  * Two watches share one verb because they answer the same question one level
  * apart: `traces watch` (no path) tails live HARNESS SESSIONS, and
- * `traces watch <target>` tails one RUN TREE. The existing no-positional form
- * is untouched; a path selects the tree view.
+ * `traces watch <target>` tails one RUN TREE.
  */
-async function cmdWatch(args: Args): Promise<void> {
-  const target = args.supervisorRunDir ?? args.input
-  if (target !== undefined) return cmdWatchRunTarget(target, args)
+async function cmdWatch(args: CliArgs): Promise<void> {
+  if (args.input !== undefined) return cmdWatchRunTarget(args.input, args)
+  if (args.once) throw new UsageError('watch --once prints one snapshot of a run: traces watch <run-dir|spans.otlp.jsonl> --once')
   const all = !args.harnessExplicit
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
@@ -1772,7 +1313,6 @@ async function cmdWatch(args: Args): Promise<void> {
     cwd: args.cwd,
     windowMs: args.window * 60_000,
     intervalMs: args.interval * 1000,
-    minLoopOccurrences: args.minLoop,
     signal: controller.signal,
     onLoop: (l) => {
       const ts = new Date().toISOString().slice(11, 19)
@@ -1795,13 +1335,13 @@ async function cmdWatch(args: Args): Promise<void> {
  * directory holding both. Read-only, plain stdout; `--once` prints a single
  * snapshot, which is what a script or an agent wants.
  */
-async function cmdWatchRunTarget(dir: string, args: Args): Promise<void> {
+async function cmdWatchRunTarget(dir: string, args: CliArgs): Promise<void> {
   const target = await resolveRunWatchTarget(resolve(dir))
   const controller = new AbortController()
   if (!args.once) {
     process.once('SIGINT', () => controller.abort())
     process.stderr.write(
-      `traces watch: tailing ${target.requested} every ${args.interval}s; read-only, ` +
+      `traces watch: tailing ${target.requested} every ${args.intervalExplicit ? args.interval : 2}s; read-only, ` +
         `${target.runDir === null ? 'span source only — Ctrl-C to stop' : 'stops when result.json lands. Ctrl-C to stop'}.\n`,
     )
   }
@@ -1821,13 +1361,13 @@ async function cmdWatchRunTarget(dir: string, args: Args): Promise<void> {
  * The sessions upload's refs name, read. A span file is one upload item per
  * run in it, keyed by its session id (or its trace id when it records none).
  */
-async function* refSessions(args: Args): AsyncGenerator<{ ref: SessionRef; spans: OtlpSpan[] }> {
+async function* refSessions(args: CliArgs): AsyncGenerator<{ ref: SessionRef; spans: OtlpSpan[] }> {
   const named = args.selection
   if (!named) return
   for (const { adapter, ref } of named.sessions) yield { ref, spans: await parseSession(adapter, ref) }
   for (const source of named.spans) {
     const collected = source.kind === 'spans' && source.reader !== 'otlp'
-      ? await collectImportedSpans(source.path, source.reader, args, source.selector)
+      ? await collectImportedSpans(source.path, source.reader, source.selector)
       : await collectOtlpSpans(source.path, source.kind === 'spans' ? source.selector : undefined)
     const mtimeMs = (await stat(source.path)).mtimeMs
     const byTrace = new Map<string, OtlpSpan[]>()
@@ -1850,10 +1390,14 @@ async function* refSessions(args: Args): AsyncGenerator<{ ref: SessionRef; spans
   }
 }
 
-async function cmdUpload(args: Args): Promise<void> {
+/** `traces upload`: redact, gate on share safety, and send. A ref or `--since` is required (the table says so). */
+async function cmdUpload(args: CliArgs): Promise<void> {
   const named = args.selection
   const fromRefs = named !== undefined && named.sessions.length + named.spans.length > 0
-  const sinceMs = fromRefs ? undefined : args.since ? parseSince(args.since) : Date.now() - 24 * 60 * 60 * 1000
+  if (!fromRefs && args.since === undefined) {
+    throw new UsageError(`upload over a store root needs a window: traces upload ${named?.home ?? '<store-root>'} --since 24h`)
+  }
+  const sinceMs = fromRefs ? undefined : parseSince(args.since!)
   const all = !args.harnessExplicit
   // A window is a sweep: a session that cannot be read is skipped and named.
   const unread: UnreadSessionFact[] = []
@@ -1894,7 +1438,7 @@ async function cmdUpload(args: Args): Promise<void> {
   }
 
   if (args.dryRun) {
-    const res = await executeUpload(plan, { dryRun: true, otlpOut: otlpOutPath(args), stripContent: args.noContent })
+    const res = await executeUpload(plan, { dryRun: true, otlpOut: args.out, stripContent: args.noContent })
     reportRefused(res.refused)
     console.log(`dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s). Redacted OTLP -> ${res.otlpPath}`)
     console.log('No upload performed. Set TANGLE_INGEST_URL / TANGLE_INGEST_API_KEY / TANGLE_TENANT_ID and drop --dry-run to send.')
@@ -1933,451 +1477,75 @@ function reportRefused(refused: readonly RefusedSession[]): void {
 }
 
 /**
- * `traces verify-safe <file|dir> [--profile default|share|strict] [--known-secret-env NAME]... [--format text|json]`:
- * the share-safety verdict for files, read-only. Exit 0 SAFE or
+ * `traces verify-safe <file|dir>` (hidden; `check --share-safe` in 1.0): the
+ * share-safety verdict for files, read-only. Exit 0 SAFE or
  * SAFE_WITH_WARNINGS, 1 UNSAFE, 2 UNKNOWN.
  */
-async function cmdVerifySafe(argv: readonly string[]): Promise<void> {
-  let target: string | undefined
-  let format = 'text'
-  let profile = 'share'
-  const knownSecrets: string[] = []
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!
-    if (arg === '--format') format = argv[++i] ?? ''
-    else if (arg === '--profile') profile = argv[++i] ?? ''
-    else if (arg === '--known-secret-env') {
-      const name = argv[++i] ?? ''
-      const value = process.env[name]
-      if (!value) throw new Error(`verify-safe: environment variable ${name || '(missing name)'} is not set`)
-      knownSecrets.push(value)
-    } else if (arg === '--help' || arg === '-h') {
-      usageVerifySafe()
-      return
-    } else if (arg.startsWith('--')) throw new Error(`verify-safe: unknown flag ${arg}`)
-    else if (target === undefined) target = arg
-    else throw new Error(`verify-safe: unexpected argument ${arg}`)
-  }
-  if (!target) throw new Error('verify-safe needs a file or directory: traces verify-safe <file|dir>')
-  if (format !== 'json' && format !== 'text') throw new Error(`verify-safe: --format must be json or text, got "${format}"`)
+async function cmdVerifySafe(args: CliArgs): Promise<void> {
+  const profile = args.profile ?? 'share'
   if (profile !== 'default' && profile !== 'share' && profile !== 'strict') {
-    throw new Error(`verify-safe: --profile must be default, share or strict, got "${profile}"`)
+    throw new UsageError(`verify-safe: --profile must be default, share or strict, got "${profile}"`)
   }
-  const result = await verifySafe(target, { profile, knownSecrets })
-  process.stdout.write(format === 'json' ? `${JSON.stringify(result, null, 2)}\n` : `${formatVerdict(result)}\n`)
+  const knownSecrets = args.knownSecretEnvs.map((name) => {
+    const value = process.env[name]
+    if (!value) throw new UsageError(`verify-safe: environment variable ${name || '(missing name)'} is not set`)
+    return value
+  })
+  const result = await verifySafe(args.input!, { profile, knownSecrets })
+  process.stdout.write(args.format === 'json' ? `${JSON.stringify(result, null, 2)}\n` : `${formatVerdict(result)}\n`)
   process.exitCode = verdictExitCode(result)
 }
 
-async function cmdSkills(argv: readonly string[]): Promise<void> {
-  let since: number | undefined
-  let format = 'text'
-  let unusedOnly = false
-  let refresh = true
-  let storePath = defaultSkillUsageStorePath()
-  let sweepThreshold = DEFAULT_SWEEP_THRESHOLD
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!
-    if (arg === '--since') since = parseSince(argv[++i] ?? '')
-    else if (arg === '--format') format = argv[++i] ?? ''
-    else if (arg === '--unused') unusedOnly = true
-    else if (arg === '--no-refresh') refresh = false
-    else if (arg === '--store') storePath = argv[++i] ?? ''
-    else if (arg === '--sweep') sweepThreshold = Number(argv[++i])
-    else if (arg === '--help' || arg === '-h') {
-      usageSkills()
-      return
-    } else throw new Error(`skills: unknown argument ${arg}`)
-  }
-  if (format !== 'json' && format !== 'text') throw new Error(`skills: --format must be json or text, got "${format}"`)
-  if (!storePath) throw new Error('skills: --store needs a path')
-  if (!Number.isInteger(sweepThreshold) || sweepThreshold < 1) throw new Error('skills: --sweep must be a positive integer')
+/** `traces skills`: skill use across Claude Code, Codex and Kimi Code sessions, incrementally, with no model call. */
+async function cmdSkills(args: CliArgs): Promise<void> {
+  if (args.store === '') throw new UsageError('skills: --store needs a path')
+  const since = args.since === undefined ? undefined : parseSince(args.since)
+  const storePath = args.store ?? defaultSkillUsageStorePath()
   const store = await SkillUsageStore.load(storePath)
-  const refreshed = refresh ? await store.refresh() : null
+  const refreshed = args.noRefresh ? null : await store.refresh()
   if (refreshed) await store.save()
-  const report = buildSkillUsageReport(store.list(), await readInstalledSkills(), storePath, { since, sweepThreshold, refresh: refreshed })
-  if (unusedOnly) {
-    if (format === 'json') process.stdout.write(`${JSON.stringify(report.unused, null, 2)}\n`)
+  const report = buildSkillUsageReport(store.list(), await readInstalledSkills(), storePath, {
+    since,
+    sweepThreshold: args.sweep ?? DEFAULT_SWEEP_THRESHOLD,
+    refresh: refreshed,
+  })
+  const json = args.format === 'json'
+  if (args.unused) {
+    if (json) process.stdout.write(`${JSON.stringify(report.unused, null, 2)}\n`)
     else for (const skill of report.unused) process.stdout.write(`${skill.skill}\t${skill.installedIn.join(',')}\n`)
     return
   }
-  process.stdout.write(format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : `${renderSkillUsage(report)}\n`)
+  process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : `${renderSkillUsage(report)}\n`)
 }
 
-function usageSkills(): void {
-  console.log(`traces skills [--since 30d|ISO] [--format text|json] [--unused] [--no-refresh] [--store PATH] [--sweep N]
-
-Count skill use across Claude Code, Codex, and Kimi Code sessions on this machine, with no
-model call. Each run reads only transcript bytes appended since the previous run and
-keeps the events in a store (default ${defaultSkillUsageStorePath()}), so counts
-survive a harness deleting old transcripts.
-
-  model   Claude Code Skill tool calls that loaded a skill
-  slash   Claude Code /name commands that expanded to a skill or prompt
-  read    Codex or Kimi commands that successfully read <skill>/SKILL.md
-
---since       count events at or after 30m / 2h / 7d or an ISO date (default: all stored)
---unused      print only installed skills with no use in the window
---no-refresh  answer from the store without reading transcripts
---store       store path
---sweep       one Codex or Kimi command reading N or more skills is a catalog sweep, not use;
-              its reads are excluded and counted separately (default ${DEFAULT_SWEEP_THRESHOLD})
-
-OpenCode, Pi, Gemini and other harnesses are not indexed.`)
+/** `--current` named as a ref, and `--latest-turn` checked against the harness. */
+function prepare(args: Args): CliArgs {
+  return validateLatestTurn(applyCurrentSessionSelection(args))
 }
 
-function usageVerifySafe(): void {
-  console.log(`traces verify-safe <file|dir> [--profile default|share|strict] [--known-secret-env NAME]... [--format text|json]
-
-Check whether files are safe to share, without changing them. A directory is read
-recursively. .json files are parsed whole, .jsonl and .ndjson line by line, and
-any other file is scanned as text.
-
-  SAFE                 nothing found                                   exit 0
-  SAFE_WITH_WARNINGS   only warnings (raw content, identifiers, media) exit 0
-  UNSAFE               a credential, or personal data under share/strict exit 1
-  UNKNOWN              a file, line or byte range could not be read      exit 2
-
---profile           default | share (default) | strict; see agent-eval docs/redaction.md
---known-secret-env  name of an environment variable holding a secret to look for in
-                    any encoding (repeatable); the value is never printed
---format            text (default) | json
-
-Findings name the file, line and JSON Pointer, never the matched value.`)
+/** A command that reads its refs: they are resolved once, before it runs. */
+function reading(handler: (args: CliArgs) => Promise<void>): Handler {
+  return async (args) => handler(await withSelection(prepare(args)))
 }
 
-function usageExport(): void {
-  console.log(`traces export: convert trace evidence files to OpenInference JSONL
-
-Usage:
-  traces export <input.jsonl|input.json> --out <spans.jsonl> [--format auto]
-  traces export <input.json> --attr task.id=abc --attr arm=baseline --out spans.jsonl
-  traces export <input.json> --metadata run-metadata.json --out spans.jsonl
-  traces export <input.jsonl|input.json> > spans.jsonl
-
-Input formats:
-  sandbox-events   JSON arrays with start/raw/result/done/error events
-  openinference    Existing OpenInference JSONL; rewrites through traces redaction
-  auto             Detect the format from the file contents (default)
-
-Examples:
-  traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
-  traces export sandbox-events.json --attr task.id=aec-001 --attr outcome.score=1 --out spans.openinference.jsonl
-
-Safety:
-  export runs the same local redaction (agent-eval's redaction core) used by upload before writing spans.
-  --metadata must be a JSON object; --attr key=value is repeatable and overrides matching metadata keys.`)
-}
-
-function usageValidate(): void {
-  console.log(`traces validate: report what a trace can and cannot answer
-
-Usage:
-  traces validate <file.jsonl|dir> [--out conformance.md]
-
-Reads OTLP-JSONL and prints the conformance report from
-@tangle-network/agent-trace-contract:
-
-  - findings by severity, each naming the CONSEQUENCE of the defect and the
-    capabilities it blocks
-  - the capability table: token-accounting, cost-attribution, tool-usage,
-    loop-convergence, tree-comparison, steering-chain, latency-analysis —
-    available or not, with the trace's own reason
-  - rows that could not be read at all, with the line and the reason
-
-A directory reads the OTLP files under it, recursively — only the otlp/
-subdirectory when the producer made one. A run directory's raw event, stream and
-SDK logs are also *.jsonl; they are listed with what they actually hold, not read
-as several hundred broken spans. Identical re-declarations of a span across
-per-shot files are counted as repeats, not defects; only a repeat with DIFFERENT
-content is an error.
-
-Exit code:
-  0  no error findings, and at least one capability available (warnings mean
-     thinner analysis, not wrong analysis)
-  1  an error finding, or nothing analysable at all — an empty file, or one
-     whose every line was unreadable, answers no question and is not a pass
-
-Nothing is fixed up: a span with an unreadable timestamp is reported, never
-repaired, because a synthesized value puts invented work into a total.
-
-Examples:
-  traces validate spans.otlp.jsonl
-  traces validate results/sessions --out conformance.md
-  traces validate spans.otlp.jsonl && traces analyze --otlp spans.otlp.jsonl`)
-}
-
-function usage(): void {
-  console.log(`traces: analyze agent traces — yours, or any system's
-
-Two ways in:
-  --otlp <file|dir>   Spans a system already emitted in the
-                      @tangle-network/agent-trace-contract shape. No adapter, no
-                      translation. This is how you integrate a NEW system.
-  --harness <id>      Run an adapter over a coding agent's proprietary session
-                      store (Claude Code, Codex, OpenCode, …) — the legacy edge,
-                      for formats we do not control.
-
-A ref names what to read, by what it is (traces facts 019a3c7e --format json):
-  a session id, or a unique prefix or suffix of 8+ characters, on any harness;
-  a session file; OTLP or trace evidence (a Sandbox live stream reads as
-  codex-exec); a directory of OTLP files; a bundle or Runtime run directory;
-  or a store root, a directory that holds harness stores the way a home does,
-  which selection then reads instead of HOME. file#<trace id> and
-  file#branch=<id> pick one run. --harness forces the reader of a file ref.
-  A ref that names nothing, or more than one session, exits 2.
-
-Commands:
-  validate  Report what a trace can and cannot answer (exit 1 on error findings)
-  check     Gate a run on a trace contract: check <trace> --contract <file.json>
-            [--junit out.xml] [--out report.json] [--evidence dir] [--annotations].
-            check --contract <file.json> --explain prints what the contract checks.
-            <trace> is claude -p stream-json output, OTLP spans (file or dir),
-            a Claude Code or Codex session file, or trace evidence; --format
-            names it when the sniff cannot.
-            Exit 0 pass, 1 fail, 2 bad contract or a rule could not run,
-            3 unreadable trace, 4 ambiguous trace reference
-  list      One row per session, newest first, across every harness: the short
-            ref any command takes, harness, last activity, duration, human
-            turns, recorded cwd and first prompt (--last 20 by default; never
-            the caller's own session). --format json adds id, path, bytes and
-            parent id. Footer: N sessions · M unreadable
-  analyze   Run analyst suite + loop/waste pipelines over OTLP (--otlp), sessions,
-            or an input file; names every analysis the spans could not support
-            (--supervisor-run-dir <dir> reports a supervision tree instead)
-  investigate Run typed investigation flow, including BYO config + evidence-backed actions
-  improve   Write findings, evidence, report, and canonical trace artifacts
-  ask       Answer free-form questions over the selected sessions with the
-            model-backed engine: questions run concurrently under one budget,
-            every trace:// citation is checked, and answers.json + report.md
-            are written to --dir (exit 1 when any question fails)
-  facts     Print the deterministic session-facts sheet for the selected
-            sessions: tool calls excluding synthesized spans, subagent spawns
-            with task names, human turns in order, the final message per task,
-            changed paths, first/last record times, the harness token total, and
-            the first failure by agent-eval's fixed precedence (or none), the
-            session's recorded working directory, and for each human turn the
-            agent message it answered.
-            No model call, no budget, $0. Every fact names the span ids it came
-            from; a fact the spans cannot support is null with its reason.
-            --since/--until select every session with a record in the window and
-            count only that window's turns; a session that cannot be read is named
-            in selection.unreadSessions. Without a window: exit 1 when a selected
-            session cannot be read. --format json (default) or text
-  skills    Count skill use across Claude Code, Codex, and Kimi Code sessions on this
-            machine, and list installed skills with no use in the window.
-            Incremental: a run reads only transcript bytes appended since the
-            last run. No model call. traces skills --help
-  convert   Emit OTLP-JSONL only, to --otlp-out
-  bundle    Keep one session's evidence beyond log rotation: bundle <ref> --out
-            <new-dir> writes session/ (transcript and subagents byte for byte),
-            spans.otlp.jsonl, facts.json, git-log.txt and a sha256 manifest.
-            A bundle directory is a ref (traces facts <dir>)
-  mcp       Serve the selected traces to an MCP client over stdio: 7 read-only,
-            idempotent trace tools; spans and results redacted, results capped
-            and marked untrusted (traces mcp --help)
-  diff <a> <b>
-            Pair two runs' steps (by span id, then position with the same name
-            and kind, then name and kind anywhere) and mark the first divergence:
-            changed, replaced, only-in-a, only-in-b or reordered. Each side is an
-            OTLP file or directory, any file convert reads, file#<trace id>, or
-            file#branch=<id> for one arm (agent.branch.id or agent.branch.arm).
-            --kind TOOL (repeatable) keeps only steps of that span kind.
-            Exit 0 agree, 1 diverge, 2 unreadable, 3 no recorded outcome to
-            call agreement on (--format text|json)
-  bundle verify <bundle-dir>
-            Check a bundle against its manifest: every listed file present with
-            its recorded size and SHA-256, no unlisted or non-regular file beside
-            them. Exit 1 on any difference (--format text|json)
-  export    Convert evidence/events files to OpenInference JSONL
-  stream    Emit JSONL trace stream events for live visualizers or replay
-  watch     Online observer: tail active sessions, notify on loops + semantic findings
-            (watch <target> tails ONE run tree instead: a run directory or a span file)
-  upload    Redact + upload sessions in a time window to the Tangle Intelligence Platform;
-            a session whose final events are UNSAFE or UNKNOWN is refused (exit 1)
-  verify-safe <file|dir>
-            Say whether files are safe to share: SAFE, SAFE_WITH_WARNINGS, UNSAFE
-            (exit 1) or UNKNOWN (exit 2). Read-only (--help for flags)
-
-Selection (every harness unless --harness names one; a named session brings
-its spawned children, up to 100, and comes first; a session a sweep cannot
-read is skipped and named in selection.unreadSessions):
-  --harness <id>   Read only this harness. Known: ${knownHarnesses().join(', ')}
-  --last <n>       The N sessions with the newest file mtime, never the caller's own
-  --current        The caller's own session: CODEX_THREAD_ID (Codex) wins, else
-                   CLAUDE_CODE_SESSION_ID (Claude Code); elsewhere use
-                   traces list --cwd . --last 1
-  --latest-turn    Limit a resumed Codex or Claude Code session to its latest task turn
-  --session <id|path> The session a ref names (same as the positional ref)
-  --cwd <dir>      Sessions recorded in DIR or under it (path boundary), in a live
-                   worktree of its repository, or in a removed worktree whose
-                   recorded repository (Codex) is DIR's
-  --supervisor-run-dir <dir>
-                   analyze: report a SUPERVISION TREE instead of harness sessions —
-                   steers, spawn waves, concurrency, idle wall, cost by role,
-                   accepted vs rejected. Rolls up when the dir holds many runs.
-                   analyze reads Runtime journals and recorded startup failures.
-                   watch reads a live Runtime journal and OTLP span files.
-  --since <t>      30m / 2h / 7d (before now) or an ISO date. Selection commands read
-                   sessions modified at or after it; upload: its window (default 24h).
-                   facts: opens a time window and selects EVERY session with a record
-                   in it, not only the newest; its turn facts keep only turns inside it
-  --until <t>      facts: closes the window (exclusive), same forms as --since
-  --out <path>     Write report to a file
-  --dir <path>     improve/ask: write artifacts to this directory
-  --otlp <file|dir>  READ OTLP-JSONL emitted by any system, skipping the adapters.
-                   A directory reads the OTLP files under it — only the otlp/
-                   subdirectory when the producer made one — and names the JSONL
-                   that is not OTLP instead of reading it as broken spans.
-                   Supported by: validate, analyze, facts, investigate, improve, ask,
-                   stream, mcp. Writing commands take --otlp-out.
-  --otlp-out <path>  WRITE the OTLP-JSONL artifact here (also evidence
-                   provenance / dry-run upload preview)
-  --format <kind>  analyze/export: auto | sandbox-events | openinference
-                   facts: json (default) | text
-  --metadata <json> analyze/export file: attach JSON object fields as span attributes
-  --attr <k=v>     analyze/export file: attach one span attribute (repeatable)
-  --mode <kind>    stream: visualizer | findings | agent (default visualizer)
-  --replay, --once stream: scan once and exit (default for positional input / --session)
-  --once           watch <target>: print ONE snapshot and exit, for scripts and agents
-  --no-spans       stream: omit per-span pulse events
-  --no-findings    stream: omit semantic live-finding events
-  --llm            Enable agentic RLM analysts. Runs on the Tangle router by
-                   default (TANGLE_API_KEY); OPENAI_API_KEY alone targets OpenAI,
-                   OPENAI_BASE_URL overrides the endpoint. Needs Python with
-                   agent-eval-rpc[dspy] (TRACES_PYTHON selects the interpreter),
-                   version-matched to this package's @tangle-network/agent-eval.
-                   Exits 1 when every agentic analyst fails, with each reason.
-                   ask uses the same engine and credentials without --llm.
-  --model <id>     Model for --llm and ask (default: ${DEFAULT_ANALYST_MODEL})
-  --config <path>  investigate/improve/stream: JS config with analysts or liveAnalysts
-  --budget <usd>   USD cap for agentic analysts; ask: one ceiling shared by every question
-  --question <text> ask: a question (repeatable, at most ${MAX_TRACE_QUESTION_CHARS} characters)
-  --questions <file> ask: JSON array of questions, strings or
-                   { id?, question, instructions?, answerSchema? }
-  --question-budget <usd>
-                   ask: provider ceiling for one question (default: the smaller
-                   of --budget and $${DEFAULT_QUESTION_MAX_COST_USD})
-  --question-timeout <seconds>
-                   ask: wall-clock deadline for one question's investigation
-                   (default: ${DEFAULT_QUESTION_TIMEOUT_MS / 1000})
-  --concurrency <n> ask: questions running at once (default 4)
-  --interval <s>   watch/stream: poll interval seconds (sessions 5, run tree 2)
-  --window <m>     watch/stream: only sessions active in the last N minutes (default 30)
-  --min-loop <n>   Min identical repeated calls to flag a loop (default 3)
-  --dry-run        upload: redact + dedup + preview, write OTLP, but do NOT send
-  --no-content     facts: omit conversation, commands, paths and assignments;\n                   upload: strip prompt/response text; send metadata only
-  --yes, -y        upload: skip the confirmation prompt
-  --version, -v    Print the installed traces version
-  --help, -h       Show help (use \`traces validate --help\` or \`traces export --help\`)
-
-Moved from 0.x: traces help moved prints every removed command and flag
-and what replaces it.
-
-Watch a run tree (any depth; driver spend and child spend stay separate,
-and a cost the harness never priced reads "unknown", never $0):
-  traces watch runs/my-run                 live tree: status, budget, driver vs child spend
-  traces watch runs/my-run --once          one snapshot, then exit
-  traces watch traces.otlp.jsonl           OTLP spans only — works for ANY emitter
-  traces analyze --supervisor-run-dir runs/my-run   the full tree report
-
-Upload env: TANGLE_INGEST_URL (or TANGLE_ORCHESTRATOR_URL), TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID`)
-}
-
-async function main(): Promise<void> {
-  const rawArgs = process.argv.slice(2)
-  if (rawArgs[0] === '--version' || rawArgs[0] === '-v' || rawArgs[0] === 'version') {
-    console.log(`traces ${tracesVersion()}`)
-    return
-  }
-  if (rawArgs[0] === 'help' && rawArgs[1] === 'moved') {
-    process.stdout.write(renderMovedTable())
-    return
-  }
-  // A removed spelling exits 2 with its replacement, before any parser sees it.
-  const moved = findMoved(rawArgs)
-  if (moved) throw new RefError(movedMessage(moved, rawArgs), 'usage')
-  if (rawArgs[0] === 'mcp') {
-    await cmdMcp(parseArgs(rawArgs))
-    return
-  }
-  if (rawArgs[0] === 'diff') {
-    // Like diff(1): 1 means the runs differ, so trouble must not also exit 1.
-    try {
-      await cmdDiff(rawArgs.slice(1))
-    } catch (err) {
-      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
-      process.exitCode = 2
-    }
-    return
-  }
-  if (rawArgs[0] === 'bundle' && rawArgs[1] === 'verify') {
-    await cmdBundleVerify(rawArgs.slice(2))
-    return
-  }
-  if (rawArgs[0] === 'verify-safe') {
-    await cmdVerifySafe(rawArgs.slice(1))
-    return
-  }
-  if (rawArgs[0] === 'skills') {
-    await cmdSkills(rawArgs.slice(1))
-    return
-  }
-  const parsedArgs = parseArgs(rawArgs)
-  if (parsedArgs.help) {
-    if (parsedArgs.command === 'export' || (parsedArgs.command === 'help' && parsedArgs.input === 'export')) usageExport()
-    else if (parsedArgs.command === 'validate' || (parsedArgs.command === 'help' && parsedArgs.input === 'validate')) usageValidate()
-    else usage()
-    return
-  }
-  const validated = validateOtlpSelection(
-    validateWorkflowSelection(validateUntilSelection(applyCurrentSessionSelection(parsedArgs))),
-  )
+await runTraces(process.argv.slice(2), {
+  list: reading(cmdList),
+  facts: reading(cmdFacts),
+  analyze: reading(cmdAnalyze),
+  ask: reading(cmdAsk),
   // check resolves its refs itself, after its contract loads: a bad contract
   // is reported before any trace is read, with check's own exit codes.
-  const args = REF_COMMANDS.has(validated.command) && validated.command !== 'check'
-    ? await withSelection(validated)
-    : validated
-  switch (args.command) {
-    case 'help':
-      if (args.input === 'export') usageExport()
-      else if (args.input === 'validate') usageValidate()
-      else usage()
-      break
-    case 'list': await cmdList(args); break
-    case 'analyze': await cmdAnalyze(args); break
-    case 'validate': await cmdValidate(args); break
-    case 'check': await cmdCheck(args); break
-    case 'investigate': await cmdInvestigate(args); break
-    case 'improve': await cmdImprove(args); break
-    case 'ask': await cmdAsk(args); break
-    case 'facts': await cmdFacts(args); break
-    case 'convert': await cmdConvert(args); break
-    case 'bundle': await cmdBundle(args); break
-    case 'export': await cmdExport(args); break
-    case 'stream': await cmdStream(args); break
-    case 'watch': await cmdWatch(args); break
-    case 'upload': await cmdUpload(args); break
-    default: usage()
-  }
-}
-
-/** `--format json|jsonl` on the command line: errors are then one JSON object on stderr. */
-function wantsJsonErrors(argv: readonly string[]): boolean {
-  const at = argv.indexOf('--format')
-  return at >= 0 && (argv[at + 1] === 'json' || argv[at + 1] === 'jsonl')
-}
-
-main().catch((err) => {
-  const message = err instanceof Error ? err.message : String(err)
-  if (err instanceof RefError) {
-    // A ref that names nothing, or more than one session, could not be answered: exit 2.
-    process.stderr.write(wantsJsonErrors(process.argv)
-      ? `${JSON.stringify({ error: message, code: err.code, ...(err.candidates.length > 0 ? { candidates: err.candidates } : {}) })}\n`
-      : `error: ${message}\n`)
-    process.exitCode = 2
-    return
-  }
-  process.stderr.write(`error: ${message}\n`)
-  // A check that did not complete is neither a pass nor a proven failure.
-  process.exitCode = process.argv[2] === 'check' ? CHECK_EXIT.badContract : 1
+  check: async (args) => cmdCheck(prepare(args)),
+  diff: cmdDiff,
+  watch: cmdWatch,
+  bundle: reading(cmdBundle),
+  'bundle verify': cmdBundleVerify,
+  convert: reading(cmdConvert),
+  upload: reading(cmdUpload),
+  skills: cmdSkills,
+  mcp: reading(cmdMcp),
+  validate: cmdValidate,
+  'verify-safe': cmdVerifySafe,
+  stream: reading(cmdStream),
+  improve: reading(cmdImprove),
 })

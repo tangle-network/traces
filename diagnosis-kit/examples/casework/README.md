@@ -40,7 +40,7 @@ their next move: instrument the missing attributes, then come back.
 
 ```bash
 cd /home/drew/code/traces
-./node_modules/.bin/tsx src/cli.ts convert --harness codex --last 1 --otlp-out /tmp/real.otlp.jsonl
+./node_modules/.bin/tsx src/cli.ts convert --harness codex --last 1 --out /tmp/real.otlp.jsonl
 ./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts /tmp/real.otlp.jsonl
 ```
 

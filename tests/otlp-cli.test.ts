@@ -255,13 +255,13 @@ describe('traces validate', () => {
   })
 })
 
-describe('traces analyze --otlp', () => {
+describe('traces analyze <otlp file>', () => {
   it('analyses OTLP a foreign system emitted, with no adapter in the path', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-otlp-'))
     const path = await writeRows(dir, 'spans.otlp.jsonl', conformingRows())
     const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', '--otlp', path, '--out', report])
+    const result = await runCli(['analyze', path, '--out', report])
     expect(result.code).toBe(0)
     const written = await readFile(report, 'utf8')
     expect(written).toContain('# Trace analysis — otlp')
@@ -297,7 +297,7 @@ describe('traces analyze --otlp', () => {
     ])
     const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', '--otlp', path, '--out', report])
+    const result = await runCli(['analyze', path, '--out', report])
     expect(result.code).toBe(0)
     const written = await readFile(report, 'utf8')
     expect(written).toContain('analyses skipped, and why')
@@ -312,7 +312,7 @@ describe('traces analyze --otlp', () => {
     const path = await writeRows(dir, 'spans.otlp.jsonl', [...rows, conflicting, 'not json object'])
     const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', '--otlp', path, '--out', report])
+    const result = await runCli(['analyze', path, '--out', report])
     expect(result.code).toBe(0)
     const written = await readFile(report, 'utf8')
     expect(written).toContain('conflicting-span-id')
@@ -327,7 +327,7 @@ describe('traces analyze --otlp', () => {
     await writeRows(dir, 'shot-2.jsonl', [round1, tool, round2])
     const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', '--otlp', dir, '--out', report])
+    const result = await runCli(['analyze', dir, '--out', report])
     expect(result.code).toBe(0)
     const written = await readFile(report, 'utf8')
     expect(written).toContain('1 row(s) re-declared a span already read, identically')
@@ -365,7 +365,7 @@ describe('traces analyze --otlp', () => {
     const path = await writeRows(dir, 'spans.otlp.jsonl', [...rows, verdict1, verdict2])
     const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', '--otlp', path, '--out', report])
+    const result = await runCli(['analyze', path, '--out', report])
     expect(result.code).toBe(0)
     const written = await readFile(report, 'utf8')
     expect(written).toContain('## round-over-round convergence')
@@ -393,7 +393,7 @@ describe('traces analyze --otlp', () => {
     ])
     const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', '--otlp', path, '--out', report])
+    const result = await runCli(['analyze', path, '--out', report])
     expect(result.code).toBe(0)
     const written = await readFile(report, 'utf8')
     expect(written).toContain('### Direct model usage — inputs incomplete')
@@ -419,7 +419,7 @@ describe('traces analyze --otlp', () => {
   // `tests/otlp-round-trip.test.ts` holds the invariant over every finding code
   // the reader can emit. This is the same property proven through the CLI a user
   // actually runs, on the three fields whose laundering was found in the wild.
-  it('does not launder a source through --otlp-out: findings survive, and dropped rows are declared', async () => {
+  it('does not launder a source through convert: findings survive, and dropped rows are declared', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-roundtrip-'))
     const rows = conformingRows() as Record<string, unknown>[]
     // A kind this contract has no word for, on the tool span: it carries no
@@ -452,8 +452,8 @@ describe('traces analyze --otlp', () => {
     expect(sourceValidation.stdout).toContain('ℹ️  INFO | `unknown-span-kind`')
     expect(sourceValidation.stdout).toContain('🟠 WARN | `missing-trace-id`')
 
-    const analyzed = await runCli(['analyze', '--otlp', source, '--otlp-out', artifact, '--out', join(dir, 'r.md')])
-    expect(analyzed.code).toBe(0)
+    const converted = await runCli(['convert', source, '--out', artifact])
+    expect(converted.code).toBe(0)
 
     const artifactValidation = await runCli(['validate', artifact])
     // Same verdict, same exit, same findings — the defects did not wash out.
@@ -483,8 +483,8 @@ describe('traces analyze --otlp', () => {
     const path = join(dir, 'junk.jsonl')
     await writeFile(path, '{"hello":"world"}\n', 'utf8')
 
-    const result = await runCli(['analyze', '--otlp', path])
-    expect(result.code).toBe(1)
+    const result = await runCli(['analyze', path])
+    expect(result.code).toBe(2)
     expect(result.stderr).toContain('traces validate')
   })
 })

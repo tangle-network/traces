@@ -173,12 +173,12 @@ describe('refs: files and directories are read by their content', () => {
     await writeFile(join(runDir, 'result.json'), JSON.stringify({ kind: 'winner', tree: { root: 'sup-1' }, spentTotal: { usd: 0.01 } }), 'utf8')
 
     const positional = await run(['analyze', runDir])
-    const flagged = await run(['analyze', '--supervisor-run-dir', runDir])
-    // The two reports differ only in when each was generated.
-    const generated = (text: string) => text.replace(/^- Generated: .*$/mu, '- Generated: <time>')
     expect(positional.code).toBe(0)
     expect(positional.stdout).toContain('# Run report — sup-1')
-    expect(generated(positional.stdout)).toBe(generated(flagged.stdout))
+    // The 0.x flag names the same directory; it now prints the positional spelling.
+    const flagged = await run(['analyze', '--supervisor-run-dir', runDir])
+    expect(flagged.code).toBe(2)
+    expect(flagged.stderr).toContain(`Instead: traces analyze ${runDir}`)
   })
 })
 

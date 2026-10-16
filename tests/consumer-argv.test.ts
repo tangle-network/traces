@@ -9,6 +9,9 @@
  * tangle-tools `fleet/recurrence.py` reads one session's facts as JSON from
  * stdout (`facts P --harness H --format json`); `tests/facts-json-contract.test.ts`
  * pins the paths it reads.
+ *
+ * Each consumer's pinned 0.x argv exits 2 and prints its 1.0 spelling, which
+ * is the edit the consumer makes when it bumps.
  */
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -57,16 +60,21 @@ describe('Discovery convert argv', () => {
     expect((await spans(out)).length).toBeGreaterThanOrEqual(1)
   })
 
-  it('still runs the 0.21.1 argv until the command table replaces it', async () => {
+  it('refuses the 0.21.1 argv, printing the 1.0 argv that replaces it, which runs', async () => {
     const events = join(dir, 'events-0.21.otlp.jsonl')
-    expect((await runCli(['convert', sandboxEvents, '--format', 'sandbox-events', '--otlp-out', events], { env })).code).toBe(0)
-    expect((await spans(events)).length).toBeGreaterThanOrEqual(1)
-
     const live = join(dir, 'live-0.21.otlp.jsonl')
-    expect((await runCli(['convert', '--harness', 'codex-exec', '--session', liveStream, '--otlp-out', live], { env })).code).toBe(0)
-    const current = join(dir, 'live-1.0.otlp.jsonl')
-    expect((await runCli(['convert', liveStream, '--harness', 'codex-exec', '--out', current], { env })).code).toBe(0)
-    expect(await toolSpans(live)).toBe(await toolSpans(current))
+    for (const [argv, rewritten] of [
+      [['convert', sandboxEvents, '--format', 'sandbox-events', '--otlp-out', events], ['convert', sandboxEvents, '--out', events]],
+      [['convert', '--harness', 'codex-exec', '--session', liveStream, '--otlp-out', live], ['convert', liveStream, '--harness', 'codex-exec', '--out', live]],
+    ] as const) {
+      const refused = await runCli(argv, { env })
+      expect(refused.code).toBe(2)
+      expect(refused.stdout).toBe('')
+      expect(refused.stderr).toContain(`Instead: traces ${rewritten.join(' ')}`)
+      expect((await runCli(rewritten, { env })).code).toBe(0)
+    }
+    expect((await spans(events)).length).toBeGreaterThanOrEqual(1)
+    expect(await toolSpans(live)).toBeGreaterThanOrEqual(1)
   })
 })
 
@@ -77,5 +85,16 @@ describe('recurrence facts argv', () => {
     expect(run.code).toBe(0)
     const report = JSON.parse(run.stdout.slice(run.stdout.indexOf('{'))) as { sessions: Array<{ sessionId: string }> }
     expect(report.sessions[0]!.sessionId).toBe(IDS.parent)
+  })
+
+  it('refuses the 0.16.4 argv, printing the 1.0 argv that replaces it', async () => {
+    const fx = await makeFixtureHome()
+    const run = await runCli(['facts', '--harness', 'codex', '--session', fx.paths.parent, '--format', 'json'], { env: fx.env })
+    expect(run.code).toBe(2)
+    expect(run.stdout).toBe('')
+    // An error under --format json is one JSON object on stderr: recurrence parses stdout, never this.
+    const error = JSON.parse(run.stderr) as { error: string; code: string }
+    expect(error.code).toBe('usage')
+    expect(error.error).toContain(`Instead: traces facts ${fx.paths.parent} --harness codex --format json`)
   })
 })

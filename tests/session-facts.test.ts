@@ -328,7 +328,7 @@ describe('traces facts', () => {
     const otlp = join(dir, 'spans.otlp.jsonl')
     await writeFile(otlp, serializeSpans(await fixtureSpans()), 'utf8')
 
-    const { stdout } = await cli(['facts', '--otlp', otlp])
+    const { stdout } = await cli(['facts', otlp])
     const report = JSON.parse(stdout) as {
       kind: string
       sessions: Array<{ toolCalls: { value: number }; subagents: { value: Array<{ taskName: string }> } }>
@@ -337,7 +337,7 @@ describe('traces facts', () => {
     expect(report.sessions[0]!.toolCalls.value).toBe(4)
     expect(report.sessions[0]!.subagents.value[0]!.taskName).toBe(FIXTURE_AGENT_PATH)
 
-    const readable = await cli(['facts', '--otlp', otlp, '--format', 'text'])
+    const readable = await cli(['facts', otlp, '--format', 'text'])
     expect(readable.stdout).toContain('tool calls: 4')
     expect(readable.stdout).toContain('deterministic, $0')
   })
@@ -349,10 +349,10 @@ describe('traces facts', () => {
     // read could not answer: exit 2.
     const garbage = join(dir, 'not-a-session.jsonl')
     await writeFile(garbage, 'this is not a rollout\n', 'utf8')
-    await expect(cli(['facts', '--harness', 'codex', '--session', garbage]))
+    await expect(cli(['facts', garbage, '--harness', 'codex']))
       .rejects.toMatchObject({ code: 2 })
-    await expect(cli(['facts', '--otlp', join(dir, 'absent.otlp.jsonl')]))
-      .rejects.toMatchObject({ code: 1 })
+    await expect(cli(['facts', join(dir, 'absent.otlp.jsonl')]))
+      .rejects.toMatchObject({ code: 2 })
   })
 
   it('keeps the facts and names the unread records when part of a session is corrupt', async () => {
@@ -364,20 +364,20 @@ describe('traces facts', () => {
     records.splice(3, 0, '{ not json')
     await writeFile(session, `${records.join('\n')}\n`, 'utf8')
 
-    const { stdout } = await cli(['facts', '--harness', 'codex', '--session', session])
+    const { stdout } = await cli(['facts', session, '--harness', 'codex'])
     const report = JSON.parse(stdout) as {
       sessions: Array<{ toolCalls: { value: number }; unreadRecords: { value: number } }>
     }
     expect(report.sessions[0]!.toolCalls.value).toBe(4)
     expect(report.sessions[0]!.unreadRecords.value).toBe(1)
 
-    const readable = await cli(['facts', '--harness', 'codex', '--session', session, '--format', 'text'])
+    const readable = await cli(['facts', session, '--harness', 'codex', '--format', 'text'])
     expect(readable.stdout).toContain('unread records: 1')
   })
 
   it('rejects an unknown output format before reading anything', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-facts-format-'))
-    await expect(cli(['facts', '--otlp', join(dir, 'unused.otlp.jsonl'), '--format', 'yaml']))
-      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('unknown facts format') })
+    await expect(cli(['facts', join(dir, 'unused.otlp.jsonl'), '--format', 'yaml']))
+      .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('unknown facts format') })
   })
 })
