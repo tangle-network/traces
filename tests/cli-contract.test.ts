@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { deriveHexId, llmSpan, toolSpan } from '@tangle-network/agent-trace-contract'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { makeFixtureHome } from './fixtures/home.js'
 import { CLI, runCli } from './run-cli.js'
 
 const PIN = 'npx --yes @tangle-network/traces@0.23.1'
@@ -130,7 +131,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--no-content', '--format', '--out'],
   analyze: [...SELECT, '--out'],
   ask: [...SELECT, '--question', '--questions', '--budget', '--model'],
-  check: ['--contract', '--current', '--last', '--since', '--cwd', '--harness', '--out'],
+  check: ['--contract', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
   diff: ['--format'],
   watch: ['--once', '--harness', '--cwd'],
   bundle: ['--current', '--harness', '--out'],
@@ -341,6 +342,86 @@ describe('the command table', () => {
   })
 })
 
+/** Two spans of one run; `status` is the tool call's OTLP status. */
+async function runFile(name: string, status?: 'STATUS_CODE_OK' | 'STATUS_CODE_ERROR'): Promise<string> {
+  const trace = deriveHexId(`cli-contract-${name}`, 16)
+  const path = join(dir, `${name}.otlp.jsonl`)
+  await writeFile(path, `${[
+    llmSpan({
+      traceId: trace,
+      spanId: deriveHexId(`${name}-llm`, 8),
+      parentSpanId: null,
+      name: 'turn',
+      model: 'glm-5.2',
+      inputTokens: 10,
+      outputTokens: 2,
+      startTime: '2026-01-01T00:00:00.000Z',
+      endTime: '2026-01-01T00:00:01.000Z',
+    }),
+    toolSpan({
+      traceId: trace,
+      spanId: deriveHexId(`${name}-tool`, 8),
+      parentSpanId: null,
+      name: 'bash',
+      toolName: 'bash',
+      startTime: '2026-01-01T00:00:01.000Z',
+      endTime: '2026-01-01T00:00:02.000Z',
+      ...(status ? { status: { code: status } } : {}),
+    }),
+  ].map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
+  return path
+}
+
+/** The one JSON error object a run wrote to stderr. */
+const errorOf = (stderr: string): { error: string; code: string } => JSON.parse(stderr) as { error: string; code: string }
+
+describe('exit codes: 0 yes, 1 no, 2 could not answer, with the reason as code', () => {
+  it('check exits 0 on a pass, and 2 for every verdict it could not reach', async () => {
+    const run = await runFile('check-run', 'STATUS_CODE_OK')
+    const contract = join(dir, 'bash.contract.json')
+    await writeFile(contract, JSON.stringify({ name: 'bash-required', tools: { required: ['bash'] } }), 'utf8')
+
+    const passed = await runCli(['check', run, '--contract', contract, '--format', 'json'], { env })
+    expect(passed.code).toBe(0)
+    expect(JSON.parse(passed.stdout)).toMatchObject({ contract: 'bash-required', status: 'pass', exitCode: 0 })
+
+    const unreadable = await runCli(['check', join(dir, 'missing.otlp.jsonl'), '--contract', contract, '--format', 'json'], { env })
+    expect(unreadable.code).toBe(2)
+    expect(unreadable.stdout).toBe('')
+    expect(errorOf(unreadable.stderr).code).toBe('unreadable')
+
+    // Two sessions in the fixture home share the 8-character prefix 0199abcd.
+    const fx = await makeFixtureHome()
+    const ambiguous = await runCli(['check', '0199abcd', '--contract', contract, '--format', 'json'], { env: fx.env })
+    expect(ambiguous.code).toBe(2)
+    expect(ambiguous.stdout).toBe('')
+    expect(errorOf(ambiguous.stderr).code).toBe('ambiguous')
+
+    const badContract = await runCli(['check', run, '--contract', join(dir, 'no-such.contract.json'), '--format', 'json'], { env })
+    expect(badContract.code).toBe(2)
+    expect(errorOf(badContract.stderr).code).toBe('usage')
+
+    const noContract = await runCli(['check', run], { env })
+    expect(noContract.code).toBe(2)
+    expect(noContract.stderr).toContain('check needs --contract')
+  }, 60_000)
+
+  it('diff exits 0 when two runs agree, and 2 when neither records an outcome to agree on', async () => {
+    const recorded = await runFile('diff-ok', 'STATUS_CODE_OK')
+    const agreed = await runCli(['diff', recorded, recorded], { env })
+    expect(agreed.code).toBe(0)
+
+    const unrecorded = await runFile('diff-unset')
+    const json = await runCli(['diff', unrecorded, unrecorded, '--format', 'json'], { env })
+    expect(json.code).toBe(2)
+    expect(json.stdout).toBe('')
+    expect(errorOf(json.stderr)).toMatchObject({ code: 'no-outcome' })
+    const text = await runCli(['diff', unrecorded, unrecorded], { env })
+    expect(text.code).toBe(2)
+    expect(text.stderr).toContain('no recorded outcome to call agreement on')
+  }, 60_000)
+})
+
 describe('hidden spellings', () => {
   it('are absent from help', async () => {
     const global = (await runCli(['--help'], { env })).stdout
@@ -381,7 +462,9 @@ describe('hidden spellings', () => {
 
     expect((await runCli(['validate', spans], { env })).code).toBe(0)
     expect((await runCli(['verify-safe', spans, '--profile', 'share', '--format', 'json'], { env })).code).toBe(0)
-    expect([0, 3]).toContain((await runCli(['diff', spans, spans, '--kind', 'TOOL'], { env })).code)
+    const diff = await runCli(['diff', spans, spans, '--kind', 'TOOL', '--format', 'json'], { env })
+    expect(diff.code).toBe(2)
+    expect((JSON.parse(diff.stderr) as { code: string }).code).toBe('no-outcome')
 
     const skills = await runCli(['skills', '--no-refresh', '--store', join(dir, 'skills.json'), '--sweep', '3', '--format', 'json'], { env })
     expect(skills.code).toBe(0)

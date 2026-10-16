@@ -6,17 +6,17 @@
 No model call, no engine, no budget — it costs $0 and always returns the same sheet for the same spans.
 
 ```bash
-traces facts --harness codex --session <id>                 # JSON on stdout
+traces facts <id>                                           # JSON on stdout
 traces facts --harness codex --last 5 --format text         # the short readable form
-traces facts --otlp spans.otlp.jsonl --out facts.json
+traces facts spans.otlp.jsonl --out facts.json
 traces facts --harness claude-code --since 7d               # every session with a record in the last week
-traces facts --all --since 2026-10-14 --until 2026-10-15    # one day, across every harness
+traces facts --since 2026-10-14 --until 2026-10-15          # one day, across every harness
 ```
 
 ## Time window
 
 `--since <t>` and `--until <t>` open a half-open time window `[since, until)`; each takes `30m`/`2h`/`7d` before now or an ISO date, and either may be left open.
-With a window, `facts` selects **every** session with a record that starts or ends inside it, not only the newest (`--last <n>` still caps it to the newest `n` per harness, and `--session` or `--otlp` still name the input).
+With a window, `facts` selects **every** session with a record that starts or ends inside it, not only the newest (`--last <n>` still caps it to the newest `n` per harness, and a ref still names the input).
 Sessions are read one at a time, and a session file last modified before `since` is not read, because it cannot hold a later record.
 Within a selected session, `humanTurns`, `excludedTurns` and `turnsByActor` keep only turns that started inside the window, so a one-day run counts only that day's turns; every other fact covers the whole session.
 The report's `selection` states the window, both rules, the sessions read whose records all fell outside it (`outsideWindow`), and every session that could not be read (`unreadSessions`, each with its reason).
@@ -101,7 +101,7 @@ share-safety certificate.
 ## Prepared context for analysts
 
 The same sheet is supplied to the model-backed analysts before their first model call, through `TraceAnalystDefinition.prepareContext`.
-It reaches the built-in kinds run by `analyze --llm`, `investigate`, and `improve`, and it reaches every `traces ask` question inside `PREPARED CONTEXT:`.
+It reaches the built-in kinds run by `analyze --llm` and `improve`, and it reaches every `traces ask` question inside `PREPARED CONTEXT:`.
 
 - The sheet is bounded at `PREPARED_CONTEXT_BYTE_CEILING` (30,000 bytes), a fifth of the `perCallByteCeiling` of 150,000 the trace tools work to, so the rest of the budget stays available for the tool calls the model still makes.
 - When the sheet does not fit, fields are shed from the largest downward and the shed is listed in `omitted_fields`. The tool-call counts are the last facts to go.

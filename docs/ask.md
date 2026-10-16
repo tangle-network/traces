@@ -6,17 +6,17 @@
 Each question becomes its own recursive investigation over the same trace, and the questions run at the same time under one budget.
 
 ```bash
-traces ask --harness codex --session <id> \
+traces ask <id> \
   --question "Which shell commands exited non-zero, and what were they?" \
   --question "What was the last thing the human asked for?" \
-  --dir .traces/ask
+  --budget 1 --dir .traces/ask
 ```
 
 Ask many questions from a file, and hold an answer to a shape a scorer can compare.
 The file is a JSON array of entries, or an object with a `questions` array:
 
 ```bash
-traces ask --all --last 3 --questions questions.json --concurrency 6 --budget 2 --dir .traces/ask
+traces ask --last 3 --questions questions.json --concurrency 6 --budget 2 --dir .traces/ask
 ```
 
 ```json

@@ -11,9 +11,11 @@
  * (spec §2.4): it is parsed and run, and absent from help. When its
  * replacement works, the spelling leaves this table for `moved.ts`.
  *
- * Exit codes: 0 yes, 1 no, 2 could not answer. A usage error, an unreadable
- * input or any other failure exits 2; with `--format json|jsonl` its error is
- * one JSON object `{error, code}` on stderr, and stdout stays empty.
+ * Exit codes, on every command: 0 yes, 1 no, 2 could not answer. A usage
+ * error, an unreadable or ambiguous input, a rule that could not decide, runs
+ * with no recorded outcome, or any other failure exits 2; with `--format
+ * json|jsonl` its error is one JSON object `{error, code}` on stderr, so a
+ * caller still tells the reasons apart, and stdout stays empty.
  */
 
 import { resolve } from 'node:path'
@@ -25,12 +27,24 @@ import { knownHarnesses, resolveAdapter } from './registry.js'
 import { parseTimeBound } from './time.js'
 import { tracesCommit, tracesVersion } from './version.js'
 
-/** A command line the table refused: exit 2, `code: usage`. */
-export class UsageError extends Error {
-  readonly code = 'usage' as const
+/** Why a command could not answer (spec §2.1), the `code` of its JSON error. */
+export type ErrorCode = 'usage' | 'unreadable' | 'ambiguous' | 'unknown-verdict' | 'no-outcome' | 'partial'
 
-  constructor(message: string) {
+/** A command that could not answer: exit 2, with the reason as `code`. */
+export class CliError extends Error {
+  readonly code: ErrorCode
+
+  constructor(message: string, code: ErrorCode) {
     super(message)
+    this.name = 'CliError'
+    this.code = code
+  }
+}
+
+/** A command line the table refused: exit 2, `code: usage`. */
+export class UsageError extends CliError {
+  constructor(message: string) {
+    super(message, 'usage')
     this.name = 'UsageError'
   }
 }
@@ -316,12 +330,14 @@ const COMMANDS = [
     name: 'check',
     usage: 'check <ref…> | --current | --last N | --since T --contract FILE [flags]',
     job: 'The gate: does this run satisfy a trace contract?',
-    notes: ['Exit 0 pass, 1 fail, 2 bad contract or a rule could not run, 3 unreadable trace, 4 ambiguous ref.'],
+    notes: ['Exit 0 pass, 1 fail, 2 could not decide: a bad contract, a rule that could not run, or an unreadable or ambiguous trace.'],
     flags: [
       '--contract', ...SELECT.slice(0, 4), { flag: '--harness', help: 'force the reader of a file ref (claude-code, codex, …)' },
+      { flag: '--format', help: 'text (default) or json, the full report' },
       { flag: '--out', help: 'write the full report as JSON to PATH' },
       hidden('--junit'), hidden('--annotations'), hidden('--explain'), hidden('--evidence'),
     ],
+    formats: ['text', 'json'],
     refs: [0, MANY],
     select: 'required',
     examples: [
@@ -337,7 +353,7 @@ const COMMANDS = [
     job: 'Where two runs of one task first split.',
     notes: [
       'Each side is an OTLP file or dir, any file convert reads, file#<trace id> or file#branch=<id>.',
-      'Exit 0 agree, 1 diverge, 2 a side cannot be read, 3 no recorded outcome to call agreement on.',
+      'Exit 0 agree, 1 diverge, 2 could not compare: a side cannot be read, or neither records an outcome.',
     ],
     flags: [{ flag: '--format', help: 'text (default) or json' }, hidden('--kind')],
     formats: ['text', 'json'],
@@ -681,12 +697,17 @@ function wantsJsonErrors(argv: readonly string[]): boolean {
   return false
 }
 
-/** One error on stderr, exit 2: a line of text, or one JSON object `{error, code}` under `--format json|jsonl`. */
+/** One error line on stderr: text, or one JSON object `{error, code}` when the caller asked for JSON. */
+export function writeError(message: string, code: ErrorCode, json: boolean, extra: Record<string, unknown> = {}): void {
+  process.stderr.write(json ? `${JSON.stringify({ error: message, code, ...extra })}\n` : `error: ${message}\n`)
+}
+
+/** An error that ended a command: exit 2, with its reason as `code`. */
 function reportError(error: unknown, json: boolean): void {
   const message = error instanceof Error ? error.message : String(error)
-  const code = error instanceof RefError || error instanceof UsageError ? error.code : 'unreadable'
+  const code = error instanceof RefError || error instanceof CliError ? error.code : 'unreadable'
   const candidates = error instanceof RefError && error.candidates.length > 0 ? { candidates: error.candidates } : {}
-  process.stderr.write(json ? `${JSON.stringify({ error: message, code, ...candidates })}\n` : `error: ${message}\n`)
+  writeError(message, code, json, candidates)
   process.exitCode = 2
 }
 

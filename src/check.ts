@@ -24,14 +24,16 @@ import type { OtlpSpan } from './otlp.js'
 import { redactSpans } from './redact.js'
 import { parseIsoToEpochMs } from './time.js'
 
-/** Exit codes. CI scripts branch on these, so they never change meaning. */
+/**
+ * Exit codes, the CLI's 0 yes, 1 no, 2 could not answer. CI scripts branch on
+ * these, so they never change meaning; the JSON error's `code` says which
+ * could-not-answer case it was.
+ */
 export const CHECK_EXIT = Object.freeze({
   pass: 0,
   fail: 1,
-  /** The contract is malformed or contradicts itself, or a rule could not run. */
-  badContract: 2,
-  unreadable: 3,
-  ambiguous: 4,
+  /** A rule could not run, the contract is malformed, or the trace is unreadable or ambiguous. */
+  couldNotDecide: 2,
 })
 
 /** A trace reference that names more than one input. */
@@ -168,7 +170,7 @@ export async function runCheck(
     : traces.every((t) => t.verdict.status === 'pass')
       ? 'pass'
       : 'fail'
-  const exitCode = status === 'pass' ? CHECK_EXIT.pass : status === 'fail' ? CHECK_EXIT.fail : CHECK_EXIT.badContract
+  const exitCode = status === 'pass' ? CHECK_EXIT.pass : status === 'fail' ? CHECK_EXIT.fail : CHECK_EXIT.couldNotDecide
   return { contract: contract.name, status, exitCode, traces }
 }
 

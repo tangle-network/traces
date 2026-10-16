@@ -113,7 +113,7 @@ import {
   renderSkillUsage,
   SkillUsageStore,
 } from './skill-usage.js'
-import { type Args, type Handler, runTraces, UsageError } from './commands.js'
+import { type Args, CliError, type Handler, runTraces, UsageError, writeError } from './commands.js'
 
 /**
  * What a command's positional refs resolved to. Read once, before the command
@@ -662,29 +662,20 @@ async function cmdValidate(args: CliArgs): Promise<void> {
   process.exitCode = validationExitCode(validation)
 }
 
-/** check's exit for a ref that names nothing, or more than one thing. */
-function checkRefExit(error: RefError | UsageError): number {
-  return error.code === 'ambiguous' ? CHECK_EXIT.ambiguous : error.code === 'usage' ? CHECK_EXIT.badContract : CHECK_EXIT.unreadable
-}
-
 /**
- * `traces check` — gate a run on a trace contract. Exit 0 pass, 1 fail, 2 bad
- * contract or a rule that could not run, 3 unreadable trace, 4 ambiguous trace
- * reference. Evidence for every trace that did not pass goes to `--evidence`.
+ * `traces check` — gate a run on a trace contract. Exit 0 pass, 1 fail, 2
+ * could not decide: the contract is missing or malformed, a rule could not
+ * run (`code: unknown-verdict`), or the trace is unreadable or ambiguous. The
+ * verdict always goes to stdout in `--format`, because CI reads it; evidence
+ * for every trace that did not pass goes to `--evidence`.
  */
 async function cmdCheck(args: CliArgs): Promise<void> {
-  if (!args.contract) {
-    process.stderr.write('error: check needs --contract <contract.json>\n')
-    process.exitCode = CHECK_EXIT.badContract
-    return
-  }
+  if (!args.contract) throw new UsageError('check needs --contract <contract.json>')
   let loaded: Awaited<ReturnType<typeof loadContract>>
   try {
     loaded = await loadContract(args.contract)
   } catch (error) {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = CHECK_EXIT.badContract
-    return
+    throw new UsageError(errorText(error))
   }
   for (const warning of loaded.warnings) process.stderr.write(`warning: ${warning}\n`)
   if (args.explain) {
@@ -694,21 +685,24 @@ async function cmdCheck(args: CliArgs): Promise<void> {
   let spans: OtlpSpan[]
   try {
     spans = (await collectSpans(await withSelection(args))).spans
-    if (spans.length === 0) throw new Error('the trace holds no spans')
   } catch (error) {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = error instanceof RefError || error instanceof UsageError
-      ? checkRefExit(error)
-      : error instanceof AmbiguousTraceInputError ? CHECK_EXIT.ambiguous : CHECK_EXIT.unreadable
-    return
+    if (error instanceof RefError || error instanceof CliError) throw error
+    throw new CliError(errorText(error), error instanceof AmbiguousTraceInputError ? 'ambiguous' : 'unreadable')
   }
+  if (spans.length === 0) throw new CliError('the trace holds no spans', 'unreadable')
+  const json = args.format === 'json'
   const report = await runCheck(loaded.contract, spans, { evidenceRoot: args.evidence ?? join('.traces', 'check') })
-  console.log(renderCheckText(report))
+  process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : `${renderCheckText(report)}\n`)
   if (args.junit) await writeFile(args.junit, renderJUnit(report), 'utf8')
   if (args.out) await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
-  if (args.annotations || process.env.GITHUB_ACTIONS === 'true') {
+  // Annotations are lines of text: they would corrupt a JSON verdict on stdout.
+  if (!json && (args.annotations || process.env.GITHUB_ACTIONS === 'true')) {
     const annotations = renderGithubAnnotations(report)
     if (annotations) console.log(annotations)
+  }
+  if (report.exitCode === CHECK_EXIT.couldNotDecide) {
+    const undecided = report.traces.filter((trace) => trace.verdict.status === 'error').length
+    writeError(`${undecided} trace(s) had a rule that could not run; the verdict above says which`, 'unknown-verdict', json)
   }
   process.exitCode = report.exitCode
 }
@@ -813,15 +807,19 @@ async function cmdMcp(args: CliArgs): Promise<void> {
 
 /**
  * `traces diff <a> <b>`: pair the two runs' steps and mark where they first
- * diverge. Exit 1 when they diverge, like diff(1); exit 3 when they don't
- * diverge but neither side records an outcome to call agreement on.
+ * diverge. Exit 0 when they agree, 1 when they diverge, like diff(1); 2 when
+ * they could not be compared: a side cannot be read, or the steps line up
+ * with no divergence but neither side records an outcome to call agreement on
+ * (`code: no-outcome`).
  */
 async function cmdDiff(args: CliArgs): Promise<void> {
   if (args.kinds.some((kind) => !kind)) throw new UsageError('diff: --kind needs a span kind, e.g. --kind TOOL')
   const report = await diffRuns(args.refs[0]!, args.refs[1]!, { kinds: args.kinds })
+  if (!report.diff.firstDivergence && report.caveat) {
+    throw new CliError(`the runs line up with no divergence, but there is no recorded outcome to call agreement on: ${report.caveat}`, 'no-outcome')
+  }
   process.stdout.write(args.format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
   if (report.diff.firstDivergence) process.exitCode = 1
-  else if (report.caveat) process.exitCode = 3
 }
 
 /**

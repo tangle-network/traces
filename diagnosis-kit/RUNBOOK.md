@@ -99,7 +99,8 @@ The redaction core alone does not catch names, addresses or account numbers in p
 ## Day 2 — the deterministic pass
 
 ```bash
-traces analyze --otlp "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --out "$ENGAGEMENT_DIR/work/analysis.md" --otlp-out "$ENGAGEMENT_DIR/work/analysis.otlp.jsonl"
+traces analyze "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --out "$ENGAGEMENT_DIR/work/analysis.md"
+traces convert "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --out "$ENGAGEMENT_DIR/work/analysis.otlp.jsonl"
 ```
 
 Costs nothing and calls no model. It produces the conformance table, the capability

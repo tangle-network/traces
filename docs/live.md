@@ -11,10 +11,10 @@ It prints repeated-tool loops and semantic findings while a coding agent is stil
 It emits newline-delimited JSON events that a dashboard, art visualizer, local watcher, or hosted product can consume without scraping terminal prose.
 
 ```bash
-traces stream --all
-traces stream --all --mode findings
-traces stream --all --mode agent --config traces.config.mjs
-traces stream spans.openinference.jsonl --format openinference --no-spans
+traces stream
+traces stream --mode findings
+traces stream --mode agent --config traces.config.mjs
+traces stream spans.openinference.jsonl --no-spans
 ```
 
 Live streaming emits `session`, `span`, `analysis_batch`, `finding`, and `tick` events; `--mode agent` also emits `report` events.
@@ -25,7 +25,7 @@ The same JSONL shape is used for live sessions and replayed trace files:
 
 ![traces stream findings mode terminal capture](./stream-findings.svg)
 
-Custom online analysts use the same config file as `investigate` and `improve`:
+Custom online analysts use the same config file as `analyze --config` and `improve`:
 
 ```js
 export default {
@@ -97,7 +97,7 @@ run proof-harness-mcp-20260731i
 RESULT no-winner · budget-exhausted
 ```
 
-`traces analyze --supervisor-run-dir <dir>` writes the full report for the same run.
+`traces analyze <run-dir>` writes the full report for the same run.
 It also reads `failure.json` when Runtime fails before the first spawn.
 Pass a parent directory to combine reports from its Runtime runs.
 Eval owns discovery, normalization, and analysis; Traces adds recorded coordination requests and delivery receipts.

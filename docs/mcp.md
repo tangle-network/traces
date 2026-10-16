@@ -5,7 +5,7 @@
 `traces mcp` serves the selected traces to an MCP client over stdio.
 
 ```bash
-claude mcp add traces -- traces mcp --otlp ./spans.otlp.jsonl
+claude mcp add traces -- traces mcp ./spans.otlp.jsonl
 claude mcp add traces -- traces mcp --harness claude-code --last 5
 ```
 
