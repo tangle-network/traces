@@ -207,6 +207,20 @@ function looksLikeSandboxEvent(row: unknown): row is JsonObject {
   return type === 'start' || type === 'raw' || type === 'result' || type === 'done' || type === 'error'
 }
 
+/**
+ * The evidence format these rows are, or undefined when none claims them. Span
+ * rows are not evidence: a file of OTLP or OpenInference spans is read as
+ * spans, so this answers only for the formats that need converting.
+ */
+export function detectEvidenceFormat(rows: readonly unknown[]): Exclude<TraceEvidenceInputFormat, 'openinference'> | undefined {
+  if (rows.length === 0 || rows.every(isOpenInferenceRow)) return undefined
+  if (rows.every(isPolicyEvidenceRow)) return 'policy-evidence'
+  if (rows.every(isIntelligenceSpanRow)) return 'intelligence-spans'
+  if (rows.every(isChatTrajectory) || rows.every(isChatTrajectoryMessage)) return 'chat-trajectory'
+  if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
+  return undefined
+}
+
 function detectFormat(rows: readonly unknown[], requested: TraceEvidenceFormatOption): TraceEvidenceInputFormat {
   if (requested !== 'auto') return requested
   if (rows.length === 0) throw new Error('input contains no rows')

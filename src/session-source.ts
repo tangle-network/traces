@@ -6,6 +6,7 @@
  * spans.
  */
 
+import { readsStoreRoots } from './adapters/harness-sessions.js'
 import type { OtlpSpan } from './otlp.js'
 import { stampEnvironmentAttrs, stampSessionIdentity } from './attributes.js'
 import { stampSessionIntegrity } from './integrity.js'
@@ -91,12 +92,16 @@ function refKey(ref: SessionRef): string {
  *  dedupe and apply a boundary-aware final filter. */
 export async function locateSessions(
   adapter: HarnessTraceAdapter,
-  opts: { cwd?: string; sinceMs?: number } = {},
+  opts: { cwd?: string; sinceMs?: number; home?: string } = {},
 ): Promise<SessionRef[]> {
-  if (!opts.cwd) return adapter.locate({ sinceMs: opts.sinceMs })
+  // An adapter that reads HOME alone would answer a store root with this
+  // machine's sessions, so it has none there.
+  if (opts.home !== undefined && !readsStoreRoots(adapter)) return []
+  const where = { sinceMs: opts.sinceMs, ...(opts.home !== undefined ? { home: opts.home } : {}) }
+  if (!opts.cwd) return adapter.locate(where)
 
   const cwdSelections = await equivalentGitCwds(opts.cwd)
-  const refs = await adapter.locate({ sinceMs: opts.sinceMs })
+  const refs = await adapter.locate(where)
   const byKey = new Map<string, SessionRef>()
   // Symlink-resolved matching is per distinct cwd, cached: locate can return
   // thousands of refs, and most share a handful of working directories.
@@ -119,6 +124,8 @@ export interface ScanOptions extends AdapterSelection, ParseOptions {
   cwd?: string
   /** Only sessions modified at/after this epoch ms. */
   sinceMs?: number
+  /** A store root to read instead of HOME (see `LocateOptions.home`). */
+  home?: string
   /** Cap to the most-recent N sessions per harness. */
   last?: number
   /** Handle a locate/parse failure and continue. Without this callback, failures propagate. */
@@ -139,7 +146,7 @@ export async function* scanSessions(opts: ScanOptions): AsyncGenerator<ScannedSe
     if (opts.signal?.aborted) return
     let refs: SessionRef[]
     try {
-      refs = await locateSessions(adapter, { cwd: opts.cwd, sinceMs: opts.sinceMs })
+      refs = await locateSessions(adapter, { cwd: opts.cwd, sinceMs: opts.sinceMs, home: opts.home })
     } catch (err) {
       if (!opts.onError) throw err
       opts.onError(err)

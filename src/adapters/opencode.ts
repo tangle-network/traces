@@ -12,7 +12,7 @@ import { sourceOf } from '../source-location.js'
 
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { SESSION_CWD_ATTR } from '../attributes.js'
 import { isMissingJsonSource, isMissingPathError, listJsonFiles, readJsonFile } from '../json.js'
 import type { OtlpSpan } from '../otlp.js'
@@ -61,16 +61,24 @@ function textOf(parts: readonly OcPart[]): string {
   )
 }
 
+/** A session's parts sit beside its messages: `<storage>/message/<id>` and `<storage>/part/<message id>`. */
+function partRootOf(ref: SessionRef): string {
+  return join(dirname(dirname(ref.path)), 'part')
+}
+
 export class OpencodeAdapter implements HarnessTraceAdapter {
   readonly harness = 'opencode'
 
-  private storage(): string {
-    const base = process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share')
+  /** The legacy JSON store: under a store root when one is given, else this machine's data home. */
+  private storage(home?: string): string {
+    const base = home !== undefined
+      ? join(home, '.local', 'share')
+      : process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share')
     return join(base, 'opencode', 'storage')
   }
 
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
-    const msgRoot = join(this.storage(), 'message')
+    const msgRoot = join(this.storage(opts.home), 'message')
     let sessionDirs: string[]
     try {
       sessionDirs = await readdir(msgRoot)
@@ -108,7 +116,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
     messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
     for (const message of messages) {
       const mid = message.id ?? `m${step}`
-      const directory = join(this.storage(), 'part', mid)
+      const directory = join(partRootOf(ref), mid)
       let files: string[] = []
       try {
         files = await listJsonFiles(directory)
@@ -127,7 +135,7 @@ export class OpencodeAdapter implements HarnessTraceAdapter {
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     const traceId = ref.sessionId
     const rootId = `root:${traceId}`
-    const partRoot = join(this.storage(), 'part')
+    const partRoot = partRootOf(ref)
 
     const msgFiles = await listJsonFiles(ref.path)
 

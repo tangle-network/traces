@@ -89,6 +89,12 @@ export interface LocateOptions {
   cwd?: string
   /** Only sessions modified at/after this epoch ms. */
   sinceMs?: number
+  /**
+   * A store root to read instead of HOME: a directory that holds harness stores
+   * the way a home does (a trace archive's `<host>/home`, a fleet seat). Only
+   * adapters that read through harness-sessions honor it (`readsStoreRoots`).
+   */
+  home?: string
 }
 
 export interface HarnessTraceAdapter {

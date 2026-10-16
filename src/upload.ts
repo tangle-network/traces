@@ -67,9 +67,19 @@ export type PlanOptions = ScanOptions
 
 /** Read-only: select sessions in the window and redact them with the default profile. */
 export async function planUpload(opts: PlanOptions = {}): Promise<UploadPlan> {
+  return { ...await planUploadFrom(scanSessions(opts)), sinceMs: opts.sinceMs }
+}
+
+/**
+ * Read-only: redact sessions already read, from any source (a session id, a
+ * session file, an OTLP file), with the default profile.
+ */
+export async function planUploadFrom(
+  sessions: AsyncIterable<{ ref: SessionRef; spans: OtlpSpan[] }> | Iterable<{ ref: SessionRef; spans: OtlpSpan[] }>,
+): Promise<UploadPlan> {
   const state = await loadState()
   const items: UploadItem[] = []
-  for await (const { ref, spans: raw } of scanSessions(opts)) {
+  for await (const { ref, spans: raw } of sessions) {
     const { spans, report } = redactSpans(raw)
     const hash = sessionHash(spans)
     items.push({
@@ -80,7 +90,7 @@ export async function planUpload(opts: PlanOptions = {}): Promise<UploadPlan> {
       isNew: true,
     })
   }
-  return { items, state, sinceMs: opts.sinceMs }
+  return { items, state }
 }
 
 /** Best-effort git branch for a session's cwd (no shell-out; reads .git/HEAD). */

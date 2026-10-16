@@ -3,8 +3,9 @@
  * form CI reads — an exit code, JUnit XML, GitHub annotations, and an
  * evidence directory when a contract does not pass.
  *
- * The contract engine is agent-eval's; this module only resolves the input,
- * maps OTLP spans to the spans a contract reads, and renders the verdicts.
+ * The contract engine is agent-eval's and the input is a ref (`refs.ts`);
+ * this module maps OTLP spans to the spans a contract reads and renders the
+ * verdicts.
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -19,7 +20,6 @@ import {
   type TraceContract,
 } from '@tangle-network/agent-eval'
 import { toolArgumentsFromAttributes } from './adapters/tool-io.js'
-import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
 import { redactSpans } from './redact.js'
 import { parseIsoToEpochMs } from './time.js'
@@ -80,59 +80,6 @@ export async function loadContract(path: string): Promise<LoadedContract> {
     if (error instanceof ContractFileError) throw error
     throw new ContractFileError(`contract ${path}: ${errorText(error)}`)
   }
-}
-
-// ── Input resolution ──────────────────────────────────────────────────
-
-export type CheckInputKind = 'otlp' | 'claude-code' | 'codex' | 'evidence'
-
-const SNIFF_ROWS = 20
-
-/**
- * Which reader a positional trace file needs. Every reader is tried against
- * the first rows; exactly one must claim the file. None is unreadable, and
- * more than one is ambiguous, so the caller passes `--format`.
- */
-export async function sniffCheckInput(path: string): Promise<CheckInputKind> {
-  const rows: unknown[] = []
-  for await (const row of readJsonl<unknown>(path)) {
-    rows.push(row)
-    if (rows.length >= SNIFF_ROWS) break
-  }
-  const objects = rows.filter(isObject)
-  if (objects.length === 0) throw new Error(`${path} holds no JSON rows`)
-  const kinds: CheckInputKind[] = []
-  if (objects.every((r) => typeof r.trace_id === 'string' && typeof r.span_id === 'string')) kinds.push('otlp')
-  // A Claude Code session file spells it sessionId; `claude -p --output-format stream-json` spells it session_id.
-  if (
-    objects.some((r) => (typeof r.sessionId === 'string' || typeof r.session_id === 'string') && typeof r.type === 'string') &&
-    !objects.some(hasSpanId)
-  ) {
-    kinds.push('claude-code')
-  }
-  if (objects.some((r) => CODEX_LINE_TYPES.has(String(r.type)) && isObject(r.payload))) kinds.push('codex')
-  if (objects.every(isEvidenceRow)) kinds.push('evidence')
-  if (kinds.length === 1) return kinds[0]!
-  if (kinds.length === 0) {
-    throw new Error(`${path} is not a trace this command reads (OTLP spans, a Claude Code or Codex session, or trace evidence)`)
-  }
-  throw new AmbiguousTraceInputError(
-    `${path} reads as ${kinds.join(' and ')}; pass --format ${kinds.join(' or --format ')}`,
-  )
-}
-
-const CODEX_LINE_TYPES = new Set(['session_meta', 'response_item', 'event_msg', 'turn_context'])
-
-function hasSpanId(row: Record<string, unknown>): boolean {
-  return typeof row.span_id === 'string'
-}
-
-/** Rows the evidence exporter reads that are not already OTLP spans. */
-function isEvidenceRow(row: Record<string, unknown>): boolean {
-  if (hasSpanId(row)) return false
-  if (row.kind === 'traces.policy_evidence.session') return true
-  if (Array.isArray(row.messages) || (typeof row.role === 'string' && 'content' in row)) return true
-  return typeof row.trace_id === 'string' && typeof row.name === 'string' && isObject(row.attributes)
 }
 
 // ── Span mapping ──────────────────────────────────────────────────────
@@ -347,10 +294,6 @@ function ghData(value: string): string {
 
 function ghProperty(value: string): string {
   return ghData(value).replace(/:/g, '%3A').replace(/,/g, '%2C')
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function errorText(error: unknown): string {

@@ -76,6 +76,8 @@ export interface SessionWorkflow extends SessionWorkflowSummary {
 export interface CollectSessionWorkflowOptions extends ParseOptions {
   /** Maximum number of source files parsed for one workflow selection. */
   readonly maxSessions?: number
+  /** The store root the seeds came from; parents and children are looked up there, not in HOME. */
+  readonly home?: string
 }
 
 interface SessionReference {
@@ -257,9 +259,9 @@ export async function collectSessionWorkflow(
   const refsForId = async (sessionId: string): Promise<readonly SessionRef[]> => {
     if (resolvedIds.has(sessionId)) return refsById.get(sessionId) ?? []
     if (adapter.locateBySessionId) {
-      for (const ref of await adapter.locateBySessionId(sessionId)) addRef(ref)
+      for (const ref of await adapter.locateBySessionId(sessionId, options.home !== undefined ? { home: options.home } : {})) addRef(ref)
     } else {
-      fallbackLocated ??= await locateSessions(adapter)
+      fallbackLocated ??= await locateSessions(adapter, { home: options.home })
       for (const ref of fallbackLocated) addRef(ref)
     }
     resolvedIds.add(sessionId)
