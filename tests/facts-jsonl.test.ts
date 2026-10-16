@@ -131,6 +131,17 @@ describe('facts --format jsonl', () => {
   })
 })
 
+describe('facts: Codex sessions a person did not start', () => {
+  it("does not count a `codex exec` script's brief, or the prompts the Claude Code plugin sent", async () => {
+    const [exec] = await facts([fx.paths.exec])
+    expect(exec!.humanTurns.value).toEqual([])
+    expect(exec!.excludedTurns.value).toEqual([expect.objectContaining({ author: 'injected', turns: 1 })])
+    const [plugin] = await facts([fx.paths.plugin])
+    expect(plugin!.humanTurns.value).toEqual([])
+    expect(plugin!.excludedTurns.value).toEqual([expect.objectContaining({ author: 'agent', turns: 2 })])
+  })
+})
+
 describe('facts: a Codex fork the person made', () => {
   it('counts the turns typed into the fork', async () => {
     const [session] = await facts([fx.paths.fork])

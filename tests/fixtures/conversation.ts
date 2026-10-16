@@ -34,6 +34,10 @@ export const CONVERSATION = {
   unknown: 'c0a7e2a3-3333-4333-8333-333333333333',
   /** Codex: a fork the person made, then typed into. */
   fork: '0199f7c0-aaaa-7aaa-8aaa-aaaaaaaaaaaa',
+  /** Codex: a `codex exec` run: a script's brief, then the agent's reply. */
+  exec: '0199f7d0-dddd-7ddd-8ddd-dddddddddddd',
+  /** Codex: opened by the Claude Code plugin, which wrote both prompts. */
+  plugin: '0199f7e0-eeee-7eee-8eee-eeeeeeeeeeee',
   /** Codex: the thread {@link CONVERSATION.fork} was forked from. */
   forkParent: '0199a000-bbbb-7bbb-8bbb-bbbbbbbbbbbb',
 } as const
@@ -161,11 +165,35 @@ function codexUserFork(cwd: string): string {
   ])
 }
 
+/** A Codex session another program launched: `originator` says which. */
+function codexLaunched(id: string, cwd: string, originator: string, source: string, prompts: readonly string[]): string {
+  const rows: unknown[] = [
+    { timestamp: at(300), type: 'session_meta', payload: { id, timestamp: at(300), cwd, originator, source, cli_version: '0.163.0' } },
+  ]
+  prompts.forEach((prompt, index) => {
+    const turn = `${id.slice(0, 9)}${index}cccc-7ccc-8ccc-cccccccccccc`
+    rows.push(
+      { timestamp: at(301 + index * 10), type: 'event_msg', payload: { type: 'task_started', turn_id: turn } },
+      { timestamp: at(302 + index * 10), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] } },
+      { timestamp: at(303 + index * 10), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Reviewed.' }] } },
+      { timestamp: at(304 + index * 10), type: 'event_msg', payload: { type: 'task_complete', turn_id: turn } },
+    )
+  })
+  return jsonl(rows)
+}
+
 export interface ConversationHome {
   readonly root: string
   readonly home: string
   readonly cwd: string
-  readonly paths: { readonly claude: string; readonly logged: string; readonly unknown: string; readonly fork: string }
+  readonly paths: {
+    readonly claude: string
+    readonly logged: string
+    readonly unknown: string
+    readonly fork: string
+    readonly exec: string
+    readonly plugin: string
+  }
   readonly env: Readonly<Record<string, string>>
 }
 
@@ -188,6 +216,15 @@ export async function makeConversationHome(): Promise<ConversationHome> {
     join(home, '.codex', 'sessions', '2026', '10', '14', `rollout-2026-10-14T10-03-20-${CONVERSATION.fork}.jsonl`),
     codexUserFork(cwd),
   )
+  const codexDay = join(home, '.codex', 'sessions', '2026', '10', '14')
+  const exec = await put(
+    join(codexDay, `rollout-2026-10-14T10-05-00-${CONVERSATION.exec}.jsonl`),
+    codexLaunched(CONVERSATION.exec, cwd, 'codex_exec', 'exec', ['Review the diff and report.']),
+  )
+  const plugin = await put(
+    join(codexDay, `rollout-2026-10-14T10-05-30-${CONVERSATION.plugin}.jsonl`),
+    codexLaunched(CONVERSATION.plugin, cwd, 'Claude Code', 'vscode', ['Find the failing test.', 'Now fix it.']),
+  )
   await put(
     join(home, '.local', 'state', 'session-identity', 'claude-code', `${CONVERSATION.claude}.json`),
     JSON.stringify({ session_id: CONVERSATION.claude, updated_at: at(1), attributes: IDENTITY }),
@@ -203,7 +240,7 @@ export async function makeConversationHome(): Promise<ConversationHome> {
     root,
     home,
     cwd,
-    paths: { claude, logged, unknown, fork },
+    paths: { claude, logged, unknown, fork, exec, plugin },
     env: {
       HOME: home,
       XDG_STATE_HOME: join(root, 'state'),

@@ -19,6 +19,7 @@ traces facts --since 30d --match '^gh pr merge'             # each matching huma
 
 Each `humanTurns` entry carries `author` (always `human` there), `answered` (the agent's last message before it), `reply` (its first message after), `interrupted` (the person stopped the agent's work on this turn) and `signals`: `interrupt`, `rejected-tool` and `after-claim`, each counted since the person's previous human turn.
 A turn the reader called human is checked once more by org convention: harness text still reads `injected`, a fleet, session-to-session or operator message, or a first turn over 1,500 characters (a lane brief a tool typed in), is `fleet`, a long markdown-heavy paste after the first turn is `relay`, and a harness command (`/model`, `/clear`) is excluded with the person as its author.
+A `codex exec` run's first turn is its script's brief (`injected`), every prompt of a Codex session the Claude Code plugin opened is `agent`, and a Codex fork the person made counts the turns typed into it.
 `excludedTurns` groups every left-out turn by reason and `author`.
 
 `--format jsonl` prints one row per typed turn (`human`, `fleet` or `relay`): `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals` and `spanId`.

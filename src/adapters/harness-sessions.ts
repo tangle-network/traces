@@ -218,7 +218,7 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
 
 type CodexHead = { timestamp?: string; type?: string; payload?: {
   type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string;
-  forked_from_id?: string; thread_source?: string;
+  forked_from_id?: string; thread_source?: string; originator?: string;
   agent_role?: string; agent_path?: string; parent_thread_id?: string;
   git?: { repository_url?: unknown }; source?: { subagent?: { thread_spawn?: {
     depth?: number; agent_nickname?: string; agent_role?: string; agent_path?: string; parent_thread_id?: string
@@ -277,10 +277,30 @@ async function relabelUserFork(path: string, meta: NonNullable<CodexHead['payloa
   }
 }
 
+/**
+ * A Codex session a script or another agent launched, which the shared reader
+ * calls a person's. `codex exec` runs a script's prompt, so its first turn is
+ * the launcher's brief, as traces' own Codex reader says (`codexActor`); a
+ * session the Claude Code plugin opened takes every prompt from Claude.
+ */
+function relabelLaunched(meta: NonNullable<CodexHead['payload']>, spans: OtlpSpan[]): void {
+  const prompts = spans
+    .filter((item) => item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'human')
+    .sort((left, right) => Date.parse(left.start_time) - Date.parse(right.start_time))
+  if (meta.originator === 'Claude Code') {
+    for (const item of prompts) item.attributes['tangle.actor'] = 'agent'
+  } else if (meta.originator === 'codex_exec' || (meta.source as unknown) === 'exec') {
+    if (prompts[0]) prompts[0].attributes['tangle.actor'] = 'injected'
+  }
+}
+
 async function decorateCodexMetadata(path: string, session: HarnessSession, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
   const head = await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} })
   const meta = head.find((row) => row.type === 'session_meta')?.payload
-  if (meta) await relabelUserFork(path, meta, root, spans)
+  if (meta) {
+    await relabelUserFork(path, meta, root, spans)
+    relabelLaunched(meta, spans)
+  }
   const spawn = meta?.source?.subagent?.thread_spawn
   if (typeof spawn?.depth === 'number') root.attributes['traces.codex.agent_depth'] = spawn.depth
   const nickname = meta?.agent_nickname ?? spawn?.agent_nickname
