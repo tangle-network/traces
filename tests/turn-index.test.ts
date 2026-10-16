@@ -331,6 +331,20 @@ describe('turn index: a file rewritten in place, and a left-behind lock', () => 
     expect(answers[0]!.length).toBeGreaterThan(5)
     expect((await readdir(dir)).filter((name) => name.startsWith('lock'))).toEqual([])
   }, 60_000)
+
+  it('takes over a lock untouched for minutes, even when its pid now names a live process', async () => {
+    const fx = await growingHome()
+    await writeFile(fx.claude, claudeRecords(fx.cwd).map(line).join(''))
+    const dir = join(fx.env.XDG_STATE_HOME!, 'traces', 'turn-index')
+    await mkdir(dir, { recursive: true })
+    // This test's own process is alive; the lock it names has had no heartbeat for ten minutes.
+    await writeFile(join(dir, 'lock'), `${process.pid} reused`)
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000)
+    await utimes(join(dir, 'lock'), tenMinutesAgo, tenMinutesAgo)
+    const answer = await search(fx.env)
+    expect(answer.matches.length).toBeGreaterThan(5)
+    expect((await readdir(dir)).filter((name) => name.startsWith('lock'))).toEqual([])
+  }, 60_000)
 })
 
 describe('turn index: list', () => {

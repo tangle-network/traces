@@ -23,7 +23,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFile, link, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, link, mkdir, open, readFile, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -166,6 +166,13 @@ const EMPTY_SESSION: IndexedSession = {
 }
 
 const PIECE_WORKERS = 4
+/** The holder touches its lock this often while it holds it. */
+const LOCK_HEARTBEAT_MS = 20_000
+/**
+ * A lock untouched this long was left by a process that died, even when its
+ * pid has since been given to another process.
+ */
+const LOCK_STALE_MS = 120_000
 
 function defaultTurnIndexDir(): string {
   const state = process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state')
@@ -275,6 +282,7 @@ export class TurnIndex {
 
   /** What this process writes into the lock, so it removes only its own. */
   private readonly token = `${process.pid} ${randomUUID()}`
+  private heartbeat: NodeJS.Timeout | undefined
 
   private constructor(readonly dir: string) {}
 
@@ -312,6 +320,11 @@ export class TurnIndex {
         const handle = await open(this.lockPath, 'wx')
         await handle.writeFile(this.token)
         await handle.close()
+        this.heartbeat = setInterval(() => {
+          const now = new Date()
+          utimes(this.lockPath, now, now).catch(() => {})
+        }, LOCK_HEARTBEAT_MS)
+        this.heartbeat.unref()
         return
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
@@ -323,8 +336,9 @@ export class TurnIndex {
   }
 
   /**
-   * The inode of the lock when the process that wrote it is gone, which left
-   * it behind; null while a live process holds it, or once it is gone.
+   * The inode of the lock when the process that wrote it left it behind: its
+   * pid is gone, or it went untouched for {@link LOCK_STALE_MS}. Null while a
+   * live process holds it, or once it is gone.
    */
   private async staleLock(): Promise<number | null> {
     let handle
@@ -336,9 +350,10 @@ export class TurnIndex {
     try {
       // One open file, so the pid and the inode are the same lock's.
       const [info, text] = await Promise.all([handle.stat(), handle.readFile('utf8')])
+      if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return info.ino
       const pid = Number(text.split(' ')[0])
-      // A lock with no pid yet is being written; one that stays so was left half-written.
-      if (!Number.isInteger(pid) || pid <= 0) return Date.now() - info.mtimeMs > 60_000 ? info.ino : null
+      // A lock with no pid yet is being written.
+      if (!Number.isInteger(pid) || pid <= 0) return null
       try {
         process.kill(pid, 0)
         return null
@@ -369,6 +384,7 @@ export class TurnIndex {
 
   /** Save what was read and let the next process in. */
   async close(): Promise<void> {
+    clearInterval(this.heartbeat)
     try {
       if (!this.changed) return
       const temporary = join(this.dir, `index.json.${process.pid}.tmp`)
