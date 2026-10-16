@@ -2,7 +2,7 @@
 
 [traces](../README.md#docs) › Integrate your own system
 
-No adapter, no plugin. Emit the span contract and point `--otlp` at the file.
+No adapter, no plugin. Emit the span contract and pass the file as the ref.
 
 ```bash
 npm i @tangle-network/agent-trace-contract    # zero runtime dependencies
@@ -10,8 +10,8 @@ npm i @tangle-network/agent-trace-contract    # zero runtime dependencies
 
 You install it to PRODUCE spans. This package already depends on it to read
 them, so `npx @tangle-network/traces@latest` arrives with the contract-backed
-analyses working: trace conformance, `traces validate`, `--otlp` inbound
-reading, round-over-round convergence and the steering chain, and OpenInference
+analyses working: trace conformance, `traces validate`, OTLP files as refs,
+round-over-round convergence and the steering chain, and OpenInference
 conversion.
 
 ```ts
@@ -34,7 +34,7 @@ Write one span per line to a `.jsonl` file, then:
 
 ```bash
 traces validate spans.otlp.jsonl        # exit 1 only when the file is not a trace
-traces analyze --otlp spans.otlp.jsonl  # a directory reads the OTLP files under it
+traces analyze spans.otlp.jsonl        # a directory reads the OTLP files under it
 ```
 
 A directory is a run directory, not a span directory: it holds the span export
@@ -43,7 +43,7 @@ files are read — every other JSONL is listed in the report with what it actual
 holds, rather than counted as several hundred broken spans. Put the exports in an
 `otlp/` subdirectory and that decides it outright.
 
-Writing commands (`convert`, `export`, `evidence`, `upload`) take `--otlp-out`; they refuse `--otlp`.
+`traces convert <ref> --out <file>` writes the spans as contract OTLP-JSONL, and `traces upload <ref> --dry-run --out <file>` writes the redacted preview.
 
 `parent_span_id` is CONTAINMENT — this span happened inside that one. `links` is
 CAUSALITY — that verdict caused this retry. Encoding causality as a parent claims
@@ -67,7 +67,7 @@ capability table, not the exit code, says what the degradation cost.
 
 ### A re-export never validates cleaner than its source
 
-`--otlp-out` writes the spans that were analysed. Anywhere this package
+`traces convert <ref> --out <file>` writes the spans that were read. Anywhere this package
 normalized a field to analyse it — an `end_time` that precedes its `start_time`,
 a status code the contract does not recognise — the export writes what the
 PRODUCER wrote and keeps the normalized value in an attribute beside it, so

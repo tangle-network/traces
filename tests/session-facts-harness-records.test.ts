@@ -1,5 +1,5 @@
 /**
- * `traces facts --harness claude-code --session <file>` reads through the default
+ * `traces facts <file> --harness claude-code` reads through the default
  * path (HarnessSessionsAdapter → harness-sessions), not ClaudeAdapter. Claude Code
  * (2026-10) writes its own command records with no `origin` field and string
  * content; they must not count as the person's turns, and a typed slash command
@@ -67,7 +67,7 @@ describe('traces facts on real Claude Code harness records', () => {
     writeFileSync(file, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
     const { stdout } = await execFileAsync(
       process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'facts', '--harness', 'claude-code', '--session', file, '--format', 'json'],
+      ['--import', 'tsx', 'src/cli.ts', 'facts', file, '--harness', 'claude-code', '--format', 'json'],
       { cwd: process.cwd(), env: { ...process.env, HOME: dir, NO_COLOR: '1', FORCE_COLOR: '' }, maxBuffer: 16 * 1024 * 1024 },
     )
     const [facts] = (JSON.parse(stdout) as SessionFactsReport).sessions

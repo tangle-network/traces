@@ -9,7 +9,7 @@ Each finding already contains the claim, evidence, recommended action, confidenc
 `traces improve` turns observed sessions into a portable improvement packet:
 
 ```bash
-traces improve --all --last 20 --dir .traces/improvement
+traces improve --last 20 --dir .traces/improvement
 ```
 
 The directory contains:

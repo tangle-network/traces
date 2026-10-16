@@ -13,8 +13,9 @@ content itself — see Ownership.
 - For the analyst engine (built-in vs `--llm`), read [docs/trace-analysts.md](docs/trace-analysts.md).
 - Every 0.x command and flag that 1.0 removed is a row in [src/moved.ts](src/moved.ts): using it exits 2
   and prints the replacement (`traces help moved`). Remove a spelling only by adding its row.
-- Resolve current exports and signatures from [src/index.ts](src/index.ts) and `src/cli.ts`'s `usage()`
-  function (`traces --help`), not from memory of an older version.
+- Resolve current exports and signatures from [src/index.ts](src/index.ts) and the command table in
+  [src/commands.ts](src/commands.ts) (`traces --help`, `traces <command> --help`), not from memory of an
+  older version. A command's flags, help and parsing come from its one row there.
 
 ## Ownership
 
@@ -41,10 +42,11 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
 - **`parent_span_id` is containment; `links` is causality.** A span's parent is what it happened
   inside. A `links` entry is what caused it (e.g. a verdict that triggered a retry round). Never encode
   a causal edge as a parent pointer — it claims a nesting that never existed and cannot round-trip.
-- **Exit codes are a stable API.** `validate`/`check`/`diff` scripts and CI gates branch on exact exit
+- **Exit codes are a stable API: 0 yes, 1 no, 2 could not answer** (the 1.0.0 major note). A usage
+  error or an input traces could not read exits 2; under `--format json|jsonl` its error is one JSON
+  object `{error, code}` on stderr and stdout stays empty. Scripts and CI gates branch on exact exit
   codes (see the tables in [docs/integrate.md](docs/integrate.md), [docs/check.md](docs/check.md),
-  [docs/diff.md](docs/diff.md) and [docs/upload.md](docs/upload.md)). Do not repurpose a code's meaning; add a new one only alongside a
-  major-version note.
+  [docs/diff.md](docs/diff.md) and [docs/upload.md](docs/upload.md)). Do not repurpose a code's meaning.
 - **Nothing on the ingest path is repaired or invented.** A span with an unreadable timestamp is
   reported and excluded from analysis, never given a synthesized value — a repaired value would put
   invented work into a total. A re-export carries `traces.source.unreadable_rows` forward; it never

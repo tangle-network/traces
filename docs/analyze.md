@@ -45,5 +45,5 @@ Read [Trace analysts](./trace-analysts.md) for the output contract and a minimal
 > `OPENAI_API_KEY` alone targets OpenAI instead, and `OPENAI_BASE_URL` overrides the endpoint for any other OpenAI-compatible gateway.
 > `--llm` also needs a Python interpreter with `agent-eval-rpc[dspy]` installed, because agent-eval's model-backed analysts run through the DSPy RLM engine out of process; set `TRACES_PYTHON` to choose the interpreter.
 > The bridge protocol is version-locked: install the exact version matching this package's `@tangle-network/agent-eval` dependency (`pip install "agent-eval-rpc[dspy]==$(npm view @tangle-network/traces dependencies.@tangle-network/agent-eval)"`) — a skewed bridge kills every agentic analyst at startup.
-> When `--llm` was requested and every agentic analyst fails, `analyze`/`investigate`/`improve` still write the deterministic report, then exit 1 with each analyst's underlying error.
-> Every deterministic command — `list`, `analyze` without `--llm`, `convert`, `index`, `inspect`, `export`, `evidence`, `stream`, `watch`, `analyze --supervisor-run-dir` — needs neither a key nor Python.
+> When `--llm` was requested and every agentic analyst fails, `analyze`/`improve` still write the deterministic report, then exit 1 with each analyst's underlying error.
+> Every deterministic command — `list`, `facts`, `analyze` without `--llm`, `convert`, `stream`, `watch`, and `analyze <run-dir>` — needs neither a key nor Python.

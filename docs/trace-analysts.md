@@ -14,10 +14,10 @@ Keeping them separate prevents an exploratory model output from being reported a
 
 ```bash
 # Free local checks over the active Codex coordinator and connected workers.
-traces analyze --harness codex --current --latest-turn --workflow
+traces analyze --harness codex --current --latest-turn
 
 # Limit a resumed Claude Code session to its latest task and subagents.
-traces analyze --harness claude-code --session <path> --latest-turn
+traces analyze <path> --harness claude-code --latest-turn
 
 # Write reusable findings, evidence, report, and OpenInference spans.
 traces improve --harness codex --last 5 --dir .traces/improvement
@@ -26,7 +26,7 @@ traces improve --harness codex --last 5 --dir .traces/improvement
 traces analyze --harness codex --last 5 --llm --budget 0.50
 ```
 
-Which sessions these commands select, and how `--workflow` and `--latest-turn` expand them, is in [Choose sessions](./harnesses.md#choose-sessions).
+Which sessions these commands select, how a named session brings its spawned children, and how `--latest-turn` narrows it, is in [Choose sessions](./harnesses.md#choose-sessions).
 
 `traces improve` writes:
 
@@ -55,7 +55,7 @@ The original trace and exact cited span remain available for review.
 A model-backed analyst can submit a finding the evidence gate then refuses.
 Without the reason, a report showing "0 findings" reads as "the model found nothing" when the truth may be "the gate refused everything it found".
 
-`analyze`, `investigate`, `improve`, and `ask` now carry those refusals:
+`analyze`, `improve`, and `ask` now carry those refusals:
 
 - the CLI log adds whatever the event carries beyond its own text to each `finding rejected` line: the cause (`reason` for the gate's rejections and the bridge-row rejection, `issues` for a schema failure), the offending URI, the citation counts, and the subject;
 - the analyst table's Detail cell names the reasons and their counts;

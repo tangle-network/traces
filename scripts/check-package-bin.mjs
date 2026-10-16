@@ -18,9 +18,11 @@ if (firstLine !== '#!/usr/bin/env node') {
   throw new Error(`${binPath} is missing the node shebang`)
 }
 
+// The build stamps the version and the commit it came from: `traces <version> (<commit>)`.
 const versionOutput = execFileSync('node', [binPath, '--version'], { encoding: 'utf8' }).trim()
-if (versionOutput !== `traces ${pkg.version}`) {
-  throw new Error(`unexpected --version output: ${versionOutput}`)
+const stamped = versionOutput.match(/^traces (\S+) \(([0-9a-f]{7,40}(?:-dirty)?|unknown)\)$/)
+if (!stamped || stamped[1] !== pkg.version) {
+  throw new Error(`unexpected --version output: ${versionOutput} (expected traces ${pkg.version} (<commit>))`)
 }
 
 const packJson = execFileSync('npm', ['pack', '--dry-run', '--json'], { encoding: 'utf8' })

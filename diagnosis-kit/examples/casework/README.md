@@ -40,11 +40,11 @@ their next move: instrument the missing attributes, then come back.
 
 ```bash
 cd /home/drew/code/traces
-./node_modules/.bin/tsx src/cli.ts convert --harness codex --last 1 --otlp-out /tmp/real.otlp.jsonl
+./node_modules/.bin/tsx src/cli.ts convert --harness codex --last 1 --out /tmp/real.otlp.jsonl
 ./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts /tmp/real.otlp.jsonl
 ```
 
-Substitute any harness the adapters cover. `traces list --all` shows what is on the box.
+Substitute any harness the adapters cover. `traces list` shows what is on the box, across every harness.
 
 ## The Casework seam, for the first campaign
 
@@ -53,11 +53,11 @@ Casework writes a raw sandbox event array, not OTLP:
 - `eval/production-executor.ts:182` writes `sandbox-events.json` into the run directory
 - runs land under `.artifacts/eval/runs/<ISO timestamp>/<cellId>/`
 
-The traces package reads that shape directly with `--format sandbox-events`, converting
+The traces package reads that shape directly (it sniffs sandbox events), converting
 each event to a span (`src/file-export.ts`). So the sequence once a campaign has run is:
 
 ```bash
-traces convert <runDir>/<cellId>/sandbox-events.json --format sandbox-events --otlp-out casework.otlp.jsonl
+traces convert <runDir>/<cellId>/sandbox-events.json --out casework.otlp.jsonl
 ./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts casework.otlp.jsonl
 ```
 

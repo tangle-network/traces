@@ -89,7 +89,7 @@ describe('sessions larger than the V8 string limit', () => {
     }).rejects.toBeInstanceOf(JsonlParseError)
   }, 240_000)
 
-  it('analyzes the session through the real CLI in a heap too small to hold it as one string', async () => {
+  it('analyzes and converts the session through the real CLI in a heap too small to hold it as one string', async () => {
     const home = join(dir, 'cli-home')
     await mkdir(join(home, '.claude', 'projects', '-tmp-giant'), { recursive: true })
     await writeGiantRowSession(join(home, '.claude', 'projects', '-tmp-giant', 'giant.jsonl'))
@@ -102,26 +102,24 @@ describe('sessions larger than the V8 string limit', () => {
     // holding the session (or its giant row) can be allocated there, so the
     // CLI completing proves discovery, parse, analysis, and export all stayed
     // incremental and bounded on the real code path.
-    const run = spawnSync(
+    const cli = (argv: readonly string[]) => spawnSync(
       process.execPath,
-      [
-        '--max-old-space-size=128', '--max-semi-space-size=4', '--import', 'tsx',
-        join(process.cwd(), 'src', 'cli.ts'),
-        'analyze', '--harness', 'claude-code', '--session', 'giant',
-        '--out', report, '--otlp-out', artifact,
-      ],
+      ['--max-old-space-size=128', '--max-semi-space-size=4', '--import', 'tsx', join(process.cwd(), 'src', 'cli.ts'), ...argv],
       { cwd: process.cwd(), encoding: 'utf8', env, timeout: 240_000 },
     )
-    expect(run.status, run.stderr || run.error?.message).toBe(0)
-
+    const analyzed = cli(['analyze', 'giant', '--harness', 'claude-code', '--out', report])
+    expect(analyzed.status, analyzed.stderr || analyzed.error?.message).toBe(0)
     const text = await readFile(report, 'utf8')
     expect(text).toContain('# Trace analysis — claude-code')
+
+    const converted = cli(['convert', 'giant', '--harness', 'claude-code', '--out', artifact])
+    expect(converted.status, converted.stderr || converted.error?.message).toBe(0)
     // The unreadable row is receipted on the session's spans, not silently
     // dropped: the artifact carries the degraded integrity stamp and count.
     const artifactText = await readFile(artifact, 'utf8')
     expect(artifactText).toContain('"traces.session.integrity":"degraded_not_lossless"')
     expect(artifactText).toContain('"traces.session.corruption_count":1')
-  }, 300_000)
+  }, 540_000)
 
   it('streams the OTLP export in bounded chunks instead of one string', async () => {
     const path = join(dir, 'streamed-export.otlp.jsonl')

@@ -59,19 +59,19 @@ describe('supervisor reports', () => {
     const dir = join(root, 'runs', 'inst-1', 'ARM')
     await writeRun(dir)
 
-    const single = await run(['analyze', '--supervisor-run-dir', dir])
+    const single = await run(['analyze', dir])
     expect(single.stdout).toContain('# Run report — sup-1 [ARM]')
     expect(single.stdout).toContain('steers=1 queued / 1 delivered')
     expect(single.stdout).toContain('| Workers spawned | 1 |')
     expect(single.stdout).toContain('unavailable —')
 
-    const rollup = await run(['analyze', '--supervisor-run-dir', root])
+    const rollup = await run(['analyze', root])
     expect(rollup.stdout).toContain(`Supervisor rollup — ${root}`)
     expect(rollup.stdout).toContain('Steers across all cells: 1')
     expect(rollup.stdout).toContain('| sup-1 | ARM |')
 
     const out = join(root, 'supervisor.md')
-    const written = await run(['analyze', '--supervisor-run-dir', dir, '--out', out])
+    const written = await run(['analyze', dir, '--out', out])
     expect(written.stdout).toContain(`supervisor report → ${out}`)
     const withoutGeneratedTime = (text: string) => text.replace(/^- Generated: .+$/m, '').trimEnd()
     expect(withoutGeneratedTime(await readFile(out, 'utf8'))).toBe(withoutGeneratedTime(single.stdout))
@@ -83,7 +83,7 @@ describe('supervisor reports', () => {
       runId: 'failed-run', pursuitId: 'attempt-1', at: at(0),
       error: { name: 'ProviderError', message: 'provider setup failed' },
     }))
-    const result = await run(['analyze', '--supervisor-run-dir', dir])
+    const result = await run(['analyze', dir])
     expect(result.stdout).toContain('provider setup failed')
     expect(result.stdout).toContain('failed-run')
     expect(result.stdout).toContain('| Status source | runtime-failure |')
@@ -96,7 +96,7 @@ describe('supervisor reports', () => {
       await mkdir(old, { recursive: true })
       await writeFile(join(old, 'journal.jsonl'), JSON.stringify({ kind: 'spawned', id: 'sup-1', at: at(0) }))
     }
-    await expect(run(['analyze', '--supervisor-run-dir', empty])).rejects.toThrow(/no supervisor run found.*Runtime run/)
+    await expect(run(['analyze', empty])).rejects.toThrow(/unless it is a Runtime run \(spawn-journal\.jsonl/)
   })
 
   it('rejects a terminal record from another Runtime run', async () => {

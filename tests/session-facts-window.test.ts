@@ -158,14 +158,14 @@ describe('traces facts --since/--until', () => {
   })
 
   it('leaves a selection without a window as it was, and refuses --until elsewhere', async () => {
-    const { stdout } = await cli(['facts', '--harness', 'claude-code', '--session', join(project, 'two-day.jsonl')])
+    const { stdout } = await cli(['facts', join(project, 'two-day.jsonl'), '--harness', 'claude-code'])
     const report = JSON.parse(stdout) as SessionFactsReport
     expect(report.selection).toBeNull()
     expect(report.sessions[0]!.humanTurns.value).toHaveLength(4)
 
     await expect(cli(['list', '--harness', 'claude-code', '--until', '1d']))
-      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('--until is not supported by list') })
+      .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('--until does not apply to list; it applies to: facts') })
     await expect(cli(['facts', '--harness', 'claude-code', '--until', 'yesterday-ish']))
-      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('--until: expected') })
+      .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('--until: expected') })
   })
 })

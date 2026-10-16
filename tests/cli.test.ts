@@ -14,7 +14,7 @@ function parseRows(jsonl: string): Record<string, unknown>[] {
 }
 
 describe('traces CLI', () => {
-  it('routes a span file through analyze, investigate, and improve', async () => {
+  it('routes a span file through analyze and improve', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-test-'))
     const input = join(dir, 'spans.otlp.jsonl')
     const report = join(dir, 'report.md')
@@ -59,11 +59,6 @@ describe('traces CLI', () => {
     // The external-engine footer went with the engines (1.0).
     expect(reportText).not.toContain('--analyzer')
 
-    const investigation = join(dir, 'investigation.md')
-    const investigated = await run(['investigate', input, '--out', investigation])
-    expect(investigated.stdout).toContain(`investigation report → ${investigation}`)
-    expect(await readFile(investigation, 'utf8')).toContain('1 session(s), 2 spans')
-
     const improvement = join(dir, 'improvement')
     const improved = await run(['improve', input, '--dir', improvement])
     expect(improved.stdout).toContain(`improvement artifacts → ${improvement}`)
@@ -73,7 +68,7 @@ describe('traces CLI', () => {
     expect(result.spanCount).toBe(2)
     expect(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8')).not.toBe('')
     expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain('1 session(s), 2 spans')
-    // Three cold CLI subprocesses, each allowed 30s of its own. A 15s outer
+    // Two cold CLI subprocesses, each allowed 30s of its own. A 15s outer
     // budget was shorter than the inner ones and failed on a loaded machine
     // while every subprocess was still inside its own timeout, which is the
     // disagreement `vitest.config.ts` raised the default to fix.
@@ -114,8 +109,6 @@ describe('traces CLI', () => {
       'src/cli.ts',
       'analyze',
       input,
-      '--format',
-      'openinference',
       '--out',
       report,
     ], {
@@ -160,8 +153,6 @@ describe('traces CLI', () => {
       cli,
       'analyze',
       input,
-      '--format',
-      'openinference',
       '--out',
       report,
       ...extra,
@@ -211,8 +202,6 @@ describe('traces CLI', () => {
       'src/cli.ts',
       'improve',
       input,
-      '--format',
-      'openinference',
       '--dir',
       improvement,
     ], {
@@ -250,7 +239,6 @@ describe('traces CLI', () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-child-'))
     const session = join(dir, 'rollout-child.jsonl')
     const report = join(dir, 'report.md')
-    const otlp = join(dir, 'spans.openinference.jsonl')
     const parentId = '019f24d6-b5ec-7173-acc1-f957de216ee5'
     const childId = '019f5aea-d6b4-7451-a3eb-60289875a357'
     await writeFile(session, [
@@ -290,14 +278,11 @@ describe('traces CLI', () => {
       'tsx',
       'src/cli.ts',
       'analyze',
+      session,
       '--harness',
       'codex',
-      '--session',
-      session,
       '--out',
       report,
-      '--otlp-out',
-      otlp,
     ], {
       cwd: process.cwd(),
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
@@ -313,10 +298,9 @@ describe('traces CLI', () => {
     expect(text).toContain('Own direct-streaming conversion')
   })
 
-  it('exports Codex readable IDs as conforming OTLP IDs through analyze', async () => {
+  it('converts Codex readable IDs to conforming OTLP IDs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-otlp-codex-'))
     const session = join(dir, 'rollout-readable-codex.jsonl')
-    const report = join(dir, 'report.md')
     const otlp = join(dir, 'spans.openinference.jsonl')
     const sessionId = 'codex/readable cli session'
     const callId = 'call/readable cli tool'
@@ -351,14 +335,11 @@ describe('traces CLI', () => {
       '--import',
       'tsx',
       'src/cli.ts',
-      'analyze',
+      'convert',
+      session,
       '--harness',
       'codex',
-      '--session',
-      session,
       '--out',
-      report,
-      '--otlp-out',
       otlp,
     ], {
       cwd: process.cwd(),
@@ -396,10 +377,9 @@ describe('traces CLI', () => {
     expect(validation.stdout).not.toContain('non-hex-id')
   })
 
-  it('exports Claude readable IDs as conforming OTLP IDs through analyze', async () => {
+  it('converts Claude readable IDs to conforming OTLP IDs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-otlp-claude-'))
     const session = join(dir, 'claude-readable.jsonl')
-    const report = join(dir, 'report.md')
     const otlp = join(dir, 'spans.openinference.jsonl')
     const sessionId = 'claude/readable cli session'
     const callId = 'call/readable cli tool'
@@ -438,14 +418,11 @@ describe('traces CLI', () => {
       '--import',
       'tsx',
       'src/cli.ts',
-      'analyze',
+      'convert',
+      session,
       '--harness',
       'claude-code',
-      '--session',
-      session,
       '--out',
-      report,
-      '--otlp-out',
       otlp,
     ], {
       cwd: process.cwd(),
@@ -912,8 +889,6 @@ describe('traces CLI', () => {
       'src/cli.ts',
       'stream',
       input,
-      '--format',
-      'openinference',
       '--no-spans',
     ], {
       cwd: process.cwd(),
@@ -978,8 +953,6 @@ describe('traces CLI', () => {
       'src/cli.ts',
       'stream',
       input,
-      '--format',
-      'openinference',
       '--config',
       config,
       '--mode',
@@ -1040,8 +1013,6 @@ describe('traces analyze --llm failure surfacing', () => {
       'src/cli.ts',
       'analyze',
       input,
-      '--format',
-      'openinference',
       '--llm',
       '--budget',
       '1',
@@ -1113,14 +1084,14 @@ describe('traces ask', () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-ask-none-'))
     const input = await writeSessionFile(dir)
     const failure = await execFileAsync(process.execPath, [
-      '--import', 'tsx', 'src/cli.ts', 'ask', input, '--format', 'openinference',
+      '--import', 'tsx', 'src/cli.ts', 'ask', input,
     ], { cwd: process.cwd(), env: { ...process.env, NO_COLOR: '1' }, timeout: 30_000 }).then(
       () => {
         throw new Error('ask exited 0 without a question')
       },
       (error: Error & { code?: number; stderr?: string }) => error,
     )
-    expect(failure.code).toBe(1)
+    expect(failure.code).toBe(2)
     expect(failure.stderr).toContain('ask needs --question')
   }, 30_000)
 
@@ -1129,7 +1100,7 @@ describe('traces ask', () => {
     const input = await writeSessionFile(dir)
     for (const value of ['0', '-5', 'soon']) {
       const failure = await execFileAsync(process.execPath, [
-        '--import', 'tsx', 'src/cli.ts', 'ask', input, '--format', 'openinference',
+        '--import', 'tsx', 'src/cli.ts', 'ask', input,
         '--question', 'Did the session finish?', '--question-timeout', value,
       ], { cwd: process.cwd(), env: { ...process.env, NO_COLOR: '1' }, timeout: 30_000 }).then(
         () => {
@@ -1137,7 +1108,7 @@ describe('traces ask', () => {
         },
         (error: Error & { code?: number; stderr?: string }) => error,
       )
-      expect(failure.code).toBe(1)
+      expect(failure.code).toBe(2)
       expect(failure.stderr).toContain('--question-timeout must be a number of seconds')
     }
   }, 60_000)
@@ -1157,7 +1128,6 @@ describe('traces ask', () => {
 
     const failure = await execFileAsync(process.execPath, [
       '--import', 'tsx', 'src/cli.ts', 'ask', input,
-      '--format', 'openinference',
       '--questions', questions,
       '--question', 'Did the session finish?',
       '--budget', '5',

@@ -24,7 +24,7 @@ Requires Node ≥ 22. To run without installing: `npx --yes @tangle-network/trac
 ```bash
 traces analyze --harness claude-code --last 1               # where your last session got stuck or wasted tokens
 traces facts   --harness claude-code --last 1 --format text # tool calls, turns, PRs, first failure: exact, $0
-traces analyze --otlp spans.otlp.jsonl                      # spans from your own system, no adapter
+traces analyze spans.otlp.jsonl                             # spans from your own system, no adapter
 traces check   run.jsonl --contract contract.json           # fail CI when a run took a forbidden path
 ```
 
@@ -36,14 +36,14 @@ traces check   run.jsonl --contract contract.json           # fail CI when a run
 | Get exact facts, each citing its spans | `facts` | [Session facts](docs/facts.md) |
 | Ask your own questions, with checked citations | `ask` | [Ask questions](docs/ask.md) |
 | Gate CI on the path a run took | `check` | [Gate CI on a trace contract](docs/check.md) |
-| Read spans from a system you own | `validate`, `--otlp` | [Integrate your own system](docs/integrate.md) |
+| Read spans from a system you own | `analyze <file>`, `validate` | [Integrate your own system](docs/integrate.md) |
 | Watch sessions or a run tree while they run | `watch`, `stream` | [Watch and stream](docs/live.md) |
 | Find where two runs diverge | `diff` | [Diff two runs](docs/diff.md) |
 | Give an agent read-only trace tools | `mcp` | [MCP server](docs/mcp.md) |
 | Write a reviewable improvement packet | `improve` | [Improvement engine](docs/improve.md) |
 | Count which skills get used | `skills` | [Skill usage](docs/skill-usage.md) |
 | Keep one session's evidence after the logs rotate | `bundle` | [Session bundle](docs/bundle.md) |
-| Convert event captures to OpenInference | `export` | [Export to OpenInference](docs/evidence.md) |
+| Convert event captures to OTLP spans | `convert` | [Export to OpenInference](docs/evidence.md) |
 | Upload, or check files before sharing | `upload`, `verify-safe` | [Upload and share safely](docs/upload.md) |
 
 The common commands and flags are in the [CLI reference](docs/cli.md). `traces --help` lists every command and option, and `traces <command> --help` prints that command's own flags.
@@ -52,10 +52,10 @@ The common commands and flags are in the [CLI reference](docs/cli.md). `traces -
 
 | | Use when | How |
 |---|---|---|
-| **Emit the contract** | You control the system | Emit [`@tangle-network/agent-trace-contract`](https://github.com/tangle-network/agent-sdk/tree/main/packages/agent-trace-contract) spans, then `traces analyze --otlp <file\|dir>` |
-| **Adapters** | You do *not* control the format | `traces analyze --harness <id>` reads a coding agent's own session store; see [Supported harnesses](docs/harnesses.md) |
+| **Emit the contract** | You control the system | Emit [`@tangle-network/agent-trace-contract`](https://github.com/tangle-network/agent-sdk/tree/main/packages/agent-trace-contract) spans, then `traces analyze <file\|dir>` |
+| **Adapters** | You do *not* control the format | `traces analyze --harness <id> --last 1` reads a coding agent's own session store; see [Supported harnesses](docs/harnesses.md) |
 
-Emitting the contract is the supported way to integrate a new system. Adapters are the legacy edge: each one translates a format nobody standardised. If you can choose, choose `--otlp`.
+Emitting the contract is the supported way to integrate a new system. Adapters are the legacy edge: each one translates a format nobody standardised. If you can choose, choose OTLP.
 
 ## Library
 

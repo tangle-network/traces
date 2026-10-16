@@ -33,6 +33,7 @@ ACP-only bridges may not persist a local transcript.
 ## Choose sessions
 
 Every harness is read unless `--harness` names one.
+A reading command needs a selection: a ref, `--current`, `--last N` or `--since T`; `--cwd` and `--harness` only narrow it.
 A named session (a ref or `--current`) and a `--last` selection bring each session's spawned children, up to 100: the named session is `sessions[0]`, and each child follows it in the order it started, with `parentSessionId`. No number of the named session includes a child's. A child named alone is read without its parent.
 `--latest-turn` keeps a long-lived resumed Codex or Claude Code session scoped to its most recent task and the workers spawned from that task.
 
@@ -56,6 +57,6 @@ Missing copied directories, conflicting source bindings, and symlinks that chang
 Copied Workflow directories contain regular transcript and metadata files; symlink entries stop parsing.
 Missing or conflicting Workflow identities stop the parse instead of widening the selected history.
 Cross-harness parent/child trees are not inferred.
-For a reproducible report, run `traces list` first and pass its session ID with `--session`.
-Ephemeral `codex exec --json` output has no discovery location, so select its file with `--harness codex-exec --session <path>`.
+For a reproducible report, run `traces list` first and pass its session ID, or its short ref, as the ref.
+Ephemeral `codex exec --json` output has no discovery location, so pass its file as the ref; `--harness codex-exec` forces that reader.
 The adapter rejects empty, incomplete, or other JSONL formats instead of emitting zero-valued session evidence.
