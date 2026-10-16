@@ -12,8 +12,9 @@
  * `sessionRows`), never a second classifier. A piece ends before the last
  * response, which may still be streaming (`pieceBoundary`); that response is
  * read again with the next piece. Every other session (OpenCode's SQLite
- * store, Pi, Kimi, Factory, `claude -p` stream-json, a Codex fork) is read
- * whole whenever it changes, so its rows are a whole read's by construction.
+ * store, Pi, Kimi, Factory, `claude -p` stream-json, a Codex rollout in the
+ * older prompt form) is read whole whenever it changes, so its rows are a
+ * whole read's by construction.
  *
  * The index is lazy: a command refreshes only the sessions its selection
  * names, so the first `--since 30d` search builds 30 days and no more.
@@ -42,7 +43,7 @@ import type { HarnessTraceAdapter, SessionRef } from './types.js'
 // ── The per-file byte cursor, shared with the skills store ─────────────
 
 /** How far a file was read: its inode, its size then, and the offset just past the last line consumed. */
-export interface ByteCursor {
+interface ByteCursor {
   readonly ino: number
   readonly size: number
   readonly offset: number
@@ -64,15 +65,15 @@ const NEWLINE = 0x0a
 
 /**
  * Read `path` from byte `from` to `to` in chunks, handing `consume` each run
- * of complete lines (a buffer that ends in a newline) with the file offset it
- * starts at. A line longer than a chunk is read whole. The bytes after the
- * last newline, a line still being written, are returned in `rest`.
+ * of complete lines (a buffer that ends in a newline). A line longer than a
+ * chunk is read whole. Returns the bytes read, the offset just past the last
+ * newline, and the bytes after it in `rest`: a line still being written.
  */
 export async function readCompleteLines(
   path: string,
   from: number,
   to: number,
-  consume: (lines: Buffer, at: number) => void | Promise<void>,
+  consume: (lines: Buffer) => void | Promise<void>,
 ): Promise<{ bytes: number; end: number; rest: Buffer }> {
   const handle = await open(path, 'r')
   let bytes = 0
@@ -89,7 +90,7 @@ export async function readCompleteLines(
       const buffer = carry.length > 0 ? Buffer.concat([carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead)
       const complete = buffer.lastIndexOf(NEWLINE) + 1
       if (complete > 0) {
-        await consume(Buffer.from(buffer.subarray(0, complete)), end)
+        await consume(Buffer.from(buffer.subarray(0, complete)))
         end += complete
       }
       carry = Buffer.from(buffer.subarray(complete))
@@ -163,7 +164,7 @@ const EMPTY_SESSION: IndexedSession = {
 
 const PIECE_WORKERS = 4
 
-export function defaultTurnIndexDir(): string {
+function defaultTurnIndexDir(): string {
   const state = process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state')
   return join(state, 'traces', 'turn-index')
 }
