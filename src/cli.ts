@@ -13,7 +13,8 @@
 
 import { readFileSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
-import { basename, resolve } from 'node:path'
+import { homedir, hostname } from 'node:os'
+import { basename, dirname, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { findingRejectionDetail } from './finding-rejections.js'
@@ -70,9 +71,13 @@ import {
   computeSessionFacts,
   createSessionFactsReportBuilder,
   renderSessionFacts,
+  sessionMatches,
   type SessionFactsReport,
+  type SessionMatch,
+  type SessionReading,
   type UnreadSessionFact,
 } from './session-facts.js'
+import { sessionIdentityLookup } from './session-identity.js'
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { watchSessions } from './observer.js'
@@ -842,12 +847,40 @@ async function cmdBundleVerify(args: CliArgs): Promise<void> {
 }
 
 /**
+ * The host a `--format jsonl` row names: this machine's short lowercase name
+ * (the name voice-ledger and trace-mine key turns by), or for a store root
+ * the archive's `<host>/home` directory name.
+ */
+function hostOf(args: CliArgs): string {
+  const root = args.selection?.home
+  if (root !== undefined) return basename(root) === 'home' ? basename(dirname(root)) : basename(root)
+  return hostname().split('.')[0]!.toLowerCase()
+}
+
+/** One `traces facts --format jsonl` row: a turn a person typed, or another agent or a pasted relay sent. */
+interface TurnRow {
+  readonly host: string
+  readonly harness: string | null
+  readonly session: string | null
+  readonly cwd: string | null
+  readonly at: string
+  readonly author: string
+  readonly text: string
+  readonly answered: string | null
+  readonly reply: string | null
+  readonly interrupted: boolean
+  readonly signals: readonly string[]
+  readonly spanId: string
+}
+
+/**
  * `traces facts` — the deterministic session-facts sheet, printed.
  *
  * No model, no engine, no budget: the numbers come out of the spans. JSON by
  * default because the sheet's consumers are programs; `--format text` prints
- * the short readable form. Every fact names the span ids it came from, so any
- * number here can be checked with `traces convert` or a trace tool.
+ * the short readable form, and `--format jsonl` one row per typed turn. With
+ * `--match RE` it prints the human turns, agent messages and shell commands
+ * that match instead of the sheet. Every fact names the span ids it came from.
  *
  * A named session (a ref or `--current`) comes first, its spawned children
  * after it, and one that cannot be read exits 2. A sweep (`--last`, a window)
@@ -858,15 +891,55 @@ async function cmdBundleVerify(args: CliArgs): Promise<void> {
  */
 async function cmdFacts(args: CliArgs): Promise<void> {
   const format = args.format ?? 'json'
+  const pattern = args.match === undefined ? undefined : new RegExp(args.match)
+  if (args.noContent && (pattern !== undefined || format === 'jsonl')) {
+    throw new UsageError(`${pattern ? '--match searches' : '--format jsonl rows carry'} turn text, which --no-content withholds; drop one of them`)
+  }
   const window = args.since !== undefined || args.until !== undefined
     ? {
         ...(args.since !== undefined ? { since: new Date(parseSince(args.since)).toISOString() } : {}),
         ...(args.until !== undefined ? { until: new Date(parseTimeBound(args.until, '--until')).toISOString() } : {}),
       }
     : undefined
+  // Rows need where each session was read from, which the facts do not carry.
+  const sourceOf = new Map<string, string>()
+  let readingFrom: string | null = null
+  const host = hostOf(args)
+  const rows: TurnRow[] = []
+  const matches: Array<SessionMatch & { readonly source: string | null }> = []
+  const onSession = (reading: SessionReading): void => {
+    const source = readingFrom ?? sourceOf.get(reading.facts.sessionId ?? '') ?? null
+    if (pattern !== undefined) {
+      for (const match of sessionMatches(reading, pattern, window)) matches.push({ ...match, source })
+      return
+    }
+    if (format !== 'jsonl') return
+    for (const turn of reading.turns) {
+      rows.push({
+        host,
+        harness: reading.facts.harness,
+        session: reading.facts.sessionId,
+        cwd: reading.facts.cwd.value,
+        at: turn.at,
+        author: turn.author,
+        text: turn.text,
+        answered: turn.answered,
+        reply: turn.reply,
+        interrupted: turn.interrupted,
+        signals: turn.signals,
+        spanId: turn.spanId,
+      })
+    }
+  }
   // A store root alone is a place to select from, not a selection.
   const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
-  const builder = createSessionFactsReportBuilder({ includeContent: !args.noContent, window, nameUnread: named === 0 })
+  const builder = createSessionFactsReportBuilder({
+    includeContent: !args.noContent,
+    window,
+    nameUnread: named === 0,
+    agentIdentity: sessionIdentityLookup(args.selection?.home ?? (process.env.HOME || homedir())),
+    onSession,
+  })
   let report: SessionFactsReport
   if (window !== undefined && named === 0) {
     // Every session modified since the window opened, newest first, parsed and
@@ -885,8 +958,10 @@ async function cmdFacts(args: CliArgs): Promise<void> {
         continue
       }
       harnesses.add(adapter.harness)
+      readingFrom = ref.path
       builder.add(spans)
     }
+    readingFrom = null
     for (const entry of unread) builder.addUnread(entry)
     warnUnread(args, unread)
     report = { ...builder.build(), harness: [...harnesses].join('+') || (args.harnessExplicit ? args.harness : null) }
@@ -894,7 +969,11 @@ async function cmdFacts(args: CliArgs): Promise<void> {
     const collected = await collectSpans(args)
     if (collected.spans.length === 0 && (collected.unread ?? []).length === 0) throw new Error('no spans found for the given selection')
     warnIncompleteWorkflow(collected.workflow)
+    for (const source of collected.sources) sourceOf.set(source.sessionId, source.path)
+    const files = args.selection?.spans ?? []
+    if (files.length === 1 && collected.sources.length === 0) readingFrom = files[0]!.path
     builder.add(collected.spans)
+    readingFrom = null
     for (const entry of collected.unread ?? []) builder.addUnread(entry)
     report = { ...builder.build(), harness: collected.harness }
   }
@@ -914,13 +993,47 @@ async function cmdFacts(args: CliArgs): Promise<void> {
       'unreadable',
     )
   }
-  const rendered = format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderSessionFacts(report)
+  let rendered: string
+  let summary: string
+  if (pattern !== undefined) {
+    matches.sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+    const document = {
+      schemaVersion: 1,
+      kind: 'traces.session_matches',
+      generatedAt: report.generatedAt,
+      pattern: args.match,
+      sessions: report.sessions.length,
+      selection: report.selection,
+      matches,
+    }
+    rendered = format === 'json'
+      ? `${JSON.stringify(document, null, 2)}\n`
+      : format === 'jsonl'
+        ? matches.map((match) => `${JSON.stringify(match)}\n`).join('')
+        : renderMatches(document.pattern!, report.sessions.length, matches)
+    summary = `matches → ${args.out}  (${matches.length} in ${report.sessions.length} session(s), $0, no model call)`
+  } else if (format === 'jsonl') {
+    rendered = rows.map((row) => `${JSON.stringify(row)}\n`).join('')
+    summary = `turns → ${args.out}  (${rows.length} typed turn(s) in ${report.sessions.length} session(s), $0, no model call)`
+  } else {
+    rendered = format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderSessionFacts(report)
+    summary = `session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`
+  }
   if (args.out) {
     await writeFile(args.out, rendered, 'utf8')
-    console.log(`session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`)
+    console.log(summary)
     return
   }
   process.stdout.write(rendered)
+}
+
+/** `facts --match` as text: one line per hit, oldest first. */
+function renderMatches(pattern: string, sessions: number, matches: readonly SessionMatch[]): string {
+  const lines = [`${matches.length} match(es) for /${pattern}/ in ${sessions} session(s), deterministic, $0`]
+  for (const match of matches) {
+    lines.push(`${match.at}  ${(match.sessionId ?? '?').slice(0, 8)}  ${match.kind.padEnd(7)}  ${match.text}`)
+  }
+  return `${lines.join('\n')}\n`
 }
 
 async function cmdAnalyze(args: CliArgs): Promise<void> {

@@ -11,7 +11,30 @@ traces facts --harness codex --last 5 --format text         # the short readable
 traces facts spans.otlp.jsonl --out facts.json
 traces facts --harness claude-code --since 7d               # every session with a record in the last week
 traces facts --since 2026-10-14 --until 2026-10-15          # one day, across every harness
+traces facts --since 1d --format jsonl                      # one row per typed turn: author, answered, reply, signals
+traces facts --since 30d --match '^gh pr merge'             # each matching human turn, agent message or shell command
 ```
+
+## Turns, search and jsonl
+
+Each `humanTurns` entry carries `author` (always `human` there), `answered` (the agent's last message before it), `reply` (its first message after), `interrupted` (the person stopped the agent's work on this turn) and `signals`: `interrupt`, `rejected-tool` and `after-claim`, each counted since the person's previous human turn.
+A turn the reader called human is checked once more by org convention: harness text still reads `injected`, a fleet, session-to-session or operator message, or a first turn over 1,500 characters (a lane brief a tool typed in), is `fleet`, a long markdown-heavy paste after the first turn is `relay`, and a harness command (`/model`, `/clear`) is excluded with the person as its author.
+A `codex exec` run's first turn is its script's brief (`injected`), every prompt of a Codex session the Claude Code plugin opened is `agent`, and a Codex fork the person made counts the turns typed into it.
+`excludedTurns` groups every left-out turn by reason and `author`.
+
+`--format jsonl` prints one row per typed turn (`human`, `fleet` or `relay`): `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals` and `spanId`.
+A `fleet` row carries no signals: those are a person's.
+`host` is this machine's short name, or for a trace archive's `<host>/home` store root, that host.
+
+`--match RE` prints, instead of the sheet, one row per human turn, agent message or shell command that matches (`sessionId`, `kind`, `at`, `spanId`, `source`, and the text clipped to 300 characters around the hit).
+Shell commands are matched one simple command at a time, as the shell would split the script, so `^traces ` matches `cd x && traces facts …` and never `tangle traces list`.
+`--no-content` withholds the text both of these read, so it is refused with either.
+
+## Who acted
+
+`agent` names the profile, model, harness, skill set and directive variant of the session, under agent-trace-contract's `ATTR` keys: from the root span's `agent.*` attributes, else (Claude Code) the record dotfiles' SessionStart hook writes at `~/.local/state/session-identity/claude-code/<session_id>.json`, else the directive variant in `~/.claude/directives-log.jsonl`.
+Each key comes from the first source that has it, and `source` names the first source that supplied any; with a store root, both files are read under it.
+`agent.value` is `null` with the reason when no source names anyone.
 
 ## Time window
 

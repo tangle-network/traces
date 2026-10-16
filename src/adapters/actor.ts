@@ -260,6 +260,83 @@ export function codexActor(args: {
   return 'human'
 }
 
+// ── who typed a turn the reader called human ────────────────────────────────
+
+/**
+ * Text the harness writes into a user turn. A reader that labels by structure
+ * (harness-sessions) already calls most of these injected; the facts sheet
+ * checks again because span files from other producers carry only the text.
+ * Ported from trace-mine `extract.mjs` `MACHINE_PREFIXES` and voice-ledger
+ * `multi_extract.py` `MACHINE`, less the fleet prefixes below.
+ */
+const HARNESS_TURN_PREFIXES: readonly RegExp[] = [
+  /^<task-notification>/u, /^<local-command-/u, /^Caveat: The messages below/u, /^<system-reminder>/u,
+  /^<bash-(?:stdout|stderr)>/u, /^<user-prompt-submit-hook>/u, /^\[Request interrupted by user/u,
+  /^Base directory for this skill/u, /^This session is being continued/u, /^Your claude\.ai usage limit/u,
+  /^\[\d+ prior \/loop wakeup/u, /^<subagent_notification>/u, /^<turn_aborted>/u, /^<environment_context>/u,
+  /^# AGENTS\.md instructions/u, /^<user_instructions>/u, /^<user_shell_command>/u, /^<skill>/u,
+  /^<command-(?:name|message|args)>/u, /^\[system\]/iu,
+]
+
+/**
+ * A turn another agent or session sent in: a fleet message, a session-to-session
+ * message, an operator's handoff or brief. Ported from trace-mine `extract.mjs`.
+ */
+const FLEET_TURN_PREFIXES: readonly RegExp[] = [
+  /^\[fleet-message-id:/u, /^Another Claude session sent/u, /^acct moved this session/u,
+  /^Handoff from the Mac operator/u, /^You run on [\w.-]+ as a/u, /^Read (?:~|\/home\/drew|\/Users\/drew)\/code\/_handoff\//u,
+]
+
+/**
+ * Above this length a session's first turn is a brief another agent or an
+ * operator sent (`extract.mjs`), and a later turn may be pasted agent output
+ * (`multi_extract.py`).
+ */
+const LONG_TURN_CHARS = 1500
+
+function count(text: string, needle: string): number {
+  return text.split(needle).length - 1
+}
+
+/**
+ * Who typed a turn the session reader called human, by org convention:
+ *   harness text (a notification, a hook wrapper)  → `injected`
+ *   a fleet, session or operator relay prefix      → `fleet`
+ *   a first turn over 1,500 characters             → `fleet` (a lane or operator brief)
+ *   a long, markdown-heavy turn after the first    → `relay` (pasted agent output)
+ *   otherwise                                      → `human`
+ * The brief rule is trace-mine's; the relay rule is voice-ledger's: over 1,500
+ * characters with more than 3 table rows, 2 headings or 8 bullets. Measured on
+ * a week of GTR Claude Code sessions, every first turn over 1,500 characters
+ * was a lane brief (`You own …`, `Continue lane …`) typed in by a tool.
+ */
+export function authorOfTypedTurn(text: string, options: { readonly firstTurn: boolean }): 'human' | 'injected' | 'fleet' | 'relay' {
+  const trimmed = text.trim()
+  if (HARNESS_TURN_PREFIXES.some((prefix) => prefix.test(trimmed))) return 'injected'
+  if (FLEET_TURN_PREFIXES.some((prefix) => prefix.test(trimmed))) return 'fleet'
+  if (options.firstTurn && trimmed.length > LONG_TURN_CHARS) return 'fleet'
+  if (
+    !options.firstTurn &&
+    trimmed.length > LONG_TURN_CHARS &&
+    (count(trimmed, '\n|') > 3 || count(trimmed, '\n#') > 2 || count(trimmed, '\n- ') > 8)
+  ) return 'relay'
+  return 'human'
+}
+
+/**
+ * Claude Code commands that drive the harness rather than ask the agent for
+ * anything (`/model opus`, `/clear`). A person typed them, but they are not a
+ * turn of the conversation. A skill command (`/reflect-last`) is a request and
+ * stays a human turn.
+ */
+const HARNESS_COMMAND =
+  /^\/(?:add-dir|agents|bashes|clear|compact|config|context|copy|cost|doctor|effort|exit|export|fast|help|hooks|ide|login|logout|mcp|memory|model|output-style|permissions|plugin|privacy-settings|release-notes|resume|rewind|sandbox|status|statusline|terminal-setup|theme|todos|upgrade|usage|vim)(?:\s|$)/u
+
+/** True when a turn is a harness command a person typed (see {@link HARNESS_COMMAND}). */
+export function isHarnessCommand(text: string): boolean {
+  return HARNESS_COMMAND.test(text.trim())
+}
+
 // ── reaction classification (extract.py classify(), verbatim regexes) ────────
 
 export type Reaction = 'correction' | 'frustration' | 'praise' | 'jargon' | 'structure'

@@ -143,7 +143,7 @@ const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7]
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
 const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   list: ['--last', '--since', '--cwd', '--harness', '--format'],
-  facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--no-content', '--format', '--out'],
+  facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--match', '--no-content', '--format', '--out'],
   analyze: [...SELECT, '--out'],
   ask: [...SELECT, '--question', '--questions', '--budget', '--model'],
   check: ['--contract', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
@@ -158,13 +158,13 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
 }
 
 /**
- * The 24 options of §2.5, less the three whose commands take them in later
- * steps: `--match` (facts, step 8), `--share-safe` and `--known-secret-env`
- * (check, step 15). `--help` and `--version` are global.
+ * The 24 options of §2.5, less the two whose command takes them in a later
+ * step: `--share-safe` and `--known-secret-env` (check, step 15). `--help` and
+ * `--version` are global.
  */
 const OPTIONS = [
   '--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn',
-  '--format', '--out', '--no-content',
+  '--format', '--out', '--match', '--no-content',
   '--question', '--questions', '--budget', '--model',
   '--contract', '--once', '--dry-run', '--yes', '--unused',
 ]

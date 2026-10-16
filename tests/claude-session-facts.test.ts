@@ -314,7 +314,7 @@ describe('session facts from a Claude Code transcript', () => {
     ])
   })
 
-  it('counts a typed command and bash line, not the harness\'s output, whatever origin it carries', async () => {
+  it('counts a typed bash line, not the harness\'s output or a harness command, whatever origin it carries', async () => {
     const path = join(dir, 'machine-records.jsonl')
     const record = (uuid: string, second: number, content: string, extra: Record<string, unknown> = {}) => ({
       type: 'user',
@@ -343,12 +343,13 @@ describe('session facts from a Claude Code transcript', () => {
     const facts = await factsFor(path)
 
     expect(facts.humanTurns.value!.map((turn) => turn.text)).toEqual([
-      '/effort',
       '<bash-input>ls</bash-input>',
       'rerun the parser tests and tell me which one fails',
     ])
+    // `/effort` is typed, but to the harness: excluded, with the person as its author.
     expect(facts.excludedTurns.value).toEqual([
-      expect.objectContaining({ turns: 8, reason: expect.stringContaining('harness-injected content') }),
+      expect.objectContaining({ turns: 1, author: 'human', reason: expect.stringContaining('a command the person gave the harness') }),
+      expect.objectContaining({ turns: 8, author: 'injected', reason: expect.stringContaining('harness-injected content') }),
     ])
   })
 

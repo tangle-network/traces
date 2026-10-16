@@ -2,7 +2,9 @@
  * Traces keeps selection and trace-specific presentation here; the shared reader
  * alone interprets the harness's records, model calls, tools, and token usage. */
 import { homedir } from 'node:os'
+import { createReadStream } from 'node:fs'
 import { open, stat } from 'node:fs/promises'
+import { createInterface } from 'node:readline'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   claudeCodeRefForFile,
@@ -216,6 +218,7 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
 
 type CodexHead = { timestamp?: string; type?: string; payload?: {
   type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string;
+  forked_from_id?: string; thread_source?: string; originator?: string;
   agent_role?: string; agent_path?: string; parent_thread_id?: string;
   git?: { repository_url?: unknown }; source?: { subagent?: { thread_spawn?: {
     depth?: number; agent_nickname?: string; agent_role?: string; agent_path?: string; parent_thread_id?: string
@@ -237,9 +240,67 @@ function ownHome(): string {
   return process.env.HOME || homedir()
 }
 
+/** When each user-role message a rollout records was written: the turns typed into it. */
+async function codexUserMessageTimes(path: string): Promise<Set<number>> {
+  const times = new Set<number>()
+  const lines = createInterface({ input: createReadStream(path, 'utf8'), crlfDelay: Infinity })
+  for await (const line of lines) {
+    if (!line.includes('"response_item"') || !line.includes('"user"')) continue
+    try {
+      const row = JSON.parse(line) as CodexHead
+      if (row.type === 'response_item' && row.payload?.type === 'message' && row.payload.role === 'user' && row.timestamp) {
+        times.add(Date.parse(row.timestamp))
+      }
+    } catch {
+      // A torn line is the shared reader's integrity decision.
+    }
+  }
+  return times
+}
+
+/**
+ * A fork the person made (`/fork`, `codex fork`) records the thread it came
+ * from, and the shared reader (harness-sessions 0.1.4) then labels every turn
+ * typed into it a spawned agent's brief, so the session showed no human turn.
+ * A spawned agent's fork says so in `thread_source` or `source.subagent`; a
+ * person's does not. Its user-role messages are the person's again, and the
+ * session is an operator's. Messages another agent sent stay as they are.
+ */
+async function relabelUserFork(path: string, meta: NonNullable<CodexHead['payload']>, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
+  if (typeof meta.forked_from_id !== 'string' || meta.thread_source === 'subagent' || meta.source?.subagent !== undefined) return
+  root.attributes['traces.session.role'] = 'operator'
+  const typed = await codexUserMessageTimes(path)
+  for (const item of spans) {
+    if (item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'subagent-spawn' && typed.has(Date.parse(item.start_time))) {
+      item.attributes['tangle.actor'] = 'human'
+    }
+  }
+}
+
+/**
+ * A Codex session a script or another agent launched, which the shared reader
+ * calls a person's. `codex exec` runs a script's prompt, so its first turn is
+ * the launcher's brief, as traces' own Codex reader says (`codexActor`); a
+ * session the Claude Code plugin opened takes every prompt from Claude.
+ */
+function relabelLaunched(meta: NonNullable<CodexHead['payload']>, spans: OtlpSpan[]): void {
+  const prompts = spans
+    .filter((item) => item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'human')
+    .sort((left, right) => Date.parse(left.start_time) - Date.parse(right.start_time))
+  if (meta.originator === 'Claude Code') {
+    for (const item of prompts) item.attributes['tangle.actor'] = 'agent'
+  } else if (meta.originator === 'codex_exec' || (meta.source as unknown) === 'exec') {
+    if (prompts[0]) prompts[0].attributes['tangle.actor'] = 'injected'
+  }
+}
+
 async function decorateCodexMetadata(path: string, session: HarnessSession, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
   const head = await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} })
   const meta = head.find((row) => row.type === 'session_meta')?.payload
+  if (meta) {
+    await relabelUserFork(path, meta, root, spans)
+    relabelLaunched(meta, spans)
+  }
   const spawn = meta?.source?.subagent?.thread_spawn
   if (typeof spawn?.depth === 'number') root.attributes['traces.codex.agent_depth'] = spawn.depth
   const nickname = meta?.agent_nickname ?? spawn?.agent_nickname
