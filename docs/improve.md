@@ -24,7 +24,7 @@ The directory contains:
 Bring your own analysts with a config file:
 
 ```bash
-traces improve --last 5 --config examples/improvement-config.mjs --dir .traces/improvement
+traces improve --last 5 --config traces.config.mjs --dir .traces/improvement
 ```
 
 The config can export:
@@ -32,7 +32,6 @@ The config can export:
 - `analysts`: deterministic or LLM analysts that implement the `agent-eval` `Analyst` contract
 - `liveAnalysts`: deterministic online analysts that implement the `TraceLiveAnalyst` contract for `traces stream`
 - `registry`: a prebuilt `AnalystRegistry`
-- `externalAnalyzers`: HALO or any command/model adapter that reads the OTLP artifact
 
 Traces does not pretend that an action is a measured candidate.
 Use `agent-eval` to propose and compare candidate changes, `agent-runtime` to package an approved improvement, and `agent-interface` to represent profile edits.

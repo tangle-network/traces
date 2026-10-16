@@ -37,10 +37,8 @@ import type {
   SkippedInputFile,
   UnreadableSourceRows,
 } from './otlp-input.js'
-import type { ExternalAnalysisResult, ExternalAnalyzer } from './external.js'
 import { createFindingRejectionTally, type FindingRejectionCounts } from './finding-rejections.js'
-import { spanEvidenceUri } from './external-analysis-validation.js'
-import { runExternalAnalyzers } from './external.js'
+import { spanEvidenceUri } from './analyst-citations.js'
 import type { TraceLiveAnalyst } from './live.js'
 import type { OtlpSpan } from './otlp.js'
 import { type PipelineReport, runPipelines } from './pipelines.js'
@@ -62,7 +60,6 @@ export interface TracesConfig {
   readonly registry?: AnalystRegistry
   readonly analysts?: readonly Analyst[]
   readonly liveAnalysts?: readonly TraceLiveAnalyst[]
-  readonly externalAnalyzers?: readonly ExternalAnalyzer[]
 }
 
 export interface TraceInvestigationOptions {
@@ -80,8 +77,6 @@ export interface TraceInvestigationOptions {
   readonly registry?: AnalystRegistry
   /** Agentic registry override for custom trace-analysis agents. */
   readonly agenticRegistry?: AnalystRegistry
-  readonly externalAnalyzers?: readonly ExternalAnalyzer[]
-  readonly analyzerPrompt?: string
   readonly otlpOutPath?: string
   readonly generatedAt?: string
   /**
@@ -168,7 +163,6 @@ export interface TraceInvestigationResult {
    * finding count can be told apart from "every finding was rejected".
    */
   readonly findingRejections?: FindingRejectionCounts
-  readonly external: readonly ExternalAnalysisResult[]
   readonly report: string
 }
 
@@ -507,12 +501,6 @@ function deterministicFindings(
   return findings
 }
 
-function normalizeExternalFindings(results: readonly ExternalAnalysisResult[]): AnalystFinding[] {
-  return results.flatMap((result) =>
-    result.ok && result.kind === 'findings' ? [...(result.findings ?? [])] : [],
-  )
-}
-
 function buildEvidenceRows(findings: readonly AnalystFinding[]): TraceEvidenceRow[] {
   return findings.flatMap((finding) =>
     finding.evidence_refs.map((ref) => ({
@@ -564,22 +552,6 @@ export function buildTraceFindingPacket(opts: BuildTraceFindingPacketOptions): T
   return { ...packet, report: renderFindingPacket(packet, opts.title) }
 }
 
-function renderExternal(results: readonly ExternalAnalysisResult[]): string {
-  if (results.length === 0) return ''
-  const lines = ['## external analyzers', '']
-  for (const result of results) {
-    lines.push(`### ${result.analyzer} (${result.kind})`)
-    lines.push('')
-    if (!result.ok) lines.push(`failed: ${result.error}`)
-    else if (result.kind === 'discovery') {
-      lines.push(`${result.candidates?.length ?? 0} review candidate(s).`)
-      if (result.output) lines.push('', result.output)
-    } else lines.push(result.output || '(no output)')
-    lines.push('')
-  }
-  return lines.join('\n')
-}
-
 function renderAgenticRoute(route: TraceAgenticRoute | undefined): string {
   if (!route) return ''
   const lines = ['## LLM trace analysis', '']
@@ -608,7 +580,7 @@ function renderInvestigationReport(
     ...(opts.conformanceUnreadable ? { unreadable: opts.conformanceUnreadable } : {}),
   })
   const unavailable = unavailableCapabilities(result.conformance)
-  const base =
+  return (
     `${renderReport({ ...analystResult, findings: [...result.findings] }, {
       harness: result.harness,
       sessionCount: result.sessionCount,
@@ -627,8 +599,7 @@ function renderInvestigationReport(
     `${renderLoopConvergence(result.loopConvergence, unavailable)}\n` +
     `${renderSteeringChain(result.steeringChain, unavailable)}\n` +
     `${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
-  const external = renderExternal(result.external)
-  return external ? `${base}\n${external}` : base
+  )
 }
 
 function registryFromConfig(config?: TracesConfig): AnalystRegistry | undefined {
@@ -678,11 +649,7 @@ export async function loadTracesConfig(path?: string): Promise<TracesConfig | un
 
 export function mergeTracesConfig(opts: TraceInvestigationOptions, config?: TracesConfig): TraceInvestigationOptions {
   if (!config) return opts
-  return {
-    ...opts,
-    registry: opts.registry ?? registryFromConfig(config),
-    externalAnalyzers: [...(config.externalAnalyzers ?? []), ...(opts.externalAnalyzers ?? [])],
-  }
+  return { ...opts, registry: opts.registry ?? registryFromConfig(config) }
 }
 
 export async function runTraceInvestigation(opts: TraceInvestigationOptions): Promise<TraceInvestigationResult> {
@@ -722,19 +689,8 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     signal: opts.signal,
     log,
   })
-  const external = opts.externalAnalyzers?.length
-    ? await runExternalAnalyzers(analysis.otlpPath, opts.externalAnalyzers, {
-        prompt: opts.analyzerPrompt,
-        signal: opts.signal,
-        spans: opts.spans,
-      })
-    : []
   opts.signal?.throwIfAborted()
-  const findings = [
-    ...analysis.result.findings,
-    ...deterministic,
-    ...normalizeExternalFindings(external),
-  ]
+  const findings = [...analysis.result.findings, ...deterministic]
   const partial: Omit<TraceInvestigationResult, 'report'> = {
     schemaVersion: 1,
     kind: 'traces.investigation',
@@ -759,7 +715,6 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     ...(analysis.agenticPerAnalyst
       ? { agenticPerAnalyst: analysis.agenticPerAnalyst, findingRejections: rejections.counts() }
       : {}),
-    external,
   }
   const result = { ...partial, report: '' }
   return { ...result, report: renderInvestigationReport(result, analysis.result, opts) }

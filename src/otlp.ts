@@ -28,10 +28,10 @@ import {
   TOOL_NAME,
 } from '@tangle-network/agent-eval/trace-attributes'
 import type { SpanKind } from '@tangle-network/agent-trace-contract'
-import { traceContractBuildIdOrNull } from './contract-build.js'
 import { RAW_FIELD_ATTRIBUTES, SUBSTITUTED_FIELDS_ATTR, type SubstitutedField } from './otlp-input.js'
 import { validateOtlpSpans } from './span-validation.js'
 import { sourceAttributes, type SourceReferences } from './source-location.js'
+import { tracesVersion } from './version.js'
 
 /**
  * The span-kind vocabulary, which is exactly
@@ -285,16 +285,13 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
   for (const k of ['traces.source.unreadable_rows', 'traces.source.unreadable_row_kinds']) {
     if (a[k] != null) resourceAttrs[k] = a[k]
   }
-  // WHICH BUILD of `@tangle-network/agent-trace-contract` this hop exported
-  // with. Every kind, substitution, and finding in this artifact is that
-  // build's reading, so the artifact names it the way cli-bridge and VB name
-  // theirs. Omitted — never faked — when the installed tree cannot be read:
-  // an absent stamp says "this producer did not know its build", a placeholder
-  // would claim a build that never existed. Span attributes stay faithful, so a
+  // WHICH traces build exported this hop. Every kind, substitution and finding
+  // in the artifact is that build's reading, and traces pins
+  // `@tangle-network/agent-trace-contract` to one exact version, so this
+  // version also names the contract build. Span attributes stay faithful, so a
   // re-export keeps the ORIGINAL producer's stamp there while this hop signs
   // the resource.
-  const contractBuild = traceContractBuildIdOrNull()
-  if (contractBuild !== null) resourceAttrs['traces.trace_contract.build'] = contractBuild
+  resourceAttrs['traces.version'] = tracesVersion()
   // The analysed kind, which is what a span the producer left unclassified is
   // exported as: the artifact is also the store this package's analysts and
   // agent-eval read, and an unclassified span there is re-derived differently by

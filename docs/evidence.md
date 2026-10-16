@@ -44,13 +44,11 @@ That boundary matters. `agent-lab` campaign `cells.jsonl` says "arm X beat arm Y
 
 ## Export existing evidence or events to OpenInference
 
-If you already have compact evidence or event captures on disk, convert them to the same OpenInference JSONL shape that `traces analyze --analyzer halo` uses:
+If you already have compact evidence or event captures on disk, convert them to the same OpenInference JSONL shape `traces analyze` writes:
 
 ```bash
 traces export policy-evidence.jsonl --out spans.openinference.jsonl
 traces export sandbox-events.json --format sandbox-events --out spans.openinference.jsonl
-traces export trajectory.json --format chat-trajectory --out spans.openinference.jsonl
-halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 ```
 
 `traces export` accepts:
@@ -58,6 +56,5 @@ halo spans.openinference.jsonl --prompt "Analyze this trace slice" --max-turns 1
 - compact `traces.policy_evidence.session` JSONL from `traces evidence`
 - JSON arrays with `start`, `raw`, `result`, `done`, and `error` events. A tool call becomes one span, keyed by its message part id, however many events report on that part. The Sandbox SDK records each call as a `message.part.updated` event and again as the harness's raw `tool_use` event. The span takes its start from the part's first event, its final state from the last, and `ERROR` if any event reported one. The root span's `traces.event.tool_part_updates_merged` counts the events folded in.
 - existing OpenInference JSONL, rewritten through the local redaction path
-- chat message arrays and objects with a `messages` array
 
 Run `traces export --help` for the full command reference.

@@ -39,8 +39,12 @@ import {
   type RawAnalystFinding,
   type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
-import { spanEvidenceUri } from './external-analysis-validation.js'
 import type { OtlpSpan } from './otlp.js'
+
+/** The `trace://` URI that cites one span, the form the evidence gate checks. */
+export function spanEvidenceUri(traceId: string, spanId: string): string {
+  return `trace://${encodeURIComponent(traceId)}/span/${encodeURIComponent(spanId)}`
+}
 
 /**
  * Appended to each wrapped definition's version. agent-eval records a

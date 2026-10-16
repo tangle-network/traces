@@ -36,12 +36,10 @@ for (const expected of [
   'package.json',
   'skills/inspect-agent-traces/SKILL.md',
   'skills/inspect-agent-traces/agents/openai.yaml',
-  'skills/build-trace-analyst/SKILL.md',
-  'skills/build-trace-analyst/agents/openai.yaml',
 ]) {
   if (!files.has(expected)) {
     throw new Error(`npm package is missing ${expected}`)
   }
 }
 
-console.log(`package ok: ${pkg.name}@${pkg.version} ships ${binPath} and 2 agent skills`)
+console.log(`package ok: ${pkg.name}@${pkg.version} ships ${binPath} and 1 agent skill`)

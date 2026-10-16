@@ -22,11 +22,6 @@ import type { SessionEnvironment } from './types.js'
 import { capText } from './adapters/conversation.js'
 import { toolIoAttributes } from './adapters/tool-io.js'
 import { appendAll } from './arrays.js'
-import {
-  chatTrajectoryToSpans,
-  isChatTrajectory,
-  isChatTrajectoryMessage,
-} from './chat-trajectory.js'
 import type { PolicyEvidenceRecord } from './evidence.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
@@ -42,12 +37,10 @@ export type TraceEvidenceInputFormat =
   | 'sandbox-events'
   | 'openinference'
   | 'intelligence-spans'
-  | 'chat-trajectory'
 export type TraceEvidenceFormatOption = TraceEvidenceInputFormat | 'auto'
 
 export interface TraceEvidenceExportOptions {
   readonly format?: TraceEvidenceFormatOption
-  readonly sourcePath?: string
   readonly attributes?: JsonObject
 }
 
@@ -216,7 +209,6 @@ export function detectEvidenceFormat(rows: readonly unknown[]): Exclude<TraceEvi
   if (rows.length === 0 || rows.every(isOpenInferenceRow)) return undefined
   if (rows.every(isPolicyEvidenceRow)) return 'policy-evidence'
   if (rows.every(isIntelligenceSpanRow)) return 'intelligence-spans'
-  if (rows.every(isChatTrajectory) || rows.every(isChatTrajectoryMessage)) return 'chat-trajectory'
   if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
   return undefined
 }
@@ -227,9 +219,8 @@ function detectFormat(rows: readonly unknown[], requested: TraceEvidenceFormatOp
   if (rows.every(isPolicyEvidenceRow)) return 'policy-evidence'
   if (rows.every(isOpenInferenceRow)) return 'openinference'
   if (rows.every(isIntelligenceSpanRow)) return 'intelligence-spans'
-  if (rows.every(isChatTrajectory) || rows.every(isChatTrajectoryMessage)) return 'chat-trajectory'
   if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
-  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, openinference, intelligence-spans, or chat-trajectory')
+  throw new Error('could not detect input format; use --format policy-evidence, sandbox-events, openinference, or intelligence-spans')
 }
 
 function requirePolicyEvidenceRows(rows: readonly unknown[]): readonly PolicyEvidenceRecord[] {
@@ -255,19 +246,6 @@ function requireIntelligenceSpanRows(rows: readonly unknown[]): readonly JsonObj
 function requireObjectRows(rows: readonly unknown[]): readonly JsonObject[] {
   if (!rows.every(isObject)) throw new Error('sandbox-events input must contain only JSON object events')
   return rows
-}
-
-function chatTrajectoryRowsToSpans(
-  rows: readonly unknown[],
-  sourcePath?: string,
-): OtlpSpan[] {
-  if (rows.every(isChatTrajectoryMessage)) {
-    return chatTrajectoryToSpans(rows, { sourcePath })
-  }
-  if (!rows.every(isChatTrajectory)) {
-    throw new Error('chat-trajectory input must be one message array or trajectory objects')
-  }
-  return rows.flatMap((trajectory) => chatTrajectoryToSpans(trajectory, { sourcePath }))
 }
 
 function evidenceTimeBounds(record: PolicyEvidenceRecord): { start: string; end: string } {
@@ -844,9 +822,7 @@ export function exportTraceEvidenceRows(
         ? openInferenceToSpans(requireOpenInferenceRows(rows))
         : format === 'intelligence-spans'
           ? intelligenceSpansToSpans(requireIntelligenceSpanRows(rows))
-          : format === 'chat-trajectory'
-            ? chatTrajectoryRowsToSpans(rows, opts.sourcePath)
-            : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
+          : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
   const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)
@@ -881,11 +857,7 @@ export async function exportTraceEvidenceFile(
         sandboxRows.push(row)
         continue
       }
-      const converted = exportTraceEvidenceRows([row], {
-        ...opts,
-        sourcePath: inputPath,
-        format,
-      })
+      const converted = exportTraceEvidenceRows([row], { ...opts, format })
       appendAll(spans, converted.spans)
       redactionCount += converted.redactionCount
       for (const [rule, count] of Object.entries(converted.redactionsByDetector)) {
@@ -895,11 +867,7 @@ export async function exportTraceEvidenceFile(
 
     if (!format) throw new Error('input file is empty')
     if (format === 'sandbox-events') {
-      return exportTraceEvidenceRows(sandboxRows, {
-        ...opts,
-        sourcePath: inputPath,
-        format,
-      })
+      return exportTraceEvidenceRows(sandboxRows, { ...opts, format })
     }
     return {
       format,
@@ -909,7 +877,7 @@ export async function exportTraceEvidenceFile(
     }
   }
   const text = await readFile(inputPath, 'utf8')
-  return exportTraceEvidenceText(text, { ...opts, sourcePath: inputPath })
+  return exportTraceEvidenceText(text, opts)
 }
 
 export async function writeTraceEvidenceExportFile(

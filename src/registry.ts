@@ -2,30 +2,19 @@
  * Harness adapter registry — resolves a harness id (or alias) to the
  * adapter that knows its on-disk session format.
  *
- * Format families collapse many harnesses onto few adapters:
- *   - claude family (claude / claudish / openclaw / nanoclaw) share the
- *     `~/.claude`-style transcript JSONL
- *   - codex family (codex / codex-acp) share the rollout JSONL
- *   - gemini (gemini-cli) and its fork qwen (qwen-code) share the chat JSON
- *     under distinct home dirs
- *   - factory-droids (droid) has its own `~/.factory` rollout JSONL
+ * The harness stores are read through `@tangle-network/harness-sessions`
+ * (`SHARED_SESSION_ADAPTERS`). `codex-exec` is the one reader traces keeps for
+ * itself: a Sandbox live stream is not a Codex rollout, and harness-sessions
+ * has no reader for it.
  */
 
-import { AmpAdapter } from './adapters/amp.js'
 import { CodexExecAdapter } from './adapters/codex-exec.js'
-import { CopilotAdapter } from './adapters/copilot.js'
-import { GeminiAdapter } from './adapters/gemini.js'
 import { SHARED_SESSION_ADAPTERS } from './adapters/harness-sessions.js'
-import { QwenAdapter } from './adapters/qwen.js'
 import type { HarnessTraceAdapter } from './types.js'
 
 const ADAPTERS: HarnessTraceAdapter[] = [
   ...SHARED_SESSION_ADAPTERS,
   new CodexExecAdapter(),
-  new GeminiAdapter(),
-  new QwenAdapter(),
-  new AmpAdapter(),
-  new CopilotAdapter(),
 ]
 
 const BY_NAME = new Map<string, HarnessTraceAdapter>()

@@ -10,8 +10,9 @@
  *
  * Scope: the core finds credentials by field name and value shape, and email,
  * card, SSN and phone values. It does not find names, postal addresses or
- * account numbers written in prose. For that, pass an external `Redactor`
- * (`applyRedactor`) or upload metadata-only with `--no-content`.
+ * account numbers written in prose. For that, run your own scrubber on a
+ * converted file (`traces convert X --out f`, scrub `f`, `traces upload f`) or
+ * upload metadata-only with `--no-content`.
  */
 
 import {
@@ -22,8 +23,7 @@ import {
   redact,
   type ShareSafetyVerdict,
 } from '@tangle-network/agent-eval/traces'
-import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-io.js'
-import type { Redactor } from './external.js'
+import { normalizeToolIoAttributes } from './adapters/tool-io.js'
 import type { OtlpSpan } from './otlp.js'
 import { stripSourceAttributes } from './source-location.js'
 
@@ -103,54 +103,4 @@ export function assessSpans(spans: readonly OtlpSpan[], profile: RedactionProfil
       }
     }),
   )
-}
-
-/** Defense-in-depth: run an external {@link Redactor} over captured conversation
- *  and tool values, catching free-form PII the core misses. Compose AFTER
- *  `redactSpans`. Returns scrubbed spans and the number of fields changed. */
-export async function applyRedactor(
-  spans: readonly OtlpSpan[],
-  redactor: Redactor,
-): Promise<{ spans: OtlpSpan[]; changed: number }> {
-  const capturedKeys = ['content', ...TOOL_IO_VALUE_KEYS] as const
-  const fields: Array<
-    | { spanIndex: number; key: (typeof capturedKeys)[number] }
-    | { spanIndex: number; key: 'status.message' }
-  > = []
-  const texts: string[] = []
-  spans.forEach((s, i) => {
-    for (const key of capturedKeys) {
-      const value = s.attributes[key]
-      if (typeof value === 'string' && value.length > 0) {
-        fields.push({ spanIndex: i, key })
-        texts.push(value)
-      }
-    }
-    if (s.status.message) {
-      fields.push({ spanIndex: i, key: 'status.message' })
-      texts.push(s.status.message)
-    }
-  })
-  const out = spans.map((s) => ({ ...s, attributes: stripSourceAttributes(s.attributes) }))
-  if (texts.length === 0) {
-    for (const span of out) normalizeToolIoAttributes(span.attributes)
-    return { spans: out, changed: 0 }
-  }
-  const scrubbed = await redactor.redactText(texts)
-  if (scrubbed.length !== texts.length) {
-    throw new Error(`redactor ${redactor.name}: expected ${texts.length} values, received ${scrubbed.length}`)
-  }
-  let changed = 0
-  fields.forEach(({ spanIndex, key }, k) => {
-    if (scrubbed[k] !== texts[k]) {
-      if (key === 'status.message') {
-        out[spanIndex]!.status = { ...out[spanIndex]!.status, message: scrubbed[k] }
-      } else {
-        out[spanIndex]!.attributes[key] = scrubbed[k]
-      }
-      changed += 1
-    }
-  })
-  for (const span of out) normalizeToolIoAttributes(span.attributes)
-  return { spans: out, changed }
 }

@@ -14,13 +14,9 @@ not the way to integrate a system you own — for that, [emit the contract](inte
 | `codex` (`codex-acp`) | `~/.codex/sessions/**/rollout-*.jsonl` | verified |
 | `codex-exec` (`codex-json`) | explicit `codex exec --json` JSONL file | fixture |
 | `opencode` | `~/.local/share/opencode/opencode.db` (shared reader), plus historical `storage/` JSON sessions (legacy reader) | verified |
-| `gemini` (`gemini-cli`) | `~/.gemini/tmp/<hash>/chats/session-*.json` | verified |
 | `pi` | `~/.pi/agent/sessions/<cwd>/*.jsonl` | verified |
 | `kimi` (`kimi-code`) | `~/.kimi/sessions/<cwd hash>/<session id>/wire.jsonl` | verified |
 | `factory` (`factory-droids`, `droid`) | `~/.factory/sessions/<cwd>/*.jsonl` + `.settings.json` sidecar | verified |
-| `qwen` (`qwen-code`) | `~/.qwen/projects/<cwd>/chats/*.jsonl` | fixture |
-| `amp` | `~/.local/share/amp/threads/T-*.json` | fixture |
-| `github-copilot` (`copilot`) | `~/.copilot/session-state/<id>/events.jsonl` | fixture |
 
 Every adapter captures the conversation stored in one session file: the **user's prompt** and the **assistant's response** text, plus tool calls/results and token usage.
 Claude Code, Codex, current OpenCode, Pi, Kimi, and Factory read native records through [`@tangle-network/harness-sessions`](https://github.com/tangle-network/agent-sdk/tree/main/packages/harness-sessions); traces adds conversation and workflow spans over its model and tool calls. Historical OpenCode JSON sessions remain readable through the older adapter because their IDs do not overlap the SQLite store. Kimi's wire log has no served-model field, so its model remains unknown rather than being guessed.
@@ -31,7 +27,6 @@ Exported native-session span IDs derive deterministically from the session and r
 The adapter preserves Claude source UUIDs in `traces.claude.source_*` attributes and derives valid OTLP IDs for the exported graph.
 The Claude transcript proves turns and tool calls, but does not prove loop iterations or causal links, so those fields remain absent.
 Codex stores each worker in a separate session file; a named session brings the workers it spawned.
-`github-copilot` is the one exception: its log format carries no user prompt.
 Factory stores token totals in `.settings.json`, not per turn.
 ACP-only bridges may not persist a local transcript.
 
