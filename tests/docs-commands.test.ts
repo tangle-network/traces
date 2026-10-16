@@ -21,7 +21,7 @@ const ROOT = join(dirname(CLI), '..')
 const HIDDEN_FLAGS: Readonly<Record<string, Readonly<Record<string, boolean>>>> = {
   analyze: { '--llm': false, '--model': true, '--budget': true, '--config': true },
   ask: { '--dir': true, '--question-budget': true, '--question-timeout': true, '--concurrency': true },
-  check: { '--junit': true, '--annotations': false, '--explain': false, '--evidence': true },
+  check: { '--junit': true, '--annotations': false, '--explain': false },
   diff: { '--kind': true },
   watch: { '--window': true, '--interval': true },
   skills: { '--no-refresh': false, '--store': true, '--sweep': true },

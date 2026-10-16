@@ -19,6 +19,8 @@ export interface CliOptions {
   readonly timeoutMs?: number
   /** Another build of the CLI to run instead of this checkout's `dist/cli.js`. */
   readonly cli?: string
+  /** Written to the CLI's stdin, which is then closed (an MCP client's requests). */
+  readonly input?: string
 }
 
 /**
@@ -36,7 +38,7 @@ export function runCli(argv: readonly string[], options: CliOptions = {}): Promi
     ...options.env,
   }
   return new Promise((resolve, reject) => {
-    execFile(process.execPath, [cli, ...argv], {
+    const child = execFile(process.execPath, [cli, ...argv], {
       cwd: options.cwd ?? process.cwd(),
       env,
       maxBuffer: 64 * 1024 * 1024,
@@ -48,5 +50,6 @@ export function runCli(argv: readonly string[], options: CliOptions = {}): Promi
       }
       resolve({ stdout, stderr, code: typeof error?.code === 'number' ? error.code : 0 })
     })
+    if (options.input !== undefined) child.stdin?.end(options.input)
   })
 }

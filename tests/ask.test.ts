@@ -151,7 +151,6 @@ describe('runTraceQuestions', () => {
       spans: fixtureSpans(),
       engine,
       harness: 'synthetic',
-      otlpOutPath: join(dir, 'traces.otlp.jsonl'),
     })
 
     expect(result.ok).toBe(true)
@@ -230,7 +229,7 @@ describe('runTraceQuestions', () => {
     expect(result.totals.wallTimeMs).toBeLessThan(result.totals.questionTimeMs / 2)
     expect(result.totals.peakConcurrency).toBe(6)
     expect(result.report).toMatch(
-      /Wall time \d+\.\d s \(\d+\.\d s of it writing and indexing the trace file\) against \d+\.\d s of question time \(peak 6 at once\)/,
+      /Wall time \d+\.\d s \(\d+\.\d s of it building the trace store\) against \d+\.\d s of question time \(peak 6 at once\)/,
     )
     expect(result.totals.setupTimeMs).toBeLessThanOrEqual(result.totals.wallTimeMs)
   })
@@ -346,7 +345,6 @@ describe('runTraceQuestions', () => {
       spans: fixtureSpans(),
       engine,
       concurrency: 1,
-      otlpOutPath: join(dir, 'traces.otlp.jsonl'),
       signal: controller.signal,
     })
 

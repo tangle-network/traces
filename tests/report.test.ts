@@ -47,7 +47,6 @@ describe('renderReport', () => {
       harness: 'claude-code',
       sessionCount: 5,
       spanCount: 17470,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       deterministic: {
         stuckLoops: 12,
@@ -70,7 +69,6 @@ describe('renderReport', () => {
       harness: 'codex',
       sessionCount: 1,
       spanCount: 10,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       deterministic: {
         stuckLoops: 0,
@@ -94,7 +92,6 @@ describe('renderReport', () => {
       harness: 'codex',
       sessionCount: 1,
       spanCount: 10,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
     })
 
@@ -107,7 +104,6 @@ describe('renderReport', () => {
       harness: 'codex',
       sessionCount: 1,
       spanCount: 817,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       sources: [{
         sessionId: '019f5aea-d6b4-7451-a3eb-60289875a357',
@@ -133,7 +129,6 @@ describe('renderReport', () => {
       harness: 'codex',
       sessionCount: 2,
       spanCount: 20,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       workflow: {
         seedSessionIds: ['root'],
@@ -177,7 +172,6 @@ describe('renderReport', () => {
       harness: 'codex',
       sessionCount: 1,
       spanCount: 20,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       workflow: {
         seedSessionIds: ['root'],
@@ -219,7 +213,6 @@ describe('renderReport', () => {
       harness: 'codex',
       sessionCount: 1,
       spanCount: 76_400,
-      otlpPath: '/tmp/operator.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       sources: [{
         sessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
@@ -261,7 +254,6 @@ describe('renderReport', () => {
       harness: 'openinference',
       sessionCount: 25,
       spanCount: 25,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       sources: Array.from({ length: 25 }, (_, index) => ({
         sessionId: `session-${index}`,
@@ -284,7 +276,6 @@ describe('renderReport', () => {
       sessionCount: 2,
       unassignedTraceCount: 13,
       spanCount: 2880,
-      otlpPath: '/tmp/spans.jsonl',
       execution: EMPTY_EXECUTION,
     })
 
@@ -603,7 +594,6 @@ describe('analystRunDetail', () => {
       harness: 'claude-code',
       sessionCount: 1,
       spanCount: 10,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
     })
     expect(report).toContain('| Analyst | Status | Findings | Latency | Detail |')
@@ -740,7 +730,6 @@ describe('analystRunDetail', () => {
       harness: 'codex',
       sessionCount: 1,
       spanCount: 10,
-      otlpPath: '/tmp/spans.openinference.jsonl',
       execution: EMPTY_EXECUTION,
       findingRejections: { 'failure-mode': { 'insufficient evidence citations': 1 } },
     })

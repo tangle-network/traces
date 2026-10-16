@@ -12,9 +12,18 @@ import { contentHash } from '@tangle-network/agent-eval'
 import type { TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
 import type { OtlpSpan } from './otlp.js'
 
+function stateHome(): string {
+  return process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state')
+}
+
+/** Under `$XDG_STATE_HOME/traces`, the one directory traces keeps state in. */
 function stateFile(): string {
-  const base = process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state')
-  return join(base, 'tangle-traces', 'uploaded.json')
+  return join(stateHome(), 'traces', 'uploaded.json')
+}
+
+/** Where 0.x kept the state. It is read, never written, so a session it records is not sent again. */
+function legacyStateFile(): string {
+  return join(stateHome(), 'tangle-traces', 'uploaded.json')
 }
 
 export interface UploadRecord {
@@ -53,11 +62,14 @@ export function outboundHash(events: readonly TraceSpanEvent[], identity: Upload
 }
 
 export async function loadState(): Promise<UploadState> {
-  try {
-    return JSON.parse(await readFile(stateFile(), 'utf8')) as UploadState
-  } catch {
-    return {}
+  for (const file of [stateFile(), legacyStateFile()]) {
+    try {
+      return JSON.parse(await readFile(file, 'utf8')) as UploadState
+    } catch {
+      // Absent or unreadable: try the next location.
+    }
   }
+  return {}
 }
 
 export async function saveState(state: UploadState): Promise<void> {

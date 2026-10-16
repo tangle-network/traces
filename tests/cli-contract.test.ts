@@ -122,7 +122,22 @@ const STEP_6: readonly MovedCase[] = [
   { argv: ['analyze', 'abc12345', '--min-loop', '4'], spelling: '--min-loop', instead: 'traces analyze abc12345' },
 ]
 
-const MOVED = [...STEP_4, ...STEP_5, ...STEP_6]
+/** Step 7: check writes evidence only under --out. */
+const STEP_7: readonly MovedCase[] = [
+  {
+    argv: ['check', 'spans.jsonl', '--contract', 'c.json', '--evidence', 'evidence'],
+    spelling: '--evidence',
+    instead: 'traces check spans.jsonl --contract c.json --out evidence',
+  },
+  {
+    // 0.x --out was the JSON report: there is no mechanical rewrite, so the row says what --out is now.
+    argv: ['check', 'spans.jsonl', '--contract', 'c.json', '--evidence', 'evidence', '--out', 'report.json'],
+    spelling: '--evidence',
+    instead: 'check … --out DIR: evidence for each trace that did not pass; without --out, check writes nothing',
+  },
+]
+
+const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7]
 
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
@@ -159,7 +174,7 @@ const HIDDEN_COMMANDS = ['validate', 'verify-safe', 'stream', 'improve']
 const HIDDEN_FLAGS: Readonly<Record<string, readonly string[]>> = {
   analyze: ['--llm', '--model', '--budget', '--config'],
   ask: ['--dir', '--question-budget', '--question-timeout', '--concurrency'],
-  check: ['--junit', '--annotations', '--explain', '--evidence'],
+  check: ['--junit', '--annotations', '--explain'],
   diff: ['--kind'],
   watch: ['--window', '--interval'],
   skills: ['--no-refresh', '--store', '--sweep'],

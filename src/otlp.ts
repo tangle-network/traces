@@ -211,11 +211,12 @@ export type ExportRule = 'faithful' | 'declared-or-analysed' | 'analysed'
  *   export always declares one. Writing the producer's word when there is one is
  *   what keeps `unknown-span-kind` alive across the trip.
  * - `analysed` — this package's value regardless. `trace_id` is the one field
- *   here, and it is not a choice: `analyze --otlp-out` hands the artifact
- *   straight to `agent-eval`'s `OtlpFileTraceStore`, whose `projectOtlpFlatLine`
- *   drops any row with a falsy `trace_id` and then throws `TraceFileMalformed`
- *   on the drop. A faithful (absent) trace id makes the artifact unreadable by
- *   the tool that reads it, so `missing-trace-id` CANNOT survive the trip. The
+ *   here, and it is not a choice: `agent-eval`'s `projectOtlpFlatLine`, which
+ *   both this package's analysis store and its `OtlpFileTraceStore` read every
+ *   exported line through, drops a row with a falsy `trace_id`, and each store
+ *   then refuses the trace. A faithful (absent) trace id makes the artifact
+ *   unreadable by the tool that reads it, so `missing-trace-id` CANNOT survive
+ *   the trip. The
  *   substitution is disclosed instead — the span carries the pairing, and
  *   `renderConformance` states it above the findings so a reader of the artifact
  *   is told the id was minted here rather than left to assume the source had one.
@@ -354,14 +355,12 @@ export function* iterSerializedSpans(spans: readonly OtlpSpan[]): Generator<stri
  *  rare on big exports. */
 const OTLP_WRITE_CHUNK_CHARS = 4 * 1024 * 1024
 
-/** Write spans to an OTLP-JSONL file (a temp file when no path is given), one
- *  bounded chunk at a time — never the whole export as one string, so a
- *  session larger than V8's string limit still exports. */
-export async function writeOtlpFile(spans: readonly OtlpSpan[], outPath?: string): Promise<string> {
-  const { mkdtemp, open } = await import('node:fs/promises')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'traces-')), 'spans.otlp.jsonl')
+/** Write spans to the OTLP-JSONL file at `path`, one bounded chunk at a time —
+ *  never the whole export as one string, so a session larger than V8's string
+ *  limit still exports. The caller names the file: nothing is written anywhere
+ *  it did not ask for. */
+export async function writeOtlpFile(spans: readonly OtlpSpan[], path: string): Promise<string> {
+  const { open } = await import('node:fs/promises')
   const handle = await open(path, 'w')
   try {
     let chunk = ''

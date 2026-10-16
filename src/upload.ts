@@ -171,6 +171,7 @@ export interface UploadResult {
   acceptedSpans: number
   redactionCount: number
   dryRun: boolean
+  /** The redacted preview a dry run wrote, when `otlpOut` named one. */
   otlpPath?: string
   /** Sessions whose final events were UNSAFE or UNKNOWN. None of them was sent. */
   refused: RefusedSession[]
@@ -198,7 +199,7 @@ export class PartialUploadError extends Error {
 
 export interface ExecuteOptions {
   dryRun?: boolean
-  /** Where to write the redacted OTLP-JSONL on a dry run. */
+  /** Where to write the redacted OTLP-JSONL on a dry run. Without it a dry run writes nothing. */
   otlpOut?: string
   /** Custom sink. Defaults to the hosted Tangle Intelligence client from env. */
   backend?: UploadBackend
@@ -272,22 +273,23 @@ async function prepareOutbound(
   return { items, skipped: plan.items.length - items.length - refused.length, refused }
 }
 
-/** Send the final, new outbound items (or write their dry-run OTLP). */
+/** Send the final, new outbound items, or on a dry run write their OTLP to `otlpOut` when it is given. */
 export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {}): Promise<UploadResult> {
   const uploadedAt = new Date().toISOString()
   const { items, skipped, refused } = await prepareOutbound(plan, opts, uploadedAt)
   const redactionCount = items.reduce((n, { item }) => n + item.redaction.redactionCount, 0)
 
   if (opts.dryRun) {
-    const allSpans = items.flatMap(({ item }) => item.spans)
-    const path = await writeOtlpFile(allSpans, opts.otlpOut)
+    const path = opts.otlpOut === undefined
+      ? undefined
+      : await writeOtlpFile(items.flatMap(({ item }) => item.spans), opts.otlpOut)
     return {
       uploadedSessions: 0,
       skippedSessions: skipped,
       acceptedSpans: 0,
       redactionCount,
       dryRun: true,
-      otlpPath: path,
+      ...(path === undefined ? {} : { otlpPath: path }),
       refused,
     }
   }

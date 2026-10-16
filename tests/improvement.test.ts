@@ -334,7 +334,8 @@ describe('runTraceImprovement', () => {
     expect(saved.spanCount).toBe(fixtureSpans().length)
     expect(saved).not.toHaveProperty('proposals')
     expect(saved).not.toHaveProperty('validation')
-    expect(result.artifacts!.traces).toBe(result.otlpPath)
+    expect(result.artifacts!.traces).toBe(join(outDir, 'traces.otlp.jsonl'))
+    expect(await readFile(result.artifacts!.traces, 'utf8')).not.toBe('')
     expect(result.artifacts?.directory).toBe(outDir)
 
     const evidence = (await readFile(result.artifacts!.evidence, 'utf8'))

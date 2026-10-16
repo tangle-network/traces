@@ -87,7 +87,6 @@ export interface Args {
   questionTimeout?: number
   concurrency: number
   junit?: string
-  evidence?: string
   annotations: boolean
   explain: boolean
   mode?: string
@@ -211,7 +210,6 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   },
   '--concurrency': { value: 'N', help: 'questions running at once (default 4)', set: (a, v) => { a.concurrency = positiveInteger('--concurrency', v) } },
   '--junit': { value: 'FILE', help: 'write JUnit XML to FILE', set: (a, v) => { a.junit = v } },
-  '--evidence': { value: 'DIR', help: 'evidence for a trace that did not pass', set: (a, v) => { a.evidence = v } },
   '--annotations': { help: 'print GitHub workflow annotations', set: (a) => { a.annotations = true } },
   '--explain': { help: 'print what the contract checks and read no trace', set: (a) => { a.explain = true } },
   '--mode': { value: 'MODE', help: 'visualizer, findings or agent', set: (a, v) => { a.mode = v } },
@@ -334,8 +332,8 @@ const COMMANDS = [
     flags: [
       '--contract', ...SELECT.slice(0, 4), { flag: '--harness', help: 'force the reader of a file ref (claude-code, codex, …)' },
       { flag: '--format', help: 'text (default) or json, the full report' },
-      { flag: '--out', help: 'write the full report as JSON to PATH' },
-      hidden('--junit'), hidden('--annotations'), hidden('--explain'), hidden('--evidence'),
+      { flag: '--out', value: 'DIR', help: 'write evidence for each trace that did not pass under DIR' },
+      hidden('--junit'), hidden('--annotations'), hidden('--explain'),
     ],
     formats: ['text', 'json'],
     refs: [0, MANY],
@@ -343,7 +341,7 @@ const COMMANDS = [
     examples: [
       'traces check spans.otlp.jsonl --contract contract.json',
       'traces check --current --contract contract.json',
-      'traces check run.jsonl --harness claude-code --contract c.json --out report.json',
+      'traces check run.jsonl --harness claude-code --contract c.json --out evidence',
     ],
     overview: ['Does this run pass? (CI)', 'traces check <ref> --contract c.json'],
   },

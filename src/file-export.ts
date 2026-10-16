@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
 import { ATTR, stampEnvironmentAttrs } from './attributes.js'
 import type { SessionEnvironment } from './types.js'
 import { capText } from './adapters/conversation.js'
@@ -620,11 +618,10 @@ export async function exportTraceEvidenceFile(
 
 export async function writeTraceEvidenceExportFile(
   inputPath: string,
-  outPath?: string,
+  outPath: string,
   opts: TraceEvidenceExportOptions = {},
 ): Promise<TraceEvidenceExportResult & { path: string }> {
   const result = await exportTraceEvidenceFile(inputPath, opts)
-  const path = outPath ?? join(await mkdtemp(join(tmpdir(), 'traces-export-')), 'spans.openinference.jsonl')
-  await writeFile(path, serializeSpans(result.spans), 'utf8')
-  return { ...result, path }
+  await writeFile(outPath, serializeSpans(result.spans), 'utf8')
+  return { ...result, path: outPath }
 }

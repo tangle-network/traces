@@ -46,7 +46,6 @@ export interface ReportMeta {
   sessionCount: number
   unassignedTraceCount?: number
   spanCount: number
-  otlpPath: string
   execution: ExecutionReport
   deterministic?: DeterministicSummary
   sources?: readonly ReportSource[]

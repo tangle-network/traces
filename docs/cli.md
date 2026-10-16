@@ -55,11 +55,10 @@ traces help moved                                  # every 0.x command and flag 
 | `--cwd <dir>` | Sessions recorded in `<dir>` or under it on a path boundary, in a live worktree of its repository, or in a removed worktree whose recorded repository (Codex) is its |
 | `--since <t>` | `30m`/`2h`/`7d` before now, or an ISO date. Commands that select sessions read those modified at or after it; `upload`: its window; `facts`: opens a time window, see [Session facts](facts.md) |
 | `--until <t>` | `facts`: closes the time window (exclusive), same forms as `--since` |
-| `--out <path>` | Write the output to a file; stdout gets one summary line. `convert`: the OTLP file; `upload --dry-run`: the redacted preview |
-| `--dir <path>` | `improve`: write the full artifact pack to this directory; `ask`: write `answers.json` + `report.md` there |
+| `--out <path>` | Write the output to a file; stdout gets one summary line. `convert`: the OTLP file; `upload --dry-run`: the redacted preview (nothing is written without it); `check`: a directory for the evidence of each trace that did not pass |
+| `--dir <path>` | `improve`: write the full artifact pack to this directory (required); `ask`: write `answers.json` + `report.md` there (without it, the report goes to stdout only) |
 | `--contract <file>` | `check`: the declarative trace contract (JSON) |
 | `--junit <file>` | `check`: write JUnit XML, one test case per rule |
-| `--evidence <dir>` | `check`: where evidence for a trace that did not pass goes (default `.traces/check`) |
 | `--annotations` | `check`: print GitHub workflow annotations (on by default under `GITHUB_ACTIONS=true`) |
 | `--format <kind>` | Output: `text` or `json` on `list`, `facts` (json by default), `check`, `diff`, `bundle verify` and `skills`. The input is sniffed |
 | `--llm` / `--budget <usd>` | `analyze`: enable agentic analysts (needs `TANGLE_API_KEY` + Python with `agent-eval-rpc[dspy]`) / cap their spend. `ask`: one ceiling shared by every question |
