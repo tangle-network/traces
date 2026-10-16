@@ -19,44 +19,12 @@ import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { findingRejectionDetail } from './finding-rejections.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
-import {
-  loadTracesConfig,
-  mergeTracesConfig,
-  isBridgeMismatchError,
-  runTraceImprovement,
-  runTraceInvestigation,
-  saveReport,
-  totalAgenticFailureMessage,
-  type TraceInvestigationResult,
-} from './improvement.js'
+import type { TraceInvestigationResult } from './improvement.js'
 import { shellWord } from './moved.js'
-import {
-  serializeTraceStreamEvent,
-  streamSessions,
-  traceStreamEventsFromSpans,
-  type TraceLiveAnalyst,
-  type TraceLiveFinding,
-} from './live.js'
-import {
-  analyzeSupervisorRun,
-  findSupervisorRunDirs,
-  isRuntimeSupervisorRunDir,
-  renderSupervisorRollupMarkdown,
-  renderSupervisorRunMarkdown,
-  rollupSupervisorRuns,
-} from '@tangle-network/agent-eval/supervisor-run'
-import { fileRunContextSupervisorRunReader } from './supervisor-run-context.js'
-import { resolveRunWatchTarget, watchRunTarget } from './run-watch.js'
+import type { TraceLiveAnalyst, TraceLiveFinding } from './live.js'
 import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL, DEFAULT_QUESTION_MAX_COST_USD } from './analyst-model-call.js'
-import {
-  loadTraceQuestionsFile,
-  normalizeTraceQuestions,
-  runTraceQuestions,
-  type TraceQuestion,
-  type TraceQuestionsResult,
-  writeTraceQuestionsArtifacts,
-} from './ask.js'
+import { DEFAULT_ANALYST_MODEL } from './ask-defaults.js'
+import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
 import { iterSerializedSpans, writeOtlpFile } from './otlp.js'
 import type {
@@ -81,7 +49,6 @@ import {
 import { sessionIdentityLookup } from './session-identity.js'
 import { renderValidation, validationExitCode } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
-import { watchSessions } from './observer.js'
 import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession, sessionsInCwd } from './session-source.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
@@ -90,26 +57,12 @@ import {
   type SessionWorkflowSummary,
 } from './session-workflow.js'
 import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
-import { diffRuns, renderRunDiff } from './diff.js'
-import { serveTraceMcp } from './mcp.js'
-import { sessionReportSource } from './report.js'
 import type { ReportSource } from './report.js'
 import { parseSince, parseTimeBound } from './time.js'
-import { explainTraceContract } from '@tangle-network/agent-eval'
-import {
-  AmbiguousTraceInputError,
-  CHECK_EXIT,
-  loadContract,
-  renderCheckText,
-  renderGithubAnnotations,
-  renderJUnit,
-  runCheck,
-} from './check.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { RefError, resolveRefs, selectSpans, shortestRefs, type ResolvedRef } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
-import { executeUpload, planUpload, planUploadFrom, type RefusedSession, type UploadPlan } from './upload.js'
-import { formatVerdict, verdictExitCode, verifySafe } from './verify-safe.js'
+import type { RefusedSession, UploadPlan } from './upload.js'
 import {
   buildSkillUsageReport,
   DEFAULT_SWEEP_THRESHOLD,
@@ -338,7 +291,8 @@ function warnUnread(args: CliArgs, unread: readonly UnreadSessionFact[], command
  * ceiling: the registry already splits `--budget` across analysts, so this only
  * stops the engine's own $1 default from cutting runs short.
  */
-function llmAnalysisEngine(args: CliArgs, model: string): TraceAnalysisEngine {
+async function llmAnalysisEngine(args: CliArgs, model: string): Promise<TraceAnalysisEngine> {
+  const { analysisEngineFromEnv } = await import('./analyst-model-call.js')
   return analysisEngineFromEnv({ model, maxCostUsd: args.budget, log: analystLog })
 }
 
@@ -371,10 +325,11 @@ function requiredBridgeVersion(): string {
  * happens only once total agentic failure is established, so a package.json
  * problem can never turn a successful run into a failure.
  */
-function failUnlessRequestedAnalysesRan(
+async function failUnlessRequestedAnalysesRan(
   args: CliArgs,
   result: Pick<TraceInvestigationResult, 'agenticPerAnalyst'>,
-): void {
+): Promise<void> {
+  const { totalAgenticFailureMessage } = await import('./improvement.js')
   if (!args.llm || !totalAgenticFailureMessage(result.agenticPerAnalyst)) return
   const message = totalAgenticFailureMessage(result.agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })
   process.stderr.write(`error: ${message}\n`)
@@ -519,6 +474,7 @@ interface CollectedSpans {
  * need no translation to be analysed.
  */
 async function collectOtlpSpans(path: string, selector?: string): Promise<CollectedSpans> {
+  const { sessionReportSource } = await import('./report.js')
   let input: Awaited<ReturnType<typeof readOtlpInput>>
   try {
     input = await readOtlpInput(path)
@@ -615,6 +571,7 @@ function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
 
 /** Spans of the selected harness sessions: refs, `--current`, or discovery. */
 async function collectSessionSpans(args: CliArgs): Promise<CollectedSpans> {
+  const { sessionReportSource } = await import('./report.js')
   const selection = await collectSessionRows(args, args.last || 1)
   const spans: OtlpSpan[] = []
   const harnesses = new Set<string>()
@@ -644,6 +601,7 @@ async function collectSessionSpans(args: CliArgs): Promise<CollectedSpans> {
  * states its degradation per capability.
  */
 async function cmdValidate(args: CliArgs): Promise<void> {
+  const { saveReport } = await import('./improvement.js')
   const path = args.input!
   const input = await readOtlpInput(path)
   const report = renderValidation(input.validation, {
@@ -679,6 +637,8 @@ async function cmdValidate(args: CliArgs): Promise<void> {
  * nothing is written.
  */
 async function cmdCheck(args: CliArgs): Promise<void> {
+  const { explainTraceContract } = await import('@tangle-network/agent-eval')
+  const { AmbiguousTraceInputError, CHECK_EXIT, loadContract, renderCheckText, renderGithubAnnotations, renderJUnit, runCheck } = await import('./check.js')
   if (!args.contract) throw new UsageError('check needs --contract <contract.json>')
   let loaded: Awaited<ReturnType<typeof loadContract>>
   try {
@@ -806,6 +766,7 @@ async function cmdBundle(args: CliArgs): Promise<void> {
  * carries the protocol, so everything else this command says goes to stderr.
  */
 async function cmdMcp(args: CliArgs): Promise<void> {
+  const { serveTraceMcp } = await import('./mcp.js')
   const collected = await collectSpans(args)
   if (collected.spans.length === 0) throw new Error('mcp: no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
@@ -821,6 +782,7 @@ async function cmdMcp(args: CliArgs): Promise<void> {
  * (`code: no-outcome`).
  */
 async function cmdDiff(args: CliArgs): Promise<void> {
+  const { diffRuns, renderRunDiff } = await import('./diff.js')
   if (args.kinds.some((kind) => !kind)) throw new UsageError('diff: --kind needs a span kind, e.g. --kind TOOL')
   const report = await diffRuns(args.refs[0]!, args.refs[1]!, { kinds: args.kinds })
   if (!report.diff.firstDivergence && report.caveat) {
@@ -1115,6 +1077,7 @@ function renderMatches(pattern: string, sessions: number, matches: readonly Sess
 }
 
 async function cmdAnalyze(args: CliArgs): Promise<void> {
+  const { saveReport } = await import('./improvement.js')
   // A Runtime run directory, or a directory of them, is a supervision tree.
   const runDir = args.selection?.spans.find((source) => source.kind === 'run-dir')
   if (runDir) {
@@ -1131,7 +1094,7 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
   } else {
     console.log(result.report)
   }
-  failUnlessRequestedAnalysesRan(args, result)
+  await failUnlessRequestedAnalysesRan(args, result)
 }
 
 /**
@@ -1143,6 +1106,9 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
  * evidence through its reader, then prints a single report or a rollup.
  */
 async function cmdAnalyzeSupervisorRun(runDir: string, args: CliArgs): Promise<void> {
+  const { analyzeSupervisorRun, findSupervisorRunDirs, isRuntimeSupervisorRunDir, renderSupervisorRollupMarkdown, renderSupervisorRunMarkdown, rollupSupervisorRuns } = await import('@tangle-network/agent-eval/supervisor-run')
+  const { fileRunContextSupervisorRunReader } = await import('./supervisor-run-context.js')
+  const { saveReport } = await import('./improvement.js')
   const single = await isRuntimeSupervisorRunDir(runDir)
   const runDirs = single ? [runDir] : await findSupervisorRunDirs(runDir)
   if (runDirs.length === 0) {
@@ -1170,6 +1136,7 @@ async function collectImportedSpans(
   format: TraceEvidenceFormatOption,
   selector?: string,
 ): Promise<CollectedSpans> {
+  const { sessionReportSource } = await import('./report.js')
   const result = await exportTraceEvidenceFile(path, { format })
   const spans = selector ? selectSpans(result.spans, selector, path) : result.spans
   const { sessionByTrace } = indexSessionIdsByTrace(spans)
@@ -1236,12 +1203,13 @@ function conformanceOptions(collected: CollectedSpans) {
 
 /** The analyze run: a traces config is loaded only when `--config` names one. */
 async function investigate(args: CliArgs) {
+  const { loadTracesConfig, mergeTracesConfig, runTraceInvestigation } = await import('./improvement.js')
   const collected = await collectSpans(args)
   const { spans, harness, cwds, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = args.config !== undefined ? await loadTracesConfig(args.config) : undefined
   const analystModel = analystModelFor(args)
-  const engine = args.llm ? llmAnalysisEngine(args, analystModel) : undefined
+  const engine = args.llm ? await llmAnalysisEngine(args, analystModel) : undefined
   return runTraceInvestigation(mergeTracesConfig({
     spans,
     harness,
@@ -1258,6 +1226,8 @@ async function investigate(args: CliArgs) {
 
 /** `traces improve` (hidden; `analyze --out DIR` in 1.0): the review packet, written to `--dir`. */
 async function cmdImprove(args: CliArgs): Promise<void> {
+  const { loadTracesConfig, mergeTracesConfig, runTraceImprovement } = await import('./improvement.js')
+  const { runTraceQuestions } = await import('./ask.js')
   const outDir = args.dir ?? args.out
   if (outDir === undefined) throw new UsageError('improve needs --dir DIR for its artifacts')
   const collected = await collectSpans(args)
@@ -1265,7 +1235,7 @@ async function cmdImprove(args: CliArgs): Promise<void> {
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const analystModel = analystModelFor(args)
-  const engine = args.llm ? llmAnalysisEngine(args, analystModel) : undefined
+  const engine = args.llm ? await llmAnalysisEngine(args, analystModel) : undefined
   const result = await runTraceImprovement({
     ...mergeTracesConfig({
       spans,
@@ -1284,7 +1254,7 @@ async function cmdImprove(args: CliArgs): Promise<void> {
   const dir = result.artifacts?.directory
   if (!dir) throw new Error('improve did not produce an artifact directory')
   console.log(`improvement artifacts → ${dir}  (${result.findings.length} findings with actions and checks)`)
-  failUnlessRequestedAnalysesRan(args, result)
+  await failUnlessRequestedAnalysesRan(args, result)
 }
 
 /**
@@ -1299,6 +1269,9 @@ async function cmdImprove(args: CliArgs): Promise<void> {
  * the answers already paid for.
  */
 async function cmdAsk(args: CliArgs): Promise<void> {
+  const { analysisEngineFromEnv, DEFAULT_QUESTION_MAX_COST_USD } = await import('./analyst-model-call.js')
+  const { isBridgeMismatchError } = await import('./improvement.js')
+  const { loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
   const questions: TraceQuestion[] = [
     ...(args.questionsFile ? await loadTraceQuestionsFile(args.questionsFile) : []),
     ...args.questions.map((question) => ({ question })),
@@ -1410,6 +1383,7 @@ async function streamExplicitSession(
   extraAnalysts: readonly TraceLiveAnalyst[] | undefined,
   { adapter, ref }: RefSelection['sessions'][number],
 ): Promise<void> {
+  const { serializeTraceStreamEvent, traceStreamEventsFromSpans } = await import('./live.js')
   const preset = streamPreset(args)
   const spans = await parseSession(adapter, ref)
   for (const event of traceStreamEventsFromSpans(spans, {
@@ -1424,6 +1398,8 @@ async function streamExplicitSession(
 
 /** `traces stream` (hidden; `watch --format jsonl` in 1.0): live trace events as JSONL. */
 async function cmdStream(args: CliArgs): Promise<void> {
+  const { loadTracesConfig } = await import('./improvement.js')
+  const { serializeTraceStreamEvent, streamSessions, traceStreamEventsFromSpans } = await import('./live.js')
   const config = await loadTracesConfig(args.config)
   const preset = streamPreset(args)
   const named = args.selection
@@ -1494,6 +1470,7 @@ async function cmdStream(args: CliArgs): Promise<void> {
  * `traces watch <target>` tails one RUN TREE.
  */
 async function cmdWatch(args: CliArgs): Promise<void> {
+  const { watchSessions } = await import('./observer.js')
   if (args.input !== undefined) return cmdWatchRunTarget(args.input, args)
   if (args.once) throw new UsageError('watch --once prints one snapshot of a run: traces watch <run-dir|spans.otlp.jsonl> --once')
   const all = !args.harnessExplicit
@@ -1533,6 +1510,7 @@ async function cmdWatch(args: CliArgs): Promise<void> {
  * snapshot, which is what a script or an agent wants.
  */
 async function cmdWatchRunTarget(dir: string, args: CliArgs): Promise<void> {
+  const { resolveRunWatchTarget, watchRunTarget } = await import('./run-watch.js')
   const target = await resolveRunWatchTarget(resolve(dir))
   const controller = new AbortController()
   if (!args.once) {
@@ -1589,6 +1567,7 @@ async function* refSessions(args: CliArgs): AsyncGenerator<{ ref: SessionRef; sp
 
 /** `traces upload`: redact, gate on share safety, and send. A ref or `--since` is required (the table says so). */
 async function cmdUpload(args: CliArgs): Promise<void> {
+  const { executeUpload, planUpload, planUploadFrom } = await import('./upload.js')
   const named = args.selection
   const fromRefs = named !== undefined && named.sessions.length + named.spans.length > 0
   if (!fromRefs && args.since === undefined) {
@@ -1682,6 +1661,7 @@ function reportRefused(refused: readonly RefusedSession[]): void {
  * SAFE_WITH_WARNINGS, 1 UNSAFE, 2 UNKNOWN.
  */
 async function cmdVerifySafe(args: CliArgs): Promise<void> {
+  const { formatVerdict, verdictExitCode, verifySafe } = await import('./verify-safe.js')
   const profile = args.profile ?? 'share'
   if (profile !== 'default' && profile !== 'share' && profile !== 'strict') {
     throw new UsageError(`verify-safe: --profile must be default, share or strict, got "${profile}"`)

@@ -19,8 +19,7 @@
  */
 
 import { resolve } from 'node:path'
-import { DEFAULT_ANALYST_MODEL } from './analyst-model-call.js'
-import { MAX_TRACE_QUESTION_CHARS } from './ask.js'
+import { DEFAULT_ANALYST_MODEL, MAX_TRACE_QUESTION_CHARS } from './ask-defaults.js'
 import { findMoved, movedMessage, renderMovedTable, tracesCommand } from './moved.js'
 import { RefError } from './refs.js'
 import { knownHarnesses, resolveAdapter } from './registry.js'

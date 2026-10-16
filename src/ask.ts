@@ -34,6 +34,7 @@ import {
   formatFindingRejections,
   totalFindingRejections,
 } from './finding-rejections.js'
+import { ASK_QUESTION_HEADER, MAX_TRACE_QUESTION_CHARS, QUESTION_LABEL } from './ask-defaults.js'
 import { isBridgeMismatchError } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
 import { sessionFactsContext } from './session-facts.js'
@@ -189,16 +190,6 @@ const ASK_DEFINITION_VERSION = '1.0.0'
  * characters of the instructions, which is all of them the preview keeps.
  */
 const DSPY_PREVIEW_HEAD_CHARS = 500
-const QUESTION_FIELD_MAX_CHARS = 900
-
-const ASK_QUESTION_HEADER =
-  'Answer QUESTION with the trace tools and follow TRACES ASK RULES in analyst_instructions. ' +
-  'The trace list is JSON after PREPARED CONTEXT: there. Cite trace://<trace_id>/span/<span_id>.'
-
-const QUESTION_LABEL = '\n\nQUESTION: '
-
-/** Longest question that keeps the whole question field inside the preview. */
-export const MAX_TRACE_QUESTION_CHARS = QUESTION_FIELD_MAX_CHARS - ASK_QUESTION_HEADER.length - QUESTION_LABEL.length
 
 const ASK_RULES = [
   'TRACES ASK RULES',
