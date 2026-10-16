@@ -778,14 +778,13 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       if (carry.tokens) primer.push({ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: carry.tokens } } })
       for (let call = 0; call < carry.calls; call += 1) primer.push({ type: 'event_msg', payload: { type: 'stream_error', message: 'earlier piece' } })
     }
-    if (primer.length > carry.lines) throw new Error(`${ref.path}: ${carry.calls} model calls in ${carry.lines} lines cannot be replayed before the piece`)
-    // Lines before the piece keep their numbers: a record without an id is named by its line.
-    const input: unknown[] = new Array<unknown>(carry.lines - primer.length).fill(null)
-    input.push(...primer, ...records)
-    const read = readSessionInput(this.nativeHarness, { records: input }, {
+    // The piece's records keep their file lines, since a record without an id is
+    // named by its line; the primer takes the lines just before them.
+    const read = readSessionInput(this.nativeHarness, { records: [...primer, ...records] }, {
       nativeSessionId: carry.nativeSessionId ?? native.nativeSessionId,
       parentNativeSessionId: carry.parentNativeSessionId ?? native.parentNativeSessionId,
       label: ref.path,
+      firstLine: carry.lines - primer.length + 1,
     })
     const session: HarnessSession = {
       ...read,
