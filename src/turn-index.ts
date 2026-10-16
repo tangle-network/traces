@@ -119,11 +119,8 @@ export interface IndexedSession {
 /** A row on disk: kind, start, span id, its place among the span's rows of that kind, text. */
 type StoredRow = [SessionMatchKind, string, string, number, string]
 
+/** One session file (or one session of a shared store), keyed by harness, path and session id. */
 interface FileEntry {
-  readonly key: string
-  readonly harness: string
-  readonly path: string
-  readonly sessionId: string
   /** `pieces`: read from `offset` a piece at a time. `whole`: read whole when `version` changes. */
   mode: 'pieces' | 'whole'
   ino: number
@@ -183,10 +180,12 @@ function earlier(left: string | null, right: string | null): string | null {
   return Date.parse(right) < Date.parse(left) ? right : left
 }
 
-/** `session` with one more read of the same session after it. */
-function extend(session: IndexedSession, read: SessionIndexRead): IndexedSession {
-  const human = [...session.humanTurns]
-  for (const id of read.humanTurns) if (!human.includes(id)) human.push(id)
+/** Characters of the first prompt kept: `list` prints 80 of it on one line. */
+const FIRST_PROMPT_CHARS = 200
+
+/** `session` with a later read of the same session after it. */
+function extend(session: IndexedSession, read: IndexedSession | SessionIndexRead): IndexedSession {
+  const prompt = session.firstPrompt ?? read.firstPrompt
   return {
     sessionId: session.sessionId ?? read.sessionId,
     parentSessionId: session.parentSessionId ?? read.parentSessionId,
@@ -194,8 +193,8 @@ function extend(session: IndexedSession, read: SessionIndexRead): IndexedSession
     firstAt: earlier(session.firstAt, read.firstAt),
     lastAt: later(session.lastAt, read.lastAt),
     records: session.records + read.records,
-    humanTurns: human,
-    firstPrompt: session.firstPrompt ?? read.firstPrompt,
+    humanTurns: [...new Set([...session.humanTurns, ...read.humanTurns])],
+    firstPrompt: prompt === null ? null : prompt.replace(/\s+/gu, ' ').trim().slice(0, FIRST_PROMPT_CHARS),
   }
 }
 
@@ -246,7 +245,9 @@ function errorText(error: unknown): string {
 /** The selection's sessions, as the index knows them. Open, `refresh`, read, then `close`. */
 export class TurnIndex {
   private files: Record<string, FileEntry> = {}
-  private whole: Promise<void> = Promise.resolve()
+  /** Whole reads, one after another. */
+  private queue: Promise<void> = Promise.resolve()
+  private changed = false
 
   private constructor(readonly dir: string) {}
 
@@ -318,6 +319,7 @@ export class TurnIndex {
   /** Save what was read and let the next process in. */
   async close(): Promise<void> {
     try {
+      if (!this.changed) return
       const temporary = join(this.dir, `index.json.${process.pid}.tmp`)
       await writeFile(temporary, JSON.stringify({ version: 1, files: this.files } satisfies StoreV1))
       await rename(temporary, join(this.dir, 'index.json'))
@@ -326,8 +328,8 @@ export class TurnIndex {
     }
   }
 
-  private rowsPath(entry: { readonly key: string }): string {
-    return join(this.dir, 'rows', `${createHash('sha256').update(entry.key).digest('hex').slice(0, 24)}.jsonl`)
+  private rowsPath(key: string): string {
+    return join(this.dir, 'rows', `${createHash('sha256').update(key).digest('hex').slice(0, 24)}.jsonl`)
   }
 
   private static keyOf(adapter: HarnessTraceAdapter, ref: SessionRef): string {
@@ -347,6 +349,7 @@ export class TurnIndex {
         const { adapter, ref } = sessions[next++]!
         const read = await this.refreshOne(adapter, ref)
         if (read === null) continue
+        this.changed = true
         stats.sessionsRead += 1
         stats.bytesRead += read.bytes
         stats.rowsAdded += read.rows
@@ -363,7 +366,7 @@ export class TurnIndex {
     try {
       info = await stat(ref.path)
     } catch (error) {
-      const entry = this.blank(key, adapter, ref, { ino: 0, size: 0 }, 'whole')
+      const entry = this.blank({ ino: 0, size: 0 }, 'whole')
       entry.unread = errorText(error)
       this.files[key] = entry
       return { bytes: 0, rows: 0, whole: false }
@@ -384,19 +387,18 @@ export class TurnIndex {
     return this.readWhole(key, adapter, ref, info, version)
   }
 
-  private blank(key: string, adapter: HarnessTraceAdapter, ref: SessionRef, info: { ino: number; size: number }, mode: FileEntry['mode']): FileEntry {
+  private blank(info: { ino: number; size: number }, mode: FileEntry['mode']): FileEntry {
     return {
-      key, harness: adapter.harness, path: ref.path, sessionId: ref.sessionId, mode, ino: info.ino, size: info.size, version: '',
-      offset: 0, carry: null, turn: TURN_FOLD_START, session: EMPTY_SESSION, tail: null, unread: null,
+      mode, ino: info.ino, size: info.size, version: '', offset: 0, carry: null, turn: TURN_FOLD_START, session: EMPTY_SESSION, tail: null, unread: null,
     }
   }
 
   /** Read a session whole, as `facts <ref>` reads it, replacing every row it had. */
   private async readWhole(key: string, adapter: HarnessTraceAdapter, ref: SessionRef, info: { ino: number; size: number }, version: string): Promise<{ bytes: number; rows: number; whole: boolean }> {
-    const entry = this.blank(key, adapter, ref, info, 'whole')
+    const entry = this.blank(info, 'whole')
     entry.version = version
     // One whole read at a time: a large session's spans are the largest thing a refresh holds.
-    const turn = this.whole.then(async () => {
+    const read = this.queue.then(async () => {
       let rows: StoredRow[] = []
       try {
         const read = readSessionIndex(await readSessionSpans(adapter, ref), { sessionId: ref.sessionId })
@@ -407,12 +409,12 @@ export class TurnIndex {
       } catch (error) {
         entry.unread = errorText(error)
       }
-      await writeFile(this.rowsPath(entry), serialize(rows))
+      await writeFile(this.rowsPath(key), serialize(rows))
       this.files[key] = entry
       return rows.length
     })
-    this.whole = turn.then(() => {}, () => {})
-    return { bytes: 0, rows: await turn, whole: true }
+    this.queue = read.then(() => {}, () => {})
+    return { bytes: 0, rows: await read, whole: true }
   }
 
   /**
@@ -429,9 +431,7 @@ export class TurnIndex {
   ): Promise<{ bytes: number; rows: number; whole: boolean } | null> {
     const from = resumeOffset(previous?.mode === 'pieces' ? previous : undefined, info)
     if (from === null) return null
-    const entry: FileEntry = from === 0 || !previous
-      ? this.blank(key, adapter, ref, info, 'pieces')
-      : { ...previous, session: previous.session, tail: null }
+    const entry: FileEntry = from === 0 || !previous ? this.blank(info, 'pieces') : { ...previous, tail: null }
     let carry = entry.carry ?? PIECE_START
     let pending: { records: PieceRecord[]; bytes: number[] } = { records: [], bytes: [] }
     const committed: StoredRow[] = []
@@ -470,8 +470,8 @@ export class TurnIndex {
     }
     entry.ino = info.ino
     entry.size = info.size
-    if (from === 0) await writeFile(this.rowsPath(entry), serialize(committed))
-    else if (committed.length > 0) await appendFile(this.rowsPath(entry), serialize(committed))
+    if (from === 0) await writeFile(this.rowsPath(key), serialize(committed))
+    else if (committed.length > 0) await appendFile(this.rowsPath(key), serialize(committed))
     this.files[key] = entry
     return { bytes: read.bytes, rows: committed.length + (entry.tail?.rows.length ?? 0), whole: false }
   }
@@ -480,20 +480,7 @@ export class TurnIndex {
   session(adapter: HarnessTraceAdapter, ref: SessionRef): { readonly session: IndexedSession; readonly unread: string | null } | null {
     const entry = this.files[TurnIndex.keyOf(adapter, ref)]
     if (!entry) return null
-    const tail = entry.tail?.session
-    const session = tail
-      ? {
-          ...entry.session,
-          sessionId: entry.session.sessionId ?? tail.sessionId,
-          parentSessionId: entry.session.parentSessionId ?? tail.parentSessionId,
-          cwd: entry.session.cwd ?? tail.cwd,
-          firstAt: earlier(entry.session.firstAt, tail.firstAt),
-          lastAt: later(entry.session.lastAt, tail.lastAt),
-          records: entry.session.records + tail.records,
-          humanTurns: [...new Set([...entry.session.humanTurns, ...tail.humanTurns])],
-          firstPrompt: entry.session.firstPrompt ?? tail.firstPrompt,
-        }
-      : entry.session
+    const session = entry.tail ? extend(entry.session, entry.tail.session) : entry.session
     return { session, unread: entry.unread ?? (session.records === 0 ? 'no record could be read' : null) }
   }
 
@@ -503,11 +490,12 @@ export class TurnIndex {
    * twice (a harness that writes a record again) is listed once.
    */
   async rows(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<SessionRow[]> {
-    const entry = this.files[TurnIndex.keyOf(adapter, ref)]
+    const key = TurnIndex.keyOf(adapter, ref)
+    const entry = this.files[key]
     if (!entry) return []
     let text = ''
     try {
-      text = await readFile(this.rowsPath(entry), 'utf8')
+      text = await readFile(this.rowsPath(key), 'utf8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }

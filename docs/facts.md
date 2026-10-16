@@ -28,6 +28,7 @@ A `fleet` row carries no signals: those are a person's.
 
 `--match RE` prints, instead of the sheet, one row per human turn, agent message or shell command that matches (`sessionId`, `kind`, `at`, `spanId`, `source`, and the text clipped to 300 characters around the hit).
 Shell commands are matched one simple command at a time, as the shell would split the script, so `^traces ` matches `cd x && traces facts …` and never `tangle traces list`.
+Over a window, `--match` reads the turn index under `$XDG_STATE_HOME/traces/turn-index`, which keeps a byte cursor per session file, so a repeated search reads only what sessions appended since the last one; its rows are a whole read's, row for row. A named ref is read whole.
 `--no-content` withholds the text both of these read, so it is refused with either.
 
 ## Who acted

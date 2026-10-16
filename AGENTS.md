@@ -54,6 +54,11 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
 - **Redact before anything leaves the machine, then check the redacted copy.** `upload` and `mcp` both
   redact first and then require a `SAFE`/`SAFE_WITH_WARNINGS` verdict on the *redacted* result before
   sending or serving anything. `UNSAFE` or `UNKNOWN` is refused, not sent with a warning.
+- **The turn index answers exactly what a whole read answers.** `list` and `facts --since … --match`
+  read the index under `$XDG_STATE_HOME/traces/turn-index`, which reads only what each session file
+  appended since the last run. Its rows come from the same fold, projection and row functions as a
+  whole read, never a second classifier; `tests/turn-index.test.ts` holds it to a whole read, row for
+  row, after every appended record.
 - **Unknown is never rendered as a measured zero.** An unpriced turn reads `cost unknown`, never
   `$0.0000`; a fact the spans cannot support is `null` with its reason, never a guessed value.
 

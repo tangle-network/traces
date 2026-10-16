@@ -216,8 +216,11 @@ describe('turn index: a session read as it is written', () => {
     for (let k = 0; k < Math.max(...files.map((file) => file.records.length)); k += 1) {
       for (const file of files) if (k < file.records.length) await appendFile(file.path, line(file.records[k]))
       const answer = await search(fx.env)
+      // One whole read of all three; while one has no record yet, that run exits 2, so read each alone.
+      const together = await runCli(['facts', ...files.map((file) => file.path), '--match', EVERY_ROW, '--format', 'json'], { env: fx.env })
+      const all = together.code === 0 ? (JSON.parse(together.stdout) as Search).matches : null
       for (const { id, path } of files) {
-        const whole = await parsed(fx.env, path, id)
+        const whole = all ? all.filter((match) => match.sessionId === id) : await parsed(fx.env, path, id)
         const indexed = answer.matches.filter((match) => match.sessionId === id)
         if (whole === null) expect(indexed, `${id} after ${k + 1} records`).toEqual([])
         else expect(indexed, `${id} after ${k + 1} records`).toEqual(whole.map((match) => ({ ...match, source: path })))
