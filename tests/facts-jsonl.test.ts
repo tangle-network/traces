@@ -97,6 +97,8 @@ describe('facts --format jsonl', () => {
     expect(rows.map((row) => row.author)).toEqual(['human', 'fleet', 'fleet', 'human', 'human', 'relay'])
     expect(rows.map((row) => row.at)).toEqual([...rows.map((row) => row.at as string)].sort())
     expect(rows[5]).toMatchObject({ reply: TEXT.relayReply, signals: [] })
+    // A fleet message is another agent talking: it carries no correction signal.
+    expect(rows.filter((row) => row.author === 'fleet').map((row) => row.signals)).toEqual([[], []])
   })
 
   it("names the archived host when it reads a trace archive's <host>/home store root", async () => {

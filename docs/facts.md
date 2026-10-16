@@ -22,6 +22,7 @@ A turn the reader called human is checked once more by org convention: harness t
 `excludedTurns` groups every left-out turn by reason and `author`.
 
 `--format jsonl` prints one row per typed turn (`human`, `fleet` or `relay`): `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals` and `spanId`.
+A `fleet` row carries no signals: those are a person's.
 `host` is this machine's short name, or for a trace archive's `<host>/home` store root, that host.
 
 `--match RE` prints, instead of the sheet, one row per human turn, agent message or shell command that matches (`sessionId`, `kind`, `at`, `spanId`, `source`, and the text clipped to 300 characters around the hit).

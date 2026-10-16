@@ -215,7 +215,7 @@ export interface SessionTurnFact {
   readonly replySpanId: string | null
   /** The person interrupted the agent's work on this turn, before the next typed turn. */
   readonly interrupted: boolean
-  /** The correction signals since the person's previous human turn. */
+  /** The correction signals since the person's previous human turn; none on a `fleet` turn. */
   readonly signals: readonly TurnSignal[]
 }
 
@@ -969,7 +969,8 @@ function typedTurnsOf(spans: readonly OtlpSpan[]): TypedTurns {
       reply: null,
       replySpanId: null,
       interrupted: false,
-      signals: SIGNAL_ORDER.filter((signal) => pending.has(signal)),
+      // A fleet message is another agent talking: a correction signal is a person's.
+      signals: author === 'fleet' ? [] : SIGNAL_ORDER.filter((signal) => pending.has(signal)),
     }
     turns.push(turn)
     lastTurn = turn
