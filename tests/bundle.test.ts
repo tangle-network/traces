@@ -109,21 +109,23 @@ describe('traces bundle', () => {
     const read = await runCli(['facts', bundle, '--format', 'json'], { env })
     expect(read.code).toBe(0)
     const reread = JSON.parse(read.stdout) as FactsJson
+    // The same instants: OTLP spells a time with milliseconds, the transcript may not.
+    const instant = (at: string | null) => (at === null ? null : new Date(at).toISOString())
     const summary = (facts: FactsJson) => facts.sessions.map((session) => ({
       sessionId: session.sessionId,
       cwd: session.cwd.value,
       toolCalls: session.toolCalls.value,
       humanTurns: session.humanTurns.value?.map((turn) => turn.text),
-      firstRecordAt: session.firstRecordAt.value,
-      lastRecordAt: session.lastRecordAt.value,
+      firstRecordAt: instant(session.firstRecordAt.value),
+      lastRecordAt: instant(session.lastRecordAt.value),
     }))
     expect(summary(kept)).toEqual([{
       sessionId: SESSION_ID,
       cwd: repo,
       toolCalls: 0,
       humanTurns: ['Fix the date parser.'],
-      firstRecordAt: expect.stringMatching(/^2026-01-01T00:00:00/),
-      lastRecordAt: expect.stringMatching(/^2026-01-01T00:00:01/),
+      firstRecordAt: '2026-01-01T00:00:00.000Z',
+      lastRecordAt: '2026-01-01T00:00:01.000Z',
     }])
     expect(summary(reread)).toEqual(summary(kept))
   })

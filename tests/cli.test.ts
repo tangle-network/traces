@@ -707,6 +707,8 @@ describe('traces CLI', () => {
         },
       },
       { timestamp: '2026-07-28T22:00:00.100Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'nested-turn' } },
+      // facts reports a session only from its records, never a sheet of zeros.
+      { timestamp: '2026-07-28T22:00:00.200Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Nested task.' } },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     const { stdout, stderr } = await execFileAsync(process.execPath, [
@@ -817,6 +819,12 @@ describe('traces CLI', () => {
         timestamp: '2026-07-29T00:00:02.600Z',
         type: 'event_msg',
         payload: { type: 'task_started', turn_id: 'child-turn' },
+      },
+      // facts reports a session only from its records, never a sheet of zeros.
+      {
+        timestamp: '2026-07-29T00:00:02.700Z',
+        type: 'response_item',
+        payload: { type: 'message', role: 'user', content: 'Child task.' },
       },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
