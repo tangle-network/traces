@@ -363,7 +363,7 @@ export class TurnIndex {
     try {
       info = await stat(ref.path)
     } catch (error) {
-      const entry = this.blank(key, adapter, ref, { ino: 0, size: 0, mtimeMs: ref.mtimeMs }, 'whole')
+      const entry = this.blank(key, adapter, ref, { ino: 0, size: 0 }, 'whole')
       entry.unread = errorText(error)
       this.files[key] = entry
       return { bytes: 0, rows: 0, whole: false }

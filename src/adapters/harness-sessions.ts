@@ -426,7 +426,7 @@ function isLegacyPrompt(row: CodexHead): boolean {
 function addLegacyPrompts(head: readonly CodexHead[], session: HarnessSession, root: OtlpSpan, spans: OtlpSpan[]): void {
   if (session.messages.some((message) => message.role === 'user' && messageText(message))) return
   for (const row of head) {
-    if (!isLegacyPrompt(row) || !row.timestamp) continue
+    if (!isLegacyPrompt(row) || !row.timestamp || !row.payload) continue
     spans.push(asTracesSpan(contractSpan({
       traceId: root.trace_id,
       spanId: deriveHexId(`codex:${session.nativeSessionId}:legacy-prompt:${row.payload.id ?? row.timestamp}`, 8),
