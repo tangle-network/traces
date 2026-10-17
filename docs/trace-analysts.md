@@ -6,7 +6,7 @@ Keeping them separate prevents an exploratory model output from being reported a
 | Question | Tool | Output |
 | --- | --- | --- |
 | What happened? | Built-in local checks | Findings from explicit trace facts |
-| Why might it have happened? | `--llm` or a custom analyst | Findings with cited spans |
+| Why might it have happened? | `traces ask`, or your own analyst through `analyzeSpans({ registry })` | Findings with cited spans |
 | What exactly does this session say about X? | `traces ask` | An answer per question, with checked `trace://` citations |
 | What does this session state, exactly and for free? | `traces facts` | A deterministic facts sheet, no model call |
 
@@ -19,28 +19,17 @@ traces analyze --harness codex --current --latest-turn
 # Limit a resumed Claude Code session to its latest task and subagents.
 traces analyze <path> --harness claude-code --latest-turn
 
-# Write reusable findings, evidence, report, and OpenInference spans.
-traces improve --harness codex --last 5 --dir .traces/improvement
+# Keep the report and the finding packet as files.
+traces analyze --harness codex --last 5 --out analysis
 
-# Add the built-in model-assisted analysts with a spending limit.
-traces analyze --harness codex --last 5 --llm --budget 0.50
+# A question that needs judgment: the one command that calls a model, with a spending limit.
+traces ask --harness codex --last 5 --question "Why did the first check fail?" --budget 0.50
 ```
 
 Which sessions these commands select, how a named session brings its spawned children, and how `--latest-turn` narrows it, is in [Choose sessions](./harnesses.md#choose-sessions).
 
-`traces improve` writes:
-
-```text
-.traces/improvement/
-  evidence.jsonl
-  findings.json
-  report.md
-  result.json
-  traces.otlp.jsonl
-```
-
-The OpenInference file is the input any other tool can read.
-The original trace and exact cited span remain available for review.
+`traces analyze <ref> --out DIR` writes exactly `report.md` and `findings.json`; see [Analyze a session](./analyze.md).
+`traces convert <ref> --out <file>` writes the OpenInference spans any other tool can read.
 
 ## Ask free-form questions
 
@@ -48,18 +37,17 @@ The original trace and exact cited span remain available for review.
 
 ## Session facts
 
-`traces facts` computes the deterministic facts sheet, and the model-backed analysts receive it as prepared context. See [Session facts](./facts.md).
+`traces facts` computes the deterministic facts sheet, and `traces ask` hands it to the model as prepared context. See [Session facts](./facts.md).
 
 ## Evidence-gate rejections
 
 A model-backed analyst can submit a finding the evidence gate then refuses.
 Without the reason, a report showing "0 findings" reads as "the model found nothing" when the truth may be "the gate refused everything it found".
 
-`analyze`, `improve`, and `ask` now carry those refusals:
+`ask` carries those refusals:
 
 - the CLI log adds whatever the event carries beyond its own text to each `finding rejected` line: the cause (`reason` for the gate's rejections and the bridge-row rejection, `issues` for a schema failure), the offending URI, the citation counts, and the subject;
-- the analyst table's Detail cell names the reasons and their counts;
-- `result.findingRejections` (investigation and improvement) and `answers.json` (`ask`) hold the counts per analyst and reason.
+- `answers.json` holds the counts per question and reason.
 
 The common reasons are an excerpt the cited span does not contain, a span the trace does not hold, and too few distinct citations for the kind.
 
@@ -78,27 +66,6 @@ Successful follow-up counts require explicit success; unknown follow-up outcomes
 The runtime span projection leaves its optional status absent for `UNSET` spans.
 Use the execution report for terminal run outcomes.
 The older runtime store's required run status cannot represent unknown and is not completion evidence.
-
-## Model-assisted citations
-
-agent-eval's evidence gate accepts a model finding only when each cited span exists and each excerpt appears in that span.
-Before the gate runs, `traces` normalizes the citations of the built-in `--llm` analysts against the analyzed spans.
-
-- An excerpt copied from a `searchTrace` hit carries JSON escapes such as `\"` and `\n`.
-  It is replaced by its decoded form only when the cited span contains that decoded text.
-- A citation of a readable harness ID, such as `tool:<call_id>` or the Codex session ID, is replaced by the hex OTLP span ID.
-  The readable ID must name exactly one span through its `traces.<harness>.source_*` attributes.
-- A subject from another analyst's vocabulary is removed, because the subject is optional.
-  The claim and its citations still go through the gate.
-
-The gate itself is unchanged and checks every rewritten finding.
-A fabricated excerpt, an unknown ID, or an ambiguous ID remains rejected.
-Normalization never adds a citation, so a failure-mode finding still needs two distinct spans.
-A subject outside the subject grammar is rejected before normalization runs.
-Wrapped analysts report a version ending in `+traces-citations-1`.
-
-A custom analyst built with `createTraceAnalyst` gets the same behavior through `normalizeAnalystCitations(definitions, spans)`.
-Pass the spans that the analyst's trace store was written from.
 
 ## Write one analyst
 
@@ -141,10 +108,11 @@ registry.register(failedTools)
 export default { registry }
 ```
 
-Run it without another wrapper:
+Run it through the SDK, which builds the in-memory store and runs the registry over it:
 
-```bash
-traces improve --last 5 --config traces.config.mjs --dir .traces/improvement
+```ts
+import { analyzeSpans } from '@tangle-network/traces'
+const { result } = await analyzeSpans(spans, { registry })
 ```
 
 The full runnable example is [`examples/custom-analyst.ts`](../examples/custom-analyst.ts).

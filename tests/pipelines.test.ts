@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { span } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
-import { renderPipelines } from '../src/report.js'
 
 /** Build a tool call span with given name + identical input (→ same argHash). */
 function toolCall(
@@ -41,8 +40,6 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
     expect(r.stuckLoops.findings[0]!.toolName).toBe('bash')
     expect(r.stuckLoops.findings[0]!.occurrences).toBe(3)
     expect(r.stuckLoops.affectedRunRatio).toBe(1)
-    const text = renderPipelines(r)
-    expect(text).toContain('Stuck loops')
     // identical repeated calls also show as duplicates + errors
     expect(r.toolUse[0]!.duplicateRate).toBeGreaterThan(0)
     expect(r.toolUse[0]!.errorRate).toBe(1)
@@ -172,20 +169,6 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
     expect((await runPipelines(spans)).stuckLoops.findings).toHaveLength(0)
   })
 
-  it('reports retry follow-through against failed calls, not all calls', async () => {
-    const spans = [
-      span({ traceId: 'sess', spanId: 'root', name: 'session', kind: 'AGENT', startTime: new Date(0).toISOString(), service: 'other' }),
-      toolCall(1, 'bash', { cmd: 'false' }, 'ERROR'),
-      toolCall(2, 'read', { path: 'a' }),
-      toolCall(3, 'bash', { cmd: 'true' }),
-    ]
-
-    const text = renderPipelines(await runPipelines(spans))
-
-    expect(text).toContain('1/3 failed; 1/1 failed calls followed by another same-tool call (100%)')
-    expect(text).not.toContain('% retry')
-  })
-
   it('clusters terminal failures without treating recovered tool errors as failed runs', async () => {
     const spans = [
       span({
@@ -240,8 +223,5 @@ describe('runPipelines (reuses agent-eval stuckLoopView + computeToolUseMetrics)
         exampleError: 'Task failed',
       }),
     ])
-    const report = renderPipelines(result)
-    expect(report).toContain('**Terminal failures:** 1/2 run(s)')
-    expect(report).toContain('| unknown | 1 | not captured | `failed` | Task failed |')
   })
 })

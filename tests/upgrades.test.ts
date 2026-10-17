@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ACTOR_ATTR } from '../src/adapters/conversation.js'
 import {
-  classifyReaction,
   claudeActor,
   claudePromptStartsTask,
   codexActor,
@@ -12,8 +11,6 @@ import {
 import { ClaudeAdapter } from '../src/adapters/claude.js'
 import { CodexAdapter } from '../src/adapters/codex.js'
 import type { OtlpSpan } from '../src/otlp.js'
-import { span } from '../src/otlp.js'
-import { analyzeReactions } from '../src/reactions.js'
 import type { SessionRef } from '../src/types.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'tt-upgrades-'))
@@ -147,86 +144,5 @@ describe('actor derivation', () => {
 
     expect(spans[0]!.attributes['llm.model_name']).toBe('gpt-late')
     expect(spans.find((item) => item.name === 'llm.turn')?.attributes['llm.model_name']).toBe('gpt-late')
-  })
-})
-
-// ── Feature 2: user-reaction analyst ─────────────────────────────────────────
-
-describe('reaction classifier', () => {
-  it('labels correction / frustration / praise / jargon / structure complaints', () => {
-    expect(classifyReaction('no, that is wrong')).toContain('correction')
-    expect(classifyReaction('ugh, again? this is wasting time')).toContain('frustration')
-    expect(classifyReaction('perfect, ship it')).toContain('praise')
-    expect(classifyReaction('plain english please, that is jargon')).toContain('jargon')
-    expect(classifyReaction('too long, get to the point')).toContain('structure')
-    expect(classifyReaction('looks fine to me overall')).toEqual([])
-  })
-})
-
-function humanPrompt(i: number, traceId: string, text: string): OtlpSpan {
-  return span({
-    traceId,
-    spanId: `u${i}`,
-    parentSpanId: 'root',
-    name: 'user.prompt',
-    kind: 'CHAIN',
-    startTime: new Date(1000 + i * 1000).toISOString(),
-    step: i,
-    content: text,
-    extra: { [ACTOR_ATTR]: 'human' },
-  })
-}
-function assistant(i: number, traceId: string, text: string): OtlpSpan {
-  return span({
-    traceId,
-    spanId: `a${i}`,
-    parentSpanId: 'root',
-    name: 'llm.turn',
-    kind: 'LLM',
-    startTime: new Date(1000 + i * 1000).toISOString(),
-    step: i,
-    content: text,
-  })
-}
-
-describe('analyzeReactions', () => {
-  it('classifies only human turns that follow an assistant turn, and computes the ratio', () => {
-    const spans: OtlpSpan[] = [
-      assistant(0, 's1', 'Here is a verbose technical wall of text.'),
-      humanPrompt(1, 's1', 'no, that is wrong'), // correction (follows assistant)
-      assistant(2, 's1', 'Sorry, corrected.'),
-      humanPrompt(3, 's1', 'perfect, exactly right'), // praise (follows assistant)
-    ]
-    const r = analyzeReactions(spans)
-    expect(r.humanReactionTurns).toBe(2)
-    expect(r.signals.correction).toBe(1)
-    expect(r.signals.praise).toBe(1)
-    expect(r.correctiveToPositiveRatio).toBe(1)
-    expect(r.triggerPairs.length).toBe(2)
-    // The most-corrective pair ranks first.
-    expect(r.triggerPairs[0]!.reactions).toContain('correction')
-  })
-
-  it('ignores a non-human (injected/subagent) turn and a leading human turn with no prior assistant', () => {
-    const injected = span({
-      traceId: 's2',
-      spanId: 'u9',
-      parentSpanId: 'root',
-      name: 'user.prompt',
-      kind: 'CHAIN',
-      startTime: new Date(5000).toISOString(),
-      step: 9,
-      content: 'no this is wrong',
-      extra: { [ACTOR_ATTR]: 'injected' },
-    })
-    const spans: OtlpSpan[] = [
-      humanPrompt(0, 's2', 'no this is wrong'), // first turn, no prior assistant → not a reaction
-      assistant(1, 's2', 'working on it'),
-      injected, // injected → never counted even though it follows an assistant
-    ]
-    const r = analyzeReactions(spans)
-    expect(r.humanReactionTurns).toBe(0)
-    expect(r.signals.correction).toBe(0)
-    expect(r.triggerPairs).toHaveLength(0)
   })
 })

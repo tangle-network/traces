@@ -140,12 +140,12 @@ describe('every command writes only to --out and $XDG_STATE_HOME/traces', () => 
   it('analyze, to stdout and to --out', async () => {
     const printed = await run(['analyze', IDS.claude])
     expect(printed.code).toBe(0)
-    expect(printed.stdout).toContain('# Trace analysis')
+    expect(printed.stdout).toContain(`${IDS.claude.slice(0, 8)} claude-code`)
 
-    const report = join(out, 'report.md')
-    const written = await run(['analyze', IDS.opencode, '--out', report])
+    const analysis = join(out, 'analysis')
+    const written = await run(['analyze', IDS.opencode, '--out', analysis])
     expect(written.code).toBe(0)
-    expect(await readFile(report, 'utf8')).toContain('# Trace analysis')
+    expect(await readFile(join(analysis, 'report.md'), 'utf8')).toContain('# traces analyze')
   })
 
   it('ask, when the engine dies at startup', async () => {

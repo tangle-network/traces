@@ -93,7 +93,7 @@ describe('sessions larger than the V8 string limit', () => {
     const home = join(dir, 'cli-home')
     await mkdir(join(home, '.claude', 'projects', '-tmp-giant'), { recursive: true })
     await writeGiantRowSession(join(home, '.claude', 'projects', '-tmp-giant', 'giant.jsonl'))
-    const report = join(dir, 'cli-report.md')
+    const report = join(dir, 'cli-analysis')
     const artifact = join(dir, 'cli-spans.otlp.jsonl')
 
     const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, FORCE_COLOR: '0' }
@@ -109,8 +109,9 @@ describe('sessions larger than the V8 string limit', () => {
     )
     const analyzed = cli(['analyze', 'giant', '--harness', 'claude-code', '--out', report])
     expect(analyzed.status, analyzed.stderr || analyzed.error?.message).toBe(0)
-    const text = await readFile(report, 'utf8')
-    expect(text).toContain('# Trace analysis — claude-code')
+    const text = await readFile(join(report, 'report.md'), 'utf8')
+    expect(text).toContain('# traces analyze')
+    expect(text).toContain(' claude-code ')
 
     const converted = cli(['convert', 'giant', '--harness', 'claude-code', '--out', artifact])
     expect(converted.status, converted.stderr || converted.error?.message).toBe(0)

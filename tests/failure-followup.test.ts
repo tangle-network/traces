@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { classifyFailureFollowUps } from '../src/failure-followup.js'
 import { span } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
-import { renderPipelines } from '../src/report.js'
 
 function toolCall(
   i: number,
@@ -53,7 +52,6 @@ describe('classifyFailureFollowUps', () => {
       followUpSucceeded: 0,
       items: [expect.objectContaining({ followUpSucceeded: null, kind: 'blind' })],
     })
-    expect(renderPipelines(result)).toContain('0/1 follow-ups succeeded')
   })
 
   it('labels an identical re-send after a failure as blind', () => {
@@ -163,33 +161,5 @@ describe('classifyFailureFollowUps', () => {
     ])
     expect(r.followed).toBe(0)
     expect(r.items[0]?.kind).toBe('none')
-  })
-})
-
-describe('renderPipelines with failure follow-ups', () => {
-  it('splits the follow-up count into blind vs adapted and names blind offenders', async () => {
-    const r = await runPipelines([
-      root,
-      toolCall(1, 'bash', { cmd: 'npm test' }, 'ERROR'),
-      toolCall(2, 'bash', { cmd: 'npm test' }),
-      toolCall(3, 'bash', { cmd: 'false' }, 'ERROR'),
-      toolCall(4, 'bash', { cmd: 'true' }),
-    ])
-    const text = renderPipelines(r)
-    expect(text).toContain(
-      '2/2 failed calls followed by another same-tool call (100%) — 1 blind (identical args), 1 adapted (changed args); 2/2 follow-ups succeeded',
-    )
-    expect(text).toContain('Blind retries (same args re-sent after a failure): `bash` ×1')
-  })
-
-  it('omits the blind-retry line when every follow-up adapted', async () => {
-    const r = await runPipelines([
-      root,
-      toolCall(1, 'bash', { cmd: 'false' }, 'ERROR'),
-      toolCall(2, 'bash', { cmd: 'true' }),
-    ])
-    const text = renderPipelines(r)
-    expect(text).toContain('1/1 failed calls followed by another same-tool call (100%) — 0 blind (identical args), 1 adapted (changed args)')
-    expect(text).not.toContain('Blind retries')
   })
 })

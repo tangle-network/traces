@@ -22,6 +22,8 @@ export interface MovedRow {
   readonly was: readonly string[]
   /** How `traces help moved` names a row with no spelling. */
   readonly label?: string
+  /** The commands a flag spelling was removed from; absent when it was removed from every command. */
+  readonly commands?: readonly string[]
   /** What replaces it in 1.0, as `traces help moved` prints it. */
   readonly now: string
   /**
@@ -197,6 +199,24 @@ export const MOVED: readonly MovedRow[] = [
       'and counts a command that reads 3 or more skills as a catalog sweep',
     rewrite: (argv) => dropFlag(dropFlag(dropFlag(argv, '--no-refresh', false), '--store', true), '--sweep', true),
   },
+  {
+    was: ['improve'],
+    now: 'traces analyze … --out DIR (report.md and findings.json; no span copy)',
+    rewrite: (argv) => {
+      const renamed = renameCommand(argv, 'analyze')
+      return renameFlag(renamed, '--dir', '--out') ?? renamed
+    },
+  },
+  {
+    was: ['--llm', '--model', '--budget'],
+    commands: ['analyze', 'investigate', 'improve'],
+    label: 'analyze --llm, --model, --budget',
+    now: 'analyze calls no model: traces ask <ref> --question "…" --budget USD [--model ID]',
+  },
+  {
+    was: ['--config'],
+    now: 'removed: run your own analysts through the SDK, analyzeSpans(spans, { registry })',
+  },
 ]
 
 export interface MovedSpelling {
@@ -214,6 +234,8 @@ export function findMoved(argv: readonly string[]): MovedSpelling | undefined {
 function findAllMoved(argv: readonly string[]): MovedSpelling[] {
   const found: MovedSpelling[] = []
   for (const row of MOVED) {
+    const command = commandOf(argv)
+    if (row.commands && (command === undefined || !row.commands.includes(command))) continue
     for (const spelling of row.was) {
       if (uses(argv, spelling)) found.push({ row, spelling })
     }

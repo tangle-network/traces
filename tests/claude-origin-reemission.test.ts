@@ -95,7 +95,7 @@ describe('claude origin re-emission (real transcript fixture)', () => {
       join(projectDir, 'origin-reemission'),
       { recursive: true })
 
-    const report = join(home, 'report.md')
+    const report = join(home, 'analysis')
     const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, FORCE_COLOR: '0' }
     delete env.NODE_OPTIONS
     const run = spawnSync(
@@ -105,8 +105,8 @@ describe('claude origin re-emission (real transcript fixture)', () => {
       { cwd: process.cwd(), encoding: 'utf8', env, timeout: 240_000 },
     )
     expect(run.status, run.stderr || run.error?.message).toBe(0)
-    const text = readFileSync(report, 'utf8')
-    expect(text).toContain('# Trace analysis — claude-code')
-    expect(text).toMatch(/\*\*\d+ findings?|spans? →/)
+    const text = readFileSync(join(report, 'report.md'), 'utf8')
+    expect(text).toContain('# traces analyze')
+    expect(text).toMatch(/^findings (?:none|\d+ \()/mu)
   })
 })

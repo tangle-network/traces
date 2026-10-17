@@ -7,7 +7,8 @@
  */
 
 import type { PipelineReport } from './pipelines.js'
-import { streamSessions, type TraceLiveBatch, type TraceLiveFinding, type TraceLiveLoop } from './live.js'
+import { streamSessions, type TraceLiveBatch, type TraceLiveLoop } from './live.js'
+import type { TraceLiveFinding } from './pipelines.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 
 export type ObservedLoop = TraceLiveLoop

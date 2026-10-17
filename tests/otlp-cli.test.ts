@@ -255,20 +255,28 @@ describe('traces validate', () => {
   })
 })
 
+interface AnalysisJson {
+  harness: string
+  conformance: { capabilities: Array<{ name: string; available: boolean }>; findings: Array<{ code: string }> }
+  measures: { toolUse: Array<{ byTool: Record<string, unknown> }> }
+  cannotAnswer: Array<{ analysis: string; reason: string }>
+}
+
+const capability = (analysis: AnalysisJson, name: string) => analysis.conformance.capabilities.find((entry) => entry.name === name)
+
 describe('traces analyze <otlp file>', () => {
   it('analyses OTLP a foreign system emitted, with no adapter in the path', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-otlp-'))
     const path = await writeRows(dir, 'spans.otlp.jsonl', conformingRows())
-    const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', path, '--out', report])
+    const result = await runCli(['analyze', path, '--format', 'json'])
     expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('# Trace analysis — otlp')
-    expect(written).toContain('trace conformance')
-    expect(written).toContain('| `token-accounting` | ✅ available')
+    const analysis = JSON.parse(result.stdout) as AnalysisJson
+    expect(analysis.harness).toBe('otlp')
+    expect(capability(analysis, 'token-accounting')).toMatchObject({ available: true })
     // The tool span reached the tool analysis under its semconv name.
-    expect(written).toContain('bash')
+    expect(Object.keys(analysis.measures.toolUse[0]!.byTool)).toContain('bash')
+    expect((await runCli(['analyze', path])).stdout.split('\n').length).toBeLessThanOrEqual(41)
   })
 
   it('states which analyses it skipped when the trace cannot support them', async () => {
@@ -295,14 +303,16 @@ describe('traces analyze <otlp file>', () => {
         attributes: { 'openinference.span.kind': 'AGENT' },
       },
     ])
-    const report = join(dir, 'report.md')
+    const out = join(dir, 'analysis')
 
-    const result = await runCli(['analyze', path, '--out', report])
+    const result = await runCli(['analyze', path, '--format', 'json'])
     expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('analyses skipped, and why')
-    expect(written).toContain('Direct model usage')
-    expect(written).toContain('Cost coverage')
+    const { cannotAnswer } = JSON.parse(result.stdout) as AnalysisJson
+    expect(cannotAnswer.map((entry) => entry.analysis).join('\n')).toContain('Direct model usage')
+    expect(cannotAnswer.map((entry) => entry.analysis).join('\n')).toContain('Cost coverage')
+    expect((await runCli(['analyze', path, '--out', out])).code).toBe(0)
+    const written = await readFile(join(out, 'report.md'), 'utf8')
+    for (const entry of cannotAnswer) expect(written).toContain(entry.reason)
   })
 
   it('degrades instead of crashing on a trace the span model cannot represent', async () => {
@@ -310,13 +320,11 @@ describe('traces analyze <otlp file>', () => {
     const rows = conformingRows() as Record<string, unknown>[]
     const conflicting = { ...rows[1], name: 'a different call entirely' }
     const path = await writeRows(dir, 'spans.otlp.jsonl', [...rows, conflicting, 'not json object'])
-    const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', path, '--out', report])
+    const result = await runCli(['analyze', path, '--format', 'json'])
     expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('conflicting-span-id')
-    expect(written).toContain('could not be analysed')
+    const analysis = JSON.parse(result.stdout) as AnalysisJson
+    expect(analysis.conformance.findings.map((finding) => finding.code)).toContain('duplicate-span-id')
   })
 
   it('reports a multi-shot cell re-declaring its ancestors as repeats, not as defects', async () => {
@@ -325,19 +333,16 @@ describe('traces analyze <otlp file>', () => {
     // Every shot file re-declares the round it hangs under, byte-identically.
     await writeRows(dir, 'shot-1.jsonl', [round1, call])
     await writeRows(dir, 'shot-2.jsonl', [round1, tool, round2])
-    const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', dir, '--out', report])
+    const result = await runCli(['analyze', dir, '--format', 'json'])
     expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('1 row(s) re-declared a span already read, identically')
-    expect(written).toContain('Identical repeats are not a defect')
-    expect(written).not.toContain('conflicting-span-id')
+    const analysis = JSON.parse(result.stdout) as AnalysisJson
+    expect(analysis.conformance.findings.map((finding) => finding.code)).not.toContain('conflicting-span-id')
     // The repeat did not cost token accounting, because it double-counts nothing.
-    expect(written).toContain('| `token-accounting` | ✅ available')
+    expect(capability(analysis, 'token-accounting')).toMatchObject({ available: true })
   })
 
-  it('reports round-over-round convergence and the verdict that steered each round', async () => {
+  it('reads the verdicts and the link that steered each round as conformance capabilities', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-loop-'))
     const rows = conformingRows() as Record<string, unknown>[]
     const verdict1 = {
@@ -363,21 +368,16 @@ describe('traces analyze <otlp file>', () => {
     // Round 2 was caused by round 1's verdict, not nested inside it.
     rows[3] = { ...rows[3], links: [{ trace_id: TRACE, span_id: verdict1.span_id, attributes: { 'agent.link.kind': 'steered_by' } }] }
     const path = await writeRows(dir, 'spans.otlp.jsonl', [...rows, verdict1, verdict2])
-    const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', path, '--out', report])
+    const result = await runCli(['analyze', path, '--format', 'json'])
     expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('## round-over-round convergence')
-    expect(written).toContain('improved')
-    expect(written).toContain('score 0.25 → 0.9 across 2 graded round(s)')
-    expect(written).toContain('## steering chain (which verdict caused which retry)')
-    expect(written).toContain('`steered_by`')
-    // The EVALUATOR verdict survived ingest as an EVALUATOR.
-    expect(written).toContain('| `steering-chain` | ✅ available')
+    const analysis = JSON.parse(result.stdout) as AnalysisJson
+    // The EVALUATOR verdicts and the steering link survived ingest.
+    expect(capability(analysis, 'steering-chain')).toMatchObject({ available: true })
+    expect(analysis.cannotAnswer.map((entry) => entry.analysis).join('\n')).not.toContain('steering-chain')
   })
 
-  it('marks the sections whose inputs are incomplete, at the table, not only in the preamble', async () => {
+  it('states what an incomplete trace cannot answer, and prints no number it cannot support', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-gate-'))
     const path = await writeRows(dir, 'spans.otlp.jsonl', [
       {
@@ -391,22 +391,19 @@ describe('traces analyze <otlp file>', () => {
         attributes: { 'openinference.span.kind': 'AGENT' },
       },
     ])
-    const report = join(dir, 'report.md')
 
-    const result = await runCli(['analyze', path, '--out', report])
-    expect(result.code).toBe(0)
-    const written = await readFile(report, 'utf8')
-    expect(written).toContain('### Tokens and cost — inputs incomplete')
-    expect(written).toContain('⚠️ **Inputs incomplete — `token-accounting` unavailable:**')
-    expect(written).toContain('⚠️ **Inputs incomplete — `tool-usage` unavailable:**')
+    const json = await runCli(['analyze', path, '--format', 'json'])
+    expect(json.code).toBe(0)
+    const analysis = JSON.parse(json.stdout) as AnalysisJson
+    const asked = analysis.cannotAnswer.map((entry) => entry.analysis)
+    expect(asked.some((entry) => entry.startsWith('token-accounting: '))).toBe(true)
+    expect(asked.some((entry) => entry.startsWith('tool-usage: '))).toBe(true)
+    expect(asked).toContain('facts.tokens')
     // No session reports usage: unknown with the reason, never a zero.
-    expect(written).toContain('- **Tokens:** unknown — ')
-    // The marker sits above the token line, not forty lines away from it.
-    const marker = written.indexOf('`token-accounting` unavailable')
-    const table = written.indexOf('- **Tokens:**')
-    expect(marker).toBeGreaterThan(-1)
-    expect(table - marker).toBeGreaterThan(0)
-    expect(table - marker).toBeLessThan(600)
+    const text = (await runCli(['analyze', path])).stdout
+    expect(text.split('\n')[0]).toContain('cost unknown: ')
+    expect(text).not.toMatch(/\$0\.0+ |tokens 0\b/u)
+    expect(text).toContain(`cannot answer ${analysis.cannotAnswer.length} questions`)
   })
 
   // A round trip through `traces` must not turn a defective trace into a clean

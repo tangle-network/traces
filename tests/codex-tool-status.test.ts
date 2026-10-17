@@ -6,7 +6,6 @@ import { CodexAdapter } from '../src/adapters/codex.js'
 import { summarizeSpanExecution } from '../src/execution.js'
 import { runTraceInvestigation } from '../src/improvement.js'
 import { runPipelines } from '../src/pipelines.js'
-import { renderExecution } from '../src/report.js'
 import { toRuntimeStore } from '../src/runtime-store.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'traces-codex-status-'))
@@ -123,13 +122,13 @@ describe.each(['function', 'custom'] as const)('Codex %s tool outcomes', (varian
       spans,
       harness: 'codex',
     })
-    const report = investigation.pipelines
+    const report = investigation.measures
     expect(report.toolUse[0]).toMatchObject({ totalCalls: 2, errorRate: 0, retryRate: 0 })
     expect(report.failureClusters).toMatchObject({ totalFailures: 0, totalRuns: 1 })
     expect(report.failureFollowUps?.failures).toBe(0)
-    const execution = renderExecution(summarizeSpanExecution(spans))
-    expect(execution).toContain('**Terminal outcomes:** 1 succeeded  |  0 failed')
-    expect(execution).toContain('**Sessions with execution errors:** 0/1 (0.00%)')
+    const { execution } = summarizeSpanExecution(spans)
+    expect(execution.terminalOutcomes).toMatchObject({ succeeded: 1, failed: 0 })
+    expect(execution.executionErrors).toMatchObject({ runs: 0, reportingRuns: 1 })
 
     const failed = await runPipelines(await parseOutputs(variant, [
       { output: { exit_code: 1, output: 'success' } },

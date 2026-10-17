@@ -40,7 +40,6 @@ traces check   run.jsonl --contract contract.json           # fail CI when a run
 | Watch sessions or a run tree while they run | `watch`, `stream` | [Watch and stream](docs/live.md) |
 | Find where two runs diverge | `diff` | [Diff two runs](docs/diff.md) |
 | Give an agent read-only trace tools | `mcp` | [MCP server](docs/mcp.md) |
-| Write a reviewable improvement packet | `improve` | [Improvement engine](docs/improve.md) |
 | Count which skills get used | `skills` | [Skill usage](docs/skill-usage.md) |
 | Keep one session's evidence after the logs rotate | `bundle` | [Session bundle](docs/bundle.md) |
 | Convert event captures to OTLP spans | `convert` | [Export to OpenInference](docs/evidence.md) |

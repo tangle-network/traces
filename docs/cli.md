@@ -12,20 +12,19 @@ traces analyze  <id>                               # pin one ref printed by `lis
 traces analyze  --current                          # this session (Codex or Claude Code), with its spawned children
 traces analyze  --current --latest-turn            # current turn plus the workers it spawned
 traces analyze  <path> --harness claude-code --latest-turn  # a session file; latest task plus its subagents
-traces analyze  --last 10 --out report.md
-traces improve  --last 10 --dir .traces/improvement
+traces analyze  --last 10 --out analysis          # report.md and findings.json under analysis/
 traces ask      <id> --question "Which commands failed?" --budget 1
 traces facts    <id>                               # the deterministic facts sheet, $0
 traces facts    --since 2026-10-14 --until 2026-10-15  # every session with a record that day, that day's turns
 traces skills   --since 30d                        # skill use across every local session, incremental, $0
 traces diff     run-a.otlp.jsonl run-b.otlp.jsonl  # where two runs of one task first diverge
 traces mcp      spans.otlp.jsonl                   # read-only trace tools for an MCP client
-traces analyze  --since 2026-06-18 --out report.md
+traces analyze  --since 2026-06-18 --format json  # facts, findings, measures, conformance, what it cannot answer
 traces check    spans.otlp.jsonl --contract c.json --junit c.xml  # exit 0 pass, 1 fail, 2 could not decide
 traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
 traces validate results/sessions --out conformance.md  # a whole directory of exports
 traces analyze  spans.otlp.jsonl                   # analyse foreign OTLP, no adapter
-traces analyze  results/sessions --out report.md
+traces analyze  results/sessions --out analysis
 traces convert  --harness claude-code --last 1 --out spans.jsonl   # contract OTLP-JSONL; stdout without --out
 traces list     --format json                      # one row per session, with id, path and parent id
 traces bundle   <id|path> --out bundle-dir         # one session's durable evidence dir
@@ -55,19 +54,18 @@ traces help moved                                  # every 0.x command and flag 
 | `--cwd <dir>` | Sessions recorded in `<dir>` or under it on a path boundary, in a live worktree of its repository, or in a removed worktree whose recorded repository (Codex) is its |
 | `--since <t>` | `30m`/`2h`/`7d` before now, or an ISO date. Commands that select sessions read those modified at or after it; `upload`: its window; `facts`: opens a time window, see [Session facts](facts.md) |
 | `--until <t>` | `facts`: closes the time window (exclusive), same forms as `--since` |
-| `--out <path>` | Write the output to a file; stdout gets one summary line. `convert`: the OTLP file; `upload --dry-run`: the redacted preview (nothing is written without it); `check`: a directory for the evidence of each trace that did not pass |
-| `--dir <path>` | `improve`: write the full artifact pack to this directory (required); `ask`: write `answers.json` + `report.md` there (without it, the report goes to stdout only) |
+| `--out <path>` | Write the output to a file; stdout gets one summary line. `convert`: the OTLP file; `upload --dry-run`: the redacted preview (nothing is written without it); `check`: a directory for the evidence of each trace that did not pass; `analyze`: a directory for `report.md` and `findings.json` |
+| `--dir <path>` | `ask`: write `answers.json` + `report.md` there (without it, the report goes to stdout only) |
 | `--contract <file>` | `check`: the declarative trace contract (JSON) |
 | `--junit <file>` | `check`: write JUnit XML, one test case per rule |
 | `--annotations` | `check`: print GitHub workflow annotations (on by default under `GITHUB_ACTIONS=true`) |
-| `--format <kind>` | Output: `text` or `json` on `list`, `facts` (json by default), `check`, `diff`, `bundle verify` and `skills`. The input is sniffed |
-| `--llm` / `--budget <usd>` | `analyze`: enable agentic analysts (needs `TANGLE_API_KEY` + Python with `agent-eval-rpc[dspy]`) / cap their spend. `ask`: one ceiling shared by every question |
+| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`. The input is sniffed |
+| `--budget <usd>` | `ask`: one ceiling shared by every question. `analyze` calls no model |
 | `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
 | `--questions <file>` | `ask`: JSON array of questions: strings, or `{ id?, question, instructions?, answerSchema? }` |
 | `--question-budget <usd>` | `ask`: provider ceiling for ONE question; `--budget` is the ceiling shared by all of them |
 | `--question-timeout <seconds>` | `ask`: wall-clock deadline for ONE question's investigation (default 600); raise it for questions over many large sessions |
 | `--concurrency <n>` | `ask`: questions running at once (default 4) |
-| `--config <path>` | `analyze` / `improve` / `stream`: load BYO analysts and live analysts |
 | `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (sessions 5, run tree 2) / active-session window minutes (default 30) |
 | `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |
 | `--replay` | `stream`: scan once, then exit |

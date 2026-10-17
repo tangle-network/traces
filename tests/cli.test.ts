@@ -14,10 +14,10 @@ function parseRows(jsonl: string): Record<string, unknown>[] {
 }
 
 describe('traces CLI', () => {
-  it('routes a span file through analyze and improve', async () => {
+  it('routes a span file through analyze, to stdout and to --out DIR', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-test-'))
     const input = join(dir, 'spans.otlp.jsonl')
-    const report = join(dir, 'report.md')
+    const out = join(dir, 'analysis')
     await writeFile(input, serializeSpans([
       span({
         traceId: 'trace-cli',
@@ -52,189 +52,22 @@ describe('traces CLI', () => {
       timeout: 30_000,
     })
 
-    const { stdout } = await run(['analyze', input, '--out', report])
-    expect(stdout).toContain(`report → ${report}`)
-    const reportText = await readFile(report, 'utf8')
-    expect(reportText).toContain('1 session(s), 2 spans')
+    const printed = await run(['analyze', input])
+    const header = printed.stdout.split('\n')[0]!
+    expect(header).toMatch(/^session- claude-code · 06-25 22:44→22:44 UTC, 3 s · /u)
     // The external-engine footer went with the engines (1.0).
-    expect(reportText).not.toContain('--analyzer')
+    expect(printed.stdout).not.toContain('--analyzer')
 
-    const improvement = join(dir, 'improvement')
-    const improved = await run(['improve', input, '--dir', improvement])
-    expect(improved.stdout).toContain(`improvement artifacts → ${improvement}`)
-    const result = JSON.parse(await readFile(join(improvement, 'result.json'), 'utf8')) as {
-      spanCount: number
-    }
-    expect(result.spanCount).toBe(2)
-    expect(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8')).not.toBe('')
-    expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain('1 session(s), 2 spans')
-    // Two cold CLI subprocesses, each allowed 30s of its own. A 15s outer
-    // budget was shorter than the inner ones and failed on a loaded machine
-    // while every subprocess was still inside its own timeout, which is the
-    // disagreement `vitest.config.ts` raised the default to fix.
+    const { stdout } = await run(['analyze', input, '--out', out])
+    expect(stdout).toContain(`analysis → ${out}  (report.md, findings.json: `)
+    expect(await readFile(join(out, 'report.md'), 'utf8')).toContain(header)
+    expect((JSON.parse(await readFile(join(out, 'findings.json'), 'utf8')) as { kind: string }).kind).toBe('traces.finding_packet')
+    // Two cold CLI subprocesses, each allowed 30s of its own.
   }, 90_000)
-
-  it('turns deterministic analyze signals into actionable findings', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-actionable-'))
-    const input = join(dir, 'spans.openinference.jsonl')
-    const report = join(dir, 'report.md')
-    await writeFile(input, serializeSpans([
-      span({
-        traceId: 'trace-actionable',
-        spanId: 'assistant',
-        name: 'llm.turn',
-        kind: 'LLM',
-        startTime: '2026-01-01T00:00:00.000Z',
-        service: 'codex',
-        step: 1,
-        content: 'I am done without checking the result.',
-        extra: { 'session.id': 'session-actionable' },
-      }),
-      span({
-        traceId: 'trace-actionable',
-        spanId: 'human',
-        name: 'user.prompt',
-        kind: 'CHAIN',
-        startTime: '2026-01-01T00:00:01.000Z',
-        service: 'codex',
-        step: 2,
-        content: 'no, that is wrong, verify it',
-        extra: { 'session.id': 'session-actionable', 'tangle.actor': 'human' },
-      }),
-    ]), 'utf8')
-
-    const analyzed = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'analyze',
-      input,
-      '--out',
-      report,
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
-
-    expect(analyzed.stdout).toMatch(/\([1-9]\d* findings, 0 loops/)
-    const reportText = await readFile(report, 'utf8')
-    expect(reportText).toContain('1 corrective human reaction signal(s)')
-    expect(reportText).toContain('**Fix:** Turn the top correction pattern into an agent profile rule')
-    expect(reportText).toContain('**Check:** Rerun traces on fresh sessions')
-    expect(reportText).not.toContain('_No analyst findings.')
-  })
-
-  it('loads an analyze config only when --config is explicit', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-config-'))
-    const input = join(dir, 'spans.openinference.jsonl')
-    const defaultReport = join(dir, 'default-report.md')
-    const configuredReport = join(dir, 'configured-report.md')
-    const config = join(dir, 'traces.config.mjs')
-    const cli = join(process.cwd(), 'src', 'cli.ts')
-    const tsx = join(process.cwd(), 'node_modules', 'tsx', 'dist', 'loader.mjs')
-    await writeFile(input, serializeSpans([
-      span({
-        traceId: 'trace-config',
-        spanId: 'root',
-        name: 'session',
-        kind: 'AGENT',
-        startTime: '2026-01-01T00:00:00.000Z',
-        service: 'codex',
-        extra: { 'session.id': 'session-config' },
-      }),
-    ]), 'utf8')
-    await writeFile(config, `export default { analysts: [{ id: 'configured-analyst', description: 'runs only from an explicit config', inputKind: 'trace-store', cost: { kind: 'deterministic' }, version: '1.0.0', async analyze() { return [] } }] }\n`, 'utf8')
-
-    const run = (report: string, extra: string[] = []) => execFileAsync(process.execPath, [
-      '--import',
-      tsx,
-      cli,
-      'analyze',
-      input,
-      '--out',
-      report,
-      ...extra,
-    ], {
-      cwd: dir,
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
-
-    await run(defaultReport)
-    expect(await readFile(defaultReport, 'utf8')).not.toContain('`configured-analyst`')
-
-    await run(configuredReport, ['--config', config])
-    expect(await readFile(configuredReport, 'utf8')).toContain('`configured-analyst`')
-  })
-
-  it('keeps a trace with conflicting session identities in improvement output', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-session-conflict-'))
-    const input = join(dir, 'spans.openinference.jsonl')
-    const improvement = join(dir, 'improvement')
-    await writeFile(input, serializeSpans([
-      span({
-        traceId: 'trace-conflict',
-        spanId: 'root',
-        name: 'session',
-        kind: 'AGENT',
-        startTime: new Date(0).toISOString(),
-        service: 'claude-code',
-        extra: { 'tangle.sessionId': 'session-a' },
-      }),
-      span({
-        traceId: 'trace-conflict',
-        spanId: 'child',
-        parentSpanId: 'root',
-        name: 'message',
-        kind: 'CHAIN',
-        startTime: new Date(1).toISOString(),
-        service: 'claude-code',
-        extra: { 'session.id': 'session-b' },
-      }),
-    ]), 'utf8')
-
-    await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'improve',
-      input,
-      '--dir',
-      improvement,
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
-
-    const result = JSON.parse(await readFile(join(improvement, 'result.json'), 'utf8')) as {
-      spanCount: number
-      sessionCount: number
-      unassignedTraceCount: number
-      sessionIdentityConflicts: Array<{ traceId: string; sessionIds: string[] }>
-    }
-    expect(result).toMatchObject({
-      spanCount: 2,
-      sessionCount: 0,
-      unassignedTraceCount: 1,
-      sessionIdentityConflicts: [
-        { traceId: 'trace-conflict', sessionIds: ['session-a', 'session-b'] },
-      ],
-    })
-    expect(parseRows(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8'))).toHaveLength(2)
-    expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain(
-      'Conflicting session identity:** 1 trace(s): `trace-conflict` (`session-a`, `session-b`)',
-    )
-  })
 
   it('identifies an explicitly analyzed Codex child session in the report', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-child-'))
     const session = join(dir, 'rollout-child.jsonl')
-    const report = join(dir, 'report.md')
     const parentId = '019f24d6-b5ec-7173-acc1-f957de216ee5'
     const childId = '019f5aea-d6b4-7451-a3eb-60289875a357'
     await writeFile(session, [
@@ -269,7 +102,7 @@ describe('traces CLI', () => {
       },
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
-    await execFileAsync(process.execPath, [
+    const analyze = (format: string[]) => execFileAsync(process.execPath, [
       '--import',
       'tsx',
       'src/cli.ts',
@@ -277,8 +110,7 @@ describe('traces CLI', () => {
       session,
       '--harness',
       'codex',
-      '--out',
-      report,
+      ...format,
     ], {
       cwd: process.cwd(),
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
@@ -286,12 +118,11 @@ describe('traces CLI', () => {
       timeout: 30_000,
     })
 
-    const text = await readFile(report, 'utf8')
-    expect(text).toContain('| child |')
-    expect(text).toContain(childId)
-    expect(text).toContain(parentId)
-    expect(text).toContain(session)
-    expect(text).toContain('Own direct-streaming conversion')
+    const text = (await analyze([])).stdout
+    expect(text.split('\n')[0]).toContain(`${childId.slice(0, 8)} codex`)
+    expect(text.split('\n')[0]).toContain(`child of ${parentId.slice(0, 8)}`)
+    const json = JSON.parse((await analyze(['--format', 'json'])).stdout) as { facts: { sessions: Array<{ sessionId: string; parentSessionId: string }> } }
+    expect(json.facts.sessions[0]).toMatchObject({ sessionId: childId, parentSessionId: parentId })
   })
 
   it('converts Codex readable IDs to conforming OTLP IDs', async () => {
@@ -856,25 +687,38 @@ describe('traces CLI', () => {
           traceId: 'trace_stream',
           spanId: `test-${i}`,
           parentSpanId: 'root',
-          name: 'tool.bash',
+          name: 'tool.Bash',
           kind: 'TOOL',
           startTime: `2026-01-01T00:00:0${i}.000Z`,
+          endTime: `2026-01-01T00:00:0${i}.500Z`,
           service: 'synthetic',
-          tool: 'bash',
-          content: 'pnpm test',
+          tool: 'Bash',
           status: 'ERROR',
           step: i,
+          extra: { 'input.value': JSON.stringify({ command: 'pnpm test' }) },
         })),
+      span({
+        traceId: 'trace_stream',
+        spanId: 'edit',
+        parentSpanId: 'root',
+        name: 'tool.Edit',
+        kind: 'TOOL',
+        startTime: '2026-01-01T00:00:04.000Z',
+        service: 'synthetic',
+        tool: 'Edit',
+        step: 4,
+        extra: { 'input.value': JSON.stringify({ file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' }) },
+      }),
       span({
         traceId: 'trace_stream',
         spanId: 'claim',
         parentSpanId: 'root',
-        name: 'assistant.message',
-        kind: 'LLM',
-        startTime: '2026-01-01T00:00:04.000Z',
+        name: 'message.assistant',
+        kind: 'CHAIN',
+        startTime: '2026-01-01T00:00:05.000Z',
         service: 'synthetic',
         content: 'Complete. Tests pass.',
-        step: 4,
+        step: 5,
       }),
     ]
     await writeFile(input, serializeSpans(spans), 'utf8')
@@ -894,158 +738,18 @@ describe('traces CLI', () => {
     })
 
     const rows = parseRows(stdout)
-    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding', 'finding', 'finding'])
+    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding', 'finding', 'finding', 'finding'])
     const rules = rows
       .filter((row) => row.event === 'finding')
       .map((row) => (row.finding as Record<string, unknown>).ruleId)
       .sort()
     expect(rules).toEqual([
       'completion-claim-without-verification',
+      'high-tool-error-rate',
       'same-failing-command',
       'verification-without-change',
     ])
   })
-
-  it('loads custom live analysts for stream replay from traces config', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-live-config-'))
-    const input = join(dir, 'spans.openinference.jsonl')
-    const config = join(dir, 'traces.config.mjs')
-    await writeFile(input, serializeSpans([
-      span({
-        traceId: 'trace_stream_config',
-        spanId: 'root',
-        name: 'session',
-        kind: 'AGENT',
-        startTime: '2026-01-01T00:00:00.000Z',
-        service: 'synthetic',
-      }),
-    ]), 'utf8')
-    await writeFile(config, `export default {
-      liveAnalysts: [{
-        id: 'cfg-live',
-        analyze(context) {
-          return [{
-            schemaVersion: 1,
-            kind: 'traces.live_finding',
-            id: 'live.cfg-live',
-            ruleId: 'cfg-live',
-            fingerprint: 'cfg-live',
-            severity: 'info',
-            title: 'Config live analyst',
-            claim: 'Loaded from config.',
-            action: 'Keep streaming.',
-            check: 'Finding appears in stream JSONL.',
-            evidence: [{ kind: 'metric', label: 'spans', value: String(context.spans.length) }],
-            session: context.session,
-            observedAt: context.generatedAt,
-          }]
-        },
-      }],
-    }\n`, 'utf8')
-
-    const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'stream',
-      input,
-      '--config',
-      config,
-      '--mode',
-      'findings',
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    })
-
-    const rows = parseRows(stdout)
-    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding'])
-    expect((rows.find((row) => row.event === 'finding')!.finding as Record<string, unknown>).ruleId).toBe('cfg-live')
-  })
-
-
-})
-
-describe('traces analyze --llm failure surfacing', () => {
-  it('exits non-zero and surfaces the bridge stderr when every agentic analyst dies at startup', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-cli-llm-fail-'))
-    const input = join(dir, 'spans.openinference.jsonl')
-    const report = join(dir, 'report.md')
-    const fakeBridge = join(dir, 'failing-bridge.sh')
-    const bridgeReason =
-      "DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly ['controlAdapter', 'instructions', 'limits', 'modelProxy', 'operation', 'question', 'toolCallback', 'toolSpecs']"
-    await writeFile(input, serializeSpans([
-      span({
-        traceId: 'trace-llm-fail',
-        spanId: 'root',
-        name: 'session',
-        kind: 'AGENT',
-        startTime: '2026-01-01T00:00:00.000Z',
-        service: 'claude-code',
-        extra: { 'session.id': 'session-llm-fail' },
-      }),
-      span({
-        traceId: 'trace-llm-fail',
-        spanId: 'assistant',
-        parentSpanId: 'root',
-        name: 'llm.turn',
-        kind: 'LLM',
-        startTime: '2026-01-01T00:00:01.000Z',
-        service: 'claude-code',
-        step: 1,
-        content: 'Working on the task.',
-        extra: { 'session.id': 'session-llm-fail' },
-      }),
-    ]), 'utf8')
-    // Stands in for `python -m agent_eval_rpc.dspy_rlm_bridge`: dies at startup
-    // with the failure line on stderr, before any model call.
-    await writeFile(fakeBridge, `#!/bin/sh\necho "${bridgeReason}" >&2\nexit 1\n`, { mode: 0o755 })
-
-    const run = execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
-      'analyze',
-      input,
-      '--llm',
-      '--budget',
-      '1',
-      '--out',
-      report,
-    ], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        NO_COLOR: '1',
-        FORCE_COLOR: '',
-        TANGLE_API_KEY: 'test-key-never-sent-upstream',
-        OPENAI_API_KEY: '',
-        OPENAI_BASE_URL: '',
-        TRACES_PYTHON: fakeBridge,
-      },
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 60_000,
-    })
-
-    const failure = await run.then(
-      () => {
-        throw new Error('analyze --llm exited 0 although every agentic analyst failed')
-      },
-      (error: Error & { code?: number; stdout?: string; stderr?: string }) => error,
-    )
-    expect(failure.code).toBe(1)
-    // (a) the FAIL line carries the underlying bridge stderr.
-    expect(failure.stderr).toMatch(/\[analyst\] FAIL failure-mode — Error: .*DSPY-BRIDGE-FAILURE: ValueError/)
-    // (b) the run ends with an unmissable total-failure banner.
-    expect(failure.stderr).toContain('LLM analysis produced nothing')
-    expect(failure.stderr).toContain('agent-eval-rpc[dspy]==')
-    // The deterministic report is still written, and its analyst table names the reason.
-    const reportText = await readFile(report, 'utf8')
-    expect(reportText).toContain('| Analyst | Status | Findings | Latency | Detail |')
-    expect(reportText).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
-  }, 60_000)
 })
 
 describe('traces ask', () => {

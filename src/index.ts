@@ -59,16 +59,8 @@ export { HarnessSessionsAdapter } from './adapters/harness-sessions.js'
 // same way every built-in adapter does.
 export { ACTOR_ATTR, CONTENT_CAP, capText, userPromptSpan } from './adapters/conversation.js'
 export type { Actor, UserPromptInput } from './adapters/conversation.js'
-// Actor + reaction classification (the user-reaction analyst keys off these).
-export {
-  classifyReaction,
-  claudeActor,
-  codexActor,
-  CORRECTIVE_REACTIONS,
-  looksLikeAgentPrompt,
-  textIsSynthetic,
-} from './adapters/actor.js'
-export type { Reaction } from './adapters/actor.js'
+// Actor classification: who typed each turn.
+export { claudeActor, codexActor, looksLikeAgentPrompt, textIsSynthetic } from './adapters/actor.js'
 // Span provenance: which spans an adapter synthesized, and which carry context
 // from outside the parsed scope. A count of what the agent DID excludes both.
 export {
@@ -85,20 +77,17 @@ export type { InheritedSpanSource } from './adapters/provenance.js'
 
 // ── Detection / analysis (built-in, or bring your own analysts) ───────────
 export * from './failure-followup.js' // classifyFailureFollowUps() — blind vs adapted retry split
-export * from './pipelines.js' // runPipelines() — repeated-call + tool-use
-export * from './reactions.js' // analyzeReactions() — human-reaction analyst
+export * from './pipelines.js' // runPipelines() and the rules analyze and watch share
 export * from './skill-usage.js' // SkillUsageStore, skillUseOfSpans: one skill classifier for traces skills and facts
-export * from './agentic-routing.js' // planTraceAgenticRoute(): deterministic LLM analyst routing
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
-export * from './analyst-citations.js' // normalizeAnalystCitations() — model citations the evidence gate can check
 // Shared execution accounting over normalized spans. `priceReport` (session-facts) prices a sheet's tokens.
 export { summarizeOtlpExecution, summarizeSpanExecution } from './execution.js'
-export type { ModelTokens, SessionCost, SessionTokens, TokenPricer, TraceExecutionOptions, UsageTotal } from './execution.js'
+export type { ModelTokens, SessionCost, SessionTokens, TokenPricer, TraceExecutionOptions } from './execution.js'
 export * from './bundle.js' // assembleSessionBundle() — one session's durable evidence dir
 export * from './diff.js' // diffRuns() — two runs paired step by step, first divergence marked
 export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
-export * from './improvement.js' // runTraceInvestigation()/runTraceImprovement() artifact pack
+export * from './improvement.js' // runTraceInvestigation(): analyze's result; buildTraceFindingPacket()
 export * from './ask.js' // runTraceQuestions(): concurrent free-form questions, answers kept and citations checked
 export * from './session-facts.js' // computeSessionFacts(): the deterministic, free session-facts sheet
 export * from './pull-request-facts.js' // readPullRequests(): the pull requests the command spans show

@@ -40,7 +40,7 @@ const SEVERITY_BADGE: Record<string, string> = {
 /**
  * The analysis each capability gates, named as it appears in the report a
  * reader is holding, or as the command that runs it. Anything not listed here
- * is analysed regardless of conformance — the deterministic loop/thrash/reaction
+ * is analysed regardless of conformance — the deterministic loop and waste
  * passes need only span names, times and ordering.
  */
 const CAPABILITY_ANALYSES: Record<string, string> = {
@@ -51,42 +51,6 @@ const CAPABILITY_ANALYSES: Record<string, string> = {
   'tree-comparison': 'arm-vs-arm comparison: `traces diff <file>#branch=<a> <file>#branch=<b>` marks where two arms first diverge',
   'steering-chain': 'steering chain (which verdict caused which retry)',
   'latency-analysis': 'latency + critical-path timing distributions',
-}
-
-/**
- * Capabilities the trace cannot support, mapped to the trace's own reason.
- *
- * This is what makes the conformance section GATE rather than narrate: the
- * renderer takes it and marks every section whose inputs are incomplete, at the
- * table, so a number and the reason it is wrong cannot end up forty lines
- * apart.
- */
-export type UnavailableCapabilities = ReadonlyMap<string, string>
-
-/** The trace's unavailable capabilities, each mapped to the validator's own reason. */
-export function unavailableCapabilities(validation: TraceValidation): UnavailableCapabilities {
-  return new Map(
-    validation.capabilities
-      .filter((capability) => !capability.available)
-      .map((capability) => [capability.name, capability.reason ?? 'no reason recorded']),
-  )
-}
-
-/**
- * The inline marker a section carries when its inputs are incomplete. Empty
- * when the capability is available — the caller concatenates unconditionally,
- * so a section can never be marked in one place and silently not in another.
- */
-export function incompleteInputsNote(
-  unavailable: UnavailableCapabilities | undefined,
-  capability: string,
-): string {
-  const reason = unavailable?.get(capability)
-  return reason === undefined
-    ? ''
-    : `> ⚠️ **Inputs incomplete — \`${capability}\` unavailable:** ${reason}. ` +
-      'Whatever appears below was computed from the spans that DID carry the field and describes ' +
-      'only those; it is not a measurement of the run.'
 }
 
 export interface SpanStructure {

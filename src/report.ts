@@ -1,72 +1,43 @@
 /**
- * Render analyst findings as a markdown report.
+ * The `traces analyze` text: at most 40 lines, answer first, in one fixed order.
  *
- * Findings are grouped by area, ordered by severity. Each carries its
- * claim, the deterministic evidence excerpt, and the recommended action —
- * the actionable output for improving a stuck/looping agent.
+ *   1  header: who, where, when, active time, cost
+ *   2  what was asked
+ *   3  the first failure and its blame
+ *   4  repeated or failing commands
+ *   5  tool-error clusters
+ *   6  stalls of 10 minutes or more no turn ended
+ *   7  interrupts and rejections
+ *   8  unverified completion claims
+ *   9  pull requests
+ *   10 findings, HIGH first, each with span ids
+ *   11 how many questions the trace cannot answer, and where they are listed
+ *
+ * Several sessions put sections 2–9 in a table of the 15 with the most waste.
+ * A section whose data is absent is left out; a fact that is unknown is one
+ * of the questions section 11 counts, never a 0. Every number is the facts
+ * sheet's (`session-facts.ts`) or the measure's that owns it.
  */
 
-import type { AnalystFinding, AnalystRunResult, AnalystRunSummary } from '@tangle-network/agent-eval/analyst'
-import type {
-  ExecutionReport,
-  ScalarDistribution,
-} from '@tangle-network/agent-eval/contract'
+import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { isInheritedSpan } from './adapters/provenance.js'
-import { ATTR, sessionIdFromAttributes, type SessionIdentityConflict } from './attributes.js'
-import { incompleteInputsNote, type UnavailableCapabilities } from './conformance.js'
-import { COST_LABEL, type UsageTotal } from './execution.js'
-import {
-  type FindingRejectionCounts,
-  type FindingRejectionReasons,
-  formatFindingRejections,
-} from './finding-rejections.js'
-import type { LoopConvergenceReport, SteeringChainReport } from './loop-analysis.js'
+import { ATTR, sessionIdFromAttributes } from './attributes.js'
+import type { CannotAnswer, SessionToolErrors, TraceInvestigationResult, UnverifiedClaim } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
-import type { PipelineReport } from './pipelines.js'
-import type { ReactionReport } from './reactions.js'
 import { describeSessionRelationship } from './session-relationship.js'
-import type { SessionWorkflowIssue, SessionWorkflowSummary } from './session-workflow.js'
+import {
+  minutesText,
+  renderFirstFailure,
+  sheetText,
+  topCounts,
+  utcMinute,
+  type SessionFacts,
+  type SessionTurnFact,
+} from './session-facts.js'
 import type { SessionCorruptionReceipt, SessionRef } from './types.js'
 
-const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 const CORRUPTION_RECEIPT_DISPLAY_LIMIT = 100
-const SOURCE_DISPLAY_LIMIT = 20
-const SEVERITY_BADGE: Record<string, string> = {
-  critical: '🔴 CRITICAL',
-  high: '🟠 HIGH',
-  medium: '🟡 MEDIUM',
-  low: '🔵 LOW',
-  info: 'ℹ️  INFO',
-}
-
-export interface ReportMeta {
-  harness: string
-  sessionCount: number
-  unassignedTraceCount?: number
-  spanCount: number
-  execution: ExecutionReport
-  /** The sessions' tokens and cost, summed from each session's facts: the numbers `traces facts` prints. */
-  usage?: UsageTotal
-  deterministic?: DeterministicSummary
-  sources?: readonly ReportSource[]
-  workflow?: SessionWorkflowSummary
-  /**
-   * Rendered trace-conformance section (see `src/conformance.ts`). Printed
-   * BEFORE the execution facts, because a reader who meets a 0-token table
-   * first and its explanation last reads a measurement gap as a measurement.
-   */
-  conformance?: string
-  /**
-   * Capabilities the trace cannot support → the trace's own reason. Every
-   * section computed from a missing field is marked AT THE TABLE with this;
-   * a conformance section that only narrates, while the tables below print
-   * confident totals, is worse than no conformance section at all.
-   */
-  unavailableCapabilities?: UnavailableCapabilities
-  /** Findings the evidence gate refused, by analyst ID and reason. */
-  findingRejections?: FindingRejectionCounts
-}
 
 export interface ReportSource {
   sessionId: string
@@ -88,10 +59,8 @@ export interface ReportSource {
 }
 
 /**
- * Build the report-source header row for one parsed session: subject line from
- * the first human prompt, parent/child relationship, and any corruption
- * receipts. Every span-consuming surface (CLI report, bundle) derives its
- * source identity through here so the same session always reads the same.
+ * The source row for one parsed session: subject line from the first human
+ * prompt, parent/child relationship, and any corruption receipts.
  */
 export function sessionReportSource(
   ref: SessionRef,
@@ -144,802 +113,325 @@ export function sessionReportSource(
   }
 }
 
-export interface DeterministicSummary {
-  stuckLoops: number
-  reactionSignals: number
-  failedRuns: number
-  totalSignals: number
+/** The most lines `traces analyze` prints for any selection. */
+export const ANALYZE_TEXT_LINES = 40
+
+/** Sessions the table of a several-session selection lists. */
+const TABLE_SESSIONS = 15
+
+const SEVERITY_LABEL: Readonly<Record<AnalystFinding['severity'], string>> = {
+  critical: 'CRIT',
+  high: 'HIGH',
+  medium: 'MED',
+  low: 'LOW',
+  info: 'INFO',
 }
 
-function deterministicSummaryText(summary: DeterministicSummary): string {
-  const parts: string[] = []
-  if (summary.stuckLoops > 0) parts.push(`${summary.stuckLoops} stuck loop(s)`)
-  if (summary.reactionSignals > 0) parts.push(`${summary.reactionSignals} human reaction signal(s)`)
-  if (summary.failedRuns > 0) parts.push(`${summary.failedRuns} failed run(s)`)
-  if (parts.length === 0) return '0 deterministic signals'
-  if (parts.length === 1) return parts[0]!
-  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+function plural(count: number, noun: string, many = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : many}`
 }
 
-function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
-  return count === 1 ? singular : pluralForm
+const short = (id: string): string => id.slice(0, 8)
+
+/** `48h 29m`, `42 min`, `18 s`: an elapsed time a person reads at a glance. */
+export function elapsedText(ms: number): string {
+  const minutes = ms / 60_000
+  if (minutes < 60) return minutesText(minutes)
+  const whole = Math.round(minutes)
+  return `${Math.floor(whole / 60)}h ${whole % 60}m`
 }
 
-function workflowIssueText(issue: SessionWorkflowIssue): string {
-  if (issue.kind === 'cycle') return `Cycle: ${issue.sessionIds.map((id) => `\`${tableCell(id)}\``).join(' -> ')}`
-  if (issue.kind === 'unresolved-parent-task') {
-    return `Could not resolve parent task for child \`${tableCell(issue.childSessionId)}\` ` +
-      `in \`${tableCell(issue.parentSessionId)}\`: ${issue.reason}`
+function costText(facts: SessionFacts): string {
+  return facts.cost.usd === null
+    ? `cost unknown: ${sheetText(facts.cost.unavailable ?? 'no reason recorded', 60)}`
+    : `$${facts.cost.usd.toFixed(facts.cost.usd < 1 ? 4 : 2)} ${facts.cost.label}`
+}
+
+/** `10-14 10:00→10-16 10:29 UTC, 48h 29m`, or null when the session's times are unknown. */
+function windowText(first: string | null, last: string | null): string | null {
+  if (first === null || last === null) return null
+  const [from, to] = [utcMinute(first), utcMinute(last)]
+  const elapsed = Date.parse(last) - Date.parse(first)
+  return `${from}→${from.slice(0, 5) === to.slice(0, 5) ? to.slice(6) : to} UTC${Number.isFinite(elapsed) && elapsed > 0 ? `, ${elapsedText(elapsed)}` : ''}`
+}
+
+function placeOf(facts: SessionFacts): string | undefined {
+  const repo = facts.repo.value
+  return repo
+    ? `${repo.repository.split('/').at(-1)}${repo.branch ? ` (${repo.branch})` : ''}`
+    : facts.cwd.value?.split('/').filter(Boolean).at(-1)
+}
+
+/** 1: `a263bb08 claude-code · agent-dev-container (main) · 10-14 10:00→10-16 10:29 UTC, 48h 29m · active 3.1 h · $519.00 list price (Router rates)`. */
+function header(facts: SessionFacts): string {
+  const parts = [`${short(facts.sessionId ?? facts.traceId)} ${facts.harness ?? 'unknown harness'}`]
+  const place = placeOf(facts)
+  if (place) parts.push(place)
+  const window = windowText(facts.firstRecordAt.value, facts.lastRecordAt.value)
+  if (window) parts.push(window)
+  if (facts.measurements.activeMinutes.value !== null) parts.push(`active ${minutesText(facts.measurements.activeMinutes.value)}`)
+  if (facts.parentSessionId) parts.push(`child of ${short(facts.parentSessionId)}`)
+  parts.push(costText(facts))
+  return parts.join(' · ')
+}
+
+/** 2: the first turn a person typed, and how many followed it. */
+function askedLine(facts: SessionFacts): string | null {
+  const turns = facts.humanTurns.value
+  if (turns === null) return null
+  const [first, ...rest] = turns
+  if (!first) return null
+  return `asked "${sheetText(first.text, 110)}"${rest.length > 0 ? ` (+${plural(rest.length, 'more human turn')})` : ''}`
+}
+
+/** 3: the first failure, when the spans name one. */
+function firstFailureLine(facts: SessionFacts): string | null {
+  const failure = facts.firstFailure
+  return failure.status === 'found' || failure.status === 'ambiguous' ? `first failure ${renderFirstFailure(failure)}` : null
+}
+
+/** 4: failing streaks, then rework and rollbacks, from the facts sheet's waste measures. */
+function commandLines(facts: SessionFacts): string[] {
+  const waste = facts.measurements.waste
+  const lines: string[] = []
+  const streaks = [...(waste.failingStreaks.value ?? [])].sort((a, b) => b.minutes - a.minutes || b.runs - a.runs)
+  if (streaks.length > 0) {
+    const shown = streaks.slice(0, 2).map((streak) => {
+      const command = streak.command === null ? `a ${streak.tool} command` : `\`${sheetText(streak.command, 60)}\``
+      return `${command} ${streak.runs}× in a row (${minutesText(streak.minutes)}, ${utcMinute(streak.at).slice(6)}, span ${streak.spanIds[0]})`
+    })
+    lines.push(`failing commands ${streaks.length}: ${shown.join(' · ')}${streaks.length > 2 ? ` · +${streaks.length - 2} more` : ''}`)
   }
-  if (issue.kind === 'parent-conflict') {
-    return `Parent conflict for \`${tableCell(issue.sessionId)}\`: declared ` +
-      `${issue.declaredParentSessionId ? `\`${tableCell(issue.declaredParentSessionId)}\`` : 'none'}, ` +
-      `referenced by ${issue.referencedParentSessionIds.length > 0
-        ? issue.referencedParentSessionIds.map((id) => `\`${tableCell(id)}\``).join(', ')
-        : 'none'}`
-  }
-  if (issue.kind === 'unjoined-child') {
-    return `Unjoined child \`${tableCell(issue.agentPath)}\` spawned by ` +
-      `\`${tableCell(issue.parentSessionId)}\`: ${issue.reason}` +
-      (issue.candidates ? `; candidates: ${issue.candidates.map((id) => `\`${tableCell(id)}\``).join(', ')}` : '')
-  }
-  const paths = issue.kind === 'ambiguous-session'
-    ? `; candidates: ${issue.paths.map((path) => `\`${tableCell(path)}\``).join(', ')}`
-    : ''
-  return `${issue.kind === 'missing-session' ? 'Missing' : 'Ambiguous'} session ` +
-    `\`${tableCell(issue.sessionId)}\`, referenced as ${issue.relation} by ` +
-    `\`${tableCell(issue.referencedBySessionId)}\`${paths}`
+  const repeated = waste.repeatedCommands.value
+  const rollbacks = waste.rollbacks.value ?? 0
+  const rework: string[] = []
+  if (repeated && repeated.commands > 0) rework.push(`${plural(repeated.commands, 'command')} rerun, ${plural(repeated.extraRuns, 'extra run')}`)
+  if (rollbacks > 0) rework.push(`${plural(rollbacks, 'revert or reset --hard', 'reverts or resets --hard')}`)
+  if (rework.length > 0) lines.push(`repeated ${rework.join(' · ')}`)
+  return lines
 }
 
-function tableCell(value: string): string {
-  return value.replace(/\s+/g, ' ').replaceAll('|', '\\|').trim()
+/** 5: the session's own failed tool calls, clustered by tool and first line of error. */
+function toolErrorLine(errors: SessionToolErrors | undefined): string | null {
+  if (!errors || errors.errors === 0) return null
+  const clusters = errors.clusters.slice(0, 3).map((cluster) => `${cluster.tool} ×${cluster.count} "${sheetText(cluster.error, 50)}" (span ${cluster.spanIds[0]})`)
+  return `tool errors ${errors.errors}/${errors.calls}: ${clusters.join(' · ')}`
 }
 
-const ANALYST_DETAIL_MAX_CHARS = 240
+/** 6: stalls of 10 minutes or more that no turn ended, the longest first. */
+function stallLine(facts: SessionFacts): string | null {
+  const stalls = facts.measurements.waste.stalls.value ?? []
+  if (stalls.length === 0) return null
+  const total = stalls.reduce((sum, stall) => sum + stall.minutes, 0)
+  const shown = [...stalls].sort((a, b) => b.minutes - a.minutes).slice(0, 2)
+    .map((stall) => `${utcMinute(stall.at).slice(6)} ${stall.kind} ${minutesText(stall.minutes)} (span ${stall.spanId})`)
+  return `stalls ${stalls.length} ≥ 10 min, ${minutesText(total)}: ${shown.join(' · ')}${stalls.length > 2 ? ` · +${stalls.length - 2} more` : ''}`
+}
 
-/** Room the condensed engine error keeps when a rejection summary shares the cell. */
-const ANALYST_DETAIL_MIN_ERROR_CHARS = 120
+/** One quoted turn of section 7, with the claim it answered when it followed one. */
+function signalQuote(turn: SessionTurnFact): string {
+  const when = utcMinute(turn.at).slice(6)
+  if (turn.signals.includes('interrupt')) return `  ${when} after an interrupt: "${sheetText(turn.text, 90)}"`
+  if (turn.signals.includes('rejected-tool')) return `  ${when} after a rejected tool call: "${sheetText(turn.text, 90)}"`
+  return `  ${when} "${sheetText(turn.text, 60)}" after the claim "${sheetText(turn.answered ?? '', 60)}"`
+}
 
 /**
- * Failure-reason marker printed by newer (currently unreleased) agent-eval
- * bridges. The pinned agent-eval-rpc release never emits it, so the head+tail
- * condensation below is the supported path today — but skew failures come
- * precisely from mismatched newer bridges, which is when the marker appears.
+ * 7: interrupts, rejected tool calls, and turns typed right after a completion
+ * claim. Step 10 measured these against the lexical baseline on labelled
+ * turns: a turn after a claim is a correction at about the base rate, so they
+ * are reported as what they are, never as corrections.
  */
-const BRIDGE_FAILURE_MARKER = 'DSPY-BRIDGE-FAILURE:'
-
-/**
- * Condense an analyst engine error to one actionable line. The bridge's
- * `DSPY-BRIDGE-FAILURE:` reason wins when present; otherwise keep head AND
- * tail, because a Python traceback names its terminal exception at the end —
- * head-only truncation would cut exactly the part worth reading. Slicing is
- * code-point-safe so a boundary never splits a surrogate pair.
- */
-export function condenseAnalystError(raw: string, maxChars: number): string {
-  const flat = raw.replace(/\s+/g, ' ').trim()
-  const marker = flat.indexOf(BRIDGE_FAILURE_MARKER)
-  let text = flat
-  if (marker >= 0) {
-    const fromMarker = flat.slice(marker)
-    const traceback = fromMarker.indexOf(' Traceback (most recent call last)')
-    text = traceback > 0 ? fromMarker.slice(0, traceback) : fromMarker
-  }
-  const chars = [...text]
-  if (chars.length <= maxChars) return text
-  const headChars = Math.floor(maxChars * 0.4)
-  return `${chars.slice(0, headChars).join('')} … ${chars.slice(chars.length - (maxChars - headChars)).join('')}`
+function interruptLines(facts: SessionFacts): string[] {
+  const turns = facts.humanTurns.value ?? []
+  const with_ = (signal: SessionTurnFact['signals'][number]): SessionTurnFact[] => turns.filter((turn) => turn.signals.includes(signal))
+  const interrupts = with_('interrupt')
+  const rejected = with_('rejected-tool')
+  const afterClaim = with_('after-claim')
+  if (interrupts.length + rejected.length + afterClaim.length === 0) return []
+  const quoted = [...new Set([...interrupts, ...rejected, ...afterClaim])].slice(0, 3)
+  return [
+    `Interrupts and rejections: ${plural(interrupts.length, 'turn')} after an interrupt · ${plural(rejected.length, 'turn')} after a rejected tool call · ${plural(afterClaim.length, 'turn')} right after a completion claim`,
+    ...quoted.map(signalQuote),
+  ]
 }
 
-/**
- * Why a failed/skipped analyst produced nothing, condensed to one table cell.
- * Failed engine runs die with the whole bridge stderr in the error message;
- * without this cell the report scores the analyst without saying why.
- */
-export function analystRunDetail(summary: AnalystRunSummary, rejections?: FindingRejectionReasons): string {
-  const raw = summary.status === 'failed' && summary.error
-    ? [summary.error.class, summary.error.message].map((part) => part.trim()).filter(Boolean).join(': ')
-    : summary.status === 'skipped' && summary.reason
-      ? summary.reason
-      : ''
-  // One budget for the whole cell. The gate's reason text comes from the
-  // engine and is not bounded at its source, so it is capped first and the
-  // condensed error takes what is left; the cell keeps the length
-  // ANALYST_DETAIL_MAX_CHARS names whether or not both parts are present.
-  const rejectionRoom = raw ? ANALYST_DETAIL_MAX_CHARS - ANALYST_DETAIL_MIN_ERROR_CHARS - 2 : ANALYST_DETAIL_MAX_CHARS
-  const rejected = truncateChars(formatFindingRejections(rejections), rejectionRoom)
-  const detail = condenseAnalystError(raw, ANALYST_DETAIL_MAX_CHARS - (rejected ? rejected.length + 2 : 0))
-  const cell = tableCell([detail, rejected].filter(Boolean).join('; '))
-  return cell === '' ? '—' : cell
+/** 8: completion claims after an edit with no check since, the latest first. */
+function claimLine(claims: readonly UnverifiedClaim[]): string | null {
+  if (claims.length === 0) return null
+  const shown = claims.slice(-2).reverse().map((claim) => `${utcMinute(claim.at).slice(6)} "${sheetText(claim.text, 70)}" (span ${claim.spanId})`)
+  return `unverified claims ${claims.length}: ${shown.join(' · ')}`
 }
 
-/** Code-point-safe truncation, so a boundary never splits a surrogate pair. */
-function truncateChars(text: string, maxChars: number): string {
-  const chars = [...text]
-  if (chars.length <= maxChars) return text
-  return `${chars.slice(0, Math.max(0, maxChars - 1)).join('')}…`
+/** PR numbers as `#12 #13`, at most `keep` of them, then how many more. */
+function prList(entries: readonly { readonly identifier: string | null }[], keep = 6): string {
+  const ids = entries.map((entry) => entry.identifier === null ? 'unnumbered' : /^\d+$/u.test(entry.identifier) ? `#${entry.identifier}` : sheetText(entry.identifier, 30))
+  return `${entries.length}${ids.length > 0 ? ` (${ids.slice(0, keep).join(' ')}${ids.length > keep ? ` +${ids.length - keep}` : ''})` : ''}`
 }
 
-function count(value: number): string {
-  return Math.round(value).toLocaleString('en-US')
+/** 9: pull requests, when the session opened or merged any. */
+function prLine(facts: SessionFacts): string | null {
+  const prs = facts.pullRequests.value
+  if (prs === null || prs.created.length + prs.merged.length === 0) return null
+  const files = facts.changedFiles.value === null ? '' : ` · changed ${plural(facts.changedFiles.value.length, 'file')}`
+  return `PRs opened ${prList(prs.created)} · merged ${prList(prs.merged)}${files}`
 }
 
-function decimal(value: number, digits = 1): string {
-  return value.toLocaleString('en-US', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
+/** The span ids a finding cites: its span evidence, else the first and last span a metric names. */
+function citedSpans(finding: AnalystFinding): string[] {
+  const fromUris = finding.evidence_refs.flatMap((ref) => {
+    const match = /\/span\/([^/]+)$/u.exec(ref.uri)
+    return match ? [decodeURIComponent(match[1]!)] : []
+  })
+  if (fromUris.length > 0) return [...new Set(fromUris)]
+  return finding.evidence_refs.flatMap((ref) => {
+    if (!ref.excerpt?.startsWith('{')) return []
+    try {
+      const parsed = JSON.parse(ref.excerpt) as Record<string, unknown>
+      return [parsed.first_span_id, parsed.last_span_id].filter((id): id is string => typeof id === 'string')
+    } catch {
+      return []
+    }
   })
 }
 
-function measured(value: number | null, render: (captured: number) => string): string {
-  return value === null ? 'not captured' : render(value)
+function findingLine(finding: AnalystFinding, sessions: number): string {
+  const spans = citedSpans(finding)
+  const session = sessions > 1 && typeof finding.metadata?.sessionId === 'string' ? `${short(finding.metadata.sessionId)} ` : ''
+  const cite = spans.length > 0 ? ` (span${spans.length > 1 ? 's' : ''} ${spans.slice(0, 2).join(', ')}${spans.length > 2 ? ', …' : ''})` : ''
+  return `  ${SEVERITY_LABEL[finding.severity].padEnd(4)} ${session}${finding.subject ?? finding.area}: ${sheetText(finding.claim, 110)}${cite}`
 }
 
-function distributionRow(label: string, distribution: ScalarDistribution, unit = ''): string {
-  if (distribution.n === 0) return `| ${label} | 0 | not captured | not captured | not captured | not captured | not captured |`
-  const value = (number: number | null) => measured(number, (captured) => `${decimal(captured)}${unit}`)
-  return `| ${label} | ${count(distribution.n)} | ${value(distribution.min)} | ${value(distribution.mean)} | ${value(distribution.p50)} | ${value(distribution.p95)} | ${value(distribution.max)} |`
-}
-
-function analysisCost(result: AnalystRunResult): string {
-  const cost = `$${result.total_cost_usd.toFixed(4)}`
-  if (result.total_cost_provenance?.kind === 'observed') return `Analysis cost: ${cost} observed.`
-  if (result.total_cost_provenance?.kind === 'estimated') return `Analysis cost: ${cost} estimated.`
-  return `Known analysis cost: ${cost}; additional cost was not captured.`
-}
-
-/** Push an incomplete-inputs marker for `capability`, if it is unavailable. */
-function pushGate(lines: string[], unavailable: UnavailableCapabilities | undefined, capability: string): void {
-  const note = incompleteInputsNote(unavailable, capability)
-  if (note === '') return
-  lines.push(note)
-  lines.push('')
-}
-
-/**
- * Every capability a table's numbers depend on, marked before the table.
- *
- * A table gated on ONE of its inputs is a table that prints confident numbers
- * whenever the OTHER input is the missing one — which is how a report came to
- * say "latency-analysis unavailable" at the top and then print a mean-latency
- * column and a `279,042,860ms` round duration with no marker on either. Any
- * table carrying a duration lists `latency-analysis` here, not only the
- * capability that decides whether the table appears at all.
- */
-function pushGates(
-  lines: string[],
-  unavailable: UnavailableCapabilities | undefined,
-  capabilities: readonly string[],
-): void {
-  for (const capability of capabilities) pushGate(lines, unavailable, capability)
-}
-
-/**
- * A duration cell for a table whose latency inputs are incomplete. The number
- * is withheld rather than printed with a warning forty lines away: a millisecond
- * count computed from spans that failed their own timestamp check is not a
- * measurement of anything, and printing it invites exactly one reading.
- */
-function latencyCell(
-  unavailable: UnavailableCapabilities | undefined,
-  render: () => string,
-): string {
-  return unavailable?.has('latency-analysis') === true ? 'not measurable' : render()
-}
-
-/**
- * A round-over-round verdict for a trace whose loop inputs are incomplete,
- * withheld for the same reason a duration is.
- *
- * `loop-convergence` unavailable is not a thinner answer, it is no answer. Its
- * commonest cause is every span declaring `agent.loop.iteration: 1`: there is
- * one round, and a trend computed across it compares a series to itself. A word
- * like `plateaued` in a Trend column is read as the finding, whatever marker
- * sits above the table — so the word does not get printed.
- */
-function trendCell(
-  unavailable: UnavailableCapabilities | undefined,
-  render: () => string,
-): string {
-  return unavailable?.has('loop-convergence') === true ? 'not measurable' : render()
-}
-
-export function renderExecution(
-  report: ExecutionReport,
-  unavailable?: UnavailableCapabilities,
-): string {
-  const execution = report.execution
-  const lines = ['## execution facts', '']
-  lines.push(
-    `- **Sessions:** ${count(execution.durationMs.n)}  |  ` +
-      `**Model-call runs:** ${count(execution.modelCalls.runs)}  |  ` +
-      `**Model-call events:** ${count(execution.modelCalls.events)}  |  ` +
-      `**Sessions with execution errors:** ${count(execution.executionErrors.runs)}/${count(execution.executionErrors.reportingRuns)} ` +
-      `(${measured(execution.executionErrors.fraction, (fraction) => `${decimal(fraction * 100, 2)}%`)})`,
-  )
-  lines.push(
-    `- **Terminal outcomes:** ${count(execution.terminalOutcomes.succeeded)} succeeded  |  ` +
-      `${count(execution.terminalOutcomes.failed)} failed  |  ` +
-      `${count(execution.terminalOutcomes.cancelled)} cancelled  |  ` +
-      `${count(execution.terminalOutcomes.incomplete)} incomplete  |  ` +
-      `${count(execution.terminalOutcomes.unknown)} unknown`,
-  )
-  lines.push('- **Task quality:** not measured; these traces do not include comparable task outcome labels.')
-  lines.push('')
-  pushGate(lines, unavailable, 'latency-analysis')
-  lines.push('| Time | Sessions measured | Min | Mean | p50 | p95 | Max |')
-  lines.push('|---|---:|---:|---:|---:|---:|---:|')
-  lines.push(distributionRow('Recorded session interval', execution.durationMs, 'ms'))
-  lines.push(distributionRow('Queue', execution.queueMs, 'ms'))
-  lines.push('')
-  lines.push('Recorded session interval is first-to-last trace time and can include idle time; it is not active agent runtime.')
-  lines.push('')
-  lines.push('| Model | Runs |')
-  lines.push('|---|---:|')
-  for (const model of execution.models) {
-    lines.push(`| \`${tableCell(model.model)}\` | ${count(model.runs)} |`)
-  }
-  lines.push('')
-  return lines.join('\n')
-}
-
-/**
- * The sessions' tokens and cost: the sum of each session's facts, so a reader
- * of `traces facts` and of this report sees one number.
- */
-export function renderUsage(usage: UsageTotal, unavailable?: UnavailableCapabilities): string {
-  const lines = [`### Tokens and cost${unavailable?.has('token-accounting') ? ' — inputs incomplete' : ''}`, '']
-  pushGate(lines, unavailable, 'token-accounting')
-  const { tokens } = usage
-  if (usage.unmeasured === usage.sessions) {
-    lines.push(`- **Tokens:** unknown — ${usage.tokensUnavailable}`)
-  } else {
-    lines.push(
-      `- **Tokens:** in ${count(tokens.input)} · out ${count(tokens.output)} · cache read ${count(tokens.cacheRead)} · ` +
-        `cache write ${count(tokens.cacheWrite)} (${count(tokens.modelCalls)} model calls; in is the whole prompt, cache included)`,
-    )
-    if (usage.unmeasured > 0) {
-      lines.push(`- **Sessions with no token counts:** ${count(usage.unmeasured)}, left out of the totals: ${usage.tokensUnavailable}`)
-    }
-  }
-  lines.push(usage.usd === null
-    ? `- **Cost:** unknown — ${usage.costUnavailable}`
-    : `- **Cost:** $${usage.usd.toFixed(6)} ${COST_LABEL}`)
-  lines.push('')
-  return lines.join('\n')
-}
-
-export function summarizeDeterministicSignals(
-  pipelines: PipelineReport,
-  reactions: ReactionReport,
-): DeterministicSummary {
-  const stuckLoops = pipelines.stuckLoops.findings.length
-  const reactionSignals = Object.values(reactions.signals).reduce((total, count) => total + count, 0)
-  const failedRuns = pipelines.failureClusters.totalFailures
-  return {
-    stuckLoops,
-    reactionSignals,
-    failedRuns,
-    totalSignals: stuckLoops + reactionSignals + failedRuns,
-  }
-}
-
-export function renderReport(result: AnalystRunResult, meta: ReportMeta): string {
+/** 10 and 11, fitted into the lines left. */
+function closingLines(result: TraceInvestigationResult, used: number): string[] {
+  const findings = result.packet.findings
   const lines: string[] = []
-  const findings = [...result.findings].sort(
-    (a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9),
-  )
-  const deterministic = meta.deterministic ?? { stuckLoops: 0, reactionSignals: 0, failedRuns: 0, totalSignals: 0 }
-  const findingSummary =
-    deterministic.totalSignals > 0
-      ? `${findings.length} ${plural(findings.length, 'finding')}; ` +
-        `${deterministic.totalSignals} raw deterministic ${plural(deterministic.totalSignals, 'signal')}`
-      : `${findings.length} ${plural(findings.length, 'finding')}`
-
-  lines.push(`# Trace analysis — ${meta.harness}`)
-  lines.push('')
-  const sessionSummary = meta.unassignedTraceCount
-    ? `${meta.sessionCount} identified session(s) + ${meta.unassignedTraceCount} ${plural(meta.unassignedTraceCount, 'trace')} without a single stable session identity`
-    : `${meta.sessionCount} session(s)`
-  lines.push(
-    `${sessionSummary}, ${meta.spanCount} spans → **${findingSummary}** ` +
-      `across ${result.per_analyst.length} analyst(s). ${analysisCost(result)}`,
-  )
-  lines.push('')
-  if (meta.unassignedTraceCount) {
-    lines.push(
-      `> ${meta.unassignedTraceCount} ${plural(meta.unassignedTraceCount, 'trace')} lacked a single stable session identity. ` +
-        'Their spans were analyzed but were not relabeled as sessions.',
-    )
-    lines.push('')
-  }
-
-  if (meta.workflow) {
-    const unjoined = meta.workflow.issues.filter((issue) => issue.kind === 'unjoined-child').length
-    lines.push(
-      `> Session workflow: ${meta.workflow.seedSessionIds.length} seed ` +
-        `${plural(meta.workflow.seedSessionIds.length, 'session')}, ${meta.sessionCount} resolved ` +
-        `${plural(meta.sessionCount, 'session')}, ${meta.workflow.issues.length} relationship ` +
-        `${plural(meta.workflow.issues.length, 'issue')}` +
-        // A child that could not be joined is named on the headline, never folded into a total a
-        // reader can skim past. "0 relationship issues" once stood beside three unjoined children.
-        (unjoined > 0 ? `, ${unjoined} unjoined child ${plural(unjoined, 'session')}` : '') +
-        '.',
-    )
-    lines.push('')
-    if (!meta.workflow.complete) {
-      for (const issue of meta.workflow.issues) lines.push(`- ${workflowIssueText(issue)}`)
-      lines.push('')
-    }
-  }
-
-  if (meta.conformance) {
-    lines.push(meta.conformance)
-    lines.push('')
-  }
-
-  lines.push(renderExecution(meta.execution, meta.unavailableCapabilities))
-  lines.push('')
-  if (meta.usage) lines.push(renderUsage(meta.usage, meta.unavailableCapabilities))
-
-  if (meta.sources && meta.sources.length > 0) {
-    lines.push('## Selected sessions')
-    lines.push('')
-    lines.push('| Role | Depth | Agent | Turn | Session ID | Parent session | Children | Integrity | Subject (first prompt line) | Source path |')
-    lines.push('|---|---:|---|---|---|---|---:|---|---|---|')
-    for (const source of meta.sources.slice(0, SOURCE_DISPLAY_LIMIT)) {
-      const corruptionCount = source.corruptionCount ?? source.corruptions?.length ?? 0
-      const integrity = source.integrity === 'degraded_not_lossless'
-        ? `degraded, not lossless (${corruptionCount} corrupt ${plural(corruptionCount, 'record')})`
-        : 'complete'
-      const agent = [source.agentNickname, source.agentRole, source.agentPath].filter(Boolean).join(' / ')
-      const turn = [source.taskScope, source.turnId].filter(Boolean).join(': ')
-      lines.push(
-        `| ${source.role} | ${source.depth ?? '-'} | ${tableCell(agent) || '-'} | ${tableCell(turn) || '-'} | ` +
-          `\`${tableCell(source.sessionId)}\` | ` +
-          `${source.parentSessionId ? `\`${tableCell(source.parentSessionId)}\`` : '—'} | ` +
-          `${source.childSessionIds?.length ?? 0} | ` +
-          `${integrity} | ` +
-          `${tableCell(source.subject) || '(no prompt captured)'} | \`${tableCell(source.path)}\` |`,
-      )
-    }
-    if (meta.sources.length > SOURCE_DISPLAY_LIMIT) {
-      lines.push(
-        `| ... | - | - | - | ${meta.sources.length - SOURCE_DISPLAY_LIMIT} additional sessions omitted | - | - | - | - | - |`,
-      )
-    }
-    lines.push('')
-    const childCount = meta.sources.filter((source) => source.role === 'child').length
-    if (childCount > 0 && !meta.workflow) {
-      lines.push(
-        `> Scope: ${childCount}/${meta.sources.length} selected session(s) are children. ` +
-          'Counts below describe only the selected files, not their parent operator sessions.',
-      )
-      lines.push('')
-    }
-
-    const totalCorruptionCount = meta.sources.reduce(
-      (total, source) => total + (source.corruptionCount ?? source.corruptions?.length ?? 0),
-      0,
-    )
-    const corruptions: SessionCorruptionReceipt[] = []
-    for (const source of meta.sources) {
-      for (const receipt of source.corruptions ?? []) {
-        if (corruptions.length === CORRUPTION_RECEIPT_DISPLAY_LIMIT) break
-        corruptions.push(receipt)
-      }
-      if (corruptions.length === CORRUPTION_RECEIPT_DISPLAY_LIMIT) break
-    }
-    if (totalCorruptionCount > 0) {
-      lines.push('## Source corruption receipts')
-      lines.push('')
-      lines.push(
-        '> Degraded, not lossless: every valid JSONL record was analyzed. ' +
-          'Malformed content is fingerprinted, not retained; exact bytes are retrievable only while ' +
-          'the local source file still contains that byte range.',
-      )
-      lines.push('')
-      for (const source of meta.sources) {
-        const count = source.corruptionCount ?? source.corruptions?.length ?? 0
-        if (count === 0) continue
-        const digest = source.corruptionDigest ? `, digest \`${source.corruptionDigest}\`` : ''
-        lines.push(`- Session \`${tableCell(source.sessionId)}\`: ${count} ${plural(count, 'receipt')}${digest}.`)
-      }
-      lines.push('')
-      if (corruptions.length > 0) {
-        lines.push('| Session ID | Source path | Line | Byte offset | Byte length | SHA-256 | Raw bytes |')
-        lines.push('|---|---|---:|---:|---:|---|---|')
-        for (const receipt of corruptions) {
-          lines.push(
-            `| \`${tableCell(receipt.sessionId)}\` | \`${tableCell(receipt.sourcePath)}\` | ` +
-              `${receipt.lineNumber} | ${receipt.byteOffset} | ${receipt.byteLength} | ` +
-              `\`${receipt.sha256}\` | local source only |`,
-          )
-        }
-        lines.push('')
-      }
-      const omitted = totalCorruptionCount - corruptions.length
-      if (omitted > 0) {
-        lines.push(
-          `_${omitted} additional ${plural(omitted, 'receipt')} omitted from this report; ` +
-            'all receipts remain in `source.corruption.receipt` child spans._',
-        )
-        lines.push('')
-      }
-    }
-  }
-
-  // Analyst run summary.
-  lines.push('| Analyst | Status | Findings | Latency | Detail |')
-  lines.push('|---|---|---|---|---|')
-  for (const s of result.per_analyst) {
-    lines.push(
-      `| \`${s.analyst_id}\` | ${s.status} | ${s.findings_count} | ${s.latency_ms}ms | ` +
-        `${analystRunDetail(s, meta.findingRejections?.[s.analyst_id])} |`,
-    )
-  }
-  lines.push('')
-
-  if (findings.length === 0 && deterministic.totalSignals === 0) {
-    lines.push('_No supported behavioral findings in the captured fields._')
-  } else if (findings.length === 0) {
-    lines.push(
-      `_No analyst findings. Deterministic checks found ${deterministicSummaryText(deterministic)}; see sections below._`,
-    )
+  if (findings.length > 0) {
+    const counts = (['critical', 'high', 'medium', 'low', 'info'] as const)
+      .map((severity) => [SEVERITY_LABEL[severity], findings.filter((finding) => finding.severity === severity).length] as const)
+      .filter(([, count]) => count > 0)
+      .map(([label, count]) => `${label} ${count}`)
+    lines.push(`findings ${findings.length} (${counts.join(', ')})`)
+    const room = ANALYZE_TEXT_LINES - used - lines.length - 1 - (result.cannotAnswer.length > 0 ? 1 : 0)
+    const shown = findings.length > room ? Math.max(0, room - 1) : findings.length
+    for (const finding of findings.slice(0, shown)) lines.push(findingLine(finding, result.facts.sessions.length))
+    if (shown < findings.length) lines.push(`  … ${findings.length - shown} more: --format json | jq .packet.findings`)
   } else {
-    const byArea = new Map<string, AnalystFinding[]>()
-    for (const f of findings) {
-      const arr = byArea.get(f.area) ?? []
-      arr.push(f)
-      byArea.set(f.area, arr)
-    }
-    for (const [area, arr] of byArea) {
-      lines.push(`## ${area} (${arr.length})`)
-      lines.push('')
-      for (const f of arr) {
-        lines.push(`### ${SEVERITY_BADGE[f.severity] ?? f.severity} — ${f.claim}`)
-        lines.push('')
-        if (f.subject) lines.push(`- **Subject:** \`${f.subject}\``)
-        lines.push(`- **Confidence:** ${f.confidence}`)
-        if (f.recommended_action) lines.push(`- **Fix:** ${f.recommended_action}`)
-        if (f.validation_plan) lines.push(`- **Check:** ${f.validation_plan}`)
-        for (const ev of f.evidence_refs.slice(0, 3)) {
-          const excerpt = ev.excerpt ? ` — \`${ev.excerpt.slice(0, 200)}\`` : ''
-          lines.push(`- **Evidence:** ${ev.kind} ${ev.uri}${excerpt}`)
-        }
-        lines.push('')
-      }
-    }
+    lines.push('findings none')
   }
-
-  return lines.join('\n')
+  if (result.cannotAnswer.length > 0) {
+    lines.push(`cannot answer ${plural(result.cannotAnswer.length, 'question')}: --format json | jq .cannotAnswer, or report.md under --out DIR`)
+  }
+  return lines
 }
 
-/**
- * Render the deterministic loop/stall/waste pipelines (agent-eval's shipped
- * detectors). This is the "is the agent stuck" view.
- */
-export function renderPipelines(pr: PipelineReport, unavailable?: UnavailableCapabilities): string {
-  const lines: string[] = ['## reliability, loops & waste (deterministic)', '']
-  // The tool table carries a mean-latency column, so it depends on BOTH.
-  pushGates(lines, unavailable, ['tool-usage', 'latency-analysis'])
-
-  lines.push(
-    `- **Terminal failures:** ${pr.failureClusters.totalFailures}/${pr.failureClusters.totalRuns} run(s)`,
-  )
-  if (pr.failureClusters.clusters.length > 0) {
-    lines.push('')
-    lines.push('| Failure class | Runs | Tool | Example trace | Example error |')
-    lines.push('|---|---:|---|---|---|')
-    for (const cluster of pr.failureClusters.clusters.slice(0, 10)) {
-      lines.push(
-        `| ${tableCell(cluster.failureClass)} | ${cluster.runCount} | ` +
-          `${cluster.toolName ? `\`${tableCell(cluster.toolName)}\`` : 'not captured'} | ` +
-          `${cluster.exampleRunId ? `\`${tableCell(cluster.exampleRunId)}\`` : 'not captured'} | ` +
-          `${tableCell(cluster.exampleError ?? 'not captured')} |`,
-      )
-    }
-    lines.push('')
-  }
-
-  if (pr.stuckLoops.findings.length === 0) {
-    lines.push('- **Stuck loops:** none (no tool called ≥3× with identical args in a short interval).')
-  } else {
-    lines.push(`- **Stuck loops:** ${pr.stuckLoops.findings.length} (${(pr.stuckLoops.affectedRunRatio * 100).toFixed(0)}% of runs affected)`)
-    for (const f of pr.stuckLoops.findings.sort((a, b) => b.occurrences - a.occurrences).slice(0, 10)) {
-      lines.push(`  - 🔁 \`${f.toolName}\` ×${f.occurrences} with identical args over ${(f.windowMs / 1000).toFixed(1)}s`)
-    }
-  }
-
-  const runsWithTools = pr.toolUse.filter((metrics) => metrics.totalCalls > 0)
-  if (runsWithTools.length > 0) {
-    let totalCalls = 0
-    let callsWithCapturedArgs = 0
-    let duplicateCalls = 0
-    let errorCalls = 0
-    let followedFailures = 0
-    const byTool = new Map<string, {
-      calls: number
-      captured: number
-      duplicates: number
-      errors: number
-      latencyMs: number
-    }>()
-    for (const metrics of runsWithTools) {
-      const toolStats = Object.values(metrics.byTool)
-      const duplicates = toolStats.length > 0
-        ? toolStats.reduce((total, stats) => total + stats.duplicates, 0)
-        : Math.round(metrics.duplicateRate * metrics.totalCalls)
-      const errors = toolStats.length > 0
-        ? toolStats.reduce((total, stats) => total + stats.errors, 0)
-        : Math.round(metrics.errorRate * metrics.totalCalls)
-      totalCalls += metrics.totalCalls
-      callsWithCapturedArgs += metrics.callsWithCapturedArgs
-      duplicateCalls += duplicates
-      errorCalls += errors
-      followedFailures += Math.round(metrics.retryRate * errors)
-      for (const [name, stats] of Object.entries(metrics.byTool)) {
-        const aggregate = byTool.get(name) ?? {
-          calls: 0,
-          captured: 0,
-          duplicates: 0,
-          errors: 0,
-          latencyMs: 0,
-        }
-        aggregate.calls += stats.calls
-        aggregate.captured += stats.callsWithCapturedArgs
-        aggregate.duplicates += stats.duplicates
-        aggregate.errors += stats.errors
-        aggregate.latencyMs += stats.avgLatencyMs * stats.calls
-        byTool.set(name, aggregate)
-      }
-    }
-    // Exact per-failure classification (from spans) outranks the derived
-    // retryRate estimate; the derived clause remains for hand-built reports.
-    const followUps = pr.failureFollowUps
-    let failureFollowUp = ''
-    if (followUps && followUps.failures > 0) {
-      const split = [
-        `${followUps.blind} blind (identical args)`,
-        `${followUps.adapted} adapted (changed args)`,
-      ]
-      if (followUps.argsUnknown > 0) split.push(`${followUps.argsUnknown} not comparable`)
-      const succeeded = followUps.followed > 0
-        ? `; ${followUps.followUpSucceeded}/${followUps.followed} follow-ups succeeded`
-        : ''
-      failureFollowUp = `; ${followUps.followed}/${followUps.failures} failed calls followed by another same-tool call (${(
-        (followUps.followed / followUps.failures) * 100
-      ).toFixed(0)}%) — ${split.join(', ')}${succeeded}`
-    } else if (errorCalls > 0) {
-      failureFollowUp = `; ${followedFailures}/${errorCalls} failed calls followed by another same-tool call (${(
-        (followedFailures / errorCalls) * 100
-      ).toFixed(0)}%)`
-    }
-    const duplicateSummary = callsWithCapturedArgs > 0
-      ? `${duplicateCalls}/${callsWithCapturedArgs} captured calls repeated exactly`
-      : 'exact repeats unavailable'
-    lines.push(
-      `- **Tool use:** ${totalCalls} calls across ${runsWithTools.length}/${pr.toolUse.length} traces; ` +
-        `${callsWithCapturedArgs}/${totalCalls} arguments captured; ${duplicateSummary}; ` +
-        `${errorCalls}/${totalCalls} failed${failureFollowUp}`,
-    )
-    if (followUps && followUps.blind > 0) {
-      const byTool = Object.entries(followUps.blindByTool)
-        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-        .map(([name, count]) => `\`${tableCell(name)}\` ×${count}`)
-      lines.push(`  - 🔁 Blind retries (same args re-sent after a failure): ${byTool.join(', ')}`)
-    }
-    if (byTool.size > 0) {
-      lines.push('')
-      lines.push('| Tool | Calls | Args captured | Exact repeats | Errors | Mean latency |')
-      lines.push('|---|---:|---:|---:|---:|---:|')
-      for (const [name, stats] of [...byTool].sort(
-        (left, right) => right[1].calls - left[1].calls || left[0].localeCompare(right[0]),
-      )) {
-        lines.push(
-          `| \`${tableCell(name)}\` | ${stats.calls} | ${stats.captured}/${stats.calls} | ` +
-            `${stats.duplicates}/${stats.captured} | ${stats.errors}/${stats.calls} | ` +
-            `${latencyCell(unavailable, () => `${(stats.latencyMs / stats.calls).toFixed(1)}ms`)} |`,
-        )
-      }
-    }
-  }
-  lines.push('')
-  return lines.join('\n')
-}
-
-const TREND_BADGE: Record<string, string> = {
-  improved: '📈 improved',
-  plateaued: '➖ plateaued',
-  regressed: '📉 regressed',
-  mixed: '🔀 mixed (peaked, then fell back)',
-  unscored: '· unscored',
-}
-
-const LOOP_DISPLAY_LIMIT = 20
-const EDGE_DISPLAY_LIMIT = 50
-
-/**
- * Round-over-round convergence: the reason a loop trace exists. A flat event
- * list can say what happened and in what order; only `agent.loop.iteration`
- * plus a verdict can say whether round N+1 was BETTER than round N.
- */
-export function renderLoopConvergence(
-  report: LoopConvergenceReport,
-  unavailable?: UnavailableCapabilities,
-): string {
-  const lines: string[] = ['## round-over-round convergence', '']
-  // The per-round table carries a Duration column, so it depends on BOTH.
-  pushGates(lines, unavailable, ['loop-convergence', 'latency-analysis'])
-  if (report.loops.length === 0) {
-    lines.push(
-      `- No rounds recorded: ${report.iterationSpans} span(s) carry \`agent.loop.iteration\`. ` +
-        'Without it a retry is indistinguishable from a first attempt, so improvement cannot be measured.',
-    )
-    lines.push('')
-    return lines.join('\n')
-  }
-
-  const byTrend = new Map<string, number>()
-  for (const loop of report.loops) byTrend.set(loop.trend, (byTrend.get(loop.trend) ?? 0) + 1)
-  lines.push(
-    `- **Loops:** ${report.loops.length} across ${report.iterationSpans} round span(s) — ` +
-      trendCell(unavailable, () => [...byTrend].map(([trend, n]) => `${n} ${trend}`).join(', ')),
-  )
-  lines.push('')
-  lines.push('| Loop | Trace | Rounds | Trend | Basis | Series |')
-  lines.push('|---|---|---:|---|---|---|')
-  for (const loop of report.loops.slice(0, LOOP_DISPLAY_LIMIT)) {
-    lines.push(
-      `| \`${tableCell(loop.loopId)}\` | \`${tableCell(loop.traceId)}\` | ${loop.iterations.length} | ` +
-        `${trendCell(unavailable, () => TREND_BADGE[loop.trend] ?? loop.trend)} | ${loop.basis} | ` +
-        // The series text ("score 0.4 → 0.9 across 3 graded round(s)") states the
-        // same verdict in prose; withholding only the badge would leave it standing.
-        `${trendCell(unavailable, () => tableCell(loop.detail))} |`,
-    )
-  }
-  if (report.loops.length > LOOP_DISPLAY_LIMIT) {
-    lines.push(`| ... | - | - | - | - | ${report.loops.length - LOOP_DISPLAY_LIMIT} more omitted |`)
-  }
-  lines.push('')
-
-  for (const loop of report.loops.slice(0, LOOP_DISPLAY_LIMIT)) {
-    lines.push(
-      `### loop \`${tableCell(loop.loopId)}\` — ` +
-        trendCell(unavailable, () => TREND_BADGE[loop.trend] ?? loop.trend),
-    )
-    lines.push('')
-    lines.push('| Round | Span | Outcome | Score | Graded by | Duration |')
-    lines.push('|---:|---|---|---:|---|---:|')
-    for (const round of loop.iterations) {
-      lines.push(
-        `| ${round.iteration} | \`${tableCell(round.spanId)}\` | ${round.outcome ?? 'not captured'} | ` +
-          `${round.score ?? 'not captured'} | ` +
-          `${round.verdictSpanId ? `\`${tableCell(round.verdictSpanId)}\`` : 'not captured'} | ` +
-          `${latencyCell(unavailable, () => (round.durationMs === null ? 'not captured' : `${count(round.durationMs)}ms`))} |`,
-      )
-    }
-    lines.push('')
-  }
-  return lines.join('\n')
-}
-
-/**
- * The steering chain. `parent_span_id` would claim round N+1 happened INSIDE
- * round N; the link says round N's verdict CAUSED it, which is the edge this
- * table follows — backwards from the caused work to the verdict that caused it.
- */
-export function renderSteeringChain(
-  report: SteeringChainReport,
-  unavailable?: UnavailableCapabilities,
-): string {
-  const lines: string[] = ['## steering chain (which verdict caused which retry)', '']
-  pushGate(lines, unavailable, 'steering-chain')
-  if (report.links === 0) {
-    lines.push(
-      '- No causal links recorded. Containment was captured; causality was not, so the chain from a ' +
-        'verdict to the round it steered cannot be followed.',
-    )
-    lines.push('')
-    return lines.join('\n')
-  }
-
-  lines.push(
-    `- **Links:** ${report.links} (${report.dangling} point at a span absent from this export) — ` +
-      Object.entries(report.byKind)
-        .sort((left, right) => right[1] - left[1])
-        .map(([kind, n]) => `${n} \`${kind}\``)
-        .join(', '),
-  )
-  lines.push('')
-  lines.push('| Caused round | Caused span | Link | Caused by | Its outcome | Its score |')
-  lines.push('|---|---|---|---|---|---:|')
-  for (const edge of report.edges.slice(0, EDGE_DISPLAY_LIMIT)) {
-    const cause = edge.resolved
-      ? `\`${tableCell(edge.causeName ?? edge.causeSpanId)}\``
-      : `\`${tableCell(edge.causeSpanId)}\` (absent from export)`
-    lines.push(
-      `| ${edge.effectIteration ?? '—'} | \`${tableCell(edge.effectName)}\` | \`${tableCell(edge.linkKind)}\` | ` +
-        `${cause} | ${edge.causeOutcome ?? 'not captured'} | ${edge.causeScore ?? 'not captured'} |`,
-    )
-  }
-  if (report.edges.length > EDGE_DISPLAY_LIMIT) {
-    lines.push(`| ... | - | - | ${report.edges.length - EDGE_DISPLAY_LIMIT} more omitted | - | - |`)
-  }
-  lines.push('')
-  return lines.join('\n')
-}
-
-const REACTION_BADGE: Record<string, string> = {
-  correction: 'correction',
-  frustration: 'frustration',
-  jargon: 'jargon-complaint',
-  structure: 'structure-complaint',
-  praise: 'praise',
-}
-
-function ratioStr(r: number | null): string {
-  if (r === null) return 'n/a (no reaction signals)'
-  if (!Number.isFinite(r)) return '∞ (corrective with zero praise)'
-  return `${r.toFixed(2)}:1`
-}
-
-function oneLine(s: string, n: number): string {
-  const t = s.replace(/\s+/g, ' ').trim()
-  return t.length > n ? `${t.slice(0, n)}…` : t
-}
-
-/**
- * Render the user-reaction analyst: how the real human reacted to the agent's
- * prose. Only `actor === 'human'` turns are counted (see actor tag) — agent-to-
- * agent and injected prompts are excluded.
- */
-export function renderReactions(rr: ReactionReport): string {
-  const lines: string[] = ['## user reactions (deterministic, human turns only)', '']
-  const total = Object.values(rr.signals).reduce((a, b) => a + b, 0)
-  if (rr.humanReactionTurns === 0) {
-    lines.push('- No human turns followed an assistant turn (nothing to classify).')
-    lines.push('')
-    return lines.join('\n')
-  }
-  lines.push(
-    `- **Reaction turns:** ${rr.humanReactionTurns} human turn(s) followed an assistant turn; ` +
-      `${total} carried a reaction signal.`,
-  )
-  lines.push(`- **Corrective-to-positive ratio:** ${ratioStr(rr.correctiveToPositiveRatio)}`)
-  lines.push('')
-  lines.push('| Signal | Count |')
-  lines.push('|---|---|')
-  for (const [k, v] of Object.entries(rr.signals)) {
-    if (v > 0) lines.push(`| ${REACTION_BADGE[k] ?? k} | ${v} |`)
-  }
-  lines.push('')
-  if (rr.triggerPairs.length > 0) {
-    lines.push('### top trigger pairs (assistant prose → human reaction)')
-    lines.push('')
-    for (const p of rr.triggerPairs) {
-      lines.push(`- **[${p.reactions.map((r) => REACTION_BADGE[r] ?? r).join(', ')}]**`)
-      lines.push(`  - assistant: \`${oneLine(p.assistant, 180)}\``)
-      lines.push(`  - human: \`${oneLine(p.human, 180)}\``)
-    }
-    lines.push('')
-  }
-  return lines.join('\n')
-}
-
-/** The traces left out of session grouping because their sources name different sessions; empty when there are none. */
-export function renderSessionIdentity(result: { readonly sessionIdentityConflicts: readonly SessionIdentityConflict[] }): string {
-  const conflicts = result.sessionIdentityConflicts
-  if (conflicts.length === 0) return ''
-  const displayed = conflicts.slice(0, SOURCE_DISPLAY_LIMIT)
-  const details = displayed
-    .map((conflict) => `\`${conflict.traceId}\` (${conflict.sessionIds.map((id) => `\`${id}\``).join(', ')})`)
-    .join('; ')
-  const omitted = conflicts.length - displayed.length
+function singleSession(result: TraceInvestigationResult, facts: SessionFacts): string[] {
+  const sessionId = facts.sessionId ?? facts.traceId
   return [
-    '## session identity',
+    header(facts),
+    askedLine(facts),
+    firstFailureLine(facts),
+    ...commandLines(facts),
+    toolErrorLine(result.measures.toolErrors.find((entry) => entry.sessionId === sessionId)),
+    stallLine(facts),
+    ...interruptLines(facts),
+    claimLine(result.measures.unverifiedClaims.filter((claim) => claim.sessionId === sessionId)),
+    prLine(facts),
+  ].filter((line): line is string => line !== null)
+}
+
+function sum(values: readonly (number | null)[]): number {
+  return values.reduce<number>((total, value) => total + (value ?? 0), 0)
+}
+
+/** 1 for several sessions: counts per harness, the window, total cost, waste hours and interrupts. */
+function fleetHeader(result: TraceInvestigationResult): string[] {
+  const sessions = result.facts.sessions
+  const byHarness: Record<string, number> = {}
+  for (const facts of sessions) byHarness[facts.harness ?? 'unknown'] = (byHarness[facts.harness ?? 'unknown'] ?? 0) + 1
+  const firsts = sessions.map((facts) => facts.firstRecordAt.value).filter((value): value is string => value !== null).sort()
+  const lasts = sessions.map((facts) => facts.lastRecordAt.value).filter((value): value is string => value !== null).sort()
+  const unpriced = sessions.filter((facts) => facts.cost.usd === null).length
+  const priced = sum(sessions.map((facts) => facts.cost.usd))
+  const cost = unpriced === sessions.length
+    ? 'cost unknown'
+    : `$${priced.toFixed(2)} list price (Router rates)${unpriced > 0 ? `, ${unpriced} unpriced` : ''}`
+  const wasteKnown = sessions.filter((facts) => facts.measurements.waste.minutes !== null)
+  const waste = wasteKnown.length === 0
+    ? 'waste unknown'
+    : `waste ${(sum(wasteKnown.map((facts) => facts.measurements.waste.minutes)) / 60).toFixed(1)} h${wasteKnown.length < sessions.length ? ` (${sessions.length - wasteKnown.length} unknown)` : ''}`
+  const interrupts = sum(sessions.map((facts) => (facts.humanTurns.value ?? []).filter((turn) => turn.signals.includes('interrupt')).length))
+  const window = windowText(firsts[0] ?? null, lasts.at(-1) ?? null)
+  const lines = [[
+    `${plural(sessions.length, 'session')} (${topCounts(byHarness, 4)})`,
+    ...(window ? [window] : []),
+    cost,
+    waste,
+    `${plural(interrupts, 'interrupt')}`,
+  ].join(' · ')]
+  const unread = result.facts.selection?.unreadSessions ?? []
+  if (unread.length > 0) lines.push(`unreadable ${unread.length}: ${unread.slice(0, 2).map((entry) => `${short(entry.sessionId ?? entry.traceId ?? entry.source ?? '?')} ${sheetText(entry.reason, 50)}`).join(' · ')}`)
+  return lines
+}
+
+function cell(text: string, width: number): string {
+  return text.length > width ? `${text.slice(0, width - 1)}…` : text.padEnd(width)
+}
+
+/** 2–9 for several sessions: one row each for the 15 with the most waste. */
+function sessionTable(result: TraceInvestigationResult): string[] {
+  const sessions = [...result.facts.sessions].sort((a, b) =>
+    (b.measurements.waste.minutes ?? -1) - (a.measurements.waste.minutes ?? -1))
+  const rows = sessions.slice(0, TABLE_SESSIONS).map((facts) => {
+    const waste = facts.measurements.waste
+    const turns = facts.humanTurns.value ?? []
+    const prs = facts.pullRequests.value
+    const signals = turns.filter((turn) => turn.signals.length > 0).length
+    return [
+      cell(short(facts.sessionId ?? facts.traceId), 8),
+      cell(facts.harness ?? '?', 11),
+      cell(placeOf(facts) ?? '?', 22),
+      cell(facts.measurements.activeMinutes.value === null ? '?' : minutesText(facts.measurements.activeMinutes.value), 7),
+      cell(facts.cost.usd === null ? '?' : `$${facts.cost.usd.toFixed(2)}`, 8),
+      cell(waste.minutes === null ? '?' : minutesText(waste.minutes), 7),
+      cell(String((waste.failingStreaks.value ?? []).length), 7),
+      cell(String((waste.stalls.value ?? []).length), 6),
+      cell(String(signals), 7),
+      cell(prs === null ? '?' : `${prs.created.length}/${prs.merged.length}`, 5),
+      sheetText(turns[0]?.text ?? '', 40),
+    ].join(' ').trimEnd()
+  })
+  const head = ['session ', 'harness    ', 'repo                  ', 'active ', 'cost    ', 'waste  ', 'streaks', 'stalls', 'signals', 'PRs  ', 'asked'].join(' ')
+  return [head, ...rows, ...(sessions.length > TABLE_SESSIONS ? [`… ${sessions.length - TABLE_SESSIONS} more sessions: --format json | jq .facts.sessions`] : [])]
+}
+
+/** The `traces analyze` text: at most {@link ANALYZE_TEXT_LINES} lines. */
+export function renderAnalysis(result: TraceInvestigationResult): string {
+  const sessions = result.facts.sessions
+  const body = sessions.length === 1 ? singleSession(result, sessions[0]!) : [...fleetHeader(result), ...sessionTable(result)]
+  const lines = [...body, ...closingLines(result, body.length)]
+  return `${lines.slice(0, ANALYZE_TEXT_LINES).join('\n')}\n`
+}
+
+function cannotAnswerLine(entry: CannotAnswer): string {
+  return `- **${entry.analysis}**${entry.sessionId ? ` (session \`${entry.sessionId}\`)` : ''}: ${entry.reason}`
+}
+
+/** `report.md` under `analyze --out DIR`: the text, every finding in full, and every question the trace cannot answer, with its reason. */
+export function renderAnalysisReport(result: TraceInvestigationResult): string {
+  return [
+    '# traces analyze',
     '',
-    `- **Conflicting session identity:** ${conflicts.length} trace(s): ${details}` +
-      `${omitted > 0 ? `; ${omitted} more omitted from this report` : ''}`,
+    '```text',
+    renderAnalysis(result).trimEnd(),
+    '```',
+    '',
+    '## Findings',
+    ...result.packet.report.split('\n').filter((line) => !/^#{1,2} /u.test(line)),
+    '',
+    `## What these traces cannot answer (${result.cannotAnswer.length})`,
+    '',
+    ...(result.cannotAnswer.length > 0 ? result.cannotAnswer.map(cannotAnswerLine) : ['Nothing: every analysis had what it reads.']),
     '',
   ].join('\n')
 }

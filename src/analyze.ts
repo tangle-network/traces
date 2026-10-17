@@ -1,156 +1,132 @@
 /**
- * Run the agent-eval analyst suite over normalized spans.
+ * Run an analyst registry over normalized spans: the SDK's extension point.
  *
- * Spans → an in-memory analysis store (`analysis-store.ts`) →
- * `buildDefaultAnalystRegistry`. Nothing is written to disk. With no engine
- * the deterministic behavioral analyst runs alone (zero LLM, model-agnostic).
- * Supply `engine` to add the agentic RLM kinds (failure-mode / knowledge-gap /
- * knowledge-poisoning / improvement).
+ * Spans → agent-eval's in-memory analysis store (`analysis-store.ts`) → the
+ * registry. Nothing is written to disk, and nothing calls a model unless your
+ * registry does. With no registry, agent-eval's deterministic behavioral
+ * analyst runs alone (token growth, output decay, one-tool runs, no check
+ * call). It reads tool names, token counts and timing, never content, so its
+ * store is built from the spans' metadata only (`metadata-only.ts`), a
+ * fraction of the export's size. A registry you bring reads the whole spans.
  *
- * A tool that wants the spans as a file gets canonical OpenInference from
- * `traces convert X --out f`.
+ * `traces analyze` runs this, the shared rules (`pipelines.ts`) and the facts
+ * sheet; `traces ask` is the one command that calls a model.
  */
 
-import type { CostProvenance } from '@tangle-network/agent-eval'
-import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import {
   type AnalystFinding,
   type AnalystRegistry,
-  type AnalystRunSummary,
+  type AnalystRunResult,
   buildDefaultAnalystRegistry,
-  DEFAULT_TRACE_ANALYST_KINDS,
-  type TraceAnalysisEngine,
-  type TraceAnalystDefinition,
 } from '@tangle-network/agent-eval/analyst'
-import { openAgenticTraceStore, openDeterministicTraceStore } from './analysis-store.js'
-import { normalizeAnalystCitations } from './analyst-citations.js'
-import { summarizeSpanExecution } from './execution.js'
+import { openDeterministicTraceStore } from './analysis-store.js'
+import { metadataOnly } from './metadata-only.js'
 import type { OtlpSpan } from './otlp.js'
-import { withSessionFactsContext } from './session-facts.js'
+import { classifyLiveActions } from './pipelines.js'
 
 export interface AnalyzeOptions {
   /**
-   * Recursive analysis engine enabling the agentic analyst kinds. Omit →
-   * deterministic only. The engine's id, version, and model become the
-   * exact-run identity of every analyst it executes.
-   */
-  engine?: TraceAnalysisEngine
-  model?: string
-  /** USD cap across agentic analysts. */
-  budgetUsd?: number
-  /**
-   * Bring your own analyst suite. When set, this registry runs over the trace
-   * store INSTEAD of the built-in deterministic suite — the seam for running
-   * your own agents/detectors over sessions. Register custom `Analyst`s with
+   * Bring your own analyst suite. It runs over the trace store INSTEAD of the
+   * built-in deterministic suite: register custom `Analyst`s with
    * `@tangle-network/agent-eval`'s `AnalystRegistry`.
    */
   registry?: AnalystRegistry
-  /** Agentic registry override. Unlike `registry`, this runs after the local
-   * deterministic pass and receives its compact findings as prior context. */
-  agenticRegistry?: AnalystRegistry
-  /** Select a subset of agent-eval's maintained trace analyst kinds. */
-  agenticKinds?: readonly TraceAnalystDefinition[]
-  /**
-   * Supply the deterministic session-facts sheet to the agentic kinds as
-   * prepared context (default true). It costs nothing and removes the guessing
-   * the bounded trace tools force on a model that needs an exact count. Set
-   * false to measure an analyst without it.
-   *
-   * It applies only to definitions this call builds a registry from; a caller
-   * who brings `agenticRegistry` owns its own prepared context.
-   */
-  sessionFactsContext?: boolean
-  /** Compact deterministic findings that agents receive before reading spans. */
-  agenticPriorFindings?: readonly AnalystFinding[]
   runId?: string
   signal?: AbortSignal
   log?: (msg: string, fields?: Record<string, unknown>) => void
 }
 
 export interface AnalyzeResult {
-  execution: ExecutionReport
-  result: Awaited<ReturnType<ReturnType<typeof buildDefaultAnalystRegistry>['run']>>
-  /**
-   * Per-analyst summaries from the agentic pass alone (also merged into
-   * `result.per_analyst`). Present only when an agentic pass ran; callers use
-   * it to tell "the engine produced nothing" apart from "deterministic-only
-   * run", which the merged list cannot express.
-   */
-  agenticPerAnalyst?: readonly AnalystRunSummary[]
+  result: AnalystRunResult
 }
 
-function mergeCostProvenance(
-  first: CostProvenance | undefined,
-  second: CostProvenance | undefined,
-  totalCostUsd: number,
-): CostProvenance {
-  if (!first || !second || first.kind === 'uncaptured' || second.kind === 'uncaptured') {
-    return { kind: 'uncaptured', usd: null }
+/** Tool calls a run needs before "used one tool" or "never checked its work" says anything about it. */
+export const MIN_TOOL_CALLS_FOR_TOOL_SIGNALS = 10
+
+/** The behavioral signals that describe a run's tool use, and need {@link MIN_TOOL_CALLS_FOR_TOOL_SIGNALS} calls. */
+const TOOL_SIGNALS = new Set(['single-tool-dependency', 'no-self-verification'])
+
+/** Shell and code-mode tools: one name runs every command, so "only one tool" says nothing about what ran. */
+const SHELL_TOOLS = new Set(['bash', 'exec_command', 'exec', 'shell', 'local_shell', 'run_shell_command', 'terminal'])
+
+/** The signal's own evidence for one trace: `{tool, calls}` or `{tool_calls, verification_calls}`. */
+function evidenceOf(finding: AnalystFinding, traceId: string): Record<string, unknown> | null {
+  const ref = finding.evidence_refs.find((evidence) => evidence.uri.includes(`/trace/${encodeURIComponent(traceId)}/`))
+  if (!ref?.excerpt) return null
+  try {
+    return JSON.parse(ref.excerpt) as Record<string, unknown>
+  } catch {
+    return null
   }
-  return first.kind === 'estimated' || second.kind === 'estimated'
-    ? { kind: 'estimated', usd: totalCostUsd }
-    : { kind: 'observed', usd: totalCostUsd }
+}
+
+/**
+ * True when agent-eval's tool signal holds for this trace, read with what
+ * traces knows and the analyst cannot. The analyst names a run's tools; it
+ * fires from 3 calls, and a shell tool's name hides every command it ran.
+ *   - Under {@link MIN_TOOL_CALLS_FOR_TOOL_SIGNALS} calls, neither signal says anything.
+ *   - "One tool" of a shell tool is every command the run had: not a monoculture.
+ *   - "No check call" is false when the run's own shell commands ran a test,
+ *     build, typecheck or lint (`pipelines.ts`).
+ */
+function toolSignalHolds(finding: AnalystFinding, traceId: string, checked: ReadonlySet<string>): boolean {
+  const evidence = evidenceOf(finding, traceId)
+  const calls = evidence?.calls ?? evidence?.tool_calls
+  if (typeof calls !== 'number' || calls < MIN_TOOL_CALLS_FOR_TOOL_SIGNALS) return false
+  if (finding.subject === 'single-tool-dependency') return !(typeof evidence?.tool === 'string' && SHELL_TOOLS.has(evidence.tool.toLowerCase()))
+  return !checked.has(traceId)
+}
+
+/** Keep agent-eval's tool signals only for the traces where {@link toolSignalHolds}. */
+function withHeldToolSignals(result: AnalystRunResult, spans: readonly OtlpSpan[]): AnalystRunResult {
+  let checked: Set<string> | undefined
+  const checkedTraces = (): ReadonlySet<string> => {
+    if (checked) return checked
+    const byTrace = new Map<string, OtlpSpan[]>()
+    for (const span of spans) {
+      const group = byTrace.get(span.trace_id)
+      if (group) group.push(span)
+      else byTrace.set(span.trace_id, [span])
+    }
+    checked = new Set([...byTrace].filter(([, group]) => classifyLiveActions(group).some((action) => action.kind === 'verify')).map(([traceId]) => traceId))
+    return checked
+  }
+  const findings = result.findings.flatMap((finding) => {
+    if (!finding.subject || !TOOL_SIGNALS.has(finding.subject)) return [finding]
+    const traces = Array.isArray(finding.metadata?.evidence_trace_ids) ? finding.metadata.evidence_trace_ids as string[] : []
+    const kept = traces.filter((traceId) => toolSignalHolds(finding, traceId, checkedTraces()))
+    if (kept.length === 0) return []
+    if (kept.length === traces.length) return [finding]
+    return [{
+      ...finding,
+      claim: finding.claim.replace(/^\d+\//u, `${kept.length}/`),
+      evidence_refs: finding.evidence_refs.filter((evidence) => kept.some((traceId) => evidence.uri.includes(`/trace/${encodeURIComponent(traceId)}/`))),
+      metadata: { ...finding.metadata, evidence_trace_ids: kept, observed_trace_count: kept.length },
+    }]
+  })
+  const dropped = result.findings.length - findings.length
+  return dropped === 0 ? result : {
+    ...result,
+    findings,
+    per_analyst: result.per_analyst.map((summary) => ({
+      ...summary,
+      findings_count: findings.filter((finding) => finding.analyst_id === summary.analyst_id).length,
+    })),
+  }
 }
 
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
   const runId = opts.runId ?? `traces-${Date.now()}`
-  const execution = summarizeSpanExecution(spans, {
-    experimentId: runId,
-  })
-
-  // Deterministic pass — high ceiling so the behavioral analyst sees the whole
-  // trace. No LLM context to protect here. A caller-supplied registry (custom
-  // analysts / their own agents) runs here instead of the built-in suite.
-  const detStore = openDeterministicTraceStore(spans)
-  opts.signal?.throwIfAborted()
-  const detRegistry = opts.registry ?? buildDefaultAnalystRegistry({ registry: { log: opts.log } })
-  const result = await detRegistry.run(runId, { traceStore: detStore }, { signal: opts.signal })
-  opts.signal?.throwIfAborted()
-
-  // Agentic pass — default ceiling so each tool call stays context-bounded;
-  // the RLM kinds drill via viewSpans/searchTrace from a summary.
-  let agenticPerAnalyst: readonly AnalystRunSummary[] | undefined
-  if (opts.engine || opts.agenticRegistry) {
-    const agStore = openAgenticTraceStore(spans)
-    // The sheet reaches the model through each definition's `prepareContext`,
-    // which runs before the first model call. Its facts are exact where the
-    // bounded trace tools force a guess, and it costs nothing to compute. A
-    // caller-supplied agentic registry owns its own prepared context, so the
-    // sheet is built only when this call builds the registry.
-    const buildRegistry = (): AnalystRegistry => {
-      // The store above is built from these spans, so citations are
-      // normalized against exactly the content the evidence gate re-reads.
-      const kinds = normalizeAnalystCitations(opts.agenticKinds ?? DEFAULT_TRACE_ANALYST_KINDS, spans)
-      return buildDefaultAnalystRegistry({
-        engine: opts.engine!,
-        definitions: opts.sessionFactsContext === false ? kinds : withSessionFactsContext(kinds, spans),
-        includeBehavioral: false,
-        registry: { log: opts.log },
-      })
-    }
-    const agRegistry = opts.agenticRegistry ?? buildRegistry()
-    const agResult = await agRegistry.run(runId, { traceStore: agStore }, {
-      budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
-      chainFindings: true,
-      signal: opts.signal,
-      ...(opts.agenticPriorFindings?.length
-        ? { priorFindings: { '*': opts.agenticPriorFindings } }
-        : {}),
-    })
-    agenticPerAnalyst = [...agResult.per_analyst]
-    result.findings.push(...agResult.findings)
-    result.per_analyst.push(...agResult.per_analyst)
-    const totalCostUsd = result.total_cost_usd + agResult.total_cost_usd
-    result.total_cost_provenance = mergeCostProvenance(
-      result.total_cost_provenance,
-      agResult.total_cost_provenance,
-      totalCostUsd,
-    )
-    result.total_cost_usd = totalCostUsd
+  if (opts.registry) {
+    const result = await opts.registry.run(runId, { traceStore: openDeterministicTraceStore(spans) }, { signal: opts.signal })
+    opts.signal?.throwIfAborted()
+    return { result }
   }
-
+  const store = openDeterministicTraceStore(metadataOnly(spans))
   opts.signal?.throwIfAborted()
-  return { execution, result, ...(agenticPerAnalyst ? { agenticPerAnalyst } : {}) }
+  const result = await buildDefaultAnalystRegistry({ registry: { log: opts.log } }).run(runId, { traceStore: store }, { signal: opts.signal })
+  opts.signal?.throwIfAborted()
+  return { result: withHeldToolSignals(result, spans) }
 }

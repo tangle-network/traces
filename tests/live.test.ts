@@ -21,67 +21,49 @@ const ref: SessionRef = {
   mtimeMs: Date.parse('2026-01-01T00:00:10.000Z'),
 }
 
+/** A session that edits, fails one check three times in a row, edits again, and claims done with no check after. */
 function liveSpans(): OtlpSpan[] {
   const base = Date.parse('2026-01-01T00:00:00.000Z')
+  const at = (second: number) => new Date(base + second * 1_000).toISOString()
+  const tool = (spanId: string, second: number, name: string, input: Record<string, unknown>, status: 'OK' | 'ERROR' = 'OK') => span({
+    traceId: 'sess-live',
+    spanId,
+    parentSpanId: 'root',
+    name: `tool.${name}`,
+    kind: 'TOOL',
+    startTime: at(second),
+    endTime: at(second + 0.5),
+    service: 'synthetic',
+    tool: name,
+    status,
+    step: second,
+    extra: { 'input.value': JSON.stringify(input) },
+  })
   return [
     span({
       traceId: 'sess-live',
       spanId: 'root',
       name: 'session',
       kind: 'AGENT',
-      startTime: new Date(base).toISOString(),
+      startTime: at(0),
       service: 'synthetic',
       extra: { 'tangle.cwd': '/work/project' },
     }),
-    span({
-      traceId: 'sess-live',
-      spanId: 'test-1',
-      parentSpanId: 'root',
-      name: 'tool.bash',
-      kind: 'TOOL',
-      startTime: new Date(base + 1_000).toISOString(),
-      service: 'synthetic',
-      tool: 'bash',
-      content: 'pnpm test',
-      status: 'ERROR',
-      step: 1,
-    }),
-    span({
-      traceId: 'sess-live',
-      spanId: 'test-2',
-      parentSpanId: 'root',
-      name: 'tool.bash',
-      kind: 'TOOL',
-      startTime: new Date(base + 2_000).toISOString(),
-      service: 'synthetic',
-      tool: 'bash',
-      content: 'pnpm test',
-      status: 'ERROR',
-      step: 2,
-    }),
-    span({
-      traceId: 'sess-live',
-      spanId: 'test-3',
-      parentSpanId: 'root',
-      name: 'tool.bash',
-      kind: 'TOOL',
-      startTime: new Date(base + 3_000).toISOString(),
-      service: 'synthetic',
-      tool: 'bash',
-      content: 'pnpm test',
-      status: 'ERROR',
-      step: 3,
-    }),
+    tool('edit-1', 1, 'Edit', { file_path: '/work/project/src/parse.ts', old_string: 'a', new_string: 'b' }),
+    tool('test-1', 2, 'Bash', { command: 'pnpm test' }, 'ERROR'),
+    tool('test-2', 3, 'Bash', { command: 'pnpm test' }, 'ERROR'),
+    tool('test-3', 4, 'Bash', { command: 'pnpm test' }, 'ERROR'),
+    tool('edit-2', 5, 'Edit', { file_path: '/work/project/src/parse.ts', old_string: 'b', new_string: 'c' }),
     span({
       traceId: 'sess-live',
       spanId: 'claim-1',
       parentSpanId: 'root',
-      name: 'assistant.message',
-      kind: 'LLM',
-      startTime: new Date(base + 4_000).toISOString(),
+      name: 'message.assistant',
+      kind: 'CHAIN',
+      startTime: at(6),
       service: 'synthetic',
       content: 'Done. The bug is fixed and tests pass.',
-      step: 4,
+      step: 6,
     }),
   ]
 }
@@ -94,13 +76,15 @@ describe('live trace intelligence', () => {
     })
 
     expect(batch.kind).toBe('traces.live_batch')
-    expect(batch.toolCallCount).toBe(3)
+    expect(batch.toolCallCount).toBe(5)
     expect(batch.erroredToolCallCount).toBe(3)
     expect(batch.verificationCallCount).toBe(3)
+    expect(batch.changeCallCount).toBe(2)
     expect(batch.actionCounts.verify).toBe(3)
     expect(batch.actionCounts.claim).toBe(1)
     expect(batch.findings.map((f) => f.ruleId).sort()).toEqual([
       'completion-claim-without-verification',
+      'high-tool-error-rate',
       'same-failing-command',
       'verification-without-change',
     ])
@@ -111,7 +95,7 @@ describe('live trace intelligence', () => {
 
   it('classifies actions once and lets callers bring custom live analysts', () => {
     const actions = classifyLiveActions(liveSpans())
-    expect(actions.map((action) => action.kind)).toEqual(['other', 'verify', 'verify', 'verify', 'claim'])
+    expect(actions.map((action) => action.kind)).toEqual(['other', 'edit', 'verify', 'verify', 'verify', 'edit', 'claim'])
 
     const analyst: TraceLiveAnalyst = {
       id: 'custom-live',
@@ -146,7 +130,7 @@ describe('live trace intelligence', () => {
     expect(events[0]?.event).toBe('session')
     expect(events.filter((event) => event.event === 'span')).toHaveLength(liveSpans().length)
     expect(events.some((event) => event.event === 'analysis_batch')).toBe(true)
-    expect(events.filter((event) => event.event === 'finding')).toHaveLength(3)
+    expect(events.filter((event) => event.event === 'finding')).toHaveLength(4)
     const line = serializeTraceStreamEvent(events.find((event) => event.event === 'finding')!)
     expect(JSON.parse(line).finding.ruleId).toBeTruthy()
   })
@@ -181,6 +165,6 @@ describe('live trace intelligence', () => {
     expect(events.filter((event) => event.event === 'span')).toHaveLength(liveSpans().length)
     expect(events.filter((event) => event.event === 'analysis_batch')).toHaveLength(2)
     expect(events.filter((event) => event.event === 'report')).toHaveLength(2)
-    expect(events.filter((event) => event.event === 'finding')).toHaveLength(3)
+    expect(events.filter((event) => event.event === 'finding')).toHaveLength(4)
   })
 })
