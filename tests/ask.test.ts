@@ -218,7 +218,7 @@ describe('traces ask: a model endpoint that refuses', () => {
     ['a key that cannot pay', 'payment', 'gpt-5.6-luna', 'auth', 'the model endpoint refused the key (402: Inference requires verified paid access.'],
     ['a model the key cannot use, refused with a 503', 'pricing', 'gpt-6-luna', 'model', 'cannot serve --model gpt-6-luna (503: Trusted pricing is unavailable'],
     ['a completion from another model', 'substituted', 'glm-5.3', 'model', 'the endpoint served "accounts/fireworks/models/glm-5p3" for --model "glm-5.3"'],
-  ] as const)('stops every question at its first call on %s: exit 2, code %s, nothing retried', async (_case, reply, model, code, says) => {
+  ] as const)('stops every question at the first refused call on %s: exit 2 with its code, nothing retried', async (_case, reply, model, code, says) => {
     const out = join(dir, `refused-${reply}`)
     const questions = ['first', 'second', 'third', 'fourth', 'fifth'].flatMap((word) => ['--question', `Which command ran ${word}?`])
     const run = await ask(['ask', session.path, ...questions, '--model', model, '--budget', '2', '--out', out, '--format', 'json'], {
