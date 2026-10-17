@@ -1,5 +1,5 @@
 /**
- * `traces facts` turns: who typed each one, the reply, the correction signals,
+ * `traces facts` turns: who typed each one, the reply, the signals,
  * and `--format jsonl`, one row per typed turn. Spawned against the built CLI
  * on a synthetic home (`fixtures/conversation.ts`).
  */
@@ -68,7 +68,7 @@ describe('facts: who typed each turn', () => {
   })
 })
 
-describe('facts: replies and correction signals', () => {
+describe('facts: replies and signals', () => {
   it('pairs each turn with the agent message it answered and the first one after it', async () => {
     const [ask, correction, stop] = (await facts([fx.paths.claude]))[0]!.humanTurns.value!
     expect(ask).toMatchObject({ answered: null, reply: TEXT.claim })
@@ -103,7 +103,7 @@ describe('facts --format jsonl', () => {
     expect(rows.map((row) => row.author)).toEqual(['human', 'fleet', 'fleet', 'human', 'human', 'relay'])
     expect(rows.map((row) => row.at)).toEqual([...rows.map((row) => row.at as string)].sort())
     expect(rows[5]).toMatchObject({ reply: TEXT.relayReply, signals: [] })
-    // A fleet message is another agent talking: it carries no correction signal.
+    // A fleet message is another agent talking: it carries no signal.
     expect(rows.filter((row) => row.author === 'fleet').map((row) => row.signals)).toEqual([[], []])
   })
 

@@ -178,7 +178,7 @@ export interface SubagentSpawnFact {
 }
 
 /**
- * A correction signal on a typed turn, counted since the person's previous
+ * A signal on a typed turn, counted since the person's previous
  * human turn (a fleet or relay turn in between does not reset it):
  *   - `interrupt`      the person interrupted the agent
  *   - `rejected-tool`  the person rejected a tool call
@@ -215,7 +215,7 @@ export interface SessionTurnFact {
   readonly replySpanId: string | null
   /** The person interrupted the agent's work on this turn, before the next typed turn. */
   readonly interrupted: boolean
-  /** The correction signals since the person's previous human turn; none on a `fleet` turn. */
+  /** The signals since the person's previous human turn; none on a `fleet` turn. */
   readonly signals: readonly TurnSignal[]
 }
 
@@ -774,15 +774,33 @@ const HARNESS_COMMAND_REASON =
   'a command the person gave the harness (/model, /clear, …), not a message to the agent'
 
 /**
- * An agent message that claims the work is done. A person's turn right after
- * one is the `after-claim` signal, and the live rule
+ * An agent message that opens by claiming the work is done. A person's turn
+ * right after one is the `after-claim` signal, and the live rule
  * `completion-claim-without-verification` fires on the same predicate.
+ *
+ * Only the opening sentence is read, with markdown marks removed, and a denial
+ * or a question there is no claim. A status report that names a merged PR in
+ * its fourth paragraph does not claim the work is done. Matching the word
+ * anywhere flagged 58% of the turns people typed, and on a blind sample of 80
+ * flagged agent messages 44% were claims; reading the opening sentence flags
+ * 16%, and 73% of those are claims (`bench/corrections/README.md`).
  */
-const CLAIM_DONE_RE = /\b(done|fixed|complete|completed|implemented|merged|verified|all green|tests pass|ready|works now)\b/i
+const CLAIM_WORD =
+  /\b(?:done|fixed|complete|completed|finished|implemented|merged|shipped|landed|resolved|verified|all green|tests pass(?:ed)?|ready|works now)\b/i
+const CLAIM_DENIED =
+  /\b(?:not|no|never|yet|still|cannot|can['’]?t|won['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|didn['’]?t|doesn['’]?t|hasn['’]?t|haven['’]?t|fail(?:s|ed|ing)?|broken|blocked)\b/i
 
-/** True when an agent message claims completion, correctness or verification. */
+/** A message's first sentence, without markdown marks or a leading list marker, at most 200 characters. */
+function openingSentence(text: string): string {
+  const plain = text.trimStart().replace(/[*_`#>]/g, '').replace(/^\s*(?:[-•→]|\d+[.)])\s+/u, '')
+  const end = /[.!?:;](?=\s|$)|\n/.exec(plain)
+  return (end ? plain.slice(0, end.index + end[0].length) : plain).slice(0, 200).trim()
+}
+
+/** True when an agent message's opening sentence claims completion, correctness or verification. */
 export function isCompletionClaim(text: string): boolean {
-  return CLAIM_DONE_RE.test(text)
+  const opening = openingSentence(text)
+  return CLAIM_WORD.test(opening) && !CLAIM_DENIED.test(opening) && !opening.endsWith('?')
 }
 
 /** The record a harness writes when the person stops the agent: Claude Code's marker, Codex's context block. */
@@ -989,7 +1007,7 @@ function typedTurnsOf(spans: readonly OtlpSpan[], start: TurnFoldState = TURN_FO
       reply: null,
       replySpanId: null,
       interrupted: false,
-      // A fleet message is another agent talking: a correction signal is a person's.
+      // A fleet message is another agent talking: a signal is a person's.
       signals: author === 'fleet' ? [] : SIGNAL_ORDER.filter((signal) => pending.has(signal)),
     }
     turns.push(turn)
