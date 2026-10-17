@@ -221,8 +221,9 @@ describe('processes a Codex code-mode script started in a loop', () => {
       const run = await runCli(['facts', ...argv, '--format', 'json'], { env: loopEnv })
       expect(run.stderr).toBe('')
       expect(run.code).toBe(0)
-      const { commands } = (JSON.parse(run.stdout) as { sessions: Array<{ commands: { value: Array<Record<string, unknown>> } }> }).sessions[0]!
-      expect(commands.value.map(({ command, runs, failed, inScripts }) => ({ command, runs, failed, inScripts }))).toEqual([
+      const { commands } = (JSON.parse(run.stdout) as { sessions: Array<{ commands: { value: Array<Record<string, unknown>>; spanIds: string[] } }> }).sessions[0]!
+      expect(commands.spanIds).toHaveLength(4)
+      expect(commands.value).toEqual([
         { command: 'labctl run', runs: 4, failed: 1, inScripts: 2 },
         { command: 'labctl cancel', runs: 1, failed: 1, inScripts: 0 },
       ])

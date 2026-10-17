@@ -742,7 +742,6 @@ export interface CommandCountFact {
   readonly failed: number
   /** Runs inside a Codex code-mode script, which records the script's status, never the command's exit code. */
   readonly inScripts: number
-  readonly spanIds: readonly string[]
 }
 
 /** Shell builtins that change the shell's own state and start no process: not commands of their own. */
@@ -767,14 +766,17 @@ function commandName(words: readonly string[]): string {
 /**
  * The programs the session's own tool calls ran (inherited history left out),
  * most runs first. Null with the reason when no tool call kept its arguments:
- * which commands ran is then unknown, not none.
+ * which commands ran is then unknown, not none. A row names no span ids: one
+ * program can run hundreds of times, and `--match` gives each run's span. The
+ * fact's `spanIds` are every call that ran a command.
  */
 function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCountFact[]> {
   const own = tools.filter((span) => span.attributes[INHERITED_SPAN_ATTR] !== true)
   if (own.length > 0 && !own.some((span) => inputValue(span) !== null)) {
     return { value: null, spanIds: [], unavailable: 'no tool call recorded its arguments, so which commands ran cannot be read' }
   }
-  const rows = new Map<string, { runs: number; failed: number; inScripts: number; spanIds: string[] }>()
+  const rows = new Map<string, { runs: number; failed: number; inScripts: number }>()
+  const spanIds: string[] = []
   for (const span of own) {
     const input = inputValue(span)
     const script = input === null ? undefined : commandTextFromInput(input)
@@ -782,20 +784,20 @@ function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCou
     const inScript = isCodeModeScript(input!)
     const commands = simpleCommands(script).filter((words) => !SHELL_STATE_BUILTINS.has(words[0]!))
     const failed = !inScript && commands.length === 1 && span.status.code === 'ERROR'
+    if (commands.length > 0) spanIds.push(span.span_id)
     for (const words of commands) {
       const name = commandName(words)
-      const row = rows.get(name) ?? { runs: 0, failed: 0, inScripts: 0, spanIds: [] }
+      const row = rows.get(name) ?? { runs: 0, failed: 0, inScripts: 0 }
       row.runs += 1
       if (failed) row.failed += 1
       if (inScript) row.inScripts += 1
-      if (row.spanIds.at(-1) !== span.span_id) row.spanIds.push(span.span_id)
       rows.set(name, row)
     }
   }
   const counts = [...rows]
     .map(([command, row]) => ({ command, ...row }))
     .sort((left, right) => right.runs - left.runs || left.command.localeCompare(right.command))
-  return listFact(counts, counts.flatMap((row) => row.spanIds))
+  return listFact(counts, spanIds)
 }
 
 function capList<T>(items: readonly T[], cap = FACT_LIST_CAP): { kept: readonly T[]; partial?: string } {
