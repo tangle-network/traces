@@ -71,6 +71,9 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
   `traces facts <f>` (the shared reader), `--latest-turn` (traces' own reader) and a bundle of `<f>`
   agree on tokens, cost, tool calls, human turns, subagents, pull requests, skills, rework, rollbacks
   and failing streaks (`tests/dual-path.test.ts`).
+- **The `traces.stream.*` envelope is a stable API.** `traces watch --format jsonl` prints session,
+  finding and tick events at `schemaVersion` 1, and trustgate reads them. `tests/watch-jsonl-contract.test.ts`
+  pins every field a consumer reads and keeps `docs/watch-jsonl.v1.example.jsonl` equal to the CLI's output.
 - **Unknown is never rendered as a measured zero.** An unpriced turn reads `cost unknown`, never
   `$0.0000`; a fact the spans cannot support is `null` with its reason, never a guessed value.
 

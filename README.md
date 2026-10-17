@@ -37,7 +37,7 @@ traces check   run.jsonl --contract contract.json           # fail CI when a run
 | Ask your own questions, with checked citations | `ask` | [Ask questions](docs/ask.md) |
 | Gate CI on the path a run took | `check` | [Gate CI on a trace contract](docs/check.md) |
 | Read spans from a system you own | `analyze <file>`, `validate` | [Integrate your own system](docs/integrate.md) |
-| Watch sessions or a run tree while they run | `watch`, `stream` | [Watch and stream](docs/live.md) |
+| Watch sessions or a run tree while they run | `watch` | [Watch](docs/live.md) |
 | Find where two runs diverge | `diff` | [Diff two runs](docs/diff.md) |
 | Give an agent read-only trace tools | `mcp` | [MCP server](docs/mcp.md) |
 | Count which skills get used | `skills` | [Skill usage](docs/skill-usage.md) |

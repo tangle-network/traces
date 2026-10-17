@@ -17,15 +17,19 @@ export function parseSince(value: string): number {
   return parseTimeBound(value, '--since')
 }
 
+/** The length of a relative bound (`30m` / `2h` / `7d`) in ms; undefined for an ISO date. */
+export function relativeBoundMs(value: string): number | undefined {
+  const m = value.match(/^(\d+)\s*([mhd])$/i)
+  if (!m) return undefined
+  const unit = m[2]!.toLowerCase()
+  return Number(m[1]) * (unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000)
+}
+
 /** Parse one time bound the way `--since` reads it: `30m` / `2h` / `7d` before
  *  now, or an ISO date. `flag` names the option in the error. */
 export function parseTimeBound(value: string, flag: string): number {
-  const m = value.match(/^(\d+)\s*([mhd])$/i)
-  if (m) {
-    const unit = m[2]!.toLowerCase()
-    const ms = unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000
-    return Date.now() - Number(m[1]) * ms
-  }
+  const relative = relativeBoundMs(value)
+  if (relative !== undefined) return Date.now() - relative
   const t = Date.parse(value)
   if (Number.isNaN(t)) throw new Error(`${flag}: expected 30m / 2h / 7d or an ISO date, got "${value}"`)
   return t

@@ -7,24 +7,14 @@ import {
   AnalystRegistry,
   analyzeSpans,
   makeFinding,
-  type HarnessTraceAdapter,
-  type ObservedLoop,
   type OtlpSpan,
-  type SessionRef,
   span,
-  watchSessions,
 } from '../src/index.js'
 
 beforeAll(() => {
   // Isolate dedup-state writes from the real ~/.local/state.
   process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), 'traces-state-'))
 })
-
-const ref: SessionRef = { harness: 'synthetic', sessionId: 'sess-1', path: '/tmp/sess', cwd: null, mtimeMs: 0 }
-
-function adapterOf(spans: OtlpSpan[]): HarnessTraceAdapter {
-  return { harness: 'synthetic', async locate() { return [ref] }, async parse() { return spans } }
-}
 
 /** A root + N identical bash calls that the loop detector flags. */
 function loopSpans(n: number): OtlpSpan[] {
@@ -81,43 +71,6 @@ function tokenTrajectorySpans(
       })),
   ]
 }
-
-describe('watchSessions (observer event API)', () => {
-  it('emits onReport + a deduped onLoop over a custom adapter, and stops on abort', async () => {
-    const controller = new AbortController()
-    const loops: ObservedLoop[] = []
-    let reports = 0
-    await watchSessions({
-      adapters: [adapterOf(loopSpans(4))],
-      intervalMs: 250,
-      minLoopOccurrences: 3,
-      signal: controller.signal,
-      onReport: () => { reports += 1 },
-      onLoop: (l) => { loops.push(l) },
-      onTick: () => controller.abort(), // one cycle, then stop
-    })
-    expect(reports).toBeGreaterThanOrEqual(1)
-    expect(loops).toHaveLength(1)
-    expect(loops[0]!.toolName).toBe('bash')
-    expect(loops[0]!.occurrences).toBeGreaterThanOrEqual(3)
-  })
-
-  it('routes a throwing onLoop to onError instead of crashing the loop', async () => {
-    const controller = new AbortController()
-    const errors: unknown[] = []
-    await watchSessions({
-      adapters: [adapterOf(loopSpans(4))],
-      intervalMs: 250,
-      minLoopOccurrences: 3,
-      signal: controller.signal,
-      onLoop: () => { throw new Error('boom') },
-      onError: (e) => errors.push(e),
-      onTick: () => controller.abort(),
-    })
-    expect(errors).toHaveLength(1)
-    expect((errors[0] as Error).message).toBe('boom')
-  })
-})
 
 describe('analyzeSpans (bring-your-own analysts)', () => {
   it('runs a caller-supplied AnalystRegistry instead of the built-in suite', async () => {

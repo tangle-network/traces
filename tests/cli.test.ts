@@ -670,7 +670,7 @@ describe('traces CLI', () => {
     expect(output.sessions[0]!.measurements.relationship.taskScope).toBe('latest')
   })
 
-  it('replays a trace file as stream JSONL with semantic findings for visualizers', async () => {
+  it('watches a span file as the traces.stream events of its runs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-cli-stream-'))
     const input = join(dir, 'spans.openinference.jsonl')
     const spans = [
@@ -727,9 +727,11 @@ describe('traces CLI', () => {
       '--import',
       'tsx',
       'src/cli.ts',
-      'stream',
+      'watch',
       input,
-      '--no-spans',
+      '--once',
+      '--format',
+      'jsonl',
     ], {
       cwd: process.cwd(),
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
@@ -738,7 +740,7 @@ describe('traces CLI', () => {
     })
 
     const rows = parseRows(stdout)
-    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding', 'finding', 'finding'])
+    expect(rows.map((row) => row.event)).toEqual(['session', 'finding', 'finding', 'finding', 'tick'])
     const rules = rows
       .filter((row) => row.event === 'finding')
       .map((row) => (row.finding as Record<string, unknown>).ruleId)

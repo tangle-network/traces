@@ -20,6 +20,7 @@ import { indexSessionIdsByTrace } from './attributes.js'
 import { findingRejectionDetail } from './finding-rejections.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
 import { shellWord } from './moved.js'
+import type { TraceStreamEvent, WatchedSession } from './live.js'
 import type { TraceLiveFinding } from './pipelines.js'
 import { DEFAULT_ANALYST_MODEL } from './ask-defaults.js'
 import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
@@ -57,7 +58,7 @@ import {
 } from './session-workflow.js'
 import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
 import type { ReportSource } from './report.js'
-import { parseSince, parseTimeBound } from './time.js'
+import { parseSince, parseTimeBound, relativeBoundMs } from './time.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { RefError, resolveRefs, selectSpans, shortestRefs, type ResolvedRef } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -1267,164 +1268,109 @@ async function cmdAsk(args: CliArgs): Promise<void> {
   process.exitCode = 1
 }
 
-function summarizeFindingEvidence(finding: TraceLiveFinding): string {
-  const first = finding.evidence[0]
-  if (!first) return 'no evidence'
-  return `${first.label}: ${first.value}`
+/** Severity as `traces analyze` prints it. */
+const LIVE_SEVERITY: Readonly<Record<TraceLiveFinding['severity'], string>> = { info: 'INFO', low: 'LOW', medium: 'MED', high: 'HIGH' }
+
+/** One line per finding: time, severity, the session's ref and harness, the rule, what it saw, and the spans it cites. */
+function liveFindingLine(finding: TraceLiveFinding, ref: string): string {
+  const spans = [...new Set(finding.evidence.flatMap((item) => item.spanIds ?? []))]
+  const cite = spans.length === 0 ? '' : ` (span${spans.length === 1 ? '' : 's'} ${spans.slice(0, 2).join(', ')}${spans.length > 2 ? ', …' : ''})`
+  return `${finding.observedAt.slice(11, 19)} ${LIVE_SEVERITY[finding.severity]} ${ref} ${finding.session.harness} ${finding.ruleId}: ${finding.claim}${cite}`
 }
 
-function formatLiveFinding(finding: TraceLiveFinding): string {
-  const ts = new Date(finding.observedAt).toISOString().slice(11, 19)
-  const where = `[${finding.session.harness}] ${finding.session.sessionId.slice(0, 8)}`
-  const cwd = finding.session.cwd ? ` · ${finding.session.cwd}` : ''
-  return [
-    `${ts} ${finding.severity.toUpperCase()} ${where}: ${finding.title}${cwd}`,
-    `  evidence: ${summarizeFindingEvidence(finding)}`,
-    `  action: ${finding.action}`,
-    `  check: ${finding.check}`,
-  ].join('\n')
-}
-
-type StreamMode = 'visualizer' | 'findings' | 'agent'
-
-function streamMode(raw: string | undefined): StreamMode {
-  if (raw === undefined) return 'visualizer'
-  if (raw === 'visualizer' || raw === 'findings' || raw === 'agent') return raw
-  throw new UsageError(`unknown stream mode "${raw}" (expected visualizer, findings, or agent)`)
-}
-
-function streamPreset(args: CliArgs): { mode: StreamMode; includeSpans: boolean; includeFindings: boolean; includeBatches: boolean; includeReports: boolean } {
-  const mode = streamMode(args.mode)
-  return {
-    mode,
-    includeSpans: !args.noSpans && mode === 'visualizer',
-    includeFindings: !args.noFindings,
-    includeBatches: true,
-    includeReports: mode === 'agent',
+/** A span source's runs, one per trace, as the sessions a watch follows. */
+async function* spanRuns(args: CliArgs, path: string): AsyncGenerator<WatchedSession> {
+  const { spans } = await collectSpans(args)
+  const { sessionByTrace } = indexSessionIdsByTrace(spans)
+  const byTrace = new Map<string, OtlpSpan[]>()
+  for (const span of spans) {
+    const group = byTrace.get(span.trace_id)
+    if (group) group.push(span)
+    else byTrace.set(span.trace_id, [span])
   }
-}
-
-async function streamExplicitSession(args: CliArgs, { adapter, ref }: RefSelection['sessions'][number]): Promise<void> {
-  const { serializeTraceStreamEvent, traceStreamEventsFromSpans } = await import('./live.js')
-  const preset = streamPreset(args)
-  const spans = await parseSession(adapter, ref)
-  for (const event of traceStreamEventsFromSpans(spans, {
-    ref,
-    includeSpans: preset.includeSpans,
-    includeFindings: preset.includeFindings,
-  })) {
-    process.stdout.write(serializeTraceStreamEvent(event))
-  }
-}
-
-/** `traces stream` (hidden; `watch --format jsonl` in 1.0): live trace events as JSONL. */
-async function cmdStream(args: CliArgs): Promise<void> {
-  const { serializeTraceStreamEvent, streamSessions, traceStreamEventsFromSpans } = await import('./live.js')
-  const preset = streamPreset(args)
-  const named = args.selection
-  if (named && named.sessions.length + named.spans.length > 1) throw new UsageError('stream reads one ref at a time')
-  const source = named?.spans[0]?.path
-  if (source) {
-    const { spans, harness } = await collectSpans(args)
-    const ref: SessionRef = {
-      harness,
-      sessionId: basename(source),
-      path: resolve(source),
-      cwd: args.cwd ?? null,
-      mtimeMs: Date.now(),
+  for (const [traceId, group] of byTrace) {
+    const attribute = (key: string): string | null => {
+      const value = group[0]!.attributes[key]
+      return typeof value === 'string' && value.length > 0 ? value : null
     }
-    for (const event of traceStreamEventsFromSpans(spans, {
-      ref,
-      includeSpans: preset.includeSpans,
-      includeFindings: preset.includeFindings,
-    })) {
-      process.stdout.write(serializeTraceStreamEvent(event))
-    }
-    return
+    yield { session: { harness: attribute('service.name') ?? 'otlp', sessionId: sessionByTrace.get(traceId) ?? traceId, cwd: attribute('tangle.cwd'), path }, spans: group }
   }
-  if (named?.sessions[0]) {
-    await streamExplicitSession(args, named.sessions[0])
-    return
-  }
-
-  const all = !args.harnessExplicit
-  const controller = new AbortController()
-  process.once('SIGINT', () => controller.abort())
-  if (!args.replay) {
-    process.stderr.write(
-      `traces stream: ${preset.mode} JSONL feed for ${all ? 'all harnesses' : args.harness}, ` +
-        `last ${args.window}m, every ${args.interval}s. Ctrl-C to stop.\n`,
-    )
-  }
-  await streamSessions({
-    all,
-    harnesses: all ? undefined : [args.harness],
-    // A store root reads every harness that reads one (--harness narrows).
-    ...(named?.home !== undefined ? { adapters: adaptersFor(args), home: named.home } : {}),
-    cwd: args.cwd,
-    last: args.last > 0 ? args.last : args.replay ? 1 : undefined,
-    windowMs: args.window * 60_000,
-    intervalMs: args.interval * 1000,
-    once: args.replay,
-    includeSpans: preset.includeSpans,
-    includeFindings: preset.includeFindings,
-    includeBatches: preset.includeBatches,
-    includeReports: preset.includeReports,
-    signal: controller.signal,
-    onEvent: (event) => {
-      process.stdout.write(serializeTraceStreamEvent(event))
-    },
-    onError: (err, ref) => {
-      const where = ref ? ` [${ref.harness}] ${ref.sessionId}` : ''
-      process.stderr.write(`stream error${where}: ${err instanceof Error ? err.message : String(err)}\n`)
-    },
-  })
 }
 
 /**
- * Two watches share one verb because they answer the same question one level
- * apart: `traces watch` (no path) tails live HARNESS SESSIONS, and
- * `traces watch <target>` tails one RUN TREE.
+ * `traces watch`: live supervision. With no ref, or a store root, it follows
+ * every session active in the `--since` window (default 30m), whose start is
+ * recomputed on every pass; with session refs, those sessions. Text prints one
+ * line per new finding (and, with `--once`, a closing count); `--format jsonl`
+ * prints the `traces.stream.*` envelope. A Runtime run directory or a span
+ * file is one run tree in text, and the envelope of its spans in jsonl.
  */
 async function cmdWatch(args: CliArgs): Promise<void> {
-  const { watchSessions } = await import('./observer.js')
-  if (args.input !== undefined) return cmdWatchRunTarget(args.input, args)
-  if (args.once) throw new UsageError('watch --once prints one snapshot of a run: traces watch <run-dir|spans.otlp.jsonl> --once')
-  const all = !args.harnessExplicit
+  const named = args.selection
+  const source = named?.spans[0]
+  if (source && (named!.spans.length > 1 || named!.sessions.length > 0)) {
+    throw new UsageError('watch follows one run tree or span file at a time, or harness sessions: traces watch <run-dir|file> or traces watch <id…>')
+  }
+  const jsonl = args.format === 'jsonl'
+  if (source && !jsonl) return cmdWatchRunTarget(source.path, args)
+  const { streamSessions, watchSource } = await import('./live.js')
+  const since = args.since ?? '30m'
+  const windowMs = relativeBoundMs(since)
+  const sessions = named?.sessions.length ? named.sessions : undefined
+  const scope = source ? source.ref : sessions ? `${sessions.length} named session${sessions.length === 1 ? '' : 's'}` : `every session active ${windowMs === undefined ? 'since' : 'in the last'} ${since}`
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
-  process.stderr.write(
-    `traces watch: observing ${all ? 'all harnesses' : args.harness}, ` +
-      `sessions active in the last ${args.window}m, every ${args.interval}s. ` +
-      `Loop + semantic live findings; read-only; Ctrl-C to stop.\n`,
-  )
-  await watchSessions({
-    all,
-    harnesses: all ? undefined : [args.harness],
-    cwd: args.cwd,
-    windowMs: args.window * 60_000,
-    intervalMs: args.interval * 1000,
-    signal: controller.signal,
-    onLoop: (l) => {
-      const ts = new Date().toISOString().slice(11, 19)
-      process.stdout.write(
-        `${ts} LOOP [${l.harness}] ${l.sessionId.slice(0, 8)}: ` +
-          `\`${l.toolName}\` repeated ×${l.occurrences} with identical args ` +
-          `(${(l.windowMs / 1000).toFixed(0)}s)${l.cwd ? ` · ${l.cwd}` : ''}\n`,
-      )
-    },
-    onFinding: (finding) => {
-      process.stdout.write(`${formatLiveFinding(finding)}\n`)
-    },
-  })
+  if (!args.once) process.stderr.write(`traces watch: ${scope}, every 5 s; read-only. Ctrl-C to stop.\n`)
+  // A session's ref is the shortest prefix or suffix that names it among the sessions seen.
+  const ids: string[] = []
+  const reported = new Set<string>()
+  let last: Extract<TraceStreamEvent, { event: 'tick' }> | undefined
+  let findings = 0
+  const onEvent = (event: TraceStreamEvent): void => {
+    if (jsonl) process.stdout.write(`${JSON.stringify(event)}\n`)
+    if (event.event === 'session') ids.push(event.session.sessionId)
+    else if (event.event === 'finding') {
+      findings += 1
+      const id = event.finding.session.sessionId
+      if (!jsonl) process.stdout.write(`${liveFindingLine(event.finding, shortestRefs(ids).get(id) ?? id)}\n`)
+    } else {
+      last = event
+      if (args.once) return
+      for (const unread of event.unreadSessions) {
+        const key = unread.sessionId ?? unread.source
+        if (reported.has(key)) continue
+        reported.add(key)
+        process.stderr.write(`unreadable ${key}: ${unread.reason}\n`)
+      }
+    }
+  }
+  const loop = { once: args.once, signal: controller.signal, onEvent }
+  if (source) await watchSource(() => spanRuns(args, source.path), loop)
+  else {
+    await streamSessions({
+      adapters: adaptersFor(args),
+      ...(sessions ? { sessions } : {}),
+      ...(named?.home !== undefined ? { home: named.home } : {}),
+      cwd: args.cwd,
+      ...(windowMs !== undefined ? { windowMs } : { sinceMs: parseSince(since) }),
+      ...loop,
+    })
+  }
+  if (!args.once || !last) return
+  const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
+  if (!jsonl) process.stdout.write(`${scope}: ${count(last.sessions, 'session')} read · ${count(findings, 'finding')}\n`)
+  const unread = last.unreadSessions.length
+  if (unread > 0) {
+    process.stderr.write(`${unread} unreadable: traces watch … --once --format jsonl | jq 'select(.event == "tick") | .unreadSessions'\n`)
+  }
 }
 
 /**
  * Live view of one run tree. The target is an OTLP span file (the general
  * source, which works for any emitter), an agent-runtime `createFileRunContext`
  * directory (the specific source, which carries budget and settlement), or a
- * directory holding both. Read-only, plain stdout; `--once` prints a single
- * snapshot, which is what a script or an agent wants.
+ * directory holding both. Read-only, plain stdout, every 2 s; `--once` prints
+ * a single snapshot, which is what a script or an agent wants.
  */
 async function cmdWatchRunTarget(dir: string, args: CliArgs): Promise<void> {
   const { resolveRunWatchTarget, watchRunTarget } = await import('./run-watch.js')
@@ -1433,17 +1379,12 @@ async function cmdWatchRunTarget(dir: string, args: CliArgs): Promise<void> {
   if (!args.once) {
     process.once('SIGINT', () => controller.abort())
     process.stderr.write(
-      `traces watch: tailing ${target.requested} every ${args.intervalExplicit ? args.interval : 2}s; read-only, ` +
+      `traces watch: tailing ${target.requested} every 2s; read-only, ` +
         `${target.runDir === null ? 'span source only — Ctrl-C to stop' : 'stops when result.json lands. Ctrl-C to stop'}.\n`,
     )
   }
-  const snapshot = await watchRunTarget(target, {
-    once: args.once,
-    // A tree view wants a tighter poll than the session observer's 5s default:
-    // a blocking question is worth surfacing the moment it lands.
-    intervalMs: args.intervalExplicit ? Math.max(250, args.interval * 1000) : 2000,
-    signal: controller.signal,
-  })
+  // A tree view polls faster than sessions: a blocking question is worth surfacing the moment it lands.
+  const snapshot = await watchRunTarget(target, { once: args.once, intervalMs: 2000, signal: controller.signal })
   // A terminal run that ended badly should not look like a success to a script.
   const result = snapshot.journal?.result ?? null
   if (result !== null && result.errorMessage !== null) process.exitCode = 1
@@ -1651,7 +1592,7 @@ await runTraces(process.argv.slice(2), {
   // is reported before any trace is read, with check's own exit codes.
   check: async (args) => cmdCheck(prepare(args)),
   diff: cmdDiff,
-  watch: cmdWatch,
+  watch: reading(cmdWatch),
   bundle: reading(cmdBundle),
   'bundle verify': cmdBundleVerify,
   convert: reading(cmdConvert),
@@ -1660,5 +1601,4 @@ await runTraces(process.argv.slice(2), {
   mcp: reading(cmdMcp),
   validate: cmdValidate,
   'verify-safe': cmdVerifySafe,
-  stream: reading(cmdStream),
 })

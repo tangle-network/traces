@@ -17,7 +17,6 @@ import {
   isSynthesizedSpan,
   SYNTHESIZED_SPAN_ATTR,
 } from '../src/adapters/provenance.js'
-import { analyzeLiveBatch } from '../src/live.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
 import { sessionReportSource } from '../src/report.js'
@@ -201,7 +200,7 @@ describe('Codex synthesized subagent spans', () => {
       .toEqual(['exec_command', 'spawn_agent', 'exec_command'])
   })
 
-  it('reports the model-issued count through the facts, live, and pipeline paths', async () => {
+  it('reports the model-issued count through the facts and pipeline paths', async () => {
     const ref = subagentRollout()
     const spans = await parse(ref)
 
@@ -209,8 +208,6 @@ describe('Codex synthesized subagent spans', () => {
     expect(facts!.toolCalls.value).toBe(3)
     expect(Object.keys(facts!.toolCallsByName.value!).sort()).toEqual(['exec_command', 'spawn_agent'])
     expect(facts!.synthesizedToolSpans.value).toBe(0)
-
-    expect(analyzeLiveBatch(spans).toolCallCount).toBe(3)
 
     const pipelines = await runPipelines(spans)
     expect(pipelines.toolUse.reduce((total, run) => total + run.totalCalls, 0)).toBe(3)

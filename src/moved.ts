@@ -217,7 +217,44 @@ export const MOVED: readonly MovedRow[] = [
     was: ['--config'],
     now: 'removed: run your own analysts through the SDK, analyzeSpans(spans, { registry })',
   },
+  {
+    was: ['stream'],
+    now: 'traces watch --format jsonl: the same traces.stream envelope, as session, finding and tick events',
+    rewrite: (argv) => {
+      const renamed = renameCommand(argv, 'watch')
+      return renamed[0] === 'help' || flagIndexes(renamed, '--format').length > 0 ? renamed : [...renamed, '--format', 'jsonl']
+    },
+  },
+  {
+    was: ['--mode', '--no-spans', '--no-findings'],
+    commands: ['stream', 'watch'],
+    now: 'removed: traces watch --format jsonl prints session, finding and tick events, with no span or batch events',
+    rewrite: (argv) => dropFlag(dropFlag(dropFlag(argv, '--mode', true), '--no-spans', false), '--no-findings', false),
+  },
+  {
+    was: ['--replay'],
+    commands: ['stream', 'watch'],
+    now: '--once: one pass, then exit',
+    rewrite: (argv) => (flagIndexes(argv, '--once').length > 0 ? dropFlag(argv, '--replay', false) : renameFlag(argv, '--replay', '--once')),
+  },
+  {
+    was: ['--window', '--interval'],
+    commands: ['stream', 'watch'],
+    now: '--since Nm (default 30m; the window slides with time). Sessions are read every 5 s, a run tree every 2 s',
+    rewrite: (argv) => windowToSince(dropFlag(argv, '--interval', true)),
+  },
+  { was: [], label: 'SDK watchSessions', now: 'streamSessions({ onEvent }): the session, finding and tick events traces watch prints' },
 ]
+
+/** `--window M` (minutes) as `--since Mm`; `undefined` when M is not a whole number of minutes. */
+function windowToSince(argv: readonly string[]): string[] | undefined {
+  const at = flagIndexes(argv, '--window')[0]
+  if (at === undefined) return [...argv]
+  const minutes = argv[at + 1]
+  if (minutes === undefined || !/^\d+$/u.test(minutes)) return undefined
+  const rest = dropFlag(argv, '--window', true)
+  return flagIndexes(rest, '--since').length > 0 ? rest : [...rest, '--since', `${minutes}m`]
+}
 
 export interface MovedSpelling {
   readonly row: MovedRow

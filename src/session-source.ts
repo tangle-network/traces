@@ -1,6 +1,6 @@
 /**
  * One place for "walk the selected harnesses, locate sessions, parse each to
- * spans." The observer, batch collector, and uploader all need the same
+ * spans." watch, the batch collector, and the uploader all need the same
  * locate → parse loop with explicit per-adapter error handling;
  * `scanSessions` is that loop, so each caller only writes what it does with the
  * spans.

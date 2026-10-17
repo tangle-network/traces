@@ -88,16 +88,6 @@ export interface Args {
   junit?: string
   annotations: boolean
   explain: boolean
-  mode?: string
-  replay: boolean
-  noSpans: boolean
-  noFindings: boolean
-  /** Seconds. */
-  interval: number
-  /** True when `--interval` was given, so a command can keep its own default. */
-  intervalExplicit: boolean
-  /** Minutes. */
-  window: number
   kinds: string[]
   profile?: string
   knownSecretEnvs: string[]
@@ -121,12 +111,6 @@ function emptyArgs(command: string): Args {
     concurrency: 4,
     annotations: false,
     explain: false,
-    replay: false,
-    noSpans: false,
-    noFindings: false,
-    interval: 5,
-    intervalExplicit: false,
-    window: 30,
     kinds: [],
     knownSecretEnvs: [],
   }
@@ -198,7 +182,7 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--budget': { value: 'USD', help: 'one spending ceiling shared by every question', set: (a, v) => { a.budget = positiveNumber('--budget', v, 'USD') } },
   '--model': { value: 'ID', help: `the analyst model (default ${DEFAULT_ANALYST_MODEL})`, set: (a, v) => { a.model = v } },
   '--contract': { value: 'FILE', help: 'the trace contract to gate on (required)', set: (a, v) => { a.contract = v } },
-  '--once': { help: 'print one snapshot and exit', set: (a) => { a.once = true; a.replay = true } },
+  '--once': { help: 'one pass, then exit', set: (a) => { a.once = true } },
   '--dry-run': { help: 'redact and preview; send nothing', set: (a) => { a.dryRun = true } },
   '--yes': { help: 'skip the confirmation prompt', set: (a) => { a.yes = true } },
   '--unused': { help: 'only installed skills with no use in the window', set: (a) => { a.unused = true } },
@@ -217,12 +201,6 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--junit': { value: 'FILE', help: 'write JUnit XML to FILE', set: (a, v) => { a.junit = v } },
   '--annotations': { help: 'print GitHub workflow annotations', set: (a) => { a.annotations = true } },
   '--explain': { help: 'print what the contract checks and read no trace', set: (a) => { a.explain = true } },
-  '--mode': { value: 'MODE', help: 'visualizer, findings or agent', set: (a, v) => { a.mode = v } },
-  '--replay': { help: 'scan once and exit', set: (a) => { a.replay = true } },
-  '--no-spans': { help: 'omit per-span events', set: (a) => { a.noSpans = true } },
-  '--no-findings': { help: 'omit live-finding events', set: (a) => { a.noFindings = true } },
-  '--interval': { value: 'S', help: 'poll every S seconds', set: (a, v) => { a.interval = positiveNumber('--interval', v, 'seconds'); a.intervalExplicit = true } },
-  '--window': { value: 'M', help: 'sessions active in the last M minutes (default 30)', set: (a, v) => { a.window = positiveNumber('--window', v, 'minutes') } },
   '--kind': { value: 'KIND', help: 'keep only steps of this span kind (repeatable)', set: (a, v) => { a.kinds.push(v) } },
   '--profile': { value: 'P', help: 'default, share or strict', set: (a, v) => { a.profile = v } },
   '--known-secret-env': { value: 'NAME', help: 'a variable holding a secret to look for (repeatable)', set: (a, v) => { a.knownSecretEnvs.push(v) } },
@@ -385,16 +363,26 @@ const COMMANDS = [
   },
   {
     name: 'watch',
-    usage: 'watch [--harness ID] [--cwd DIR]  |  watch <run-dir|spans.otlp.jsonl> [--once]',
-    job: 'Live supervision: findings in every session active in the last 30 minutes, or one run tree.',
-    notes: ['A run tree stops when its result lands, and exits 1 when the run ended with an error.'],
-    flags: [
-      { flag: '--once', help: 'with a run dir or span file: print one snapshot and exit' },
-      { flag: '--harness', help: "only this harness's sessions" }, '--cwd', hidden('--window'), hidden('--interval'),
+    usage: 'watch [<id…> | <store-root>] [--since T] [--once]  |  watch <run-dir|span file> [--once]',
+    job: 'Live supervision: what the analyze rules find in every session active in the last 30 minutes, or one run tree.',
+    notes: [
+      'Sessions are read every 5 s; a run tree every 2 s, until its result lands (exit 1 when the run ended with an error).',
+      'A run dir or span file prints its tree as text, and its findings with --format jsonl.',
     ],
-    refs: [0, 1],
-    examples: ['traces watch', 'traces watch runs/my-run --once', 'traces watch --harness codex --cwd .'],
-    overview: ['What is happening right now?', 'traces watch [<run-dir> --once]'],
+    flags: [
+      { flag: '--since', help: 'sessions active in the last T (default 30m; it slides with time), or since an ISO time' },
+      '--cwd', { flag: '--harness', help: "only this harness's sessions; with a file ref, force its reader" },
+      { flag: '--once', help: 'one pass, then exit' },
+      { flag: '--format', help: 'text (default): a line per new finding, or the run tree; jsonl: the traces.stream events' },
+    ],
+    formats: ['text', 'jsonl'],
+    refs: [0, MANY],
+    jq: [
+      ['select(.event == "finding") | .finding | {severity, ruleId, claim}', 'each new finding'],
+      ['select(.event == "tick") | .unreadSessions', 'sessions a pass could not read, and why'],
+    ],
+    examples: ['traces watch --once', 'traces watch runs/my-run --once', 'traces watch --since 2h --format jsonl'],
+    overview: ['What is happening right now?', 'traces watch [<run-dir>] [--once]'],
   },
   {
     name: 'bundle',
@@ -483,7 +471,7 @@ const COMMANDS = [
     examples: ['traces mcp spans.otlp.jsonl', 'traces mcp --last 5', 'claude mcp add traces -- traces mcp spans.otlp.jsonl'],
     overview: ['Serve span tools over MCP', 'traces mcp <ref>|--last N'],
   },
-  // Hidden until their step (spec §2.4): validate and verify-safe (15), stream (14).
+  // Hidden until their step (spec §2.4): validate and verify-safe (15).
   {
     name: 'validate',
     usage: 'validate <file|dir> [--out FILE]',
@@ -501,15 +489,6 @@ const COMMANDS = [
     formats: ['text', 'json'],
     refs: [1, 1],
     examples: ['traces verify-safe handoff.md'],
-    hidden: true,
-  },
-  {
-    name: 'stream',
-    usage: 'stream [<ref>] [flags]',
-    job: 'Live trace events as JSONL.',
-    flags: ['--current', '--last', '--cwd', '--harness', '--mode', '--replay', '--once', '--no-spans', '--no-findings', '--window', '--interval'],
-    refs: [0, 1],
-    examples: ['traces stream --mode findings'],
     hidden: true,
   },
 ] as const satisfies readonly CommandSpec[]
@@ -580,7 +559,8 @@ export function renderCommandHelp(spec: CommandSpec): string {
   if (flagLines.length > 0) lines.push('', ...flagLines)
   if (spec.jq && spec.jq.length > 0) {
     const width = Math.max(...spec.jq.map(([path]) => path.length))
-    lines.push('', 'jq paths (--format json):', ...spec.jq.map(([path, what]) => `  ${path.padEnd(width)}  ${what}`))
+    const format = spec.formats?.includes('json') ? 'json' : 'jsonl'
+    lines.push('', `jq paths (--format ${format}):`, ...spec.jq.map(([path, what]) => `  ${path.padEnd(width)}  ${what}`))
   }
   lines.push('', 'Examples:', ...spec.examples.map((example) => `  ${example}`))
   return `${lines.join('\n')}\n`

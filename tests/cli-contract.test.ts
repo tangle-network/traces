@@ -93,7 +93,7 @@ const STEP_6: readonly MovedCase[] = [
   },
   { argv: ['analyze', 'spans.jsonl', '--format', 'auto'], spelling: '--format auto', instead: 'traces analyze spans.jsonl' },
   { argv: ['analyze', 'events.json', '--format', 'sandbox-events'], spelling: '--format sandbox-events', instead: 'traces analyze events.json' },
-  { argv: ['stream', 'spans.jsonl', '--format', 'openinference'], spelling: '--format openinference', instead: 'traces stream spans.jsonl' },
+  { argv: ['stream', 'spans.jsonl', '--format', 'openinference'], spelling: '--format openinference', instead: 'traces watch spans.jsonl --format jsonl' },
   { argv: ['check', 'spans.jsonl', '--format', 'otlp', '--contract', 'c.json'], spelling: '--format otlp', instead: 'traces check spans.jsonl --contract c.json' },
   {
     argv: ['check', 'run.jsonl', '--format', 'claude-code', '--contract', 'c.json'],
@@ -159,7 +159,22 @@ const STEP_13: readonly MovedCase[] = [
   },
 ]
 
-const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13]
+/** Step 14: watch is the one live verb; stream's feed is watch --format jsonl. */
+const STEP_14: readonly MovedCase[] = [
+  // trustgate's argv (integrations/traces/package.json).
+  { argv: ['stream', '--all', '--mode', 'findings'], spelling: '--all', instead: 'traces watch --format jsonl' },
+  { argv: ['stream', '--mode', 'agent'], spelling: 'stream', instead: 'traces watch --format jsonl' },
+  { argv: ['stream', 'spans.jsonl', '--replay', '--no-spans'], spelling: 'stream', instead: 'traces watch spans.jsonl --once --format jsonl' },
+  { argv: ['watch', '--harness', 'codex', '--window', '60', '--interval', '10'], spelling: '--window', instead: 'traces watch --harness codex --since 60m' },
+  {
+    argv: ['watch', '--window', '1.5'],
+    spelling: '--window',
+    instead: '--since Nm (default 30m; the window slides with time). Sessions are read every 5 s, a run tree every 2 s',
+  },
+  { argv: ['help', 'stream'], spelling: 'stream', instead: 'traces help watch' },
+]
+
+const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13, ...STEP_14]
 
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
@@ -170,7 +185,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   ask: [...SELECT, '--question', '--questions', '--budget', '--model'],
   check: ['--contract', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
   diff: ['--format'],
-  watch: ['--once', '--harness', '--cwd'],
+  watch: ['--since', '--cwd', '--harness', '--once', '--format'],
   bundle: ['--current', '--harness', '--out'],
   'bundle verify': ['--format'],
   convert: [...SELECT, '--out'],
@@ -192,12 +207,11 @@ const OPTIONS = [
 ]
 
 /** 0.x spellings kept, hidden, until the step that moves each (spec §2.4). */
-const HIDDEN_COMMANDS = ['validate', 'verify-safe', 'stream']
+const HIDDEN_COMMANDS = ['validate', 'verify-safe']
 const HIDDEN_FLAGS: Readonly<Record<string, readonly string[]>> = {
   ask: ['--dir', '--question-budget', '--question-timeout', '--concurrency'],
   check: ['--junit', '--annotations', '--explain'],
   diff: ['--kind'],
-  watch: ['--window', '--interval'],
 }
 
 let dir: string
@@ -510,9 +524,9 @@ describe('hidden spellings', () => {
     expect(diff.code).toBe(2)
     expect((JSON.parse(diff.stderr) as { code: string }).code).toBe('no-outcome')
 
-    const stream = await runCli(['stream', spans, '--mode', 'findings', '--no-spans'], { env })
-    expect(stream.code).toBe(0)
-    expect(lines(stream.stdout).map((line) => (JSON.parse(line) as { event: string }).event)).toContain('session')
+    const watched = await runCli(['watch', spans, '--once', '--format', 'jsonl'], { env })
+    expect(watched.code).toBe(0)
+    expect(lines(watched.stdout).map((line) => (JSON.parse(line) as { event: string }).event)).toEqual(['session', 'tick'])
   }, 120_000)
 })
 

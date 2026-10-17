@@ -108,8 +108,8 @@ describe('one session, answer first', () => {
 })
 
 describe('watch and analyze share one rule set', () => {
-  it('stream replays the findings analyze ranks, with the same spans', async () => {
-    const run = await runCli(['stream', fx.worker, '--mode', 'findings'], { env: fx.env })
+  it('watch finds what analyze ranks, with the same spans', async () => {
+    const run = await runCli(['watch', fx.worker, '--once', '--format', 'jsonl'], { env: fx.env })
     expect(run.code).toBe(0)
     const live = run.stdout.trim().split('\n').map((line) => JSON.parse(line) as { event: string; finding?: { ruleId: string; evidence: Array<{ spanIds?: string[] }> } })
       .flatMap((event) => (event.finding ? [event.finding] : []))

@@ -31,14 +31,12 @@ traces bundle   <id|path> --out bundle-dir         # one session's durable evide
 traces bundle verify bundle-dir                    # every file against its manifest SHA-256
 traces facts    bundle-dir --no-content            # a bundle is a ref; this is its evidence without its words
 traces convert  sandbox-events.json --out spans.otlp.jsonl  # sandbox events and live streams are sniffed
-traces watch                                       # live observer over every harness; loops + semantic findings
+traces watch                                       # live findings in every session active in the last 30 min
+traces watch    --once --format jsonl              # one pass, as traces.stream events
 traces watch    runs/my-run                        # live run tree: status, budget, driver vs child spend
 traces watch    runs/my-run --once                 # one snapshot, then exit
 traces watch    traces.otlp.jsonl                  # any OTLP span file, any emitter
 traces analyze  runs/my-run                        # the full tree report
-traces stream   --mode findings                    # low-volume semantic feed
-traces stream   --mode agent                       # findings + deterministic report events
-traces stream   spans.openinference.jsonl --no-spans
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
 traces verify-safe bundle-dir                      # SAFE / SAFE_WITH_WARNINGS / UNSAFE (exit 1) / UNKNOWN (exit 2)
@@ -66,11 +64,7 @@ traces help moved                                  # every 0.x command and flag 
 | `--question-budget <usd>` | `ask`: provider ceiling for ONE question; `--budget` is the ceiling shared by all of them |
 | `--question-timeout <seconds>` | `ask`: wall-clock deadline for ONE question's investigation (default 600); raise it for questions over many large sessions |
 | `--concurrency <n>` | `ask`: questions running at once (default 4) |
-| `--interval <s>` / `--window <m>` | `watch` / live `stream`: poll seconds (sessions 5, run tree 2) / active-session window minutes (default 30) |
-| `--mode <kind>` | `stream`: `visualizer` (spans + findings), `findings` (low-volume), or `agent` (findings + reports) |
-| `--replay` | `stream`: scan once, then exit |
-| `--once` | `stream`: scan once; `watch <target>`: print ONE snapshot and exit |
-| `--no-spans` / `--no-findings` | `stream`: suppress raw span rows / finding rows |
+| `--once` | `watch`: one pass (or one run-tree snapshot), then exit |
 | `--no-content` | `facts`: omit conversation, commands, paths and assignment text; `upload`: send metadata only |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
 
