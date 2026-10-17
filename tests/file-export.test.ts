@@ -14,6 +14,18 @@ function parseRows(jsonl: string): Record<string, unknown>[] {
   return jsonl.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
 }
 
+function expectOpenInferenceRow(row: Record<string, unknown>): void {
+  expect(row.trace_id).toEqual(expect.any(String))
+  expect(row.span_id).toEqual(expect.any(String))
+  expect(row.name).toEqual(expect.any(String))
+  expect(row.start_time).toEqual(expect.any(String))
+  expect(row.end_time).toEqual(expect.any(String))
+  expect(row.status).toEqual(expect.objectContaining({ code: expect.any(String) }))
+  expect(row.resource).toEqual(expect.objectContaining({ attributes: expect.any(Object) }))
+  expect(row.scope).toEqual(expect.objectContaining({ name: expect.any(String) }))
+  expect(row.attributes).toEqual(expect.any(Object))
+}
+
 describe('trace evidence export', () => {
   it('keeps a complete OpenInference row as written', () => {
     const complete = {
