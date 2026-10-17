@@ -689,11 +689,16 @@ function workflowIssueText(issue: SessionWorkflowIssue): string {
   return `${issue.kind} ${issue.sessionId}, referenced as ${issue.relation} by ${issue.referencedBySessionId}`
 }
 
+/** Issues the incomplete-workflow warning names; the rest are counted. */
+const WORKFLOW_ISSUES_NAMED = 3
+
 function warnIncompleteWorkflow(workflow: SessionWorkflowSummary | undefined): void {
   if (!workflow || workflow.complete) return
+  const { issues } = workflow
+  const more = issues.length - WORKFLOW_ISSUES_NAMED
   process.stderr.write(
-    `warning: session workflow is incomplete (${workflow.issues.length} issue(s)): ` +
-      `${workflow.issues.map(workflowIssueText).join('; ')}\n`,
+    `warning: session workflow is incomplete (${issues.length} issue(s)): ` +
+      `${issues.slice(0, WORKFLOW_ISSUES_NAMED).map(workflowIssueText).join('; ')}${more > 0 ? `; and ${more} more` : ''}\n`,
   )
 }
 

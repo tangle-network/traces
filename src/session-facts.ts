@@ -1629,10 +1629,29 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
 
-/** `name 3, other 1, …`: the largest counts first, at most `keep` of them. */
-export function topCounts(counts: Readonly<Record<string, number>>, keep = 3): string {
+/** `name 3, other 1, …`: the largest counts first, at most `keep` of them, each followed by its `note`. */
+export function topCounts(counts: Readonly<Record<string, number>>, keep = 3, note: (name: string) => string = () => ''): string {
   const rows = Object.entries(counts).sort(([leftName, left], [rightName, right]) => right - left || leftName.localeCompare(rightName))
-  return rows.slice(0, keep).map(([name, count]) => `${name} ${count}`).join(', ') + (rows.length > keep ? ', …' : '')
+  return rows.slice(0, keep).map(([name, count]) => `${name} ${count}${note(name)}`).join(', ') + (rows.length > keep ? ', …' : '')
+}
+
+/** ` (2 failed, 1 in scripts)`, or nothing when both are zero. */
+function failedNote(failed: number, inScripts: number): string {
+  const parts = [...(failed > 0 ? [`${failed} failed`] : []), ...(inScripts > 0 ? [`${inScripts} in scripts`] : [])]
+  return parts.length > 0 ? ` (${parts.join(', ')})` : ''
+}
+
+/** Programs the sheet's commands line names; `--format json` lists every one in `.commands.value`. */
+const SHEET_COMMANDS = 5
+
+/** `commands 556: labctl status 523, labctl run 9 (1 failed, 2 in scripts), …`; null for a session that ran none. */
+function commandLine(facts: SessionFacts): string | null {
+  const commands = facts.commands.value
+  if (commands === null) return `commands unknown: ${facts.commands.unavailable}`
+  if (commands.length === 0) return null
+  const runs = commands.reduce((sum, row) => sum + row.runs, 0)
+  const shown = commands.slice(0, SHEET_COMMANDS).map((row) => `${row.command} ${row.runs}${failedNote(row.failed, row.inScripts)}`)
+  return `commands ${runs}: ${shown.join(', ')}${commands.length > SHEET_COMMANDS ? ', …' : ''}`
 }
 
 /**
@@ -1667,10 +1686,13 @@ function sessionSheet(facts: SessionFacts): string[] {
   lines.push(turnLine(facts))
   const subagents = facts.subagents.value ?? []
   const names = subagents.map((entry) => entry.taskName).filter((name): name is string => name !== null)
+  const failedCalls = new Map(facts.measurements.tools.map((row) => [row.name, row.outcomes.error]))
   lines.push(
-    `tools ${facts.toolCalls.value}${facts.toolCalls.value ? ` (${topCounts(facts.toolCallsByName.value ?? {})})` : ''}` +
+    `tools ${facts.toolCalls.value}${facts.toolCalls.value ? ` (${topCounts(facts.toolCallsByName.value ?? {}, 3, (name) => failedNote(failedCalls.get(name) ?? 0, 0))})` : ''}` +
       ` · subagents ${subagents.length}${names.length > 0 ? ` (${names.slice(0, 3).map((name) => sheetText(name, 40)).join(', ')}${names.length > 3 ? ', …' : ''})` : ''}`,
   )
+  const commands = commandLine(facts)
+  if (commands !== null) lines.push(commands)
   const skills = Object.fromEntries(Object.entries(facts.measurements.skills).map(([name, use]) => [name, use.model + use.slash + use.read]))
   if (Object.keys(skills).length > 0) lines.push(`skills ${topCounts(skills, 5)}`)
   lines.push(`tokens ${renderTokens(facts.tokens, facts.cost)}`)

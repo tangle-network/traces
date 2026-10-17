@@ -2,7 +2,7 @@
 
 [traces](../README.md#docs) › Session facts
 
-`traces facts` states what happened in a session, exactly, for $0: who acted, the turns, tools, pull requests, first failure, tokens, cost and the time lost.
+`traces facts` states what happened in a session, exactly, for $0: who acted, the turns, tools, commands, pull requests, first failure, tokens, cost and the time lost.
 It calls no model, and the same spans always give the same sheet.
 
 ```bash
@@ -21,7 +21,8 @@ Text is the default; pass `--format json` to parse. Each session takes at most 2
 99d75d4b claude-code · agent-dev-container (feat/gap-closure) · 10-15 09:12→12:40 UTC · active 3.1 h
 who dotfiles sha256:5843…ca56 · claude-opus-5-5 (from session-identity)
 human turns 14 (excluded: injected 6, fleet 2, relay 1) · interrupts 2
-tools 412 (Bash 220, Edit 88, Read 61, …) · subagents 6 (lint, test, docs, …)
+tools 412 (Bash 220 (31 failed), Edit 88, Read 61, …) · subagents 6 (lint, test, docs, …)
+commands 236: pnpm test 41 (19 failed), git status 30, rg 22, gh pr 9 (1 failed), git push 6, …
 tokens in 2.1M · out 310k · cache read 88M · $38.20 list price (Router rates)
 waste 52 min: `pnpm test` failed 14× in a row (31 min) · 2 stalls ≥ 10 min (21 min) · reverts 1
 PRs opened #11021 #11022 · merged #11006 · changed 23 files
@@ -29,6 +30,7 @@ first failure 09:40 Bash: exit 1 (blame agent, span 6be1…)
 final "Merged #11006; …"
 ```
 
+A tool's `(31 failed)` counts its calls that ended in error. The `commands` line names the programs run, most runs first, with the runs known to have failed and the runs inside Codex code-mode scripts (`in scripts`), which record no exit code of their own; `--format json` lists every program.
 A fact the spans cannot support reads `unknown` with the reason. A selection of several sessions starts with one line naming the count, the window and the sessions it could not read.
 
 ## What it states
@@ -88,7 +90,7 @@ console.log(renderSessionFacts(buildSessionFactsReport(spans)))
 
 ```text
 Usage: traces facts <ref…> | --current | --last N | --since T [flags]
-What happened, exactly, for $0: who acted, turns, tools, PRs, first failure, tokens, cost and time lost.
+What happened, exactly, for $0: who acted, turns, tools, commands, PRs, first failure, tokens, cost, time lost.
 
   --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
   --last N            the N newest sessions by file mtime, never the caller's own
@@ -103,10 +105,10 @@ What happened, exactly, for $0: who acted, turns, tools, PRs, first failure, tok
   --out PATH          write the sheet to PATH; stdout gets one summary line
 
 jq paths (--format json):
-  .sessions[0].humanTurns.value[] | {text, reply, signals}         each ask, its reply, its signals
-  .sessions[0].agent.value                                         who acted: profile, model, directive
-  .sessions[0] | {firstFailure, cost, waste: .measurements.waste}  first failure, cost, streaks, stalls, reverts
-  .matches[] | {sessionId, kind, text}                             with --match: each hit
+  .sessions[0].humanTurns.value[] | {at, text, spanId}                        each typed turn, its time and span
+  .sessions[0].commands.value[]                                               programs run: runs, failed, inScripts
+  .sessions[0].measurements.tools[] | {name, calls, failed: .outcomes.error}  tool calls by name, and failures
+  .sessions[0] | {firstFailure, tokens, cost, agent: .agent.value}            first failure, tokens, cost, who acted
 
 Examples:
   traces facts --current

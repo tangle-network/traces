@@ -229,6 +229,14 @@ describe('processes a Codex code-mode script started in a loop', () => {
     }
   })
 
+  it('are a line of the text sheet, next to the tool calls that failed', async () => {
+    const run = await runCli(['facts', loopRollout], { env: loopEnv })
+    expect(run.code).toBe(0)
+    const lines = run.stdout.split('\n')
+    expect(lines.find((line) => line.startsWith('tools '))).toBe('tools 4 (exec_command 4 (2 failed)) · subagents 0')
+    expect(lines).toContain('commands 5: labctl run 4 (1 failed, 2 in scripts), labctl cancel 1 (1 failed)')
+  })
+
   it('are search rows, one per command the loop ran', async () => {
     const run = await runCli(['facts', loopRollout, '--match', '^labctl run', '--format', 'json'], { env: loopEnv })
     expect(run.code).toBe(0)
