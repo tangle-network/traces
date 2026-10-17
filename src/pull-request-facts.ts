@@ -72,6 +72,59 @@ const PULL_REQUEST_URL = /https?:\/\/[^/\s"']+\/[^/\s"']+\/[^/\s"']+\/pull\/\d+/
 const PUSH_TRACKING = /branch '([^']+)' set up to track/
 const PUSH_NEW_BRANCH = /\[new branch\]\s+\S+\s+->\s+(\S+)/
 
+/**
+ * One result a Codex code-mode script printed. `text(await tools.exec_command(…))`
+ * writes `{"chunk_id", "exit_code" or "session_id", "output"}`: an exit code once
+ * the command ended, a session id while it still runs, and the command's output
+ * as an escaped string, so a URL in it is never on a line of its own.
+ */
+interface ScriptResult {
+  readonly sessionId: string | null
+  readonly exitCode: number | null
+  readonly output: string
+}
+
+const SCRIPT_RESULT_START = '{"chunk_id"'
+
+/** Where the JSON object that opens at `start` closes (exclusive), honoring strings; -1 when it never closes. */
+function jsonObjectEnd(text: string, start: number): number {
+  let depth = 0
+  let inString = false
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]
+    if (inString) {
+      if (char === '\\') index += 1
+      else if (char === '"') inString = false
+    } else if (char === '"') inString = true
+    else if (char === '{') depth += 1
+    else if (char === '}' && --depth === 0) return index + 1
+  }
+  return -1
+}
+
+/** The tool results a code-mode script's output holds, in order. A result cut off by truncation ends the list. */
+function scriptResults(output: string): ScriptResult[] {
+  const results: ScriptResult[] = []
+  for (let from = output.indexOf(SCRIPT_RESULT_START); from !== -1; from = output.indexOf(SCRIPT_RESULT_START, from + 1)) {
+    const end = jsonObjectEnd(output, from)
+    if (end === -1) break
+    let value: Record<string, unknown>
+    try {
+      value = JSON.parse(output.slice(from, end)) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const session = value.session_id
+    results.push({
+      sessionId: typeof session === 'number' || typeof session === 'string' ? String(session) : null,
+      exitCode: typeof value.exit_code === 'number' ? value.exit_code : null,
+      output: typeof value.output === 'string' ? value.output : '',
+    })
+    from = end - 1
+  }
+  return results
+}
+
 /** One pull request the agent created or merged, with the evidence that named it. */
 export interface PullRequestFact {
   /** The PR number when one is known, else the head branch. Null when neither is. */
@@ -110,6 +163,10 @@ interface CommandRecord {
   readonly at: string
   readonly script: string
   readonly output: string
+  /** The output, then each result a code-mode script printed, decoded: what the commands themselves printed. */
+  readonly text: string
+  /** Process sessions the call left running: Codex's text header, or a script result with a session and no exit code. */
+  readonly running: readonly string[]
   /** Not known to have succeeded: a non-zero exit, or a code-mode script, whose status is the script's, not the command's. */
   readonly failed: boolean
   readonly inputTruncated: boolean
@@ -173,11 +230,19 @@ function commandRecords(spans: readonly OtlpSpan[]): CommandRecord[] {
     if (outer && (innerParents.has(span.span_id) || innerScripts.has(script))) continue
     const exit = span.attributes['process.exit_code']
     const exitCode = typeof exit === 'number' ? exit : null
+    const output = stringAttribute(span, 'output.value') ?? ''
+    const results = codeMode.has(span) ? scriptResults(output) : []
+    const header = RUNNING_SESSION.exec(output)?.[1]
     records.push({
       spanId: span.span_id,
       at: span.start_time,
       script,
-      output: stringAttribute(span, 'output.value') ?? '',
+      output,
+      text: [output, ...results.map((result) => result.output)].join('\n'),
+      running: [
+        ...(header === undefined ? [] : [header]),
+        ...results.filter((result) => result.sessionId !== null && result.exitCode === null).map((result) => result.sessionId!),
+      ],
       failed: codeMode.has(span) || (exitCode === null ? span.status.code === 'ERROR' : exitCode !== 0),
       inputTruncated: span.attributes['traces.input.truncated'] === true,
       outputTruncated: span.attributes['traces.output.truncated'] === true,
@@ -276,8 +341,14 @@ function inferHeadBranch(commands: readonly string[][], upTo: number, output: st
 /** Whether the shell reached `gh` at all, for a command not known to have succeeded. */
 function reachedGh(record: CommandRecord, action: 'create' | 'merge', sawNumber: boolean): boolean {
   if (!record.failed) return true
-  if (sawNumber || PULL_REQUEST_URL.test(record.output)) return true
-  return action === 'create' ? CREATE_REACHED_GH.test(record.output) : MERGE_REACHED_GH.test(record.output)
+  if (sawNumber || PULL_REQUEST_URL.test(record.text)) return true
+  return action === 'create' ? CREATE_REACHED_GH.test(record.text) : MERGE_REACHED_GH.test(record.text)
+}
+
+/** A pull-request number a record printed, or a later poll of a process it left running printed (`spanId`). */
+interface Printed {
+  readonly number: string
+  readonly pollSpanId: string | null
 }
 
 function createEvent(
@@ -286,15 +357,18 @@ function createEvent(
   words: readonly string[],
   commands: readonly string[][],
   commandIndex: number,
-  printedNumber: string | null,
+  printed: Printed | null,
 ): PullRequestEvent | null {
   const { flags } = parseFlags(words.slice(3), CREATE_VALUE_FLAGS)
   if (flags.has('--help') || flags.has('-h')) return null
-  if (!reachedGh(record, 'create', printedNumber !== null)) return null
+  if (!reachedGh(record, 'create', printed !== null)) return null
+  const printedNumber = printed?.number ?? null
   const headFlag = flagValue(flags, '--head', '-H')
-  const headBranch = headFlag ?? inferHeadBranch(commands, commandIndex, record.output)
+  const headBranch = headFlag ?? inferHeadBranch(commands, commandIndex, record.text)
   const evidence =
-    printedNumber !== null
+    printed?.pollSpanId
+      ? `the pull-request URL a later poll of this backgrounded command printed, in span ${printed.pollSpanId}`
+      : printedNumber !== null
       ? `the pull-request URL this command printed, in span ${record.spanId}`
       : headFlag !== null
         ? 'the --head branch given to the command'
@@ -307,7 +381,7 @@ function createEvent(
     headBranch,
     command: words.join(' '),
     evidence,
-    spanIds: [record.spanId],
+    spanIds: printed?.pollSpanId ? [record.spanId, printed.pollSpanId] : [record.spanId],
     at: record.at,
     failed: record.failed,
     recordIndex,
@@ -325,7 +399,7 @@ function mergeEvent(
   const target = positional[0] ?? null
   const numberInCommand =
     target === null ? null : (/^#?(\d+)$/.exec(target)?.[1] ?? numbersInLine(target)[0] ?? null)
-  const numberInOutput = numberInCommand === null ? (MERGED_NUMBER.exec(record.output)?.[1] ?? null) : null
+  const numberInOutput = numberInCommand === null ? (MERGED_NUMBER.exec(record.text)?.[1] ?? null) : null
   const number = numberInCommand ?? numberInOutput
   if (!reachedGh(record, 'merge', number !== null)) return null
   const evidence =
@@ -350,10 +424,10 @@ function mergeEvent(
   }
 }
 
-function eventsFromRecord(record: CommandRecord, recordIndex: number): PullRequestEvent[] {
+function eventsFromRecord(record: CommandRecord, recordIndex: number, polled: readonly Printed[]): PullRequestEvent[] {
   if (!/\bpr\b/.test(record.script)) return []
   const commands = shellCommands(record.script)
-  const printed = printedPullRequestNumbers(record.output)
+  const printed: Printed[] = [...printedPullRequestNumbers(record.text).map((number) => ({ number, pollSpanId: null })), ...polled]
   const events: PullRequestEvent[] = []
   let createIndex = 0
   for (let index = 0; index < commands.length; index += 1) {
@@ -391,7 +465,7 @@ function numberFromLaterOutput(
   for (let index = after + 1; index < records.length; index += 1) {
     const record = records[index]!
     const found = new Set<string>()
-    for (const raw of `${record.script}\n${record.output}`.split('\n')) {
+    for (const raw of `${record.script}\n${record.text}`.split('\n')) {
       const line = raw.replace(ANSI, '')
       if (!line.includes(headBranch)) continue
       for (const number of numbersInLine(line)) found.add(number)
@@ -438,29 +512,42 @@ function distinct(events: readonly PullRequestEvent[]): PullRequestFact[] {
 /** `exec_command` left a process running and named its session; a later `write_stdin` polls it. */
 const RUNNING_SESSION = /Process running with session ID (\d+)/
 
-/**
- * The pull-request number a later poll of a backgrounded command printed. A
- * `gh pr create` that is still running when its call returns prints no URL; the
- * poll of the same process session that comes back with one names its number.
- */
-function numberFromPoll(spans: readonly OtlpSpan[], record: CommandRecord): { number: string; spanId: string } | null {
-  const session = RUNNING_SESSION.exec(record.output)?.[1]
-  if (session === undefined) return null
-  for (const span of spans) {
-    if (span.start_time < record.at) continue
-    const input = stringAttribute(span, 'input.value')
-    if (input === null || !input.includes(session)) continue
-    let polled: unknown
-    try {
-      polled = (JSON.parse(input) as { session_id?: unknown }).session_id
-    } catch {
-      continue
-    }
-    if (String(polled) !== session) continue
-    const number = printedPullRequestNumbers(stringAttribute(span, 'output.value') ?? '')[0]
-    if (number !== undefined) return { number, spanId: span.span_id }
+/** Whether a tool call's input polls process `session`: a `write_stdin` argument list, or a code-mode script calling it. */
+function pollsSession(input: string, session: string): boolean {
+  if (!input.includes(session)) return false
+  if (isCodeModeScript(input) || input.includes('write_stdin(')) {
+    return new RegExp(`write_stdin\\(\\s*\\{[^}]*\\bsession_id["']?\\s*:\\s*${session}\\b`, 'u').test(input)
   }
-  return null
+  try {
+    return String((JSON.parse(input) as { session_id?: unknown }).session_id) === session
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The pull-request numbers later polls of the processes a record left running
+ * printed, in the order it left them. A `gh pr create` that is still running
+ * when its call returns prints no URL; the first later poll of the same process
+ * session that prints exactly one names its number. A code-mode poll prints the
+ * results it read, decoded the same way.
+ */
+function polledNumbers(spans: readonly OtlpSpan[], record: CommandRecord): Printed[] {
+  const found: Printed[] = []
+  for (const session of record.running) {
+    for (const span of spans) {
+      if (span.start_time < record.at || span.span_id === record.spanId) continue
+      const input = stringAttribute(span, 'input.value')
+      if (input === null || !pollsSession(input, session)) continue
+      const output = stringAttribute(span, 'output.value') ?? ''
+      const text = [output, ...scriptResults(output).map((result) => result.output)].join('\n')
+      const numbers = new Set(printedPullRequestNumbers(text))
+      if (numbers.size !== 1) continue
+      found.push({ number: [...numbers][0]!, pollSpanId: span.span_id })
+      break
+    }
+  }
+  return found
 }
 
 /**
@@ -484,7 +571,11 @@ export function readPullRequests(spans: readonly OtlpSpan[]): PullRequestReading
   }
 
   const events: PullRequestEvent[] = []
-  for (let index = 0; index < records.length; index += 1) events.push(...eventsFromRecord(records[index]!, index))
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!
+    const creates = /\bpr\b/.test(record.script) && record.running.length > 0
+    events.push(...eventsFromRecord(record, index, creates ? polledNumbers(spans, record) : []))
+  }
 
   // A create shown only by head branch takes the number another create for the
   // same branch produced: a failed first attempt and its retry are one PR.
@@ -494,14 +585,6 @@ export function readPullRequests(spans: readonly OtlpSpan[]): PullRequestReading
     if (!numberByBranch.has(event.headBranch)) numberByBranch.set(event.headBranch, event.number)
   }
   let unjoinedTruncated = 0
-  for (const event of events) {
-    if (event.number !== null || event.action !== 'create') continue
-    const polled = numberFromPoll(spans, records[event.recordIndex]!)
-    if (polled === null) continue
-    event.number = polled.number
-    event.spanIds.push(polled.spanId)
-    event.evidence = `the pull-request URL a later poll of this backgrounded command printed, in span ${polled.spanId}`
-  }
   for (const event of events) {
     if (event.number !== null || event.headBranch === null) continue
     const sibling = numberByBranch.get(event.headBranch)
