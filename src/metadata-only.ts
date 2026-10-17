@@ -14,8 +14,8 @@
  *   - values derived from a payload (its size, digest or MIME type, which can
  *     reveal a short input), and whether arguments were captured;
  *   - what the person wrote outside the conversation: source-record
- *     locations, working directories, the session file name, branch names,
- *     and the brief a subagent was given;
+ *     locations, working directories, the session file name, the repository
+ *     and branch names, and the brief a subagent was given;
  *   - every structured value, which no rule can vouch for.
  * A link's attributes follow the same rule.
  */
@@ -29,7 +29,11 @@ import { SOURCE_ATTRIBUTE_PREFIX } from './source-location.js'
 /** Computed from a tool payload: a short input's size or digest can reveal it. */
 const PAYLOAD_DERIVED = /^(?:input|output)\.mime_type$|^traces\.(?:input|output)\.(?:bytes|sha256|truncated)$/i
 
-/** Paths, branch names and assignment text: not content by name, but written by the person. */
+/**
+ * Paths, the repository and branch names, and assignment text: not content by
+ * name, but written by the person. The subject key is the repository, or the
+ * cwd's last segment when there is none.
+ */
 const WITHHELD = new Set<string>([
   'tool.args_captured',
   'cwd',
@@ -38,6 +42,8 @@ const WITHHELD = new Set<string>([
   ATTR.ENVIRONMENT_CWD,
   ATTR.SESSION_FILE,
   ATTR.CORRUPTION_SOURCE_PATH,
+  ATTR.SUBJECT_KEY,
+  ATTR.GIT_REPOSITORY,
   ATTR.GIT_BRANCH,
   ATTR.GIT_BRANCH_NAME,
   SUBAGENT_TASK_ATTR,

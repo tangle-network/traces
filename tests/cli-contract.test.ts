@@ -208,7 +208,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   watch: ['--since', '--cwd', '--harness', '--once', '--format'],
   bundle: ['--current', '--harness', '--out'],
   'bundle verify': ['--format'],
-  convert: [...SELECT, '--out'],
+  convert: [...SELECT, '--no-content', '--out', '--format'],
   upload: ['--current', '--since', '--cwd', '--harness', '--dry-run', '--no-content', '--yes', '--out'],
   skills: ['--since', '--unused', '--format'],
   mcp: ['--current', '--last', '--since', '--cwd', '--harness'],

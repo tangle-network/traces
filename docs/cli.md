@@ -57,7 +57,7 @@ traces help moved                                  # every 0.x command and flag 
 | `--contract <file>` | `check`: gate on a declarative trace contract (JSON), or on `conformance`; repeatable |
 | `--share-safe` | `check`: gate on whether each path is safe to share, read as bytes |
 | `--known-secret-env <name>` | `check --share-safe`: also fail on this variable's value, in any encoding; repeatable |
-| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`; `check` also takes `junit` and `github`. The input is sniffed |
+| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`, and on `convert`'s `--out` summary line; `check` also takes `junit` and `github`. The input is sniffed |
 | `--budget <usd>` | `ask`: one ceiling shared by every question. `analyze` calls no model |
 | `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
 | `--questions <file>` | `ask`: JSON array of questions: strings, or `{ id?, question, instructions?, answerSchema? }` |
