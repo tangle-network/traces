@@ -1,5 +1,5 @@
 import { basename } from 'node:path'
-import { INTERRUPT_TEXT } from './adapters/actor.js'
+import { INTERRUPT_TEXT, isFleetTurn } from './adapters/actor.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { canonicalJson } from './adapters/tool-io.js'
 import { INHERITED_SOURCE_ATTR, INHERITED_SPAN_ATTR } from './adapters/provenance.js'
@@ -69,7 +69,7 @@ export interface Stall {
   /** The last record before the gap. */
   readonly at: string
   readonly minutes: number
-  /** `waiting on a command` when a tool result ended the gap, else `idle`. */
+  /** `waiting on a command` when a tool result, or a background command's notice, ended the gap; else `idle`. */
   readonly kind: 'waiting on a command' | 'idle'
   /** The span whose record ended the gap. */
   readonly spanId: string
@@ -228,17 +228,24 @@ function timeOf(value: string): number | null {
 /** History copied from a parent or kept by a compaction: the session carries it but did not do it. */
 const isInherited = (span: OtlpSpan): boolean => span.attributes[INHERITED_SPAN_ATTR] === true
 
+const promptText = (span: OtlpSpan): string =>
+  span.name === 'user.prompt' && typeof span.attributes.content === 'string' ? span.attributes.content.trim() : ''
+
 /**
  * A turn sent in, which ends a wait rather than a stall: a person typing (or a
- * fleet session or pasted relay through the same prompt), a parent agent, or
- * the person interrupting.
+ * pasted relay), another session or a parent agent sending one, or the person
+ * interrupting. Some readers record a fleet message as harness text, so its
+ * opening words decide too.
  */
 function endsWait(span: OtlpSpan): boolean {
   if (span.name !== 'user.prompt') return false
   const actor = span.attributes[ACTOR_ATTR]
-  const content = typeof span.attributes.content === 'string' ? span.attributes.content.trim() : ''
-  return actor === 'human' || actor === 'agent' || INTERRUPT_TEXT.test(content)
+  const content = promptText(span)
+  return actor === 'human' || actor === 'agent' || INTERRUPT_TEXT.test(content) || isFleetTurn(content)
 }
+
+/** The record Claude Code writes when a background command or agent finishes: the result the session waited on. */
+const BACKGROUND_RESULT = /^<task-notification>/u
 
 const toolNameOf = (span: OtlpSpan): string =>
   typeof span.attributes['tool.name'] === 'string' ? span.attributes['tool.name'] : span.name.replace(/^tool\./u, '')
@@ -310,7 +317,8 @@ function measureTime(spans: readonly OtlpSpan[], records: readonly OtlpSpan[], t
     const ending: TimePoint[] = []
     for (let j = i; j < points.length && points[j]!.at === points[i]!.at; j++) ending.push(points[j]!)
     if (ending.some((point) => !point.end && endsWait(point.span))) continue
-    const result = ending.find((point) => point.end && point.span.attributes['openinference.span.kind'] === 'TOOL')
+    const result = ending.find((point) =>
+      (point.end && point.span.attributes['openinference.span.kind'] === 'TOOL') || (!point.end && BACKGROUND_RESULT.test(promptText(point.span))))
     stalls.push({
       at: new Date(before).toISOString(),
       minutes: minutes(gap),

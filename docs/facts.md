@@ -42,7 +42,7 @@ A selection of several sessions, or a window, starts with one line naming the co
 `measurements.waste` says where the session's own agent lost time, and `measurements.activeMinutes` how long it worked:
 
 - `failingStreaks`: a command that failed 3 or more times in a row (a loop is 3 identical calls), with its runs, its minutes from the first failed run's start to the last one's end, and their span ids. A success of the same command, or a turn sent in, ends a streak. Commands are compared with their whitespace collapsed; under `--no-content` the command is `null`.
-- `stalls`: gaps of 10 minutes or more between the session's own records that no turn sent in ended. A gap a person ended (or a fleet message, a parent agent, or an interrupt) is their time, not a stall. Each stall names its start, its minutes, the span that ended it, and whether a command's result ended it (`waiting on a command`) or anything else did (`idle`).
+- `stalls`: gaps of 10 minutes or more between the session's own records that no turn sent in ended. A gap a person ended (or a fleet message, a parent agent, or an interrupt) is their time, not a stall. Each stall names its start, its minutes, the span that ended it, and whether a command's result or a background command's notice (`<task-notification>`) ended it (`waiting on a command`) or anything else did (`idle`).
 - `rollbacks`: `git revert` and `git reset --hard` commands, one per simple command as the shell splits the script.
 - `repeatedCommands`: commands run more than once and the runs beyond each one's first, the way `reflect/scripts/self-audit` counts rework.
 - `minutes`: the time inside a failing streak or a stall, each minute counted once.

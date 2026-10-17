@@ -60,6 +60,14 @@ function claudeSession(): Row[] {
       uuid: 'slash-1-expansion', parentUuid: 'slash-1', isMeta: true,
     }),
     say(at(171), 'Reflected.'),
+    // A background build: twenty minutes until its notice arrives is waiting on a command.
+    call(at(172), 'b1', 'Bash', { command: 'pnpm build', run_in_background: true }), result(at(172, 5), 'b1', 'Command running in background with ID: b1'),
+    say(at(172, 10), 'Waiting for the build.'),
+    user(at(192, 10), '<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>'),
+    say(at(193), 'The build passed.'),
+    // Forty minutes until another session sends a message: the session waited for input, no stall.
+    user(at(233), '[fleet-message-id: f-1] Ship it.'),
+    say(at(234), 'Shipped.'),
   ]
 }
 
@@ -173,11 +181,12 @@ describe('facts waste measures', () => {
       expect(waste.stalls.value!.map(({ minutes, kind }) => ({ minutes, kind }))).toEqual([
         { minutes: 15, kind: 'waiting on a command' },
         { minutes: 14, kind: 'idle' },
+        { minutes: 20, kind: 'waiting on a command' },
       ])
       expect(activeMinutes.value).toBe(cappedMinutes(claudeRows))
-      expect(activeMinutes.value).toBe(52)
-      // The streak and the two stalls do not overlap: 6 + 15 + 14 minutes.
-      expect(waste.minutes).toBe(35)
+      expect(activeMinutes.value).toBe(75)
+      // The streak and the three stalls do not overlap: 6 + 15 + 14 + 20 minutes.
+      expect(waste.minutes).toBe(55)
       expect(waste.unavailable).toBeNull()
     },
   )
@@ -193,8 +202,8 @@ describe('facts waste measures', () => {
   it('prints the time lost, the active time and the skills on the text sheet', async () => {
     const run = await runCli(['facts', claudeFile], { env })
     expect(run.code).toBe(0)
-    expect(run.stdout).toContain('\nwaste 35 min: `pnpm test` failed 3× in a row (6 min) · 2 stalls ≥ 10 min (29 min) · reverts 2\n')
-    expect(run.stdout).toMatch(/ · active 52 min$/mu)
+    expect(run.stdout).toContain('\nwaste 55 min: `pnpm test` failed 3× in a row (6 min) · 3 stalls ≥ 10 min (49 min) · reverts 2\n')
+    expect(run.stdout).toMatch(/ · active 1\.3 h$/mu)
     expect(run.stdout).toContain('\nskills reflect 1, verify 1\n')
   })
 
@@ -205,7 +214,7 @@ describe('facts waste measures', () => {
     expect(waste.failingStreaks.value).toEqual([expect.objectContaining({ command: null, runs: 3 })])
     expect(run.stdout).not.toContain('pnpm test')
     const text = await runCli(['facts', claudeFile, '--no-content'], { env })
-    expect(text.stdout).toContain('\nwaste 35 min: a Bash command failed 3× in a row (6 min) · ')
+    expect(text.stdout).toContain('\nwaste 55 min: a Bash command failed 3× in a row (6 min) · ')
     expect(text.stdout).not.toContain('pnpm test')
   })
 
