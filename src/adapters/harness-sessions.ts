@@ -37,6 +37,7 @@ import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
 import { SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './provenance.js'
 import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath } from './codex.js'
 import { multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
+import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
 
 type SupportedHarness = 'claude-code' | 'codex' | 'opencode' | 'pi' | 'kimi-code' | 'factory-droids'
@@ -244,7 +245,7 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
 }
 
 type CodexHead = { timestamp?: string; type?: string; payload?: {
-  type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string;
+  type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string; turn_id?: string;
   forked_from_id?: string; thread_source?: string; originator?: string; cwd?: string; model_provider?: string;
   agent_role?: string; agent_path?: string; parent_thread_id?: string;
   git?: { repository_url?: unknown }; source?: { subagent?: { thread_spawn?: {
@@ -263,9 +264,29 @@ async function codexMeta(path: string): Promise<NonNullable<CodexHead['payload']
   }
 }
 
-/** A session Codex spawned for another: it names its parent thread or its spawn. */
-function isCodexChild(meta: NonNullable<CodexHead['payload']> | undefined): boolean {
-  return Boolean(meta?.parent_thread_id || meta?.source?.subagent?.thread_spawn?.parent_thread_id || meta?.thread_source === 'subagent')
+/**
+ * A Codex child that starts with its parent's history: its head starts a task
+ * before the child existed (the task's UUIDv7 turn id predates the child's id).
+ * Only such a child has records the shared reader would count as its own.
+ */
+function hasForkPrefix(head: readonly CodexHead[]): boolean {
+  const meta = head.find((row) => row.type === 'session_meta')?.payload
+  if (!meta?.id || !(meta.parent_thread_id || meta.source?.subagent?.thread_spawn?.parent_thread_id || meta.thread_source === 'subagent')) return false
+  const born = uuidV7TimestampMs(meta.id)
+  return born !== undefined && head.some((row) => {
+    if (row.type !== 'event_msg' || row.payload?.type !== 'task_started') return false
+    const started = uuidV7TimestampMs(row.payload.turn_id)
+    return started !== undefined && started < born
+  })
+}
+
+async function codexForkPrefix(path: string): Promise<boolean> {
+  try {
+    return hasForkPrefix(await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} }))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
 }
 
 function ownHome(): string {
@@ -637,10 +658,10 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     if (this.scopedAdapter instanceof ClaudeAdapter && await isClaudeStreamJson(ref.path)) {
       return this.scopedAdapter.parse(ref, options)
     }
-    // A Codex child starts with its parent's history, rewritten to the fork time. The
-    // shared fold has no task scope yet (U18), so it would count that history as the
+    // A forked Codex child starts with its parent's history, rewritten to the fork time.
+    // The shared fold has no task scope yet (U18), so it would count that history as the
     // child's own work; traces' own reader scopes a child to the task it was given.
-    if (this.scopedAdapter instanceof CodexAdapter && isCodexChild(await codexMeta(ref.path))) {
+    if (this.scopedAdapter instanceof CodexAdapter && await codexForkPrefix(ref.path)) {
       return this.scopedAdapter.parse(ref, options)
     }
     options.signal?.throwIfAborted()
@@ -797,9 +818,9 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     if (first === undefined) return true
     const records = first.filter((record): record is Record<string, unknown> => record !== null)
     if (this.nativeHarness === 'claude-code') return !records.some((record) => record.type === 'system' && record.subtype === 'init')
-    // A Codex child is read whole by traces' own reader (`parse`), so the index reads it whole too.
-    const meta = records.find((record) => record.type === 'session_meta') as CodexHead | undefined
-    return meta !== undefined && !isCodexChild(meta.payload) && !records.slice(0, 40).some((record) => isLegacyPrompt(record as CodexHead))
+    // A forked child is read whole by traces' own reader (`parse`), so the index reads it whole too.
+    const head = records.slice(0, 40) as CodexHead[]
+    return records.some((record) => record.type === 'session_meta') && !hasForkPrefix(head) && !head.some((record) => isLegacyPrompt(record))
   }
 
   /**
