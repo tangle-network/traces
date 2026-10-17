@@ -1,101 +1,30 @@
 ---
 name: inspect-agent-traces
-description: Inspect real agent workflows with the published Traces CLI and export cited local findings.
+description: Answer what an agent session did, said, wasted or broke with the traces CLI, not by parsing.
 ---
+Run traces; never parse session stores yourself. Everything except `ask` is exact, local and $0.
+A ref is a session id or 8+ char prefix or suffix, a file, an OTLP file or dir, a run dir, a bundle dir,
+or a store root; or select with --current, --last N, --since/--until, --cwd.
+`traces <command> --help` lists flags and jq paths.
 
-# Inspect agent traces
+| Question | Command |
+|---|---|
+| What did this session do (Claude Code, Codex) | `traces facts --current` |
+| This session on Pi, OpenCode or Kimi | `traces list --cwd . --last 1`, then `traces facts <id>` |
+| The session that just ended here | `traces list --cwd . --last 5`, then `traces facts <id>` |
+| What did the person ask, and what did the agent reply | `traces facts <id> --format jsonl` |
+| Did we already try X / what did Drew say about Y | `traces facts --since 30d --match '<re>'` |
+| Where it churned, what failed, what it cost | `traces analyze <id>` |
+| What a trace cannot answer, and why | `traces analyze <id> --format json \| jq .cannotAnswer` |
+| Where two runs split | `traces diff <a> <b>` |
+| Gate a PR or eval on the path a run took | `traces check <ref> --contract <file>` |
+| Is this safe to share | `traces check <path> --share-safe` |
+| Watch workers live | `traces watch [<run-dir>] --once` |
+| A judgment question with checked citations ($) | `traces ask <id> --question '<q>' --budget 1` |
+| Keep a session's evidence before a move | `traces bundle <id> --out <dir>`, then `traces bundle verify <dir>` |
 
-Use the deterministic CLI first; keep inspection local and read-only.
-
-## Choose the way in
-
-Read conforming OTLP directly, including `@tangle-network/agent-trace-contract` exports.
-
-```bash
-traces check spans.otlp.jsonl --contract conformance   # exit 1 only when it is not a trace
-traces analyze spans.otlp.jsonl --out .traces/current.md
-traces analyze results/sessions --out .traces/all.md   # a directory of exports
-```
-
-A session id, an 8+ character prefix or suffix, or a session file is a ref too; integrate systems you own through OTLP.
-
-Directories read only OTLP files, preferring an `otlp/` subdirectory; other JSONL logs are listed separately.
-
-Report `Inputs incomplete` values as uncaptured, never zero spend.
-The `trace conformance` section lists missing capabilities.
-
-For loops, inspect `round-over-round convergence` and `steering chain` before judging progress.
-
-## Select the workflow
-
-```bash
-traces --version
-traces list --harness codex --cwd "$PWD"
-traces facts --current --latest-turn --format text --out .traces/current-facts.txt
-```
-
-- Use `--current` for the active Codex or Claude Code session.
-- Pass a listed session's id, 8+ character prefix or suffix, or path as the ref to pin it.
-- Use `--latest-turn` for the current task in a resumed Codex or Claude Code session.
-- A named session brings its workers, linked by stable parent and child IDs, up to 100.
-
-Never join agents by display name or timestamp when Traces reports missing or conflicting IDs.
-Read facts before full transcripts or analysis.
-Check parent and worker counts against the task being investigated.
-Run `analyze` only for questions the facts sheet cannot answer:
-
-```bash
-traces analyze --current --latest-turn --out .traces/current.md
-```
-
-For moved evidence, keep byte-identical transcripts and record their source paths and hashes.
-Preserve Claude's `<session UUID>/subagents/workflows/<run ID>` subtree beside the copied parent JSONL file.
-Restore missing child files from the source; rewriting recorded paths loses the original evidence.
-Check current branches, edits, commits, and PRs before reporting unfinished work; transcripts describe past actions.
-
-## Export
-
-Write normalized OpenInference spans for another tool:
-
-```bash
-traces convert --current --latest-turn --out .traces/current.otlp.jsonl
-```
-
-Write the deterministic review as files:
-
-```bash
-traces analyze --current --latest-turn --out .traces/analysis
-```
-
-It writes `report.md` and `findings.json`, and edits no agent, repository, memory store, or knowledge base.
-
-Preserve a session for later inspection:
-
-```bash
-traces bundle <id-or-path> --out .traces/bundle
-traces bundle verify .traces/bundle
-```
-
-`bundle` copies transcripts, spans, the facts sheet, and the session-window git log with per-file SHA-256 hashes.
-It uses no model calls.
-Missing transcripts stop assembly; optional missing inputs appear in `manifest.absent`.
-A bundle directory is a ref: `traces facts .traces/bundle --no-content` reads its evidence without the session's own words.
-
-## Ask your own question
-
-`traces ask --last 1 --question "<text>" --budget 2 --out .traces/ask` spends model calls and resolves answer citations.
-
-## Report
-
-- State the ref and harness, selected task boundary, session and span counts, and integrity warnings.
-- Name missing capabilities and analyses affected by them.
-- Cite each finding with its exact `trace://` reference.
-- Mark missing outcome, cost, token, skill, or relationship data unknown.
-- Do not infer task success from a completion message.
-- Do not infer skill use from reading a `SKILL.md`.
-- Do not upload traces unless explicitly requested.
+Report the ref and harness, cite span ids, and say "unknown" where traces returns null.
+Do not infer success from a completion message. Upload only when asked.
 
 ## Then consider
-
-- Write an analyst with the SDK (`examples/custom-analyst.ts`) when deterministic findings cannot answer a repeated trace question.
-- Use `autopsy` when the result is empty, surprising, or suspiciously strong.
+A question you ask twice becomes a `--questions` bank file or a `check --contract`.

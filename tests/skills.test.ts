@@ -18,6 +18,7 @@ describe.each(skillNames)('%s skill', (name) => {
     const description = frontmatter?.match(/^description:\s*(.+)$/m)?.[1] ?? ''
     expect(description.length).toBeGreaterThan(0)
     expect(description.length).toBeLessThanOrEqual(96)
+    expect(content.trimEnd().split('\n').length).toBeLessThanOrEqual(60)
     expect(Buffer.byteLength(content)).toBeLessThanOrEqual(5_000)
     expect(content).not.toContain('TODO')
     expect(content).not.toContain('—')
@@ -41,11 +42,13 @@ describe.each(skillNames)('%s skill', (name) => {
   })
 })
 
-it('uses the durable output flag for trace conversion', async () => {
+it('maps questions to commands and never teaches parsing a store', async () => {
   const skillUrl = new URL('../skills/inspect-agent-traces/SKILL.md', import.meta.url)
   const content = await readFile(skillUrl, 'utf8')
-  const convertCommand = content.match(/traces convert[\s\S]*?```/)?.[0] ?? ''
 
-  expect(convertCommand).toContain('--out ')
-  expect(convertCommand).not.toContain('--otlp-out')
+  for (const command of ['list', 'facts', 'analyze', 'diff', 'check', 'watch', 'ask', 'bundle']) {
+    expect(content).toContain(`\`traces ${command} `)
+  }
+  expect(content).toContain('never parse session stores yourself')
+  expect(content).not.toMatch(/~\/\.claude\/projects|\.codex\/sessions|\bjq -r '\.message/u)
 })
