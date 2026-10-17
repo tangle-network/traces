@@ -102,10 +102,10 @@ async function makeExecFailsHome(): Promise<{ path: string; env: Record<string, 
     { timestamp: at(0), type: 'session_meta', payload: { id: EXEC_FAILS_ID, timestamp: at(0), cwd, originator: 'codex_cli_rs', cli_version: '0.150.0' } },
     { timestamp: at(1), type: 'event_msg', payload: { type: 'task_started', turn_id: `${EXEC_FAILS_ID}-t1` } },
     { timestamp: at(1), type: 'turn_context', payload: { cwd, model: 'gpt-6.1-sol' } },
-    { timestamp: at(2), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Run the tests.' }] } },
-    ...exec(3, 'call-test', 'pnpm test', 1, 'FAIL tests/a.test.ts (process exited with code 7 in a child)'),
-    ...exec(6, 'call-status', 'git status --short', 0, ''),
-    { timestamp: at(9), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'pnpm test fails in tests/a.test.ts.' }] } },
+    { timestamp: at(2), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Install the workspace.' }] } },
+    ...exec(3, 'call-install', 'pnpm install --frozen-lockfile', 1, 'ERR_PNPM_OUTDATED_LOCKFILE (a postinstall exited with code 7)'),
+    ...exec(6, 'call-list', 'ls packages', 0, 'core'),
+    { timestamp: at(9), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The lockfile is out of date.' }] } },
     { timestamp: at(10), type: 'event_msg', payload: { type: 'task_complete', turn_id: `${EXEC_FAILS_ID}-t1` } },
   ]
   const path = join(home, '.codex', 'sessions', '2026', '10', '17', `rollout-2026-10-17T10-00-00-${EXEC_FAILS_ID}.jsonl`)
@@ -165,7 +165,7 @@ describe('both read paths state the same numbers', () => {
   // harness-sessions 0.1.6 read every Codex exec_command as completed, so the shared path found no failure.
   it('names the same first failure for a Codex exec_command that exits 1', async () => {
     const [[shared], [native]] = await Promise.all([facts([ex.path], ex.env), facts([ex.path, '--latest-turn'], ex.env)])
-    expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', name: 'tool.exec_command.verify', laterCount: 0 })
+    expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', name: 'tool.exec_command', laterCount: 0 })
     expect(firstFailure(native!)).toEqual(firstFailure(shared!))
   })
 })

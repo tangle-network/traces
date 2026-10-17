@@ -35,7 +35,7 @@ import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
 import { SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './provenance.js'
-import { classifyNestedTool, CodexAdapter, spawnAgentPath } from './codex.js'
+import { CodexAdapter, spawnAgentPath } from './codex.js'
 import { multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { OpencodeAdapter } from './opencode.js'
 
@@ -171,15 +171,13 @@ function decorateCodexTools(session: HarnessSession, spans: OtlpSpan[]): void {
     const call = byCallId.get(callId)
     if (!call) continue
     const nested = call.name === 'exec' ? nestedToolName(call.inputText) : null
-    // The name traces' own Codex reader gives the same call, so both read paths count tools alike.
-    const named = classifyNestedTool(nested ?? call.name, call.inputText ?? undefined)
-    if (named !== call.name) {
-      item.attributes['traces.codex.outer_tool_name'] = call.name
-      item.attributes['tool.name'] = named
-      item.name = `tool.${named}`
-    }
-    if (nested) item.attributes['traces.codex.nested_tool_name'] = nested
     const name = nested ?? call.name
+    if (nested) {
+      item.attributes['traces.codex.outer_tool_name'] = call.name
+      item.attributes['traces.codex.nested_tool_name'] = nested
+      item.attributes['tool.name'] = nested
+      item.name = `tool.${nested}`
+    }
     const operation = multiAgentOperation(name)
     if (!operation) continue
     item.attributes['traces.codex.agent_operation'] = operation

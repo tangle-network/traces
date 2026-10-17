@@ -667,8 +667,7 @@ function hasReadOnlyCurl(input: string): boolean {
   return !/(?:^|\s)-(?:d|F|T)(?:\S*|\s+\S+)|(?:^|\s)--(?:data(?:-ascii|-binary|-raw|-urlencode)?|form(?:-string)?|json|upload-file)(?:=|\s)/i.test(input)
 }
 
-/** A Codex tool's name in spans: `exec_command.verify` for a command that checks work. Both Codex read paths name tools with it. */
-export function classifyNestedTool(name: string, input: string | undefined): string {
+function classifyNestedTool(name: string, input: string | undefined): string {
   return name === 'exec_command' && input && (verificationCommand.test(input) || hasReadOnlyCurl(input))
     ? 'exec_command.verify'
     : name
