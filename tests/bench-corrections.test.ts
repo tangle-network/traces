@@ -111,10 +111,17 @@ beforeAll(async () => {
   await writeFile(join(dir, 'facts.jsonl'), factsRows)
   await writeFile(join(dir, 'labels.jsonl'), labels())
   await writeFile(join(dir, 'labels-claim.jsonl'), labels({ 45: true }))
+  // Two corrections only the signals find: neither lexical arm fires on these turns.
+  await writeFile(join(dir, 'labels-unfired.jsonl'), [25, 45].map((second) => JSON.stringify({ session: SESSION, at: at(second), label: true })).join('\n') + '\n')
+  // 2,001 corrections: the signals find 1,001 and the lexical arms 1,000, every hit correct. Both recalls round to 0.500.
+  const many = Array.from({ length: 2001 }, (_, index) => ({ session: 'many', at: at(1000 + index) }))
+  await writeFile(join(dir, 'facts-many.jsonl'), many.map((turn, index) =>
+    JSON.stringify({ ...turn, text: index < 1001 ? 'ok' : "no, that's wrong", signals: index < 1001 ? ['interrupt'] : [] })).join('\n') + '\n')
+  await writeFile(join(dir, 'labels-many.jsonl'), many.map((turn) => JSON.stringify({ ...turn, label: true })).join('\n') + '\n')
 })
 
-async function report(labelsFile: string): Promise<{ joined: number; corrections: number; unjoined: number; arms: Arm[]; section7: { title: string } }> {
-  const run = await bench([join(dir, labelsFile), join(dir, 'facts.jsonl'), '--format', 'json'])
+async function report(labelsFile: string, factsFile = 'facts.jsonl'): Promise<{ joined: number; corrections: number; unjoined: number; arms: Arm[]; section7: { title: string; reason: string } }> {
+  const run = await bench([join(dir, labelsFile), join(dir, factsFile), '--format', 'json'])
   expect(run.stderr).toBe('')
   expect(run.code).toBe(0)
   return JSON.parse(run.stdout)
@@ -143,6 +150,21 @@ describe('bench:corrections', () => {
     const result = await report('labels-claim.jsonl')
     expect(arm(result.arms, 'union')).toEqual({ fires: 3, truePositives: 3, recall: 0.75, precision: 1 })
     expect(arm(result.arms, 'lexical')).toMatchObject({ recall: 0.5, precision: 0.667 })
+    expect(result.section7.title).toBe('Correction signals')
+  })
+
+  it('keeps "Interrupts and rejections" when a lexical arm never fired, so its precision cannot be compared', async () => {
+    const result = await report('labels-unfired.jsonl')
+    expect(arm(result.arms, 'union')).toEqual({ fires: 2, truePositives: 2, recall: 1, precision: 1 })
+    expect(arm(result.arms, 'lexical')).toEqual({ fires: 0, truePositives: 0, recall: 0, precision: null })
+    expect(result.section7.title).toBe('Interrupts and rejections')
+    expect(result.section7.reason).toContain('precision cannot be compared')
+  })
+
+  it('decides on the counts, not on rates rounded to three places', async () => {
+    const result = await report('labels-many.jsonl', 'facts-many.jsonl')
+    expect(arm(result.arms, 'union')).toEqual({ fires: 1001, truePositives: 1001, recall: 0.5, precision: 1 })
+    expect(arm(result.arms, 'lexical')).toEqual({ fires: 1000, truePositives: 1000, recall: 0.5, precision: 1 })
     expect(result.section7.title).toBe('Correction signals')
   })
 

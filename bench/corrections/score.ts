@@ -139,16 +139,23 @@ function scoreArm(arm: Arm, turns: ReadonlyArray<{ readonly label: boolean; read
   }
 }
 
-/** The §2.2 rule: the union beats every lexical arm's recall, at no lower precision. */
+/**
+ * The §2.2 rule: the union beats every lexical arm's recall, at no lower
+ * precision. It compares the counts, never the rounded rates, and a precision
+ * that cannot be computed (an arm that never fired) is no win.
+ */
 function decide(scores: readonly ArmScore[]): { title: string; reason: string } {
   const union = scores.find((score) => score.arm === 'union')!
   const shown = (value: number | null): string => (value === null ? 'n/a' : value.toFixed(3))
   const losses: string[] = []
   for (const lexical of scores.filter((score) => (LEXICAL_ARMS as readonly string[]).includes(score.arm))) {
-    if (union.recall === null || union.recall <= (lexical.recall ?? 0)) {
+    // Every arm is scored on the same turns, so recall orders as the true positives do.
+    if (union.recall === null || union.truePositives <= lexical.truePositives) {
       losses.push(`union recall ${shown(union.recall)} is not above ${lexical.arm} ${shown(lexical.recall)}`)
     }
-    if (lexical.precision !== null && (union.precision === null || union.precision < lexical.precision)) {
+    if (union.fires === 0 || lexical.fires === 0) {
+      losses.push(`precision cannot be compared: union fired ${union.fires} times, ${lexical.arm} ${lexical.fires}`)
+    } else if (union.truePositives * lexical.fires < lexical.truePositives * union.fires) {
       losses.push(`union precision ${shown(union.precision)} is below ${lexical.arm} ${shown(lexical.precision)}`)
     }
   }
