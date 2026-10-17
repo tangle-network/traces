@@ -31,6 +31,10 @@ export interface AnswerRow {
   cost_usd?: number | null
   cost_basis?: CostBasis | null
   error?: string | null
+  /** Model arms: the skills the agent loaded. */
+  skills_loaded?: string[]
+  /** Model arms: each `traces` command the agent ran, by subcommand; `facts:help` is `traces facts --help`. */
+  traces_commands?: string[]
 }
 
 export interface AnswersFile {

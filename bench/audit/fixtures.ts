@@ -17,7 +17,8 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-export type BenchSessionId = 'codex-operator' | 'codex-child' | 'claude'
+/** The three sessions of the 19 questions, and the large session of the large-session arm (`large.ts`). */
+export type BenchSessionId = 'codex-operator' | 'codex-child' | 'claude' | 'codex-large'
 
 interface BenchSession {
   id: BenchSessionId
@@ -59,7 +60,7 @@ const CLAUDE_CWD = '/work/ledger'
 /** More than 500, so a paged search over this command reports more hits than one page holds. */
 const STATUS_POLLS = 523
 
-function mulberry32(seed: number): () => number {
+export function mulberry32(seed: number): () => number {
   let state = seed >>> 0
   return () => {
     state = (state + 0x6d2b79f5) >>> 0
@@ -70,7 +71,7 @@ function mulberry32(seed: number): () => number {
   }
 }
 
-type Random = () => number
+export type Random = () => number
 
 function hex(random: Random, length: number): string {
   let out = ''
@@ -86,7 +87,7 @@ function base62(random: Random, length: number): string {
 }
 
 /** A UUIDv7 whose timestamp field is `ms`, as Codex session and turn ids are. */
-function uuidV7(ms: number, random: Random): string {
+export function uuidV7(ms: number, random: Random): string {
   const time = ms.toString(16).padStart(12, '0')
   const variant = (8 + Math.floor(random() * 4)).toString(16)
   return `${time.slice(0, 8)}-${time.slice(8, 12)}-7${hex(random, 3)}-${variant}${hex(random, 3)}-${hex(random, 12)}`
@@ -97,7 +98,7 @@ function uuidV4(random: Random): string {
   return `${hex(random, 8)}-${hex(random, 4)}-4${hex(random, 3)}-${variant}${hex(random, 3)}-${hex(random, 12)}`
 }
 
-class Clock {
+export class Clock {
   constructor(private ms: number, private readonly random: Random) {}
 
   get now(): number {
@@ -116,12 +117,12 @@ class Clock {
 }
 
 /** Where a planted record landed: its 1-based line and its timestamp. */
-interface Placed {
+export interface Placed {
   line: number
   at: string
 }
 
-interface Call extends Placed {
+export interface Call extends Placed {
   callId: string
   kind: 'function' | 'custom'
 }
@@ -142,7 +143,7 @@ class Jsonl {
 const cite = (file: string, line: number): string => `${file}:${line}`
 const quote = (file: string, placed: Placed, text: string) => ({ text, cite: cite(file, placed.line) })
 
-class CodexWriter {
+export class CodexWriter {
   readonly out = new Jsonl()
 
   constructor(readonly clock: Clock, private readonly random: Random) {}
@@ -181,7 +182,7 @@ class CodexWriter {
 }
 
 /** The shell-tool output envelope Codex writes for `exec_command` and `write_stdin`. */
-function shellOutput(random: Random, result: number | { running: number }, body: string): string {
+export function shellOutput(random: Random, result: number | { running: number }, body: string): string {
   const status = typeof result === 'number'
     ? `Process exited with code ${result}`
     : `Process running with session ID ${result.running}`

@@ -6,7 +6,9 @@
  *   tsx bench/audit/cli.ts gold --out <file.json>
  *   tsx bench/audit/cli.ts score <answers.json> [--fixtures <dir>] [--out <report.md>] [--json <score.json>]
  *   tsx bench/audit/cli.ts arm --arm facts|raw-files|traces --out <answers.json> [--model M --budget-usd B]
- *     [--questions id,id] [--variants canonical|all] [--concurrency N] [--fixtures <dir>] [--traces <cli.js>] [--work <dir>]
+ *     [--questions id,id] [--variants canonical|all] [--concurrency N] [--fixtures <dir>] [--traces <cli.js>] [--skills <dir>] [--work <dir>]
+ *   tsx bench/audit/cli.ts large --arm facts|raw-files|traces --out <answers.json> [--model M --budget-usd B]
+ *     [--tool-calls N] [--concurrency N] [--traces <cli.js>] [--skills <dir>] [--work <dir>]
  *
  * `fixtures` writes the tree an arm is allowed to read: the synthetic sessions,
  * a manifest, and one prompt per question wording. The gold answers are written
@@ -21,15 +23,20 @@
  *
  * `arm` answers every question wording with one arm (`arms.ts`) and writes the
  * answers file `score` reads.
+ *
+ * `large` runs one arm over the large session (`large.ts`): it writes a fresh
+ * session of about 50,000 spans under `--work`, answers its four questions,
+ * writes the answers file and prints the arm's score.
  */
 
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ARMS, type ArmName, runArm } from './arms.js'
+import { ARMS, type ArmName, runArm, runLargeArm } from './arms.js'
 import { loadCitationIndex } from './citations.js'
 import { generateBench, writeFixtures, type GeneratedBench } from './fixtures.js'
+import { generateLarge, LARGE_QUESTIONS, LARGE_TOOL_CALLS, scoreLarge, writeLarge } from './large.js'
 import { promptRows } from './questions.js'
 import { parseAnswersFile, renderArmScore, scoreArm } from './score.js'
 
@@ -39,11 +46,14 @@ const USAGE = [
   '  bench/audit/cli.ts gold --out <file.json>',
   '  bench/audit/cli.ts score <answers.json> [--fixtures <dir>] [--out <report.md>] [--json <score.json>]',
   '  bench/audit/cli.ts arm --arm facts|raw-files|traces --out <answers.json> [--model M --budget-usd B]',
-  '      [--questions id,id] [--variants canonical|all] [--concurrency N] [--fixtures <dir>] [--traces <cli.js>] [--work <dir>]',
+  '      [--questions id,id] [--variants canonical|all] [--concurrency N] [--fixtures <dir>] [--traces <cli.js>] [--skills <dir>] [--work <dir>]',
+  '  bench/audit/cli.ts large --arm facts|raw-files|traces --out <answers.json> [--model M --budget-usd B]',
+  '      [--tool-calls N] [--concurrency N] [--traces <cli.js>] [--skills <dir>] [--work <dir>]',
 ].join('\n')
 
-/** This checkout's built CLI. */
+/** This checkout's built CLI, and the skills the package ships. */
 const DIST_CLI = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist', 'cli.js')
+const SKILLS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills')
 
 interface Args {
   positional: string[]
@@ -177,6 +187,7 @@ async function main(argv: readonly string[]): Promise<number> {
       root: resolve(root),
       manifest: bench.manifest,
       cli: resolve(flags.get('traces') ?? DIST_CLI),
+      skills: resolve(flags.get('skills') ?? SKILLS),
       work: resolve(work),
       model: flags.get('model'),
       budgetUsd: flags.has('budget-usd') ? Number(flags.get('budget-usd')) : undefined,
@@ -188,6 +199,32 @@ async function main(argv: readonly string[]): Promise<number> {
     await writeOut(out, `${JSON.stringify(file, null, 2)}\n`)
     const cost = file.answers.reduce((total, row) => total + (row.cost_usd ?? 0), 0)
     console.log(`wrote ${file.answers.length} ${arm} answers to ${out} ($${cost.toFixed(4)})`)
+    return 0
+  }
+
+  if (command === 'large') {
+    const arm = flags.get('arm') as ArmName | undefined
+    const out = flags.get('out')
+    if (!arm || !ARMS.includes(arm)) throw new Error(`large needs --arm ${ARMS.join('|')}`)
+    if (!out) throw new Error('large needs --out <answers.json>')
+    const work = resolve(flags.get('work') ?? await mkdtemp(join(tmpdir(), `traces-bench-large-${arm}-`)))
+    const large = generateLarge(flags.has('tool-calls') ? Number(flags.get('tool-calls')) : LARGE_TOOL_CALLS)
+    const root = join(work, 'fixtures')
+    await writeLarge(root, large, `${promptRows(large.manifest, LARGE_QUESTIONS).map((row) => JSON.stringify(row)).join('\n')}\n`)
+    const file = await runLargeArm({
+      arm,
+      root,
+      manifest: large.manifest,
+      cli: resolve(flags.get('traces') ?? DIST_CLI),
+      skills: resolve(flags.get('skills') ?? SKILLS),
+      work,
+      model: flags.get('model'),
+      budgetUsd: flags.has('budget-usd') ? Number(flags.get('budget-usd')) : undefined,
+      concurrency: flags.has('concurrency') ? Number(flags.get('concurrency')) : undefined,
+      log: (line) => console.error(line),
+    })
+    await writeOut(out, `${JSON.stringify(file, null, 2)}\n`)
+    console.log(scoreLarge(file, large.gold))
     return 0
   }
 
