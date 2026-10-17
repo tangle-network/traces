@@ -77,9 +77,29 @@ else
   fi
 fi
 
+bin_dir="$install_prefix/bin"
+
+# Never overwrite another program's `traces`: npm links ours into lib/node_modules/@tangle-network/traces.
+existing="$bin_dir/traces"
+if [ -e "$existing" ] || [ -L "$existing" ]; then
+  target="$(readlink "$existing" 2>/dev/null || true)"
+  case "$target" in
+    */lib/node_modules/@tangle-network/traces/*) ;;
+    *)
+      owner="${target:-a plain file, not the npm link to ${PACKAGE}}"
+      {
+        echo "$existing belongs to another program ($owner); traces will not overwrite it."
+        echo "Either remove that program and run this again (Homebrew's traces: brew uninstall market-dot-dev/tap/traces),"
+        echo "or install into another prefix and put its bin first on PATH, e.g. in ~/.zshenv:"
+        echo "  ./install.sh --prefix \"\$HOME/.local\"   then   export PATH=\"\$HOME/.local/bin:\$PATH\""
+      } >&2
+      exit 1
+      ;;
+  esac
+fi
+
 npm "${install_args[@]}"
 
-bin_dir="$install_prefix/bin"
 if [ -x "$bin_dir/traces" ]; then
   traces_cmd="$bin_dir/traces"
 elif command -v traces >/dev/null 2>&1; then
@@ -99,4 +119,4 @@ case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *) echo "Add this to PATH for future shells: $bin_dir" ;;
 esac
-echo "Run: traces analyze --harness claude-code --last 1"
+echo "Run: traces list --last 5"
