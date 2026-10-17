@@ -778,18 +778,16 @@ async function cmdMcp(args: CliArgs): Promise<void> {
 }
 
 /**
- * `traces diff <a> <b>`: pair the two runs' steps and mark where they first
- * diverge. Exit 0 when they agree, 1 when they diverge, like diff(1); 2 when
- * they could not be compared: a side cannot be read, or the steps line up
- * with no divergence but neither side records an outcome to call agreement on
- * (`code: no-outcome`).
+ * `traces diff <a> <b>`: the first tool call where two runs split. Exit 0 when
+ * they agree, 1 when they diverge, like diff(1); 2 when they could not be
+ * compared: a side cannot be read, or the calls line up but neither side
+ * records an outcome to call agreement on (`code: no-outcome`).
  */
 async function cmdDiff(args: CliArgs): Promise<void> {
   const { diffRuns, renderRunDiff } = await import('./diff.js')
-  if (args.kinds.some((kind) => !kind)) throw new UsageError('diff: --kind needs a span kind, e.g. --kind TOOL')
-  const report = await diffRuns(args.refs[0]!, args.refs[1]!, { kinds: args.kinds })
+  const report = await diffRuns(args.refs[0]!, args.refs[1]!)
   if (!report.diff.firstDivergence && report.caveat) {
-    throw new CliError(`the runs line up with no divergence, but there is no recorded outcome to call agreement on: ${report.caveat}`, 'no-outcome')
+    throw new CliError(`the runs' tool calls line up with no difference, but there is no outcome to call agreement on: ${report.caveat}`, 'no-outcome')
   }
   process.stdout.write(args.format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
   if (report.diff.firstDivergence) process.exitCode = 1

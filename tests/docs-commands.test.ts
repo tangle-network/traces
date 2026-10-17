@@ -20,7 +20,6 @@ const ROOT = join(dirname(CLI), '..')
 /** Spellings kept, hidden from help, until the step that moves each (spec §2.4); value-taking ones say so. */
 const HIDDEN_FLAGS: Readonly<Record<string, Readonly<Record<string, boolean>>>> = {
   ask: { '--dir': true, '--question-budget': true, '--question-timeout': true, '--concurrency': true },
-  diff: { '--kind': true },
 }
 
 /** Commands that read sessions and need a selection (spec §2.1), with the flags that select. */
