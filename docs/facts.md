@@ -30,7 +30,6 @@ first failure 09:40 Bash: exit 1 (blame agent, span 6be1…)
 final "Merged #11006; …"
 ```
 
-A tool's `(31 failed)` counts its calls that ended in error. The `commands` line names the programs run, most runs first, with the runs known to have failed and the runs inside Codex code-mode scripts (`in scripts`), which record no exit code of their own; `--format json` lists every program.
 A fact the spans cannot support reads `unknown` with the reason. A selection of several sessions starts with one line naming the count, the window and the sessions it could not read.
 
 ## What it states
@@ -41,7 +40,7 @@ Three rules hold for every field. Every fact is about this session's own agent: 
 |---|---|
 | `toolCalls`, `toolCallsByName` | tool calls this session's agent made, by name. A Codex command that checks work is `exec_command.verify` |
 | `subagents` | every subagent-spawning call, with its task name; a refused Codex spawn is `ERROR` |
-| `commands` | the programs the session's commands ran (`labctl run`, `git push`, `pnpm test`), most runs first: `runs`; `failed`, runs that were their call's only command (a `cd` aside) and ended in error; and `inScripts`, runs inside a Codex code-mode script, which records no exit code of its own. A code-mode loop over literals counts once per element |
+| `commands` | the programs the session's commands ran (`labctl run`, `git push`, `pnpm test`), most runs first: `runs`; `failed`, runs that were their call's only command (a `cd` aside) and ended in error; and `inScripts`, runs inside a Codex code-mode script, which records no exit code of its own. A code-mode `tools.exec_command` call inside `for (const x of [...])` counts once per element, `${x}` or `{cmd: x}` taking each value; inside any other loop, once as written. On the sheet, a tool's `(31 failed)` counts its calls that ended in error |
 | `pullRequests` | pull requests created and merged, by number or head branch, with when the command ran and the span that named it |
 | `humanTurns` | turns a person typed, each with `author`, `answered`, `reply`, `interrupted` and `signals` (`interrupt`, `rejected-tool`, `after-claim`) |
 | `excludedTurns`, `turnsByActor` | every left-out turn, by reason and author, so the filter is checkable |
@@ -54,8 +53,7 @@ Three rules hold for every field. Every fact is about this session's own agent: 
 
 ## Turns
 
-A turn is one a person typed into this session. History a fork or a compaction replays, harness-injected blocks (instructions, environment context, notifications, skill expansions) and a second record of the same turn are left out, each listed in `excludedTurns`.
-A turn the reader called human is checked once more by org convention: a fleet or session message, or a first turn over 1,500 characters, is `fleet`; a long markdown-heavy paste is `relay`; a harness command (`/model`) is left out.
+A turn is one a person typed into this session. History a fork or a compaction replays, harness-injected blocks (instructions, environment context, notifications, skill expansions) and a second record of the same turn are left out, each listed in `excludedTurns`. A turn the reader called human is checked once more by org convention: a fleet or session message, or a first turn over 1,500 characters, is `fleet`; a long markdown-heavy paste is `relay`; a harness command (`/model`) is left out.
 For Codex, the harness's own labels (`content_item_kinds`) decide: a message is the person's when every item is a `user.` kind. An answer to Codex's question tool (`<send_user_message_question_reply>`) is a turn, and so is a turn with an attached image, whose text is the report Codex wrote of it, without the `<image>` wrapper.
 
 `--format jsonl` prints one row per typed turn: `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals` and `spanId`.
@@ -68,7 +66,6 @@ A pull request is named by its number when the command or an output that joins t
 A create whose call returned while it still ran takes the number a later poll of that process printed.
 In a Codex code-mode script, each tool result the script printed is decoded (`exit_code` or `session_id`, and the command's output), and a later script's `write_stdin` poll of the session counts as that poll.
 A create counts only where an output shows `gh` answered: a script that completed says nothing about its commands.
-A script's `tools.exec_command` call inside `for (const x of [...])` (an array literal, inline or bound by name) ran once per element, with `${x}` in its template, or `{cmd: x}`, taking each value; inside any other loop it is read once, as written.
 
 ## `--no-content`, windows and exit status
 
