@@ -60,7 +60,6 @@ import {
 } from './adapters/provenance.js'
 import { indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
 import { sessionCost, sessionTokens, type SessionCost, type SessionTokens, type TokenPricer } from './execution.js'
-export type { ModelTokens, SessionCost, SessionTokens, TokenPricer } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
 import {
@@ -1710,7 +1709,7 @@ export function readSessionIndex(
 }
 
 /** `in 2.1M · out 310k · cache read 88M · $38.20 list price (Router rates)`, or why a part is unknown. */
-export function renderTokens(tokens: SessionTokens, cost: SessionCost): string {
+function renderTokens(tokens: SessionTokens, cost: SessionCost): string {
   if (tokens.input === null) return `unavailable — ${tokens.unavailable}`
   const parts = [`in ${tokenCount(tokens.input)}`, `out ${tokenCount(tokens.output ?? 0)}`]
   if ((tokens.cacheRead ?? 0) > 0) parts.push(`cache read ${tokenCount(tokens.cacheRead!)}`)
