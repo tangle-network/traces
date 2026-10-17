@@ -83,7 +83,7 @@ A bundle directory is a ref: `traces facts .traces/bundle --no-content` reads it
 
 ## Ask your own question
 
-`traces ask --last 1 --question "<text>" --budget 2 --dir .traces/ask` spends model calls and resolves answer citations.
+`traces ask --last 1 --question "<text>" --budget 2 --out .traces/ask` spends model calls and resolves answer citations.
 
 ## Report
 

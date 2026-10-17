@@ -152,9 +152,9 @@ describe('every command writes only to --out and $XDG_STATE_HOME/traces', () => 
     const asked = await run(['ask', IDS.claude, '--question', 'Which command ran first?', '--budget', '1'], {
       env: { TANGLE_API_KEY: 'test-key-never-sent-upstream', TRACES_PYTHON: bridge },
     })
-    expect(asked.code).not.toBe(0)
+    expect(asked.code).toBe(2)
     expect(asked.stdout).toContain('# traces ask')
-    expect(asked.stderr).toContain('1 of 1 question(s) failed')
+    expect(asked.stderr).toContain('1 of 1 question(s) unanswered (q1: error)')
   })
 
   it('check, which writes evidence only under --out', async () => {

@@ -225,8 +225,8 @@ Check ownership and active processes before removing a legacy prompt copy.
 
 ## Known limits of this runbook
 
-- `traces ask`, the one model-backed command, needs `TANGLE_API_KEY` and the Python
-  `agent-eval-rpc[dspy]` extra. Unverified here. `traces analyze` needs neither
-  and is what days 2 and 3 rely on.
+- `traces ask`, the one model-backed command, needs `TANGLE_API_KEY` and `uv` (or
+  `TRACES_PYTHON` naming a Python with the `agent-eval-rpc[dspy]` extra). Unverified
+  here. `traces analyze` needs neither and is what days 2 and 3 rely on.
 - Casework has never run a campaign, so the worked example in `examples/casework/`
   documents the seam rather than a completed run. See its README.

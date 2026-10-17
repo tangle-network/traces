@@ -11,7 +11,6 @@
  * selection flag (`--current`, `--last`, `--since`) names the sessions.
  */
 
-import { readFileSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { homedir, hostname } from 'node:os'
 import { basename, dirname, resolve } from 'node:path'
@@ -23,7 +22,7 @@ import { metadataOnly } from './metadata-only.js'
 import { shellWord } from './moved.js'
 import type { TraceStreamEvent, WatchedSession } from './live.js'
 import type { TraceLiveFinding } from './pipelines.js'
-import { DEFAULT_ANALYST_MODEL } from './ask-defaults.js'
+import { DEFAULT_ANALYST_MODEL, DEFAULT_ASK_CONCURRENCY, DEFAULT_QUESTION_MAX_COST_USD, DEFAULT_QUESTION_TIMEOUT_MS } from './ask-defaults.js'
 import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
 import { iterSerializedSpans, writeOtlpFile } from './otlp.js'
@@ -288,24 +287,6 @@ function warnUnread(args: CliArgs, unread: readonly UnreadSessionFact[], command
 
 function analystModelFor(args: CliArgs): string {
   return args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
-}
-
-/**
- * The published version of the Python bridge (`agent-eval-rpc` on PyPI) that
- * speaks this CLI's engine protocol. The bridge validates its input with
- * exact-key checks, so any skew between the interpreter's installed bridge and
- * this package's `@tangle-network/agent-eval` dependency kills every agentic
- * analyst at startup, before any model call.
- */
-function requiredBridgeVersion(): string {
-  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-    dependencies?: Record<string, unknown>
-  }
-  const version = pkg.dependencies?.['@tangle-network/agent-eval']
-  if (typeof version !== 'string' || !version) {
-    throw new Error('package.json is missing the @tangle-network/agent-eval dependency')
-  }
-  return version
 }
 
 /** One `traces list` row: the facts a person picks a session by. */
@@ -1225,44 +1206,60 @@ function analystLog(msg: string, fields?: Record<string, unknown>): void {
 }
 
 /**
- * `traces ask`: free-form questions over the selected sessions. Every question
- * is its own recursive investigation; they run concurrently under one shared
- * ledger, so `--budget` bounds the whole run and each question's ceiling is
- * the smaller of it and the per-question default. The answers, their citation
+ * `traces ask`: free-form questions over the selected sessions, the one
+ * command that spends. Every question is its own recursive investigation;
+ * they run concurrently under one shared ledger, so `--budget` bounds the
+ * whole run, and each question spends at most min(--budget, $2) within 1800 s.
+ *
+ * Nothing is spent until the run can start: a missing key or bridge exits 2
+ * (`setup`) before any session is parsed. A key or model the endpoint refuses
+ * stops every question at its first call and exits 2 (`auth` or `model`). A
+ * busy or rate-limited endpoint is retried inside the call. Answers, citation
  * checks, and per-question cost and time are written before the exit code is
- * decided, so a failed question never costs the others' answers. Ctrl-C is
- * one of those failures: `runTraceQuestions` records it on the questions the
- * run never reached and still returns, so the artifacts below are written for
- * the answers already paid for.
+ * decided, so a failed question never costs the others' answers: a run that
+ * answered only some exits 2 (`partial`) with every answer written. Ctrl-C is
+ * one of those failures.
  */
 async function cmdAsk(args: CliArgs): Promise<void> {
-  const { analysisEngineFromEnv, DEFAULT_QUESTION_MAX_COST_USD } = await import('./analyst-model-call.js')
+  const { analysisEngineFromEnv, bridgeVersion, missingAskRequirements, UnservableModelError } = await import('./analyst-model-call.js')
   const { isBridgeMismatchError, loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
-  const questions: TraceQuestion[] = [
-    ...(args.questionsFile ? await loadTraceQuestionsFile(args.questionsFile) : []),
-    ...args.questions.map((question) => ({ question })),
-  ]
-  if (questions.length === 0) {
-    throw new UsageError('ask needs --question "<text>" (repeatable) or --questions <questions.json>')
+  let questions: TraceQuestion[]
+  try {
+    questions = [
+      ...(args.questionsFile ? await loadTraceQuestionsFile(args.questionsFile) : []),
+      ...args.questions.map((question) => ({ question })),
+    ]
+    if (questions.length === 0) throw new UsageError('ask needs --question "<text>" (repeatable) or --questions <questions.json>')
+    // Reject a bad question before any session is parsed or process started.
+    normalizeTraceQuestions(questions)
+  } catch (error) {
+    throw error instanceof CliError ? error : new UsageError(errorText(error))
   }
-  // Reject a bad question before any session is parsed or process started.
-  normalizeTraceQuestions(questions)
-  const questionTimeoutMs = args.questionTimeout === undefined ? undefined : Math.round(args.questionTimeout * 1000)
-  // Before the adapter pass: a missing API key must not cost an operator the
-  // wait for a large session to be parsed before it is reported.
-  const engine = analysisEngineFromEnv({
-    model: analystModelFor(args),
-    maxCostUsd: args.questionBudget ?? Math.min(args.budget ?? Infinity, DEFAULT_QUESTION_MAX_COST_USD),
-    ...(questionTimeoutMs !== undefined ? { timeoutMs: questionTimeoutMs } : {}),
-    log: analystLog,
-  })
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
-  warnIncompleteWorkflow(collected.workflow)
-  // Answers are files only under --dir; without it the report on stdout is the whole output.
-  const directory = args.dir === undefined ? undefined : resolve(args.dir)
-  if (directory !== undefined) await mkdir(directory, { recursive: true })
+  const missing = missingAskRequirements()
+  if (missing.length > 0) throw new CliError(`ask needs ${missing.join('; and ')}. Nothing was spent`, 'setup')
+  const budget = args.budget!
   const controller = new AbortController()
+  let refused: { code: 'auth' | 'model'; message: string } | undefined
+  let engine: ReturnType<typeof analysisEngineFromEnv>
+  try {
+    engine = analysisEngineFromEnv({
+      model: analystModelFor(args),
+      maxCostUsd: Math.min(budget, DEFAULT_QUESTION_MAX_COST_USD),
+      timeoutMs: DEFAULT_QUESTION_TIMEOUT_MS,
+      log: analystLog,
+      // A refused key or model fails every question the same way: stop them all at the first.
+      onPermanentFailure: (failure) => {
+        refused ??= failure
+        controller.abort(new Error(failure.message))
+      },
+    })
+  } catch (error) {
+    if (error instanceof UnservableModelError) throw new CliError(error.message, error.failure.code)
+    throw error
+  }
+  const collected = await collectSpans(args)
+  if (collected.spans.length === 0) throw new CliError('no spans found for the given selection', 'unreadable')
+  warnIncompleteWorkflow(collected.workflow)
   const interrupt = () => controller.abort(new Error('ask interrupted'))
   process.once('SIGINT', interrupt)
   let result: TraceQuestionsResult
@@ -1272,39 +1269,50 @@ async function cmdAsk(args: CliArgs): Promise<void> {
       spans: collected.spans,
       engine,
       harness: collected.harness,
-      concurrency: args.concurrency,
-      ...(args.budget !== undefined ? { budgetUsd: args.budget } : {}),
+      concurrency: DEFAULT_ASK_CONCURRENCY,
+      budgetUsd: budget,
       signal: controller.signal,
       log: analystLog,
     })
+  } catch (error) {
+    // A budget below one model call's reservation is refused before any call.
+    throw error instanceof RangeError ? new UsageError(error.message) : error
   } finally {
     process.removeListener('SIGINT', interrupt)
   }
-  const artifacts = directory === undefined ? undefined : await writeTraceQuestionsArtifacts(result, directory)
-  process.stdout.write(result.report)
+  const artifacts = args.out === undefined ? undefined : await writeTraceQuestionsArtifacts(result, args.out)
   for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`)
+  if (refused) {
+    const record = artifacts ? `; ${artifacts.result} records each question` : ''
+    throw new CliError(`${refused.message}. ask stopped every question at the first refused call${record}`, refused.code)
+  }
+  const { totals } = result
+  const cost = totals.cost.usd
   if (artifacts) {
-    process.stderr.write(
-      `ask artifacts → ${artifacts.directory}  (${result.totals.answered}/${result.totals.questions} answered, ` +
-        `wall ${(result.totals.wallTimeMs / 1000).toFixed(1)} s, answers: ${artifacts.result})\n`,
-    )
+    process.stdout.write(args.format === 'json'
+      ? `${JSON.stringify({ out: artifacts.directory, answered: totals.answered, questions: totals.questions, costUsd: cost })}\n`
+      : `answers → ${artifacts.directory}  (answers.json, report.md: ${totals.answered}/${totals.questions} answered, ` +
+        `${cost === null ? 'cost uncaptured' : `$${cost > 0 && cost < 0.01 ? cost.toPrecision(2) : cost.toFixed(2)}`}, ` +
+        `${(totals.wallTimeMs / 1000).toFixed(1)} s)\n`)
+  } else if (args.format === 'json') {
+    const { report: _report, ...machine } = result
+    process.stdout.write(`${JSON.stringify(machine)}\n`)
+  } else {
+    process.stdout.write(result.report)
   }
   if (result.ok) return
   const failed = result.questions.filter((answer) => answer.status === 'failed')
-  const lines = [
-    `${failed.length} of ${result.questions.length} question(s) failed; ${artifacts ? 'the answers file' : 'the report above'} holds every result.`,
-    ...failed.map((answer) => `  ${answer.id}: ${answer.failure?.kind}: ${answer.failure?.message.slice(0, 300)}`),
-  ]
+  const where = artifacts ? artifacts.result : args.format === 'json' ? 'the JSON on stdout' : 'the report above'
   // Any kind, not only `error`: the hint is decided by the message, and a
   // mismatch that also exhausted the budget still needs the reinstall line.
-  if (failed.some((answer) => isBridgeMismatchError(answer.failure?.message ?? ''))) {
-    lines.push(
-      'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
-        `agent-eval-rpc[dspy]==${requiredBridgeVersion()} (matching this package's @tangle-network/agent-eval).`,
-    )
-  }
-  process.stderr.write(`error: ${lines.join('\n')}\n`)
-  process.exitCode = 1
+  const hint = failed.some((answer) => isBridgeMismatchError(answer.failure?.message ?? ''))
+    ? ` The DSPy bridge protocol is version-locked: TRACES_PYTHON needs agent-eval-rpc[dspy]==${bridgeVersion()}, or unset it to let uv run that version.`
+    : ''
+  throw new CliError(
+    `${failed.length} of ${result.questions.length} question(s) unanswered ` +
+      `(${failed.map((answer) => `${answer.id}: ${answer.failure?.kind}`).join(', ')}); ${where} says why.${hint}`,
+    'partial',
+  )
 }
 
 /** Severity as `traces analyze` prints it. */

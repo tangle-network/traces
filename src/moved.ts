@@ -9,6 +9,8 @@
  * that makes its replacement work, and the table ships through 1.x.
  */
 
+import { DEFAULT_ASK_CONCURRENCY, DEFAULT_QUESTION_MAX_COST_USD, DEFAULT_QUESTION_TIMEOUT_MS } from './ask-defaults.js'
+
 /** The last release that has every command and flag 1.0 removed. */
 export const LAST_0X_RELEASE = '@tangle-network/traces@0.23.1'
 
@@ -300,6 +302,27 @@ export const MOVED: readonly MovedRow[] = [
     rewrite: (argv) => dropFlag(argv, '--kind', true),
   },
   { was: [], label: 'diff exit 2 (unreadable) and 3 (no outcome)', now: 'exit 2, with code unreadable or no-outcome in the JSON error on stderr' },
+  {
+    was: ['--dir'],
+    commands: ['ask'],
+    label: 'ask --dir',
+    now: '--out DIR: answers.json and report.md',
+    rewrite: (argv) => renameFlag(argv, '--dir', '--out'),
+  },
+  {
+    was: ['--question-budget', '--question-timeout', '--concurrency'],
+    commands: ['ask'],
+    label: 'ask --question-budget, --question-timeout, --concurrency',
+    now: `removed: each question spends at most min(--budget, $${DEFAULT_QUESTION_MAX_COST_USD}) within ` +
+      `${DEFAULT_QUESTION_TIMEOUT_MS / 1000} s, ${DEFAULT_ASK_CONCURRENCY} at once`,
+    rewrite: (argv) => dropFlag(dropFlag(dropFlag(argv, '--question-budget', true), '--question-timeout', true), '--concurrency', true),
+  },
+  { was: [], label: 'ask without --budget', now: 'add --budget USD: the most the run may spend' },
+  {
+    was: [],
+    label: 'ask exit 1 when a question failed',
+    now: 'exit 2, with code partial; answers.json under --out still holds every answer. A refused key or model: code auth or model',
+  },
 ]
 
 /** `--window M` (minutes) as `--since Mm`; `undefined` when M is not a whole number of minutes. */

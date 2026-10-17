@@ -34,11 +34,11 @@ import {
   formatFindingRejections,
   totalFindingRejections,
 } from './finding-rejections.js'
-import { ASK_QUESTION_HEADER, MAX_TRACE_QUESTION_CHARS, QUESTION_LABEL } from './ask-defaults.js'
+import { ASK_QUESTION_HEADER, DEFAULT_ASK_CONCURRENCY, MAX_TRACE_QUESTION_CHARS, QUESTION_LABEL } from './ask-defaults.js'
 import type { OtlpSpan } from './otlp.js'
 import { sessionFactsContext } from './session-facts.js'
 
-export { MAX_TRACE_QUESTION_CHARS }
+export { DEFAULT_ASK_CONCURRENCY, MAX_TRACE_QUESTION_CHARS }
 
 /**
  * Signatures of engine↔bridge version skew (or a missing bridge install) —
@@ -191,8 +191,6 @@ export interface TraceQuestionsArtifacts {
   readonly result: string
   readonly report: string
 }
-
-export const DEFAULT_ASK_CONCURRENCY = 4
 
 /** Bumped whenever the question layout or rules change. */
 const ASK_DEFINITION_VERSION = '1.0.0'
