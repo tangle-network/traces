@@ -50,6 +50,7 @@ Each page embeds its command's `--help`, and `tests/docs-help.test.ts` holds the
 
 ```text
 traces: what your agents did, where they wasted time, whether a run passes
+Start here for one session: traces facts <ref> (25 lines); one field: add --format json | jq '<path>'
 
   Which sessions ran?                              traces list [--cwd .] [--last N]
   What happened (turns, PRs, failure, cost)? $0    traces facts <ref> | --current | --since 1d

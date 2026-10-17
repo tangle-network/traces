@@ -1,11 +1,13 @@
 {
   "arm": "facts",
   "measuredAt": "2026-10-17",
-  "canonical": { "correct": 10, "partial": 4, "wrong": 5 },
-  "heldOut": { "correct": 10, "partial": 4, "wrong": 5 },
+  "canonical": { "correct": 12, "partial": 3, "wrong": 4 },
+  "heldOut": { "correct": 12, "partial": 3, "wrong": 4 },
   "correct": [
     "op.subagents",
+    "op.runs",
     "op.last-human-turn",
+    "op.role",
     "op.time-bounds",
     "op.changed-files",
     "op.status-polls",

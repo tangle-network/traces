@@ -258,7 +258,7 @@ const COMMANDS = [
   {
     name: 'facts',
     usage: 'facts <ref…> | --current | --last N | --since T [flags]',
-    job: 'What happened, exactly, for $0: who acted, turns, tools, PRs, first failure, tokens, cost and time lost.',
+    job: 'What happened, exactly, for $0: who acted, turns, tools, commands, PRs, first failure, tokens, cost, time lost.',
     flags: [
       ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--match', '--no-content',
       { flag: '--format', help: 'text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn' },
@@ -268,10 +268,10 @@ const COMMANDS = [
     refs: [0, MANY],
     select: 'required',
     jq: [
-      ['.sessions[0].humanTurns.value[] | {text, reply, signals}', 'each ask, its reply, its signals'],
-      ['.sessions[0].agent.value', 'who acted: profile, model, directive'],
-      ['.sessions[0] | {firstFailure, cost, waste: .measurements.waste}', 'first failure, cost, streaks, stalls, reverts'],
-      ['.matches[] | {sessionId, kind, text}', 'with --match: each hit'],
+      ['.sessions[0].humanTurns.value[] | {at, text, spanId}', 'each typed turn, its time and span'],
+      ['.sessions[0].commands.value[]', 'programs run: runs, failed, inScripts'],
+      ['.sessions[0].measurements.tools[] | {name, calls, failed: .outcomes.error}', 'tool calls by name, and failures'],
+      ['.sessions[0] | {firstFailure, tokens, cost, agent: .agent.value}', 'first failure, tokens, cost, who acted'],
     ],
     examples: ['traces facts --current', "traces facts 019a3c7e --format json | jq '.sessions[0].measurements.waste'", "traces facts --since 30d --match '^gh pr merge'"],
     overview: [
@@ -534,6 +534,7 @@ export function renderGlobalHelp(): string {
   const formats = [...new Set(SPECS.flatMap((spec) => spec.formats ?? []))]
   return [
     'traces: what your agents did, where they wasted time, whether a run passes',
+    "Start here for one session: traces facts <ref> (25 lines); one field: add --format json | jq '<path>'",
     '',
     ...rows,
     '',

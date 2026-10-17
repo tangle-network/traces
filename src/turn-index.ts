@@ -145,9 +145,10 @@ interface FileEntry {
 /**
  * The index format. A store of another version is rebuilt from the sessions,
  * so a change to what a row holds bumps it. 2: command rows include the
- * commands a Codex code-mode script ran.
+ * commands a Codex code-mode script ran. 3: a code-mode loop over literals
+ * gives one row per element.
  */
-const INDEX_VERSION = 2
+const INDEX_VERSION = 3
 
 interface Store {
   version: typeof INDEX_VERSION

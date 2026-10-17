@@ -72,7 +72,7 @@ import {
   type AgentIdentityFact,
   type AgentIdentityLookup,
 } from './session-identity.js'
-import { commandLines, commandTextFromInput } from './shell-commands.js'
+import { commandLines, commandTextFromInput, isCodeModeScript, simpleCommands } from './shell-commands.js'
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
@@ -330,6 +330,8 @@ export interface SessionFacts {
   /** The last message of the session's own agent, and of each subagent task. */
   readonly finalMessages: SessionFact<readonly FinalMessageFact[]>
   readonly changedFiles: SessionFact<readonly ChangedFileFact[]>
+  /** The programs this session's own commands ran, most runs first: see {@link CommandCountFact}. */
+  readonly commands: SessionFact<readonly CommandCountFact[]>
   /** Earliest span start among this session's own records. Not the session
    *  file's first record when the adapter selected a task boundary inside the
    *  file, and not a spawned subagent's first record. */
@@ -715,6 +717,87 @@ function finalMessagesOf(spans: readonly OtlpSpan[]): FinalMessageFact[] {
       text: capText(typeof span.attributes.content === 'string' ? span.attributes.content : ''),
       spanId: span.span_id,
     }))
+}
+
+/**
+ * One program the session's commands ran. Each simple command a tool call ran
+ * counts once (as `shell-commands.ts` splits a script), and so does each
+ * `tools.exec_command` call a Codex code-mode script made, once per element of
+ * a loop over literals.
+ */
+export interface CommandCountFact {
+  /**
+   * The program and, when its next word is a plain word, that word: `labctl
+   * run`, `git push`, `pnpm test`. A program whose first argument is data
+   * (`rg`, `cat`, `echo`, …) is named alone.
+   */
+  readonly command: string
+  readonly runs: number
+  /**
+   * Runs known to have failed: the call ran this one command (a `cd` aside)
+   * and ended in error, a non-zero exit on Codex and Claude Code. A command
+   * that shared its call with others has the call's status, not its own, and
+   * is not counted here.
+   */
+  readonly failed: number
+  /** Runs inside a Codex code-mode script, which records the script's status, never the command's exit code. */
+  readonly inScripts: number
+}
+
+/** Shell builtins that change the shell's own state and start no process: not commands of their own. */
+const SHELL_STATE_BUILTINS: ReadonlySet<string> = new Set(['cd', 'pushd', 'popd', 'export', 'set', 'unset', 'source', '.', ':', 'true', 'false', 'exit', 'shift', 'local', 'alias'])
+
+/** Programs whose first argument is data, not a subcommand: named alone. */
+const DATA_FIRST_PROGRAMS: ReadonlySet<string> = new Set([
+  'awk', 'basename', 'cat', 'chmod', 'column', 'cp', 'curl', 'cut', 'date', 'diff', 'dirname', 'du', 'echo', 'egrep', 'fgrep', 'file',
+  'find', 'grep', 'head', 'jq', 'kill', 'less', 'ln', 'ls', 'mkdir', 'mv', 'nl', 'open', 'printf', 'readlink', 'realpath', 'rg', 'rm',
+  'sed', 'sleep', 'sort', 'stat', 'tail', 'tee', 'test', '[', 'touch', 'tr', 'uniq', 'wc', 'wget', 'which', 'xargs',
+])
+
+const PLAIN_WORD = /^[A-Za-z][\w:-]{0,39}$/u
+
+/** `labctl run`, `git push`, `rg`: the name {@link CommandCountFact.command} groups a command by. */
+function commandName(words: readonly string[]): string {
+  const program = words[0]!.slice(words[0]!.lastIndexOf('/') + 1)
+  const next = words[1]
+  return next !== undefined && !DATA_FIRST_PROGRAMS.has(program) && PLAIN_WORD.test(next) ? `${program} ${next}` : program
+}
+
+/**
+ * The programs the session's own tool calls ran (inherited history left out),
+ * most runs first. Null with the reason when no tool call kept its arguments:
+ * which commands ran is then unknown, not none. A row names no span ids: one
+ * program can run hundreds of times, and `--match` gives each run's span. The
+ * fact's `spanIds` are every call that ran a command.
+ */
+function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCountFact[]> {
+  const own = tools.filter((span) => span.attributes[INHERITED_SPAN_ATTR] !== true)
+  if (own.length > 0 && !own.some((span) => inputValue(span) !== null)) {
+    return { value: null, spanIds: [], unavailable: 'no tool call recorded its arguments, so which commands ran cannot be read' }
+  }
+  const rows = new Map<string, { runs: number; failed: number; inScripts: number }>()
+  const spanIds: string[] = []
+  for (const span of own) {
+    const input = inputValue(span)
+    const script = input === null ? undefined : commandTextFromInput(input)
+    if (script === undefined) continue
+    const inScript = isCodeModeScript(input!)
+    const commands = simpleCommands(script).filter((words) => !SHELL_STATE_BUILTINS.has(words[0]!))
+    const failed = !inScript && commands.length === 1 && span.status.code === 'ERROR'
+    if (commands.length > 0) spanIds.push(span.span_id)
+    for (const words of commands) {
+      const name = commandName(words)
+      const row = rows.get(name) ?? { runs: 0, failed: 0, inScripts: 0 }
+      row.runs += 1
+      if (failed) row.failed += 1
+      if (inScript) row.inScripts += 1
+      rows.set(name, row)
+    }
+  }
+  const counts = [...rows]
+    .map(([command, row]) => ({ command, ...row }))
+    .sort((left, right) => right.runs - left.runs || left.command.localeCompare(right.command))
+  return listFact(counts, spanIds)
 }
 
 function capList<T>(items: readonly T[], cap = FACT_LIST_CAP): { kept: readonly T[]; partial?: string } {
@@ -1299,6 +1382,7 @@ function readSession(
     ),
     finalMessages: listFact(finalMessages, finalMessages.map((entry) => entry.spanId)),
     changedFiles: changedFilesFact(files, truncatedInputs, unresolvedPaths),
+    commands: commandsOf(invoked),
     firstRecordAt: firstSpan
       ? { value: firstSpan.start_time, spanIds: [firstSpan.span_id], unavailable: null }
       : { value: null, spanIds: [], unavailable: "no span of this session's own records carries a parseable start time" },
@@ -1329,6 +1413,7 @@ function readSession(
     humanTurns: withheld(),
     finalMessages: withheld(),
     changedFiles: withheld(),
+    commands: withheld(),
     pullRequests: withheld(),
     subagents: {
       ...facts.subagents,
@@ -1546,10 +1631,29 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
 
-/** `name 3, other 1, …`: the largest counts first, at most `keep` of them. */
-export function topCounts(counts: Readonly<Record<string, number>>, keep = 3): string {
+/** `name 3, other 1, …`: the largest counts first, at most `keep` of them, each followed by its `note`. */
+export function topCounts(counts: Readonly<Record<string, number>>, keep = 3, note: (name: string) => string = () => ''): string {
   const rows = Object.entries(counts).sort(([leftName, left], [rightName, right]) => right - left || leftName.localeCompare(rightName))
-  return rows.slice(0, keep).map(([name, count]) => `${name} ${count}`).join(', ') + (rows.length > keep ? ', …' : '')
+  return rows.slice(0, keep).map(([name, count]) => `${name} ${count}${note(name)}`).join(', ') + (rows.length > keep ? ', …' : '')
+}
+
+/** ` (2 failed, 1 in scripts)`, or nothing when both are zero. */
+function failedNote(failed: number, inScripts: number): string {
+  const parts = [...(failed > 0 ? [`${failed} failed`] : []), ...(inScripts > 0 ? [`${inScripts} in scripts`] : [])]
+  return parts.length > 0 ? ` (${parts.join(', ')})` : ''
+}
+
+/** Programs the sheet's commands line names; `--format json` lists every one in `.commands.value`. */
+const SHEET_COMMANDS = 5
+
+/** `commands 556: labctl status 523, labctl run 9 (1 failed, 2 in scripts), …`; null for a session that ran none. */
+function commandLine(facts: SessionFacts): string | null {
+  const commands = facts.commands.value
+  if (commands === null) return `commands unknown: ${facts.commands.unavailable}`
+  if (commands.length === 0) return null
+  const runs = commands.reduce((sum, row) => sum + row.runs, 0)
+  const shown = commands.slice(0, SHEET_COMMANDS).map((row) => `${row.command} ${row.runs}${failedNote(row.failed, row.inScripts)}`)
+  return `commands ${runs}: ${shown.join(', ')}${commands.length > SHEET_COMMANDS ? ', …' : ''}`
 }
 
 /**
@@ -1584,10 +1688,13 @@ function sessionSheet(facts: SessionFacts): string[] {
   lines.push(turnLine(facts))
   const subagents = facts.subagents.value ?? []
   const names = subagents.map((entry) => entry.taskName).filter((name): name is string => name !== null)
+  const failedCalls = new Map(facts.measurements.tools.map((row) => [row.name, row.outcomes.error]))
   lines.push(
-    `tools ${facts.toolCalls.value}${facts.toolCalls.value ? ` (${topCounts(facts.toolCallsByName.value ?? {})})` : ''}` +
+    `tools ${facts.toolCalls.value}${facts.toolCalls.value ? ` (${topCounts(facts.toolCallsByName.value ?? {}, 3, (name) => failedNote(failedCalls.get(name) ?? 0, 0))})` : ''}` +
       ` · subagents ${subagents.length}${names.length > 0 ? ` (${names.slice(0, 3).map((name) => sheetText(name, 40)).join(', ')}${names.length > 3 ? ', …' : ''})` : ''}`,
   )
+  const commands = commandLine(facts)
+  if (commands !== null) lines.push(commands)
   const skills = Object.fromEntries(Object.entries(facts.measurements.skills).map(([name, use]) => [name, use.model + use.slash + use.read]))
   if (Object.keys(skills).length > 0) lines.push(`skills ${topCounts(skills, 5)}`)
   lines.push(`tokens ${renderTokens(facts.tokens, facts.cost)}`)

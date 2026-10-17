@@ -2,7 +2,7 @@
 
 [traces](../README.md#docs) › Session facts
 
-`traces facts` states what happened in a session, exactly, for $0: who acted, the turns, tools, pull requests, first failure, tokens, cost and the time lost.
+`traces facts` states what happened in a session, exactly, for $0: who acted, the turns, tools, commands, pull requests, first failure, tokens, cost and the time lost.
 It calls no model, and the same spans always give the same sheet.
 
 ```bash
@@ -21,7 +21,8 @@ Text is the default; pass `--format json` to parse. Each session takes at most 2
 99d75d4b claude-code · agent-dev-container (feat/gap-closure) · 10-15 09:12→12:40 UTC · active 3.1 h
 who dotfiles sha256:5843…ca56 · claude-opus-5-5 (from session-identity)
 human turns 14 (excluded: injected 6, fleet 2, relay 1) · interrupts 2
-tools 412 (Bash 220, Edit 88, Read 61, …) · subagents 6 (lint, test, docs, …)
+tools 412 (Bash 220 (31 failed), Edit 88, Read 61, …) · subagents 6 (lint, test, docs, …)
+commands 236: pnpm test 41 (19 failed), git status 30, rg 22, gh pr 9 (1 failed), git push 6, …
 tokens in 2.1M · out 310k · cache read 88M · $38.20 list price (Router rates)
 waste 52 min: `pnpm test` failed 14× in a row (31 min) · 2 stalls ≥ 10 min (21 min) · reverts 1
 PRs opened #11021 #11022 · merged #11006 · changed 23 files
@@ -39,6 +40,7 @@ Three rules hold for every field. Every fact is about this session's own agent: 
 |---|---|
 | `toolCalls`, `toolCallsByName` | tool calls this session's agent made, by name. A Codex command that checks work is `exec_command.verify` |
 | `subagents` | every subagent-spawning call, with its task name; a refused Codex spawn is `ERROR` |
+| `commands` | the programs the session's commands ran (`labctl run`, `git push`, `pnpm test`), most runs first: `runs`; `failed`, runs that were their call's only command (a `cd` aside) and ended in error; and `inScripts`, runs inside a Codex code-mode script, which records no exit code of its own. Rows name no span ids; `--match` gives each run's. A code-mode `tools.exec_command` call inside `for (const x of [...])` counts once per element, `${x}` or `{cmd: x}` taking each value; inside any other loop, once as written. On the sheet, a tool's `(31 failed)` counts its calls that ended in error |
 | `pullRequests` | pull requests created and merged, by number or head branch, with when the command ran and the span that named it |
 | `humanTurns` | turns a person typed, each with `author`, `answered`, `reply`, `interrupted` and `signals` (`interrupt`, `rejected-tool`, `after-claim`) |
 | `excludedTurns`, `turnsByActor` | every left-out turn, by reason and author, so the filter is checkable |
@@ -51,8 +53,7 @@ Three rules hold for every field. Every fact is about this session's own agent: 
 
 ## Turns
 
-A turn is one a person typed into this session. History a fork or a compaction replays, harness-injected blocks (instructions, environment context, notifications, skill expansions) and a second record of the same turn are left out, each listed in `excludedTurns`.
-A turn the reader called human is checked once more by org convention: a fleet or session message, or a first turn over 1,500 characters, is `fleet`; a long markdown-heavy paste is `relay`; a harness command (`/model`) is left out.
+A turn is one a person typed into this session. History a fork or a compaction replays, harness-injected blocks (instructions, environment context, notifications, skill expansions) and a second record of the same turn are left out, each listed in `excludedTurns`. A turn the reader called human is checked once more by org convention: a fleet or session message, or a first turn over 1,500 characters, is `fleet`; a long markdown-heavy paste is `relay`; a harness command (`/model`) is left out.
 For Codex, the harness's own labels (`content_item_kinds`) decide: a message is the person's when every item is a `user.` kind. An answer to Codex's question tool (`<send_user_message_question_reply>`) is a turn, and so is a turn with an attached image, whose text is the report Codex wrote of it, without the `<image>` wrapper.
 
 `--format jsonl` prints one row per typed turn: `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals` and `spanId`.
@@ -86,7 +87,7 @@ console.log(renderSessionFacts(buildSessionFactsReport(spans)))
 
 ```text
 Usage: traces facts <ref…> | --current | --last N | --since T [flags]
-What happened, exactly, for $0: who acted, turns, tools, PRs, first failure, tokens, cost and time lost.
+What happened, exactly, for $0: who acted, turns, tools, commands, PRs, first failure, tokens, cost, time lost.
 
   --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
   --last N            the N newest sessions by file mtime, never the caller's own
@@ -101,10 +102,10 @@ What happened, exactly, for $0: who acted, turns, tools, PRs, first failure, tok
   --out PATH          write the sheet to PATH; stdout gets one summary line
 
 jq paths (--format json):
-  .sessions[0].humanTurns.value[] | {text, reply, signals}         each ask, its reply, its signals
-  .sessions[0].agent.value                                         who acted: profile, model, directive
-  .sessions[0] | {firstFailure, cost, waste: .measurements.waste}  first failure, cost, streaks, stalls, reverts
-  .matches[] | {sessionId, kind, text}                             with --match: each hit
+  .sessions[0].humanTurns.value[] | {at, text, spanId}                        each typed turn, its time and span
+  .sessions[0].commands.value[]                                               programs run: runs, failed, inScripts
+  .sessions[0].measurements.tools[] | {name, calls, failed: .outcomes.error}  tool calls by name, and failures
+  .sessions[0] | {firstFailure, tokens, cost, agent: .agent.value}            first failure, tokens, cost, who acted
 
 Examples:
   traces facts --current
