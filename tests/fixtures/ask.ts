@@ -61,7 +61,7 @@ export interface BridgeScript {
 
 /**
  * Write the stub bridge as an executable at `path`, for `TRACES_PYTHON` or as
- * `uvx` on PATH. Each run appends its argv and question to `<path>.log.jsonl`.
+ * `uvx` on PATH. Each run appends its argv, question and instructions to `<path>.log.jsonl`.
  */
 export async function writeStubBridge(path: string, questions: readonly BridgeScript[]): Promise<{ path: string; log: string }> {
   const plan = `${path}.plan.json`
