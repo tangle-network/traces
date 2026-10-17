@@ -6,13 +6,21 @@
  * source-record offsets the traces adapters attach to each span, so a span id
  * counts only when the span really came from the gold record. The gold itself
  * never passes through an adapter.
+ *
+ * `traces facts <file>` reads through the shared reader (harness-sessions),
+ * whose spans carry no record offsets and ids of their own. Until that reader
+ * captures sources (U18), each of its spans resolves through the span of traces'
+ * own reader that is the same event: the one with its readable source id (a
+ * tool call), else the one span of the same name that starts at the same time.
  */
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ClaudeAdapter } from '../../src/adapters/claude.js'
 import { CodexAdapter } from '../../src/adapters/codex.js'
+import { resolveAdapter } from '../../src/registry.js'
 import { SOURCE_ATTRIBUTE_PREFIX, sourceFileId, type SourceRecordReference } from '../../src/source-location.js'
+import type { OtlpSpan } from '../../src/otlp.js'
 import type { HarnessTraceAdapter } from '../../src/types.js'
 import type { BenchManifest } from './fixtures.js'
 
@@ -112,9 +120,14 @@ const ADAPTERS: Record<string, HarnessTraceAdapter> = {
   'claude-code': new ClaudeAdapter(),
 }
 
+const READABLE_ID_KEYS = ['traces.codex.source_span_id', 'traces.claude.source_span_id'] as const
+const readableId = (span: OtlpSpan): string | undefined =>
+  READABLE_ID_KEYS.map((key) => span.attributes[key]).find((value): value is string => typeof value === 'string')
+
 /**
  * Parse every fixture session through its traces adapter and map each span id
- * (hex wire id and unambiguous readable source id) to the records it came from.
+ * (hex wire id and unambiguous readable source id) to the records it came from,
+ * then add the span ids of the shared reader, each through its twin.
  */
 export async function spanRecordMap(root: string, manifest: BenchManifest): Promise<Map<string, RecordRef[]>> {
   const fileById = new Map<string, { path: string; starts: number[] }>()
@@ -124,16 +137,14 @@ export async function spanRecordMap(root: string, manifest: BenchManifest): Prom
   }
   const spans = new Map<string, RecordRef[]>()
   const readable = new Map<string, RecordRef[][]>()
+  const twins: Array<{ native: Map<string, OtlpSpan[]>; records: Map<OtlpSpan, RecordRef[]>; shared: OtlpSpan[] }> = []
   for (const session of manifest.sessions) {
     const adapter = ADAPTERS[session.harness]
     if (!adapter) throw new Error(`no adapter for ${session.harness}`)
-    const parsed = await adapter.parse({
-      harness: session.harness,
-      sessionId: session.sessionId,
-      path: join(root, session.path),
-      cwd: null,
-      mtimeMs: 0,
-    }, { captureSources: true })
+    const ref = { harness: session.harness, sessionId: session.sessionId, path: join(root, session.path), cwd: null, mtimeMs: 0 }
+    const parsed = await adapter.parse(ref, { captureSources: true })
+    const twin = { native: new Map<string, OtlpSpan[]>(), records: new Map<OtlpSpan, RecordRef[]>(), shared: await resolveAdapter(session.harness)!.parse({ ...ref }, {}) }
+    twins.push(twin)
     for (const span of parsed) {
       const refs = new Map<string, RecordRef>()
       for (const [key, value] of Object.entries(span.attributes)) {
@@ -146,19 +157,30 @@ export async function spanRecordMap(root: string, manifest: BenchManifest): Prom
         }
       }
       const records = [...refs.values()]
+      const timeKey = `${span.name}\0${span.start_time}`
+      twin.native.set(timeKey, [...(twin.native.get(timeKey) ?? []), span])
       // A span that carries no source record names nothing. Mapping it to an empty list
       // would report a citation of it as resolved, which is what citing a real but wrong
       // record looks like, and the two failures have to stay apart in the report.
       if (records.length === 0) continue
       spans.set(span.span_id, records)
-      for (const key of ['traces.codex.source_span_id', 'traces.claude.source_span_id']) {
-        const alias = span.attributes[key]
-        if (typeof alias === 'string') readable.set(alias, [...(readable.get(alias) ?? []), records])
-      }
+      twin.records.set(span, records)
+      const alias = readableId(span)
+      if (alias !== undefined) readable.set(alias, [...(readable.get(alias) ?? []), records])
     }
   }
   // A readable id shared by two sessions (a fork repeats its parent's call ids) names nothing.
   for (const [alias, candidates] of readable) if (candidates.length === 1 && !spans.has(alias)) spans.set(alias, candidates[0]!)
+  for (const { native, records, shared } of twins) {
+    for (const span of shared) {
+      if (spans.has(span.span_id)) continue
+      const alias = readableId(span)
+      const byAlias = alias === undefined ? undefined : readable.get(alias)
+      const sameTime = native.get(`${span.name}\0${span.start_time}`) ?? []
+      const found = byAlias?.length === 1 ? byAlias[0] : sameTime.length === 1 ? records.get(sameTime[0]!) : undefined
+      if (found) spans.set(span.span_id, found)
+    }
+  }
   return spans
 }
 

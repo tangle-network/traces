@@ -1,0 +1,18 @@
+{
+  "arm": "facts",
+  "measuredAt": "2026-10-17",
+  "canonical": { "correct": 10, "partial": 4, "wrong": 5 },
+  "heldOut": { "correct": 10, "partial": 4, "wrong": 5 },
+  "correct": [
+    "op.subagents",
+    "op.last-human-turn",
+    "op.time-bounds",
+    "op.changed-files",
+    "op.status-polls",
+    "op.tokens",
+    "child.lineage",
+    "child.own-work",
+    "child.spawned",
+    "claude.first-bash-error"
+  ]
+}

@@ -261,6 +261,16 @@ function isWaitAgentOperation(name: string): boolean {
   return name === 'wait_agent' || name.endsWith('__wait_agent')
 }
 
+/**
+ * Codex answers a multi-agent call it refused (`spawn_agent` at the agent thread
+ * limit) with `<operation> failed: <reason>` instead of the call's JSON result.
+ * That text is Codex's own status, not tool output. Both read paths apply it.
+ */
+export function agentOperationFailed(name: string, output: unknown): boolean {
+  const operation = multiAgentOperation(name)
+  return operation !== null && typeof output === 'string' && output.startsWith(`${operation} failed:`)
+}
+
 /** Only protocol-level status fields count; arbitrary tool output may itself contain code or logs mentioning errors. */
 function outputStatus(
   name: string,
@@ -272,6 +282,7 @@ function outputStatus(
   // inside arbitrary output remains domain data, not execution status.
   const sourceError = source.is_error === true || source.isError === true
     || (source.error !== undefined && source.error !== null && source.error !== false)
+    || agentOperationFailed(name, output)
   const outputError = explicitOutputError(output, !waitAgent)
   const error = sourceError || outputError === true
   const pollTimeout = !error && waitAgent && explicitTimeout(output)

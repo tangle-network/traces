@@ -274,7 +274,10 @@ const COMMANDS = [
       ['.matches[] | {sessionId, kind, text}', 'with --match: each hit'],
     ],
     examples: ['traces facts --current', "traces facts 019a3c7e --format json | jq '.sessions[0].measurements.waste'", "traces facts --since 30d --match '^gh pr merge'"],
-    overview: [['What happened (turns, PRs, failure, cost)? $0', 'traces facts <ref> | --current | --since 1d']],
+    overview: [
+      ['What happened (turns, PRs, failure, cost)? $0', 'traces facts <ref> | --current | --since 1d'],
+      ['Did we already try X / what was said? $0', "traces facts <ref> | --since 30d --match '<re>'"],
+    ],
   },
   {
     name: 'analyze',
