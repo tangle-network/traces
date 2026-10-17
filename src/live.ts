@@ -156,7 +156,7 @@ function asString(value: unknown): string | undefined {
 }
 
 function actionCounts(actions: readonly TraceLiveAction[]): Record<TraceLiveActionKind, number> {
-  const counts: Record<TraceLiveActionKind, number> = { tool: 0, read: 0, edit: 0, verify: 0, claim: 0, other: 0 }
+  const counts: Record<TraceLiveActionKind, number> = { tool: 0, read: 0, edit: 0, verify: 0, other: 0 }
   for (const action of actions) counts[action.kind] += 1
   return counts
 }
