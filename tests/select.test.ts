@@ -70,16 +70,16 @@ describe('selection: every harness, every Codex home', () => {
     expect((await facts([IDS.codexUnnamed])).sessions[0]!.sessionId).toBe(IDS.codexUnnamed)
   })
 
+  // One `facts` spawn per row, run at once: in sequence, about 20 cold spawns outlasted 30 s on a loaded gate host.
   it('prints a short ref per row that names that session alone', async () => {
     const { sessions } = await list(['--last', '50'])
-    for (const row of sessions) {
-      expect(row.ref.length).toBeGreaterThanOrEqual(8)
-      expect((await facts([row.ref])).sessions[0]!.sessionId).toBe(row.id)
-    }
+    for (const row of sessions) expect(row.ref.length).toBeGreaterThanOrEqual(8)
+    const named = await Promise.all(sessions.map(async (row) => (await facts([row.ref])).sessions[0]!.sessionId))
+    expect(named).toEqual(sessions.map((row) => row.id))
     // The two ids that share an 8-character prefix are told apart by their suffixes.
     const twin = sessions.find((row) => row.id === IDS.codexTwin)!
     expect(IDS.codexTwin.endsWith(twin.ref)).toBe(true)
-  })
+  }, 60_000)
 
   it('shows the first prompt and the human-turn count facts reports', async () => {
     const row = (await list(['--last', '50'])).sessions.find((entry) => entry.id === IDS.parent)!
