@@ -6,12 +6,13 @@ content itself — see Ownership.
 
 ## Read for the task
 
-- For the common CLI commands and flags, read [docs/cli.md](docs/cli.md) (curated; `traces --help` is the
-  complete inventory). For the SDK, read [docs/sdk.md](docs/sdk.md), which names every export. Do not
-  duplicate command inventories here. [README.md](README.md) stays a short
-  front page that links to one guide per task.
-- For the analyst engine (agent-eval's deterministic analyst, your own through `analyzeSpans({ registry })`,
-  and `traces ask`, the one command that calls a model), read [docs/trace-analysts.md](docs/trace-analysts.md).
+- For a command, read its page from the table in [README.md](README.md) (one page per command, each
+  embedding its `--help`); `traces <command> --help` is the inventory. For the SDK, read
+  [docs/sdk.md](docs/sdk.md), which names every export and shows how to run your own analyst through
+  `analyzeSpans({ registry })`. Do not duplicate command inventories here.
+- The [inspect-agent-traces](skills/inspect-agent-traces/SKILL.md) skill maps each question an agent asks
+  about a session to its command. [docs/parsers.md](docs/parsers.md) lists every session parser outside
+  traces and the command that retires it.
 - Every 0.x command and flag that 1.0 removed is a row in [src/moved.ts](src/moved.ts): using it exits 2
   and prints the replacement (`traces help moved`). Remove a spelling only by adding its row.
 - Resolve current exports and signatures from [src/index.ts](src/index.ts) and the command table in
@@ -36,18 +37,30 @@ owns:
   and validate OTLP from any producer, and render/report/gate over the result.
 
 A harness adapter is the legacy edge, for a format this project does not control. A system you do
-control should emit the contract directly (`--otlp`), never get a new adapter.
+control should emit the contract and pass its file as a ref, never get a new adapter.
 
 ## Invariants
 
 - **`parent_span_id` is containment; `links` is causality.** A span's parent is what it happened
   inside. A `links` entry is what caused it (e.g. a verdict that triggered a retry round). Never encode
   a causal edge as a parent pointer — it claims a nesting that never existed and cannot round-trip.
-- **Exit codes are a stable API: 0 yes, 1 no, 2 could not answer** (the 1.0.0 major note). A usage
-  error or an input traces could not read exits 2; under `--format json|jsonl` its error is one JSON
-  object `{error, code}` on stderr and stdout stays empty. Scripts and CI gates branch on exact exit
-  codes (see the tables in [docs/integrate.md](docs/integrate.md), [docs/check.md](docs/check.md),
-  [docs/diff.md](docs/diff.md) and [docs/upload.md](docs/upload.md)). Do not repurpose a code's meaning.
+- **0 yes, 1 no, 2 could not answer, on every command; error objects on stderr** (1.0.0 major note).
+  Under `--format json|jsonl` an error is one JSON object `{error, code}` on stderr and stdout stays
+  empty (`tests/cli-contract.test.ts`). Scripts and CI gates branch on exact exit codes; do not
+  repurpose a code's meaning.
+- **Every moved row prints its replacement.** A 0.x command or flag 1.0 removed is a row in
+  [src/moved.ts](src/moved.ts); using it exits 2 and prints the rewritten argv (`tests/cli-contract.test.ts`).
+- **Nothing is written outside `--out` and `$XDG_STATE_HOME/traces`**: no temp OTLP copy, no
+  `.traces/` in the cwd, no stderr noise (`tests/side-effects.test.ts`).
+- **One unreadable session never fails a sweep.** In a window, `--last` or a machine-wide selection it is
+  skipped and named in `selection.unreadSessions`; only a named ref that cannot be read exits 2
+  (`tests/select.test.ts`).
+- **Every `--no-content` output contains no content**: facts, convert and upload `--dry-run` share one
+  metadata-only rule, `src/metadata-only.ts` (`tests/no-content.test.ts`).
+- **A gate fails closed.** `check` with no gate exits 2 and names `--contract` and `--share-safe`; a
+  gate that could not decide exits 2, never 0 (`tests/check.test.ts`).
+- **Each doc page's embedded help equals the CLI's** (`tests/docs-help.test.ts`), and every command line
+  the shipped markdown teaches still runs (`tests/docs-commands.test.ts`).
 - **Nothing on the ingest path is repaired or invented.** A span with an unreadable timestamp is
   reported and excluded from analysis, never given a synthesized value — a repaired value would put
   invented work into a total. A re-export carries `traces.source.unreadable_rows` forward; it never
@@ -84,7 +97,7 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
 ## What not to do
 
 - Do not add a new harness adapter for a system this org controls. Emit
-  `@tangle-network/agent-trace-contract` spans and use `--otlp` instead.
+  `@tangle-network/agent-trace-contract` spans and pass the file as a ref instead.
 - Do not hand-write a credential or PII pattern here. Extend agent-eval's redaction core
   ([its docs/redaction.md](https://github.com/tangle-network/agent-eval/blob/main/docs/redaction.md))
   and depend on the new version; a second regex list drifts from the first.
@@ -110,5 +123,5 @@ pnpm check:package  # proves the packed npm tarball actually contains the `trace
 pnpm run verify:contracts-corpus   # real-trace corpus that CI runs traces check against
 ```
 
-`pnpm bench:audit` (see [Audit benchmark](docs/develop.md#audit-benchmark)) is a separate, hand-run
-comparison; it is not part of the standard gate.
+`pnpm bench:audit` (see [How quality is measured](docs/develop.md#how-quality-is-measured)): its $0 facts
+arm is in `pnpm test`; the model arms cost money and run by hand before a release tag.

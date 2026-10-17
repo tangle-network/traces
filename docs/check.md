@@ -1,60 +1,77 @@
-# Gate CI on a trace contract
+# Check: the one gate
 
-[traces](../README.md#docs) › Gate CI on a trace contract
+[traces](../README.md#docs) › Check
 
-`traces check` is the one gate, and it needs one: `--contract FILE`, the built-in `--contract conformance`, or `--share-safe`.
-With none, it exits 2 and names them, so a CI step whose contract variable expanded to nothing never passes.
+`traces check` is the one gate, and it needs one: `--contract FILE`, the built-in `--contract conformance`, or `--share-safe`. With none it exits 2 and names them, so a CI step whose contract variable expanded to nothing never passes.
 
-Two runs can give the same answer while one of them calls a forbidden tool.
-An output check passes both; a trace contract fails the wrong one.
+## Trace contracts
+
+Two runs can give the same answer while one calls a forbidden tool. An output check passes both; a trace contract fails the wrong one.
 
 ```json
 {
   "name": "refund-desk",
   "run": { "requireCompleted": true, "maxDurationMs": 300000 },
   "tools": { "required": ["Read"], "forbidden": ["Bash"], "allowed": ["Read", "Grep"], "maxCalls": 10, "enforced": true },
-  "retries": { "reads": ["Read", "Grep"] },
-  "llm": { "maxCalls": 10 }
+  "retries": { "reads": ["Read", "Grep"] }
 }
 ```
 
 ```bash
 claude -p "$TASK" --tools Read,Grep --strict-mcp-config --output-format stream-json --verbose > run.jsonl
 traces check run.jsonl --contract refund-desk.json --format junit > contract.xml
+traces check --contract refund-desk.json         # what each rule checks; reads no trace
 ```
 
-`tools.enforced` fails when the harness offered the model a tool the contract does not allow, which a flag such as `--tools` does not prove.
-Without `--strict-mcp-config`, the run above is also offered every MCP server the account or project configures.
-`retries` fails when a tool repeats a call with the same arguments and nothing proves the repeat is safe.
+`tools.enforced` fails when the harness offered a tool the contract does not allow. A saved interactive session records no run status, so give a contract for a session file no `run` key.
+Every rule prints `pass`, `fail`, `error` or `skipped`. The keys and semantics are in [agent-eval's trace-contract guide](https://github.com/tangle-network/agent-eval/blob/main/docs/trace-contracts.md).
 
-The trace is a ref: `claude -p --output-format stream-json` output, a Claude Code or Codex session file or id, OTLP spans (a file or a directory), or trace evidence. The input is sniffed, and `--harness claude-code` or `--harness codex` forces the reader of a file.
-Only stream-json output records the offered tools and the run's own result.
-**A saved interactive session file carries no run status at all** (the `result` record above only exists in `-p` mode), so `run.requireCompleted`/`run.allowedStatuses` always fail on one — write a contract for a session file with no `run` key, like the `refund-desk` example above running against `run.jsonl`.
-Every rule prints `pass`, `fail`, `error`, or `skipped` (a rule of an alternative path that did not decide the result).
+## Conformance: integrate your own system
 
-## Conformance and share safety
+Emit the span contract and pass the file as the ref; no adapter or plugin.
 
-`traces check spans.otlp.jsonl --contract conformance` says what a trace can answer: it fails only when not one entry could be read as a span, and lists each capability a missing field costs.
-It reads contract OTLP-JSONL, standard OTLP/JSON (`resourceSpans`, one document or the collector file exporter's one envelope per line), and every other ref.
+```ts
+import { llmSpan, loopSpan, steeredBy, toolSpan } from '@tangle-network/agent-trace-contract'
+```
 
-`traces check handoff.md --share-safe` reads each path as bytes, never as a trace, so a handoff, an issue draft and a span export are all just files.
-SAFE and SAFE_WITH_WARNINGS pass, UNSAFE fails, and UNKNOWN (a part it could not read) cannot decide.
-`--known-secret-env NAME` (repeatable) also fails on that variable's value in any encoding, and never prints it.
-Findings name the file and JSON Pointer, never the matched value.
+`parent_span_id` is containment and `links` is causality (`steeredBy`), so a retry is linked to the verdict that caused it, not nested under it.
+`traces check spans.otlp.jsonl --contract conformance` says what a trace can answer: each capability (`token-accounting`, `cost-attribution`, `tool-usage`, `loop-convergence`, `tree-comparison`, `steering-chain`, `latency-analysis`) available or not, with the reason. It fails only when not one entry reads as a span. It reads contract OTLP-JSONL, standard OTLP/JSON and every other ref.
+Nothing is repaired on the way in, and a re-export never validates cleaner than its source: `traces convert` keeps what the producer wrote and carries `traces.source.unreadable_rows`.
+
+## Share safety
+
+`traces check <path> --share-safe` reads each path as bytes, never as a trace, so a handoff, an issue draft and a span export are all just files. SAFE and SAFE_WITH_WARNINGS pass, UNSAFE fails, UNKNOWN cannot decide. `--known-secret-env NAME` also fails on that variable's value, in any encoding. Findings name the file and JSON Pointer, never the value.
 
 ## Exit codes and output
 
-Gates combine: the check exits 1 if any gate fails, else 2 if any could not decide, else 0.
+Gates combine: 1 if any fails, else 2 if any could not decide, else 0. Exit 2 means no gate, a bad contract, a rule that could not run, an UNKNOWN share verdict, or an unreadable or ambiguous ref.
+The verdict goes to stdout in `--format`: `text`, `json` (`.gates[]`), `junit` or `github` (`::error` lines). Evidence for each gate that did not pass goes under `--out DIR`; without it, `check` writes nothing.
 
-| Exit | Meaning |
-|---|---|
-| 0 | Every gate passed. |
-| 1 | A gate failed: a contract rule, conformance (not a trace), or share safety (UNSAFE). |
-| 2 | Could not decide: no gate, a contract that is malformed or contradicts itself, a rule that could not be evaluated, an UNKNOWN share verdict, or a trace that could not be read or whose reference is ambiguous. |
+## `traces check --help`
 
-The verdict always goes to stdout in `--format`: `text`, `json` (`.gates[]`, one per gate), `junit` (one test case per rule, per capability, per shared path) or `github` (`::error` and `::warning` workflow commands).
-An exit 2 that is not a verdict writes one error on stderr; under `--format json` it is one object `{error, code}`: `code` is `usage` (no gate, or a bad contract), `unknown-verdict` (a gate could not decide), `unreadable` or `ambiguous`.
+```text
+Usage: traces check <ref…> | --current | --last N | --since T  --contract FILE|conformance | --share-safe  [flags]
+The one gate: does this run pass a trace contract or conform, and is this file safe to share?
+A gate is required. --share-safe reads each path as bytes, never as a trace. --contract F with no ref explains F.
+Exit 0 pass, 1 any gate fails, 2 a gate could not decide: a bad contract, a rule or verdict that could not run, an unreadable ref.
 
-`traces check --contract <file>` with no ref prints what each compiled rule checks and reads no trace.
-Evidence for each gate that did not pass goes under `--out DIR`: per trace, the verdict, the contract, its plain-language statement and the redacted spans the violations cite; `conformance.md`; `share-safe.json`. Without `--out`, `check` writes nothing.
-The contract keys and rule semantics are in [agent-eval's trace-contract guide](https://github.com/tangle-network/agent-eval/blob/main/docs/trace-contracts.md).
+  --contract FILE|conformance gate on a trace contract file, or on conformance (repeatable)
+  --share-safe        gate on whether each path is safe to share, read as bytes: SAFE passes, UNSAFE fails, UNKNOWN cannot decide
+  --known-secret-env NAME with --share-safe: an environment variable whose value must appear nowhere (repeatable)
+  --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
+  --last N            the N newest sessions by file mtime, never the caller's own
+  --since T           every session with a record since T: 30m, 2h, 7d or an ISO time
+  --cwd DIR           sessions recorded in DIR or under it, or in a worktree of its repo
+  --harness ID        force the reader of a file ref (claude-code, codex, …)
+  --format text|json|junit|github text (default), json, junit or github: the verdict, on stdout
+  --out DIR           write evidence for each gate that did not pass under DIR
+
+jq paths (--format json):
+  .gates[] | {gate, status}                     each gate and what it decided
+  .gates[].report.traces[]?.verdict.violations  each rule a run broke, with span ids
+
+Examples:
+  traces check run.otlp.jsonl --contract contract.json --format junit > contract.xml
+  traces check spans.otlp.jsonl --contract conformance
+  traces check handoff.md --share-safe --known-secret-env TANGLE_API_KEY
+```

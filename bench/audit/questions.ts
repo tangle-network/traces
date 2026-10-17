@@ -282,8 +282,8 @@ export interface PromptRow {
 }
 
 /** Every question and paraphrase as the exact text an arm receives. Variant 0 is the canonical wording. */
-export function promptRows(manifest: BenchManifest): PromptRow[] {
-  return QUESTIONS.flatMap((question) => {
+export function promptRows(manifest: BenchManifest, questions: readonly Question[] = QUESTIONS): PromptRow[] {
+  return questions.flatMap((question) => {
     const session = manifest.sessions.find((item) => item.id === question.session)
     if (!session) throw new Error(`manifest has no session ${question.session}`)
     const schema = answerJsonSchema(question)

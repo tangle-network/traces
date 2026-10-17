@@ -119,11 +119,69 @@ async function makeExecFailsHome(): Promise<{ path: string; env: Record<string, 
   return { path, env: { HOME: home, XDG_STATE_HOME: join(root, 'state'), XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache') } }
 }
 
+const TYPED_ID = '019a8c00-dddd-7ddd-8ddd-dddddddddd01'
+const ASKED = 'The chart page renders blank.'
+const REPLY = '<send_user_message_question_reply>\n[{"answer":"the SVG renderer","question":"Which renderer does the page use?","questionItemId":"q-1"}]\n</send_user_message_question_reply>'
+const SCREENSHOT = 'still blank, see the screenshot'
+const SCREENSHOT_AT = '2026-10-17T11:00:08.005Z'
+
+/**
+ * A Codex session where the person answers the agent's question through
+ * Codex's question tool, then attaches a screenshot. Codex labels every item of
+ * both messages `user.*` and reports each submitted turn (`item_completed`
+ * UserMessage); the screenshot's report carries only the typed text, without the
+ * `<image …>` wrapper its message has. The shared reader (harness-sessions 0.1.7)
+ * read a user message that opens with a tag as injected, so facts dropped both turns.
+ */
+async function makeTypedTurnsHome(): Promise<{ path: string; env: Record<string, string> }> {
+  const root = await mkdtemp(join(tmpdir(), 'traces-typed-turns-'))
+  const home = join(root, 'home')
+  const cwd = join(home, 'w', 'charts')
+  const at = (second: number): string => `2026-10-17T11:00:${String(second).padStart(2, '0')}.000Z`
+  const user = (second: number, content: unknown[], kinds: string[]) => ({
+    timestamp: at(second),
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content, internal_chat_message_metadata_passthrough: { turn_id: `${TYPED_ID}-t1`, content_item_kinds: kinds } },
+  })
+  const report = (when: string, id: string, content: unknown[]) => ({
+    timestamp: when,
+    type: 'event_msg',
+    payload: { type: 'item_completed', thread_id: TYPED_ID, turn_id: `${TYPED_ID}-t1`, item: { type: 'UserMessage', id, content } },
+  })
+  const agent = (second: number, text: string) => ({ timestamp: at(second), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } })
+  const rows = [
+    { timestamp: at(0), type: 'session_meta', payload: { id: TYPED_ID, timestamp: at(0), cwd, originator: 'codex_cli_rs', cli_version: '0.150.0' } },
+    { timestamp: at(1), type: 'event_msg', payload: { type: 'task_started', turn_id: `${TYPED_ID}-t1` } },
+    { timestamp: at(1), type: 'turn_context', payload: { cwd, model: 'gpt-6.1-sol' } },
+    user(2, [{ type: 'input_text', text: ASKED }], ['user.text']),
+    report(at(2), 'um-asked', [{ type: 'text', text: ASKED }]),
+    agent(3, 'Which renderer does the page use?'),
+    user(4, [{ type: 'input_text', text: REPLY }], ['user.text']),
+    report(at(4), 'um-reply', [{ type: 'text', text: REPLY }]),
+    agent(6, 'Switching the SVG renderer to embedded fonts.'),
+    user(8, [
+      { type: 'input_text', text: '<image name=[Image #1] path="/tmp/shot.png">' },
+      { type: 'input_image', image_url: 'data:image/png;base64,iVBORw0KGgo=', detail: 'high' },
+      { type: 'input_text', text: '</image>' },
+      { type: 'input_text', text: SCREENSHOT },
+    ], ['user.text', 'user.image', 'user.text', 'user.text']),
+    report(SCREENSHOT_AT, 'um-shot', [{ type: 'local_image', path: '/tmp/shot.png' }, { type: 'text', text: SCREENSHOT }]),
+    agent(9, 'The font file was missing from the bundle.'),
+    { timestamp: at(10), type: 'event_msg', payload: { type: 'task_complete', turn_id: `${TYPED_ID}-t1` } },
+  ]
+  const path = join(home, '.codex', 'sessions', '2026', '10', '17', `rollout-2026-10-17T11-00-00-${TYPED_ID}.jsonl`)
+  await mkdir(dirname(path), { recursive: true })
+  await mkdir(cwd, { recursive: true })
+  await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  return { path, env: { HOME: home, XDG_STATE_HOME: join(root, 'state'), XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache') } }
+}
+
 let th: TokenHome
 let fx: FixtureHome
 let ex: { path: string; env: Record<string, string> }
+let tt: { path: string; env: Record<string, string> }
 beforeAll(async () => {
-  ;[th, fx, ex] = await Promise.all([makeTokenHome(), makeFixtureHome(), makeExecFailsHome()])
+  ;[th, fx, ex, tt] = await Promise.all([makeTokenHome(), makeFixtureHome(), makeExecFailsHome(), makeTypedTurnsHome()])
 })
 
 /** Every single-turn Claude Code and Codex session of both fixture homes. */
@@ -142,6 +200,7 @@ const SESSIONS: Array<[string, () => [string, Readonly<Record<string, string>>]]
   ['Codex parent with two spawned children', () => [IDS.parent, fx.env]],
   ['Codex spawned child', () => [IDS.child1, fx.env]],
   ['Codex exec_command that exits 1', () => [ex.path, ex.env]],
+  ['Codex question reply and screenshot turns', () => [tt.path, tt.env]],
 ]
 
 describe('both read paths state the same numbers', () => {
@@ -171,6 +230,24 @@ describe('both read paths state the same numbers', () => {
     const [[shared], [native]] = await Promise.all([facts([ex.path], ex.env), facts([ex.path, '--latest-turn'], ex.env)])
     expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', name: 'tool.exec_command', laterCount: 1 })
     expect(firstFailure(native!)).toEqual(firstFailure(shared!))
+  })
+
+  // harness-sessions 0.1.7 called a Codex user message that opens with a tag injected, whatever
+  // Codex's own labels said, so a question reply and a screenshot turn were not the person's.
+  it("counts a Codex question reply and a screenshot turn as the person's, on both paths and in the index", async () => {
+    const [[shared], [native]] = await Promise.all([facts([tt.path], tt.env), facts([tt.path, '--latest-turn'], tt.env)])
+    for (const session of [shared!, native!]) {
+      // The screenshot turn is the report of it: the typed text, at its time.
+      expect(session.humanTurns.value!.map((turn) => [turn.at, turn.text])).toEqual([
+        ['2026-10-17T11:00:02.000Z', ASKED],
+        ['2026-10-17T11:00:04.000Z', REPLY],
+        [SCREENSHOT_AT, SCREENSHOT],
+      ])
+    }
+    const found = await runCli(['facts', '--since', '2026-10-17T10:00:00Z', '--match', 'still blank|SVG renderer', '--format', 'json'], { env: tt.env })
+    expect(found.code).toBe(0)
+    const matches = (JSON.parse(found.stdout) as { matches: Array<{ kind: string }> }).matches
+    expect(matches.filter((match) => match.kind === 'human')).toHaveLength(2)
   })
 
   // The shared reader named every Codex command exec_command, and traces' own reader matched its

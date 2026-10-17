@@ -6,7 +6,9 @@
  *   to `facts-score.json`, which may only rise.
  * - `raw-files`: one headless agent per question over a copy of the fixture
  *   tree, with no `traces` on PATH and a fixed budget.
- * - `traces`: the same agent, prompt and budget, with `traces` on PATH.
+ * - `traces`: the same agent, prompt and budget, with `traces` on PATH and the
+ *   `inspect-agent-traces` skill installed the way a user installs it: in
+ *   `.claude/skills/` of the agent's own HOME, where Claude Code reads user skills.
  *
  * Every arm writes the answers file `cli.ts score` grades. `traces` always runs
  * with HOME set to a store home over the fixture copy, so it can read the
@@ -14,9 +16,11 @@
  */
 
 import { spawn } from 'node:child_process'
-import { cp, mkdir, symlink, writeFile } from 'node:fs/promises'
+import { access, cp, mkdir, symlink, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { BenchManifest, BenchSessionId } from './fixtures.js'
+import { LARGE_QUESTIONS } from './large.js'
 import { type PromptRow, promptRows } from './questions.js'
 import type { AnswerRow, AnswersFile } from './score.js'
 
@@ -30,6 +34,8 @@ export interface ArmOptions {
   readonly manifest: BenchManifest
   /** The traces CLI to run (`dist/cli.js`). */
   readonly cli: string
+  /** The traces arm: the directory holding `inspect-agent-traces/SKILL.md` (the package's `skills/`). */
+  readonly skills?: string
   /** Scratch space: question copies, store homes and agent transcripts. */
   readonly work: string
   /** Model arms only. */
@@ -245,6 +251,30 @@ async function factsArm(options: ArmOptions, rows: readonly PromptRow[]): Promis
 /** One question's wall-clock limit; the budget usually ends a run first. */
 const QUESTION_TIMEOUT_MS = 600_000
 
+/**
+ * The traces arm's agent HOME: the skill where Claude Code reads a user's
+ * installed skills, and nothing else of the machine's user settings. Its one
+ * setting leaves Claude Code's bundled skills out of the Skill tool, so the
+ * arms differ by traces and its skill, not by a listing of unrelated skills
+ * every question would pay for. Claude Code reads its login from the macOS
+ * login keychain under HOME (or `~/.claude/.credentials.json` elsewhere), so
+ * that one entry is linked in.
+ */
+async function agentHome(dir: string, skills: string): Promise<string> {
+  const home = join(dir, 'agent-home')
+  await mkdir(join(home, '.claude', 'skills'), { recursive: true })
+  await cp(join(skills, 'inspect-agent-traces'), join(home, '.claude', 'skills', 'inspect-agent-traces'), { recursive: true })
+  await writeFile(join(home, '.claude', 'settings.json'), `${JSON.stringify({ disableBundledSkills: true }, null, 2)}\n`)
+  if (process.platform === 'darwin') {
+    await mkdir(join(home, 'Library'), { recursive: true })
+    await symlink(join(homedir(), 'Library', 'Keychains'), join(home, 'Library', 'Keychains'))
+  } else {
+    const credentials = join(homedir(), '.claude', '.credentials.json')
+    if (await access(credentials).then(() => true, () => false)) await symlink(credentials, join(home, '.claude', '.credentials.json'))
+  }
+  return home
+}
+
 /** Read by the traces arm only; the raw-files arm gets the same prompt with no tool named. */
 const TRACES_NOTE = 'The traces CLI is on PATH. It reads Claude Code and Codex session files and answers questions about them, so you need not parse them yourself: run `traces --help`, then `traces <command> --help`.'
 
@@ -268,6 +298,9 @@ interface AgentResult {
   costUsd: number | null
   modelCalls: number
   toolCalls: number
+  /** Skills the agent loaded, and the `traces` commands it ran, by subcommand (`--help` counted as `help`). */
+  skills: string[]
+  traces: string[]
   /** Tool calls that named a session store outside the question's copy, or searched from `/`. */
   outside: number
   error: string | null
@@ -287,6 +320,8 @@ function parseClaudeStream(stdout: string, dir: string): AgentResult {
   const texts: string[] = []
   let toolCalls = 0
   let outside = 0
+  const skills: string[] = []
+  const traces: string[] = []
   let result: { subtype?: string; total_cost_usd?: number; is_error?: boolean } | undefined
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue
@@ -302,8 +337,15 @@ function parseClaudeStream(stdout: string, dir: string): AgentResult {
         if (block.type === 'text' && block.text) texts.push(block.text)
         if (block.type !== 'tool_use') continue
         toolCalls += 1
-        const input = JSON.stringify(block.input ?? '').replaceAll(dir, '<q>').replace(/<q>[^\s"'\\]*/gu, '<q>')
-        if (/(?:^|[^\w<])\.(?:claude|codex)[\w-]*\/(?!projects\/[^"]*\/tool-results\/)|\bfind\s+\/(?:\s|\\")/u.test(input)) outside += 1
+        const input = (block.input ?? {}) as { skill?: unknown; command?: unknown }
+        if (typeof input.skill === 'string') skills.push(input.skill)
+        if (typeof input.command === 'string') {
+          for (const [, sub, rest] of input.command.matchAll(/(?:^|[;&|(\s])traces\s+(--help|-h|[a-z]+)([^;&|\n]*)/gu)) {
+            traces.push(sub === '-h' || sub === '--help' ? 'help' : /(?:^|\s)(?:--help|-h)(?:\s|$)/u.test(rest!) ? `${sub}:help` : sub!)
+          }
+        }
+        const named = JSON.stringify(block.input ?? '').replaceAll(dir, '<q>').replace(/<q>[^\s"'\\]*/gu, '<q>')
+        if (/(?:^|[^\w<])\.(?:claude|codex)[\w-]*\/(?!projects\/[^"]*\/tool-results\/)|\bfind\s+\/(?:\s|\\")/u.test(named)) outside += 1
       }
     }
     if (event.type === 'result') result = event as typeof result
@@ -314,6 +356,8 @@ function parseClaudeStream(stdout: string, dir: string): AgentResult {
     costUsd: typeof result?.total_cost_usd === 'number' ? result.total_cost_usd : null,
     modelCalls: messages.size,
     toolCalls,
+    skills,
+    traces,
     outside,
     error: !result ? 'no result event' : result.is_error || result.subtype !== 'success' ? `claude ended with ${result.subtype ?? 'an error'}`
       : answer === null ? 'the reply held no JSON object' : null,
@@ -331,21 +375,25 @@ async function agentAnswer(options: ArmOptions, row: PromptRow): Promise<{ answe
     ? `#!/bin/sh\nexec env ${Object.entries(await storeHome(tree, join(dir, 'traces'))).map(([key, value]) => `${key}='${value}'`).join(' ')} '${process.execPath}' '${options.cli}' "$@"\n`
     : '#!/bin/sh\necho "traces: command not found" >&2\nexit 127\n'
   await writeFile(join(bin, 'traces'), traces, { mode: 0o755 })
+  const withTraces = options.arm === 'traces'
   const argv = [
     '-p', row.prompt,
     '--output-format', 'stream-json', '--verbose',
     '--model', options.model!,
     '--max-budget-usd', String(options.budgetUsd),
     '--no-session-persistence',
-    // No user or project settings, hooks, plugins or MCP servers: the arms differ only by `traces`.
-    '--setting-sources', 'project',
+    // No machine user settings, hooks, plugins or MCP servers: the arms differ only by `traces` and its skill.
+    // The traces arm's user settings are its own HOME's, which holds the skill alone.
+    '--setting-sources', withTraces ? 'user,project' : 'project',
     '--strict-mcp-config',
-    '--tools', 'Bash,Read,Grep,Glob',
+    '--tools', withTraces ? 'Bash,Read,Grep,Glob,Skill' : 'Bash,Read,Grep,Glob',
     '--permission-mode', 'bypassPermissions',
-    ...(options.arm === 'traces' ? ['--append-system-prompt', TRACES_NOTE] : []),
+    ...(withTraces ? ['--append-system-prompt', TRACES_NOTE] : []),
   ]
+  if (withTraces && !options.skills) throw new Error('the traces arm needs the skills directory')
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, ...(withTraces ? { HOME: await agentHome(dir, options.skills!) } : {}) }
   const started = Date.now()
-  const result = await run('claude', argv, { cwd: tree, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` }, timeoutMs: QUESTION_TIMEOUT_MS })
+  const result = await run('claude', argv, { cwd: tree, env, timeoutMs: QUESTION_TIMEOUT_MS })
   await writeFile(join(dir, 'transcript.jsonl'), result.stdout)
   const parsed = parseClaudeStream(result.stdout, dir)
   const { answer, error } = parsed
@@ -359,6 +407,8 @@ async function agentAnswer(options: ArmOptions, row: PromptRow): Promise<{ answe
     tool_calls: parsed.toolCalls,
     cost_usd: parsed.costUsd,
     cost_basis: parsed.costUsd === null ? null : 'observed',
+    skills_loaded: parsed.skills,
+    traces_commands: parsed.traces,
     ...(error ? { error: `${error}${result.code !== 0 ? ` (exit ${result.code}: ${result.stderr.trim().slice(0, 300)})` : ''}` } : {}),
   } }
 }
@@ -383,6 +433,57 @@ export async function runArm(options: ArmOptions): Promise<AnswersFile> {
   if (options.arm === 'facts') {
     return { arm: 'facts', notes: 'traces facts --format json over the 3 sessions, mapped by fixed rules; $0', answers: await factsArm(options, rows) }
   }
+  return runModelArm(options, rows)
+}
+
+/**
+ * The large-session arm (`large.ts`): the same three arms over one session of
+ * about 50,000 spans. The facts arm reads `traces facts` over its file and one
+ * `--match` search.
+ */
+export async function runLargeArm(options: ArmOptions): Promise<AnswersFile> {
+  const rows = promptRows(options.manifest, LARGE_QUESTIONS)
+  if (options.arm !== 'facts') return runModelArm(options, rows)
+  const env = { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, NO_COLOR: '1', ...await storeHome(options.root, join(options.work, 'facts')) }
+  const path = join(options.root, options.manifest.sessions[0]!.path)
+  const facts = async (argv: readonly string[]): Promise<unknown> => {
+    const result = await run(process.execPath, [options.cli, 'facts', path, ...argv, '--format', 'json'], { env, timeoutMs: 600_000 })
+    if (result.code !== 0) throw new Error(`traces facts ${argv.join(' ')} exited ${result.code}: ${result.stderr.trim()}`)
+    return JSON.parse(result.stdout) as unknown
+  }
+  const sheet = (await facts([]) as { sessions: Sheet[] }).sessions[0]!
+  const tests = (await facts(['--match', '^pnpm test( |$)']) as { matches: Match[] }).matches.filter((match) => match.kind === 'command')
+  const exec = execRows(sheet)
+  const prs = sheet.pullRequests.value
+  const numbers = (list: readonly PullRequest[] | undefined) => list?.filter((pr) => pr.number !== null).map((pr) => Number(pr.number)) ?? null
+  const answers: Readonly<Record<string, Record<string, unknown>>> = {
+    'large.commands': { exec_commands: sum(exec, (row) => row.calls), nonzero_exits: sum(exec, (row) => row.outcomes.error) },
+    'large.pull-requests': { created: numbers(prs?.created), merged: numbers(prs?.merged) },
+    'large.test-runs': { pnpm_test_runs: tests.length },
+    'large.last-human-turn': { text: sheet.humanTurns.value?.at(-1)?.text ?? null },
+  }
+  return {
+    arm: 'facts',
+    notes: 'traces facts --format json over the large session, and one --match search; $0',
+    answers: rows.map((row) => ({ question: row.question, variant: row.variant, answer: answers[row.question] ?? null, model_calls: 0, cost_usd: 0, cost_basis: 'observed' })),
+  }
+}
+
+/** How an arm's agents used traces: answers that loaded the skill, ran a traces command, only read help, or never ran it. */
+export function tracesUse(answers: readonly AnswerRow[]): { skill: number; commands: number; helpOnly: number; none: number } {
+  const ran = (row: AnswerRow) => row.traces_commands ?? []
+  const commands = answers.filter((row) => ran(row).some((command) => !command.endsWith('help'))).length
+  const helpOnly = answers.filter((row) => ran(row).length > 0 && ran(row).every((command) => command.endsWith('help'))).length
+  return {
+    skill: answers.filter((row) => (row.skills_loaded ?? []).length > 0).length,
+    commands,
+    helpOnly,
+    none: answers.filter((row) => ran(row).length === 0).length,
+  }
+}
+
+/** Answer prompt rows with one model arm: one headless agent per row. */
+export async function runModelArm(options: ArmOptions, rows: readonly PromptRow[]): Promise<AnswersFile> {
   if (!options.model || !(options.budgetUsd! > 0)) throw new Error(`the ${options.arm} arm needs --model and --budget-usd`)
   let outside = 0
   const answers = await pool(rows, options.concurrency ?? 4, async (row) => {
@@ -391,9 +492,13 @@ export async function runArm(options: ArmOptions): Promise<AnswersFile> {
     options.log?.(`${options.arm} ${row.question}#${row.variant}: ${answer.error ?? 'answered'}, $${answer.cost_usd?.toFixed(4) ?? '?'}, ${answer.tool_calls} tool calls`)
     return answer
   })
+  const use = tracesUse(answers)
+  const traces = options.arm === 'traces'
+    ? `traces on PATH and its skill in the agent's HOME; skill loaded in ${use.skill}, traces commands run in ${use.commands}, only --help in ${use.helpOnly}, no traces in ${use.none} of ${answers.length}`
+    : 'no traces on PATH'
   return {
     arm: options.arm,
-    notes: `claude -p, model ${options.model}, $${options.budgetUsd} per question, tools Bash Read Grep Glob, ${options.arm === 'traces' ? 'traces on PATH' : 'no traces on PATH'}; ${outside} tool call(s) named a session store outside the fixture copy or searched from /`,
+    notes: `claude -p, model ${options.model}, $${options.budgetUsd} per question, tools Bash Read Grep Glob${options.arm === 'traces' ? ' Skill' : ''}, ${traces}; ${outside} tool call(s) named a session store outside the fixture copy or searched from /`,
     answers,
   }
 }

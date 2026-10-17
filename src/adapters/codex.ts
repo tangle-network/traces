@@ -649,7 +649,8 @@ interface UserTurnCandidate {
  */
 const USER_MESSAGE_BEGIN = '## My request for Codex:'
 
-function userTurnKey(text: string): string {
+/** The text that pairs the two records of one submitted turn: what follows Codex's request marker, whitespace collapsed. */
+export function userTurnKey(text: string): string {
   const begin = text.indexOf(USER_MESSAGE_BEGIN)
   const typed = begin === -1 ? text : text.slice(begin + USER_MESSAGE_BEGIN.length)
   return typed.trim().replace(/\s+/g, ' ')
@@ -1525,8 +1526,9 @@ export class CodexAdapter implements HarnessTraceAdapter {
         }
       } else if (l.type === 'response_item' && l.payload?.type === 'message' && l.payload.role === 'user') {
         // The human's prompt text. Codex drops the user turn from token events,
-        // so capture it here as its own CHAIN span (no text → no span).
-        const raw = contentToString(l.payload.content)
+        // so capture it here as its own CHAIN span (no text → no span). Text
+        // blocks join on a newline, as the shared reader's projection joins them.
+        const raw = contentTextBlocks(l.payload.content).join('\n')
         const prompt = capText(raw)
         if (prompt) {
           const key = userTurnKey(raw)

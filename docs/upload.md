@@ -1,53 +1,47 @@
-# Upload and share safely
+# Upload
 
-[traces](../README.md#docs) › Upload and share safely
+[traces](../README.md#docs) › Upload
 
-`traces upload` sends sessions to the Tangle Intelligence Platform. `traces check <path> --share-safe` says whether files are safe to share.
-
-`upload` **redacts locally before anything leaves the machine**, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host).
-It then checks the final events of each session, exactly as they would be sent, with the share-safety verdict.
-A session that is UNSAFE or UNKNOWN is refused: it is not sent, not written to the dry-run preview, and not marked uploaded, and the command exits 1.
+`traces upload` sends redacted sessions to the Tangle Intelligence Platform. It needs a ref or `--since`; with neither it exits 2 and prints `--since 24h`.
 
 ```bash
-traces upload --since 24h --dry-run     # see exactly what would be sent; no network
-traces upload --since 24h --no-content  # send metadata only; drop all prompt/response text
-traces upload --since 24h               # send it
+traces upload --since 24h --dry-run              # see what would be sent; no network
+traces upload --since 24h --no-content           # metadata only
+traces upload spans.otlp.jsonl --dry-run --out preview.otlp.jsonl
 ```
 
-It needs `TANGLE_INGEST_URL` (or `TANGLE_ORCHESTRATOR_URL`), `TANGLE_INGEST_API_KEY` (or `TANGLE_API_KEY`), and `TANGLE_TENANT_ID`. Without them, `--dry-run` still works fully.
+`upload` redacts locally before anything leaves the machine, dedups against sessions already sent, and tags each with its harness, cwd, branch and host.
+It then checks each session's final events, exactly as they would be sent, with the share-safety verdict: an UNSAFE or UNKNOWN session is not sent, not previewed and not marked uploaded, and the command exits 1.
+It needs `TANGLE_INGEST_URL`, `TANGLE_INGEST_API_KEY` (or `TANGLE_API_KEY`) and `TANGLE_TENANT_ID`; `--dry-run` works without them.
 
-## Redaction scope: read this before uploading prose
+## What redaction catches
 
-Redaction is agent-eval's redaction core ([docs/redaction.md](https://github.com/tangle-network/agent-eval/blob/main/docs/redaction.md)), `default` profile.
-It finds credentials by field name (`apiKey`, `x-api-key`, `client.secret`, `refreshToken`) and by value shape (provider keys, GitHub, Slack, AWS and Google tokens, JWTs, bearer headers, private keys, `KEY=secret` assignments, credentials in URLs), and replaces the whole string.
-It replaces email, card, SSN and phone values in place.
-Token counts such as `input_tokens` and `max_tokens` are kept.
-It runs over every span attribute, including the captured prompt/response text.
+Redaction is agent-eval's redaction core, `default` profile: credentials by field name and by value shape (provider keys, GitHub, Slack, AWS and Google tokens, JWTs, bearer headers, private keys, `KEY=secret`, credentials in URLs), and email, card, SSN and phone values. It does not catch names, postal addresses or account numbers in prose. Three postures, strongest first:
 
-It does **not** catch names, postal addresses or account numbers written in prose. Those need a context-aware model. Three postures, strongest first:
+1. `--no-content`: metadata only, the same rule as `traces convert <ref> --no-content`.
+2. Your own scrubber on a file: `traces convert <ref> --out spans.jsonl`, scrub `spans.jsonl`, then `traces upload spans.jsonl`; upload still redacts and gates it.
+3. The redaction core alone.
 
-1. **`--no-content`**: upload metadata only (tool calls, tokens, timing, loop signal); no prose, command, error text, working directory or branch name leaves the machine. It is the same rule as `traces convert <ref> --no-content`, so `traces convert <ref> --no-content --out f --format json` lists the attribute keys it drops.
-2. **Your own scrubber on a file**: `traces convert <ref> --out spans.jsonl`, run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) on `spans.jsonl`, then `traces upload spans.jsonl`. Upload still applies the redaction core and the share-safety check to that file.
-3. Default: the redaction core.
+Run `--dry-run` first. `traces check <path> --share-safe` gives the same verdict for any file ([check](check.md)).
 
-Always `--dry-run` first to see exactly what would be sent.
+## `traces upload --help`
 
-## Check before sharing
+```text
+Usage: traces upload <ref…> | --current | --since T [--dry-run] [--no-content] [--yes]
+Send redacted sessions to Tangle Intelligence; one still UNSAFE or UNKNOWN once redacted is refused (exit 1).
+Env: TANGLE_INGEST_URL, TANGLE_INGEST_API_KEY (or TANGLE_API_KEY), TANGLE_TENANT_ID.
 
-`traces check <path> --share-safe` reads files as bytes and says whether they are safe to share, under the `share` profile. It never changes them, and never reads a path as a trace.
+  --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
+  --since T           every session with a record since T: 30m, 2h, 7d or an ISO time
+  --cwd DIR           sessions recorded in DIR or under it, or in a worktree of its repo
+  --harness ID        read only this harness; with a file ref, force its reader
+  --dry-run           redact and preview; send nothing
+  --no-content        strip prompt and response text; send metadata only
+  --yes               skip the confirmation prompt
+  --out PATH          with --dry-run: write the redacted OTLP preview to PATH
 
-```bash
-traces check bundle-dir --share-safe
-traces check session.jsonl --share-safe --format json
-traces check out/ --share-safe --known-secret-env TANGLE_API_KEY  # also look for this exact key, in any encoding
+Examples:
+  traces upload --since 24h --dry-run
+  traces upload 019a3c7e --yes
+  traces upload spans.otlp.jsonl --dry-run --out preview.otlp.jsonl
 ```
-
-| Status | Meaning | Exit |
-|---|---|---|
-| `SAFE` | Nothing found | 0 |
-| `SAFE_WITH_WARNINGS` | Only warnings: raw content, identifiers, embedded media | 0 |
-| `UNSAFE` | A credential or personal data remains | 1 |
-| `UNKNOWN` | A file, line or byte range could not be read, so its safety is unknown | 2 |
-
-`.json` files are parsed whole and `.jsonl` or `.ndjson` files line by line. Any other file is scanned as text.
-Each finding names the file, line and JSON Pointer, never the matched value.

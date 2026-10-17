@@ -110,3 +110,61 @@ describe('the commands a Codex code-mode script ran', () => {
     expect(run.stdout).toContain('repeated 1 command rerun, 2 extra runs · 1 revert or reset --hard')
   })
 })
+
+/**
+ * Pull requests a code-mode script created, the way current Codex records the
+ * results it printed: each `text(await tools.exec_command(…))` is one JSON
+ * object, `exit_code` once the command ended or `session_id` while it still
+ * runs, with the command's output as an escaped string. A create that is still
+ * running prints its URL only to a later script's `write_stdin` poll of that
+ * session. Both URLs reach the spans; neither is on a line of its own.
+ */
+const PR_ID = '0199c0de-0000-7000-8000-0000000000a2'
+const result = (fields: Record<string, unknown>): string => JSON.stringify({ chunk_id: 'c0ffee', wall_time_seconds: 1.0, ...fields, original_token_count: 9 })
+
+function codeModePullRequests(): Row[] {
+  const run = (t: number, id: string, input: string, output: string): Row[] => [script(t, id, input), scriptOutput(t + 0.5, id, `${COMPLETED}${output}`)]
+  return [
+    { t: 0, type: 'session_meta', payload: { id: PR_ID, cwd: '/workspace/demo' } },
+    { t: 0.5, type: 'turn_context', payload: { cwd: '/workspace/demo', model: 'gpt-fixture' } },
+    task(1, 'task_started', 'turn-1'),
+    userItem(2, [{ type: 'input_text', text: 'Open both pull requests.' }]),
+    userEvent(2.001, 'Open both pull requests.'),
+    // Backgrounded: the create is still running when the script returns.
+    ...run(3, 'call-a', 'text(await tools.exec_command({cmd:"git push -u origin feat/a && /usr/local/bin/gh-drew pr create --base main --head feat/a --title \'feat: a\' --body-file /tmp/a.md",yield_time_ms:1000}))',
+      result({ session_id: 59242, output: '' })),
+    ...run(5, 'call-poll', 'text(await tools.write_stdin({session_id:59242,chars:"",yield_time_ms:1000}))',
+      result({ exit_code: 0, output: 'https://github.com/o/demo/pull/14\n' })),
+    // Finished within the call: its URL is inside the escaped output.
+    ...run(7, 'call-b', 'text(await tools.exec_command({cmd:"gh-drew pr create --base main --head feat/b --title \'feat: b\' --body-file /tmp/b.md"}))',
+      result({ exit_code: 0, output: "remote: Create a pull request for 'feat/b' on GitHub\nhttps://github.com/o/demo/pull/15\n" })),
+    task(9, 'task_complete', 'turn-1'),
+  ]
+}
+
+describe('pull requests a Codex code-mode script created', () => {
+  let prEnv: Record<string, string>
+  let prRollout: string
+  beforeAll(async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-code-mode-prs-'))
+    const sessions = join(dir, 'home', '.codex', 'sessions', '2026', '09', '08')
+    await mkdir(sessions, { recursive: true })
+    prRollout = join(sessions, `rollout-2026-09-08T10-00-00-${PR_ID}.jsonl`)
+    await writeFile(prRollout, `${codeModePullRequests().map(({ t, ...row }) => JSON.stringify({ timestamp: at(t), ...row })).join('\n')}\n`)
+    prEnv = { HOME: join(dir, 'home'), XDG_STATE_HOME: join(dir, 'state') }
+  })
+
+  it('are read from the results the script printed, and from a later poll of a create still running, on both paths', async () => {
+    for (const argv of [[prRollout], [prRollout, '--latest-turn']]) {
+      const run = await runCli(['facts', ...argv, '--format', 'json'], { env: prEnv })
+      expect(run.stderr).toBe('')
+      expect(run.code).toBe(0)
+      const { created } = (JSON.parse(run.stdout) as { sessions: Array<{ pullRequests: { value: { created: Array<{ number: string; headBranch: string; at: string }> } } }> })
+        .sessions[0]!.pullRequests.value
+      expect(created.map(({ number, headBranch, at: when }) => ({ number, headBranch, at: when }))).toEqual([
+        { number: '14', headBranch: 'feat/a', at: at(3) },
+        { number: '15', headBranch: 'feat/b', at: at(7) },
+      ])
+    }
+  })
+})

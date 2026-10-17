@@ -17,6 +17,7 @@ from a scored run of both arms on this benchmark, with the costs reported.
 | `citations.ts` | Resolves an answer's citation to the source record it names. |
 | `cli.ts` | The runner: write fixtures, write gold, run an arm, score an answers file. |
 | `arms.ts` | The facts, raw-files and traces arms. |
+| `large.ts` | The large-session arm: one session of about 50,000 spans and its four questions. |
 | `facts-score.json` | The facts arm's committed score; it may only rise. |
 
 Everything the fixtures contain is invented. No content from any real session appears in
@@ -181,7 +182,7 @@ is reported as a number. `cost_basis` says whether `cost_usd` was observed or es
 |---|---|---|
 | `facts` | `traces facts --format json` over the three sessions (and one `--match` search), mapped to each answer by fixed rules in `arms.ts`. A leaf the sheet has no field for is `null`. | $0, deterministic |
 | `raw-files` | One headless agent per question (`claude -p`), in a copy of the fixture tree, with no `traces` on PATH | the agent's own reported cost |
-| `traces` | The same agent, model, prompt and budget, with `traces` on PATH and one line telling it so | the agent's own reported cost |
+| `traces` | The same agent, model, prompt and budget, with `traces` on PATH, one line telling it so, and the `inspect-agent-traces` skill installed in the agent's own HOME | the agent's own reported cost |
 
 ```sh
 pnpm build
@@ -193,12 +194,26 @@ pnpm bench:audit score /tmp/raw.json --fixtures /tmp/audit-bench
 ```
 
 The model arms run `claude -p --output-format stream-json` with `--max-budget-usd` per
-question, no session persistence, no user or project settings, hooks or MCP servers, and the
-tools `Bash`, `Read`, `Grep` and `Glob`. The traces arm's `traces` runs with HOME set to a
+question, no session persistence, none of the machine's user settings, hooks or MCP servers, and the
+tools `Bash`, `Read`, `Grep` and `Glob`.
+
+The traces arm loads the skill the way an installed skill reaches `claude -p`. Its agent runs with a
+HOME of its own whose `.claude/skills/inspect-agent-traces/` holds the package's skill, where Claude
+Code reads a user's installed skills, with `--setting-sources user,project` (the user settings are
+that HOME's) and the `Skill` tool. That HOME's `.claude/settings.json` sets `disableBundledSkills`:
+otherwise the Skill tool lists Claude Code's 19 bundled skills in every question, about 5,400 more
+cache-write tokens each that the raw-files arm never pays (2026-10-17, run 1 of the traces arm:
+15/19 correct at $1.15 with them listed, 16/19 at $0.74 with them off). Three built-in skills (`design`, `doctor`,
+`plugin-authoring`) stay listed. On macOS the agent's HOME links `Library/Keychains`, where Claude
+Code reads its login; elsewhere it links `~/.claude/.credentials.json`. Pass `--skills <dir>` when the
+runner is bundled away from the package's `skills/`. The traces arm's `traces` runs with HOME set to a
 store home over its fixture copy, so it reads the fixtures and never the machine's own
 sessions; a stub `traces` that exits 127 keeps any other `traces` on PATH out of the raw-files
 arm. Each answer records the harness's own cost, model calls (assistant messages) and tool
-calls; each question's transcript stays under `--work`. The notes line counts tool calls that
+calls, the skills the agent loaded (`skills_loaded`) and each `traces` command it ran
+(`traces_commands`; `facts:help` is `traces facts --help`); the notes line counts the answers that
+loaded the skill, ran a traces command, read only help, or never ran traces. Each question's
+transcript stays under `--work`. The notes line counts tool calls that
 named a session store outside the fixture copy or searched from `/`.
 
 Citations: a span id from either read path resolves. traces' own readers attach each span's
@@ -206,6 +221,16 @@ source records; `traces facts <file>` reads through the shared reader (harness-s
 whose spans resolve through the span of traces' own reader that is the same event (the same
 readable call id, else the one span of that name starting at that time) until harness-sessions
 captures sources (U18).
+
+## The large-session arm
+
+`pnpm bench:audit large --arm facts|raw-files|traces` writes one synthetic Codex session of 40,000
+tool calls (about 50,000 spans, 27 MB) under `--work` and answers four questions about it: the
+`exec_command` calls and their non-zero exits (a `write_stdin` poll's exit is not one), the pull
+requests created and merged, the `pnpm test` runs, and the last typed turn. The gold comes from the
+plan, as in `fixtures.ts`, and the arm prints its score. It is reported apart from the 19 and does not
+decide the release rule. `--tool-calls N` writes a smaller session; `tests/bench-audit-large.test.ts`
+runs the facts arm on one.
 
 ## The decision rule (U11)
 

@@ -38,27 +38,40 @@ Import other packages' names from their owners: `AnalystRegistry`, `makeFinding`
 An options type that is not listed is still in `dist/index.d.ts`; name it as `Parameters<typeof runTraceQuestions>[0]`.
 
 ```ts
-import { AnalystRegistry, makeFinding } from '@tangle-network/agent-eval/analyst'
 import { analyzeSpans, readOtlpInput, streamSessions } from '@tangle-network/traces'
 
-// Read OTLP any system emitted, and find out what it can answer before analysing:
-const input = await readOtlpInput('spans.otlp.jsonl')   // or a directory
+const input = await readOtlpInput('spans.otlp.jsonl')   // any producer; never throws on a foreign trace
 console.log(input.validation.capabilities)
-if (input.validation.ok) await analyzeSpans(input.spans)
 
-// Watch live sessions and feed their findings anywhere (read-only, cancellable):
-const c = new AbortController()
-await streamSessions({ signal: c.signal, onEvent: (event) => { if (event.event === 'finding') alert(event.finding.claim) } })
-
-// Run your own analyst instead of the built-ins:
-const registry = new AnalystRegistry()
-registry.register({
-  id: 'mine', description: '…', inputKind: 'trace-store', cost: { kind: 'deterministic' }, version: '1.0.0',
-  async analyze() {
-    return [makeFinding({ analyst_id: 'mine', area: 'custom', claim: '…', severity: 'info', evidence_refs: [], confidence: 0.9 })]
-  },
-})
-await analyzeSpans(input.spans, { registry })
+const stop = new AbortController()
+await streamSessions({ signal: stop.signal, onEvent: (event) => { if (event.event === 'finding') console.log(event.finding.claim) } })
 ```
 
-The runnable version of the last part is [`examples/custom-analyst.ts`](../examples/custom-analyst.ts).
+## Write your own analyst
+
+An analyst receives a paged trace store and returns typed findings; start with deterministic logic when the trace holds the facts.
+
+```ts
+import { buildDefaultAnalystRegistry, defineTraceAnalyst, makeFinding } from '@tangle-network/agent-eval/analyst'
+import { analyzeSpans } from '@tangle-network/traces'
+
+const failedTools = defineTraceAnalyst({
+  id: 'failed-tools',
+  description: 'Reports repeated tool failure signatures.',
+  async analyze(store) {
+    const overview = await store.getOverview({ has_errors: true })
+    return overview.error_clusters.map((cluster) => makeFinding({
+      analyst_id: 'failed-tools', area: 'tool-use', subject: cluster.signature,
+      claim: `${cluster.span_count} spans share this failure`, severity: cluster.span_count >= 3 ? 'high' : 'medium',
+      evidence_refs: [{ kind: 'span', uri: `trace://${cluster.exemplar_trace_ids[0]}/span/${cluster.exemplar_span_ids[0]}` }],
+      confidence: 1, id_basis: cluster.signature,
+    }))
+  },
+})
+const registry = buildDefaultAnalystRegistry()
+registry.register(failedTools)
+const { result } = await analyzeSpans(spans, { registry })
+```
+
+The runnable version is [`examples/custom-analyst.ts`](../examples/custom-analyst.ts) (`pnpm tsx examples/custom-analyst.ts --fixture` prints its one finding).
+Do not rewrite policy from an analyst's prose alone: attach a measured outcome or reviewed feedback, promote the failure into an eval case, change one thing, and compare on fresh cases.
