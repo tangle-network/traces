@@ -103,7 +103,7 @@ const DAY_TWO_WINDOW = ['--since', `${DAY_TWO}T00:00:00Z`, '--until', `${DAY_THR
 
 describe('traces facts --since/--until', () => {
   it("selects every session with a record in the window and counts only the window's turns", async () => {
-    const { stdout, stderr } = await cli(['facts', '--harness', 'claude-code', ...DAY_TWO_WINDOW])
+    const { stdout, stderr } = await cli(['facts', '--harness', 'claude-code', ...DAY_TWO_WINDOW, '--format', 'json'])
     const report = JSON.parse(stdout) as SessionFactsReport
 
     expect(report.selection).toMatchObject({
@@ -140,14 +140,14 @@ describe('traces facts --since/--until', () => {
   })
 
   it('reads the same window in the relative forms other commands accept', async () => {
-    const { stdout } = await cli(['facts', '--harness', 'claude-code', '--since', `${DAY_TWO}T00:00:00Z`, '--until', '1m'])
+    const { stdout } = await cli(['facts', '--harness', 'claude-code', '--since', `${DAY_TWO}T00:00:00Z`, '--until', '1m', '--format', 'json'])
     const report = JSON.parse(stdout) as SessionFactsReport
     expect(report.sessions.map((facts) => facts.sessionId)).toEqual(['two-day'])
     expect(Date.parse(report.selection!.until!)).toBeGreaterThan(Date.parse(`${DAY_THREE}T00:00:00Z`))
   })
 
   it('withholds the answered text and the directory under --no-content', async () => {
-    const { stdout } = await cli(['facts', '--harness', 'claude-code', ...DAY_TWO_WINDOW, '--no-content'])
+    const { stdout } = await cli(['facts', '--harness', 'claude-code', ...DAY_TWO_WINDOW, '--no-content', '--format', 'json'])
     const report = JSON.parse(stdout) as SessionFactsReport
     expect(report.contentIncluded).toBe(false)
     const [facts] = report.sessions
@@ -158,7 +158,7 @@ describe('traces facts --since/--until', () => {
   })
 
   it('leaves a selection without a window as it was, and refuses --until elsewhere', async () => {
-    const { stdout } = await cli(['facts', join(project, 'two-day.jsonl'), '--harness', 'claude-code'])
+    const { stdout } = await cli(['facts', join(project, 'two-day.jsonl'), '--harness', 'claude-code', '--format', 'json'])
     const report = JSON.parse(stdout) as SessionFactsReport
     expect(report.selection).toBeNull()
     expect(report.sessions[0]!.humanTurns.value).toHaveLength(4)

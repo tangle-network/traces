@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ClaudeAdapter, CodexAdapter, buildSessionFactsReport, parseSession, span } from '../src/index.js'
-import { computeAdoption, analyzeAdoption } from '../src/adoption.js'
 import { toolIoAttributes } from '../src/adapters/tool-io.js'
 import type { HarnessTraceAdapter } from '../src/types.js'
 
@@ -64,7 +63,6 @@ describe('standard session measurements', () => {
     const changed = structuredClone(spans)
     changed[1]!.attributes.content = 'changed'
     expect(report.sourceDigest).not.toBe(buildSessionFactsReport(changed).sourceDigest)
-    expect(computeAdoption(spans)).toEqual(await analyzeAdoption(spans))
   })
   it('keeps child observations out of the parent tool and compaction measurements', () => {
     const spans = [

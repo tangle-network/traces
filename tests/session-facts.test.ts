@@ -296,7 +296,7 @@ describe('traces facts', () => {
     const otlp = join(dir, 'spans.otlp.jsonl')
     await writeFile(otlp, serializeSpans(await fixtureSpans()), 'utf8')
 
-    const { stdout } = await cli(['facts', otlp])
+    const { stdout } = await cli(['facts', otlp, '--format', 'json'])
     const report = JSON.parse(stdout) as {
       kind: string
       sessions: Array<{ toolCalls: { value: number }; subagents: { value: Array<{ taskName: string }> } }>
@@ -305,9 +305,10 @@ describe('traces facts', () => {
     expect(report.sessions[0]!.toolCalls.value).toBe(4)
     expect(report.sessions[0]!.subagents.value[0]!.taskName).toBe(FIXTURE_AGENT_PATH)
 
-    const readable = await cli(['facts', otlp, '--format', 'text'])
-    expect(readable.stdout).toContain('tool calls: 4')
-    expect(readable.stdout).toContain('deterministic, $0')
+    // Text is the default: the sheet a person reads.
+    const readable = await cli(['facts', otlp])
+    expect(readable.stdout).toMatch(/^tools 4 \(/mu)
+    expect(readable.stdout).not.toContain('"kind"')
   })
 
   it('exits non-zero when a session cannot be read', async () => {
@@ -332,7 +333,7 @@ describe('traces facts', () => {
     records.splice(3, 0, '{ not json')
     await writeFile(session, `${records.join('\n')}\n`, 'utf8')
 
-    const { stdout } = await cli(['facts', session, '--harness', 'codex'])
+    const { stdout } = await cli(['facts', session, '--harness', 'codex', '--format', 'json'])
     const report = JSON.parse(stdout) as {
       sessions: Array<{ toolCalls: { value: number }; unreadRecords: { value: number } }>
     }
@@ -340,7 +341,7 @@ describe('traces facts', () => {
     expect(report.sessions[0]!.unreadRecords.value).toBe(1)
 
     const readable = await cli(['facts', session, '--harness', 'codex', '--format', 'text'])
-    expect(readable.stdout).toContain('unread records: 1')
+    expect(readable.stdout).toContain('unread records 1:')
   })
 
   it('rejects an unknown output format before reading anything', async () => {

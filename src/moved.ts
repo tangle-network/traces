@@ -190,6 +190,13 @@ export const MOVED: readonly MovedRow[] = [
     now: 'check … --out DIR: evidence for each trace that did not pass; without --out, check writes nothing',
     rewrite: (argv) => renameFlag(argv, '--evidence', '--out'),
   },
+  { was: [], label: 'facts JSON by default', now: 'text by default, 25 lines a session; pass --format json to parse the sheet' },
+  {
+    was: ['--no-refresh', '--store', '--sweep'],
+    now: 'removed: skills always reads what sessions appended since its last run, keeps its store under $XDG_STATE_HOME/traces, ' +
+      'and counts a command that reads 3 or more skills as a catalog sweep',
+    rewrite: (argv) => dropFlag(dropFlag(dropFlag(argv, '--no-refresh', false), '--store', true), '--sweep', true),
+  },
 ]
 
 export interface MovedSpelling {

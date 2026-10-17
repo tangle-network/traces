@@ -62,10 +62,14 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
 - **`facts` owns every session number; the other commands render it.** Tokens and cost have one owner,
   `src/execution.ts`: `tokens.input` is the whole prompt on every harness, and `cost` is agent-runtime's
   `priceTokens` (`list price (Router rates)`). `analyze` prints the sum of the sessions' facts, never a
-  second count; `tests/facts-owner.test.ts` checks the numbers against jq over the raw records.
+  second count; `tests/facts-owner.test.ts` checks the numbers against jq over the raw records. The
+  waste measures (failing streaks, rollbacks, stalls, active minutes, rework) are facts' too, checked
+  against the planted records in `tests/facts-measures.test.ts`, and a session's skill counts come from
+  the classifier `traces skills` uses (`skill-usage.ts`), never a second one.
 - **Until harness-sessions reads every view (U18), both read paths state every number the same.**
   `traces facts <f>` (the shared reader), `--latest-turn` (traces' own reader) and a bundle of `<f>`
-  agree on tokens, cost, tool calls, human turns, subagents and pull requests (`tests/dual-path.test.ts`).
+  agree on tokens, cost, tool calls, human turns, subagents, pull requests, skills, rework, rollbacks
+  and failing streaks (`tests/dual-path.test.ts`).
 - **Unknown is never rendered as a measured zero.** An unpriced turn reads `cost unknown`, never
   `$0.0000`; a fact the spans cannot support is `null` with its reason, never a guessed value.
 

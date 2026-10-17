@@ -6,14 +6,49 @@
 No model call, no engine, no budget — it costs $0 and always returns the same sheet for the same spans.
 
 ```bash
-traces facts <id>                                           # JSON on stdout
-traces facts --harness codex --last 5 --format text         # the short readable form
-traces facts spans.otlp.jsonl --out facts.json
+traces facts <id>                                           # the text sheet: at most 25 lines a session
+traces facts <id> --format json                             # the whole sheet, with span ids, for programs
+traces facts --harness codex --last 5
+traces facts spans.otlp.jsonl --format json --out facts.json
 traces facts --harness claude-code --since 7d               # every session with a record in the last week
 traces facts --since 2026-10-14 --until 2026-10-15          # one day, across every harness
 traces facts --since 1d --format jsonl                      # one row per typed turn: author, answered, reply, signals
 traces facts --since 30d --match '^gh pr merge'             # each matching human turn, agent message or shell command
 ```
+
+## The text sheet
+
+Text is the default; pass `--format json` to parse the sheet. Each session takes at most 25 lines, in this order, and times are UTC:
+
+```
+99d75d4b claude-code · agent-dev-container (feat/gap-closure) · 10-15 09:12→12:40 UTC · active 3.1 h
+who dotfiles sha256:5843…ca56 · claude-opus-5-5 (from session-identity)
+human turns 14 (excluded: injected 6, fleet 2, relay 1) · interrupts 2
+tools 412 (Bash 220, Edit 88, Read 61, …) · subagents 6 (lint, test, docs, …)
+skills verify 2, simplify 1
+tokens in 2.1M · out 310k · cache read 88M · $38.20 list price (Router rates)
+waste 52 min: `pnpm test` failed 14× in a row (31 min) · 2 stalls ≥ 10 min (21 min) · reverts 1
+PRs opened #11021 #11022 · merged #11006 · changed 23 files
+first failure 09:40 Bash: exit 1 (blame agent, span 6be1…)
+final "Merged #11006; …"
+```
+
+`who` and `skills` appear when known, and a session that is a spawned child says `child of <parent>` in its first line.
+A fact the spans cannot support reads `unknown` with the reason.
+A selection of several sessions, or a window, starts with one line naming the count, the window and the sessions it could not read.
+
+## Waste
+
+`measurements.waste` says where the session's own agent lost time, and `measurements.activeMinutes` how long it worked:
+
+- `failingStreaks`: a command that failed 3 or more times in a row (a loop is 3 identical calls), with its runs, its minutes from the first failed run's start to the last one's end, and their span ids. A success of the same command, or a turn sent in, ends a streak. Commands are compared with their whitespace collapsed; under `--no-content` the command is `null`.
+- `stalls`: gaps of 10 minutes or more between the session's own records that no turn sent in ended. A gap a person ended (or a fleet message, a parent agent, or an interrupt) is their time, not a stall. Each stall names its start, its minutes, the span that ended it, and whether a command's result ended it (`waiting on a command`) or anything else did (`idle`).
+- `rollbacks`: `git revert` and `git reset --hard` commands, one per simple command as the shell splits the script.
+- `repeatedCommands`: commands run more than once and the runs beyond each one's first, the way `reflect/scripts/self-audit` counts rework.
+- `minutes`: the time inside a failing streak or a stall, each minute counted once.
+- `activeMinutes`: the minutes between consecutive records, each gap capped at 10.
+
+A command measure is `null` with its reason when no tool call kept its arguments, and `minutes` is then `null` too.
 
 ## Turns, search and jsonl
 
@@ -55,6 +90,7 @@ A report built without a window has `selection: null`.
 | `subagentToolSpans` | TOOL spans excluded because a subagent, not this agent, made the call. Zero on a trace that carries no subagent records |
 | `subagents` | every subagent-spawning call with the task name the adapter recorded |
 | `pullRequests` | the pull requests the commands created and merged, each named by number or head branch, with the command span and how the identity was joined. Scanned the way a shell reads the script, so a `gh pr create` inside a heredoc body is not a command that ran |
+| `repo` | the repository: `git.repository`, `git.branch` and `git.commit` on the session's spans. The harness's own record when it kept one, else read from the checkout at the recorded cwd when the session was read, so the branch can be the checkout's current one. `null` with the reason when no span names one |
 | `cwd` | the working directory the harness recorded for the session (`traces.session.cwd` on the root span): Claude Code's first record `cwd`, Codex's `session_meta` cwd, Pi's session header, OpenCode's session directory (the older JSON store: its messages' `path.cwd`), Factory's `session_start`. Never decoded from a directory name or inferred from paths; `null` with the reason when the source names none or its adapter does not read one |
 | `humanTurns` | `user.prompt` turns a person typed into this session, in order, with the timestamp. Inherited fork or compaction history, harness-injected blocks, and a second record of the same turn are excluded — each listed in `excludedTurns` with its reason and span ids, never silently dropped. `turnsByActor` shows every turn by actor so the filter is checkable. Each turn's `answered` is the last message this session's own agent wrote before it (not a subagent's, not inherited history), clipped to 1,500 characters with a `… [+N chars]` marker, with its span in `answeredSpanId`; `null` when the agent had written no text yet in the spans read (a `--latest-turn` read starts at the latest task, so its first turn has none) |
 | `excludedTurns` | every `user.prompt` turn `humanTurns` left out, grouped by the reason, with the span ids |
@@ -66,7 +102,9 @@ A report built without a window has `selection: null`.
 | `tokens` | this session's own agent's tokens, from one owner (`src/execution.ts`) on every harness: `input` is the whole prompt, cache reads and writes included (Claude Code's `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` per response, counted once per message id; Codex's own cumulative `input_tokens`, which already holds its cached tokens), with `output`, `cacheRead`, `cacheWrite`, `reasoning` (null when the harness does not report it), `modelCalls` and `byModel`. A harness's cumulative counter (Codex's `total_token_usage`) is preferred to a sum of its calls. Every count is null, with `unavailable`, when no call reports usage |
 | `cost` | what the Router would charge for `tokens`: agent-runtime's `priceTokens` per model, labelled `list price (Router rates)`. `usd` is null, with `unavailable`, when a model has no Router price, no model is recorded, or the tokens are unknown |
 | `tokenTotal` | `tokens.input + tokens.output`, null with the same reason when the tokens are unknown |
-| `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none` — spans were observed and none of them failed. When every span is UNSET (a capture that failed before any status was written), or a session has no records of its own at all (every span is `traces.span.subagent` — spawned work folded into this trace, with nothing this agent recorded itself), the status is `unknown`, not `none`: the record does not say whether the run failed. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own, and is `unknown` rather than `agent` when no evidence names the agent |
+| `measurements.waste`, `measurements.activeMinutes` | where the session's own agent lost time, and how long it worked (see [Waste](#waste)) |
+| `measurements.skills` | skills used, by name and kind (`model`, `slash`, `read`), counted by the classifier `traces skills` uses |
+| `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none` — spans were observed and none of them failed. When every span is UNSET (a capture that failed before any status was written), or a session has no records of its own at all (every span is `traces.span.subagent` — spawned work folded into this trace, with nothing this agent recorded itself), the status is `unknown`, not `none`: the record does not say whether the run failed. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own, and is `unknown` rather than `agent` when no evidence names the agent. A found failure carries `at`, when its span ended |
 
 Three rules hold for every field:
 
@@ -117,7 +155,7 @@ For Codex the actor comes from the harness's own per-item labelling (`internal_c
 
 The same facts sheet includes observed tool outcomes, captured input/output byte
 volumes, call-to-result intervals, compaction boundaries and available context
-sizes, and existing skill invocation/document-read evidence.
+sizes, the waste measures, and the session's skill counts.
 Each measurement carries coverage; absent telemetry remains unknown.
 `--format json` prints the sheet as one compact line, with no distribution of a single value.
 `facts --no-content` withholds conversation (including each turn's `answered` text),

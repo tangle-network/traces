@@ -24,12 +24,18 @@
  * Each event is keyed by its record ID, so a resumed session that copies earlier
  * records, or a file reread after truncation, never counts an event twice. The
  * store keeps events after a harness deletes old transcripts.
+ *
+ * `traces facts` counts one session's skill use from its spans with the same
+ * classifier (`skillUseOfSpans`), so the two never disagree on what a use is.
  */
 
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { STORES } from '@tangle-network/harness-sessions/catalog'
+import { ACTOR_ATTR } from './adapters/conversation.js'
+import type { OtlpSpan } from './otlp.js'
+import { commandTextFromInput } from './shell-commands.js'
 import { readCompleteLines, resumeOffset } from './turn-index.js'
 
 export type SkillUsageHarness = 'claude-code' | 'codex' | 'kimi-code'
@@ -113,6 +119,140 @@ const SLASH_COMMAND = /<command-name>\/?([^<\s]+)<\/command-name>/
 const SKILL_READ_VERB = /(?:^|[\s;&|(`'"])(?:cat|sed|head|tail|less|more|awk|nl|bat)\s/
 const SKILL_DOCUMENT = /(?:^|[\s'"=:(`])((?:[^\s'"`;|&()]*\/)?([A-Za-z0-9][A-Za-z0-9._-]*))\/SKILL\.md\b/g
 const SESSION_UUID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/
+
+// ── The classifier: what counts as one use of a skill ───────────────
+// The store's scanners read raw records with it, and `skillUseOfSpans`
+// reads one session's spans with it, so `traces skills` and `traces facts`
+// count the same acts the same way.
+
+/** The skill a Skill tool result says it loaded (`Launching skill: <name>`), or null. */
+export function skillLaunchedBy(resultText: string): string | null {
+  const match = SKILL_RESULT_TEXT.exec(resultText)
+  return match ? (match[1] ?? match[2])! : null
+}
+
+/** The command a Claude Code slash-command record names (`<command-name>/name</command-name>`), or null. */
+export function slashCommandOf(text: string): string | null {
+  return SLASH_COMMAND.exec(text)?.[1] ?? null
+}
+
+/**
+ * The skill documents a completed shell command read (`<dir>/<skill>/SKILL.md`
+ * after a read verb), less any its output says is missing. With `path`,
+ * `text` is one file path a read tool opened. One entry per directory.
+ */
+export function skillDocumentReads(
+  text: string,
+  output: string,
+  options: { readonly path?: boolean } = {},
+): Array<{ readonly skill: string; readonly directory: string }> {
+  if (!text.includes('SKILL.md')) return []
+  if (options.path ? !text.endsWith('/SKILL.md') : !SKILL_READ_VERB.test(text)) return []
+  const reads = new Map<string, string>()
+  for (const match of text.matchAll(SKILL_DOCUMENT)) {
+    const directory = match[1]!
+    if (!output.includes(`${directory}/SKILL.md: No such file`) && !reads.has(directory)) reads.set(directory, match[2]!)
+    if (options.path) break
+  }
+  return [...reads].map(([directory, skill]) => ({ skill, directory }))
+}
+
+function rootOfDirectory(directory: string): string | null {
+  const slash = directory.lastIndexOf('/')
+  return slash > 0 ? directory.slice(0, slash) : null
+}
+
+/** One skill's uses in one session, by kind (the columns of `traces skills`). */
+export interface SkillUseCount {
+  model: number
+  slash: number
+  read: number
+}
+
+/** A typed slash command as the session readers word it (`/name args`). */
+const TYPED_SLASH = /^\/([A-Za-z0-9][\w:.-]*)(?:\s|$)/u
+
+/**
+ * The skills one session's own agent used, read from its spans with the rules
+ * the store applies to raw records: a Skill tool call that completed (`model`),
+ * a `/name` turn whose next prompt is its expansion (`slash`), and, on a
+ * harness with no skill event (every one but Claude Code), a completed command
+ * or read tool that opened a skill document (`read`). One command that reads
+ * `sweepThreshold` or more skills is a catalog sweep and counts for none.
+ * `spans` are the session's own records in trace order.
+ */
+export function skillUseOfSpans(
+  spans: readonly OtlpSpan[],
+  harness: string | null,
+  sweepThreshold: number = DEFAULT_SWEEP_THRESHOLD,
+): Record<string, SkillUseCount> {
+  const counts: Record<string, SkillUseCount> = {}
+  const add = (skill: string, kind: SkillUsageKind): void => {
+    const row = counts[skill] ?? (counts[skill] = { model: 0, slash: 0, read: 0 })
+    row[kind] += 1
+  }
+  // A slash command waits for its expansion: the next prompt, before the agent acts.
+  let slash: { skill: string; seen: number } | null = null
+  for (const span of spans) {
+    const content = typeof span.attributes.content === 'string' ? span.attributes.content.trim() : ''
+    if (slash && (slash.seen += 1) > SLASH_LOOKAHEAD_LINES) slash = null
+    if (span.name === 'user.prompt') {
+      const actor = span.attributes[ACTOR_ATTR]
+      const named = slashCommandOf(content) ?? (actor === 'human' ? TYPED_SLASH.exec(content)?.[1] ?? null : null)
+      if (named) {
+        slash = { skill: skillName(named), seen: 0 }
+        continue
+      }
+      if (slash && content.length > 0 && actor !== 'human' && !content.startsWith('<local-command-') && !content.startsWith('<command-')) {
+        add(slash.skill, 'slash')
+        slash = null
+      }
+      continue
+    }
+    const kind = span.attributes['openinference.span.kind']
+    // The agent acted, so the command expanded to nothing (a built-in such as /clear).
+    if (kind === 'LLM' || kind === 'TOOL' || span.name === 'message.assistant') slash = null
+    if (kind !== 'TOOL' || span.status.code === 'UNSET') continue
+    const tool = typeof span.attributes['tool.name'] === 'string' ? span.attributes['tool.name'] : span.name.replace(/^tool\./u, '')
+    const input = typeof span.attributes['input.value'] === 'string' ? span.attributes['input.value'] : ''
+    const output = typeof span.attributes['output.value'] === 'string' ? span.attributes['output.value'] : ''
+    if (tool === 'Skill') {
+      if (span.status.code !== 'OK') continue
+      const named = skillLaunchedBy(output) ?? skillArgument(input)
+      if (named) add(skillName(named), 'model')
+      continue
+    }
+    // Claude Code records a skill when it loads one, so reading the document is not a use there.
+    if (harness === 'claude-code') continue
+    const command = commandTextFromInput(input)
+    const path = tool === 'ReadFile' && span.status.code === 'OK' ? pathArgument(input) : null
+    const reads = command !== undefined ? skillDocumentReads(command, output) : path ? skillDocumentReads(path, output, { path: true }) : []
+    if (reads.length >= sweepThreshold) continue
+    for (const read of reads) add(read.skill, 'read')
+  }
+  return counts
+}
+
+function jsonObject(text: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(text)
+    return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/** The skill a Skill tool call named: `skill`, else `command`. */
+function skillArgument(input: string): string | null {
+  const args = jsonObject(input)
+  const value = args?.skill ?? args?.command
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function pathArgument(input: string): string | null {
+  const value = jsonObject(input)?.path
+  return typeof value === 'string' ? value : null
+}
 
 export function defaultSkillUsageSources(): SkillUsageSources {
   const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')
@@ -278,7 +418,7 @@ export class SkillUsageStore {
       }
       const content = (record.message as Record<string, unknown> | undefined)?.content
       if (typeof content !== 'string' || !content.startsWith('<command-')) continue
-      const name = SLASH_COMMAND.exec(content)?.[1]
+      const name = slashCommandOf(content)
       if (!name || typeof record.uuid !== 'string') continue
       const command: PendingSlash = { uuid: record.uuid, skill: skillName(name), ts, session, seen: 0 }
       const outcome = this.resolveSlash(buffer, lines, end + 1, command)
@@ -325,18 +465,14 @@ export class SkillUsageStore {
       const item = payload?.item as Record<string, unknown> | undefined
       if (payload?.type !== 'item_completed' || item?.type !== 'CommandExecution' || typeof item.id !== 'string') continue
       const command = Array.isArray(item.command) ? item.command.join(' ') : String(item.command ?? '')
-      if (!command.includes('SKILL.md') || !SKILL_READ_VERB.test(command)) continue
       const output = typeof item.aggregated_output === 'string' ? item.aggregated_output : String(item.stdout ?? '')
       const ts = typeof record?.timestamp === 'string' ? record.timestamp : null
-      for (const match of command.matchAll(SKILL_DOCUMENT)) {
-        const directory = match[1]!
-        if (output.includes(`${directory}/SKILL.md: No such file`)) continue
-        const slash = directory.lastIndexOf('/')
+      for (const { skill, directory } of skillDocumentReads(command, output)) {
         const event: SkillUsageEvent = {
           harness: 'codex',
           kind: 'read',
-          skill: match[2]!,
-          root: slash > 0 ? directory.slice(0, slash) : null,
+          skill,
+          root: rootOfDirectory(directory),
           ts,
           session: fileSession,
           id: `${item.id}#${directory}`,
@@ -375,19 +511,12 @@ export class SkillUsageStore {
         if (result?.is_error !== false) continue
         let args: Record<string, unknown>
         try { args = JSON.parse(call.args) as Record<string, unknown> } catch { continue }
-        const paths = call.name === 'ReadFile' && typeof args.path === 'string'
-          ? [args.path]
-          : call.name === 'Shell' && typeof args.command === 'string' && SKILL_READ_VERB.test(args.command)
-            ? [...args.command.matchAll(SKILL_DOCUMENT)].map((match) => `${match[1]}/SKILL.md`)
-            : []
-        for (const path of paths) {
-          const match = SKILL_DOCUMENT.exec(path)
-          SKILL_DOCUMENT.lastIndex = 0
-          if (!match || !path.endsWith('/SKILL.md')) continue
-          const directory = match[1]!
-          const slash = directory.lastIndexOf('/')
-          if (typeof result.output === 'string' && result.output.includes(`${directory}/SKILL.md: No such file`)) continue
-          if (this.add({ harness: 'kimi-code', kind: 'read', skill: match[2]!, root: slash > 0 ? directory.slice(0, slash) : null,
+        const output = typeof result.output === 'string' ? result.output : ''
+        const reads = call.name === 'ReadFile' && typeof args.path === 'string'
+          ? skillDocumentReads(args.path, output, { path: true })
+          : call.name === 'Shell' && typeof args.command === 'string' ? skillDocumentReads(args.command, output) : []
+        for (const { skill, directory } of reads) {
+          if (this.add({ harness: 'kimi-code', kind: 'read', skill, root: rootOfDirectory(directory),
             ts: call.ts, session, id: `${session}:${id}#${directory}` })) added += 1
         }
       }
@@ -452,8 +581,8 @@ function loadedSkill(record: Record<string, unknown>): { skill: string; id: stri
     const text = typeof part.content === 'string'
       ? part.content
       : Array.isArray(part.content) ? String((part.content[0] as Record<string, unknown> | undefined)?.text ?? '') : ''
-    const match = SKILL_RESULT_TEXT.exec(text)
-    if (match) return { skill: (match[1] ?? match[2])!, id: part.tool_use_id }
+    const skill = skillLaunchedBy(text)
+    if (skill) return { skill, id: part.tool_use_id }
   }
   return null
 }
@@ -705,19 +834,18 @@ function day(ts: string | null): string {
   return ts === null ? '-' : ts.slice(0, 10)
 }
 
-function megabytes(bytes: number): string {
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
+/**
+ * The text form: one header line and the table. The bookkeeping (what the
+ * refresh read, the store, the sweep exclusions, the harnesses not indexed)
+ * is in `--format json`.
+ */
 export function renderSkillUsage(report: SkillUsageReport): string {
-  const lines: string[] = []
-  const refresh = report.refresh
-    ? report.refresh.map((r) => `${r.harness} ${r.files} files, read ${megabytes(r.bytesRead)} from ${r.filesRead}, +${r.eventsAdded} events`).join('; ')
-    : 'not refreshed'
-  lines.push(`skill usage · ${report.storedEvents} stored events ${day(report.firstEvent)} → ${day(report.lastEvent)} · ${refresh}`)
-  lines.push(`window: ${report.since === null ? 'all stored events' : `since ${report.since.slice(0, 10)}`}`
-    + ` · reads exclude ${report.sweepReadsExcluded} from ${report.sweepCommands} commands that read ${report.sweepThreshold}+ skills at once`)
-  lines.push('')
+  const window = report.since === null ? 'in every stored event' : `since ${report.since.slice(0, 10)}`
+  const lines = [
+    `${report.rows.length} skill${report.rows.length === 1 ? '' : 's'} used ${window} · ` +
+      `${report.unused.length} installed with no use (traces skills --unused) · no model call`,
+  ]
+  if (report.rows.length === 0) return lines.join('\n')
   const width = Math.max(5, ...report.rows.map((r) => r.skill.length))
   lines.push(`${'skill'.padEnd(width)}  model  slash   read  sessions  last        installed`)
   for (const row of report.rows) {
@@ -726,8 +854,5 @@ export function renderSkillUsage(report: SkillUsageReport): string {
       + `  ${String(row.sessions).padStart(8)}  ${day(row.lastUsed)}  ${row.installedIn.join(',') || '-'}`,
     )
   }
-  lines.push('')
-  lines.push(`installed, no use in window (${report.unused.length}): ${report.unused.map((u) => u.skill).join(', ') || 'none'}`)
-  lines.push(`not indexed: ${report.notIndexed.join(', ')}`)
   return lines.join('\n')
 }

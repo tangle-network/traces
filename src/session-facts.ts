@@ -41,13 +41,17 @@
 
 import { createHash } from 'node:crypto'
 import { canonicalJson } from './adapters/tool-io.js'
-import { computeSessionMeasurements, type SessionMeasurements } from './session-measurements.js'
-export type { SessionMeasurements, ToolMeasurement, CoveredMeasurement, CompactionMeasurement, ContentFootprint } from './session-measurements.js'
+import { computeSessionMeasurements, STALL_MINUTES, type SessionMeasurements } from './session-measurements.js'
+export type {
+  SessionMeasurements, ToolMeasurement, CoveredMeasurement, CompactionMeasurement, ContentFootprint,
+  SessionWaste, FailingStreak, Stall, RepeatedCommands,
+} from './session-measurements.js'
+export type { SkillUseCount } from './skill-usage.js'
 
 import type { TraceAnalystDefinition } from '@tangle-network/agent-eval/analyst'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
-import { authorOfTypedTurn, isHarnessCommand } from './adapters/actor.js'
+import { authorOfTypedTurn, INTERRUPT_TEXT, isHarnessCommand } from './adapters/actor.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import {
   INHERITED_SOURCE_ATTR,
@@ -58,7 +62,7 @@ import {
   isSubagentSpan,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
+import { ATTR, indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
 import { needsPrice, routerPrices, sessionCost, sessionTokens, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
@@ -73,7 +77,7 @@ import { commandLines, commandTextFromInput } from './shell-commands.js'
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '6'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '7'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
@@ -256,6 +260,17 @@ export interface ChangedFileFact {
   readonly spanIds: readonly string[]
 }
 
+/** The repository a session worked in, as its spans name it. */
+export interface SessionRepo {
+  /** The normalized remote (`github.com/<owner>/<repo>`). */
+  readonly repository: string
+  readonly branch: string | null
+  readonly commit: string | null
+}
+
+/** {@link SessionFacts.firstFailure}, with when the failing span ended. */
+export type SessionFirstFailure = FirstFailure & { readonly at?: string }
+
 /** Everything the spans of one session state, computed without a model. */
 export interface SessionFacts {
   readonly schemaVersion: 1
@@ -275,6 +290,13 @@ export interface SessionFacts {
    * the paths the session touched.
    */
   readonly cwd: SessionFact<string>
+  /**
+   * The repository: `git.repository`, `git.branch` and `git.commit` on the
+   * session's spans. The harness's own record when it kept one (Codex's
+   * `session_meta`), else read from the checkout at the recorded cwd when the
+   * session was read, so a branch can be the checkout's current one.
+   */
+  readonly repo: SessionFact<SessionRepo>
   /** Spans in this trace, including the synthesized ones. */
   readonly spanCount: number
   /**
@@ -333,7 +355,7 @@ export interface SessionFacts {
    * ERROR span that ended first, else a failed `agent.outcome`, else `none`.
    * Failures that ended at the same instant are `ambiguous`, never guessed.
    */
-  readonly firstFailure: FirstFailure
+  readonly firstFailure: SessionFirstFailure
   readonly measurements: SessionMeasurements
   /**
    * Who acted: the profile, model, harness, skill set and directive variant,
@@ -805,9 +827,6 @@ export function isCompletionClaim(text: string): boolean {
   return CLAIM_WORD.test(opening) && !CLAIM_DENIED.test(opening) && !opening.endsWith('?')
 }
 
-/** The record a harness writes when the person stops the agent: Claude Code's marker, Codex's context block. */
-const INTERRUPT_TEXT = /^(?:\[Request interrupted by user|<turn_aborted>)/iu
-
 /** A tool result saying the person refused the call (Claude Code's refusal text, Codex's rejection). */
 const REJECTED_TOOL_TEXT =
   /The user doesn't want to proceed with this tool use|tool use was rejected|rejected by (?:the )?user|user (?:rejected|declined|denied) (?:this|the)/iu
@@ -1186,6 +1205,11 @@ function readSession(
   const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
   const cwdSpan = spans.find((span) => stringAttr(span, SESSION_CWD_ATTR) !== null)
+  const repoSpan = spans.find((span) => stringAttr(span, ATTR.GIT_REPOSITORY) !== null)
+  const firstFailure: SessionFirstFailure = ownSpans.length === 0
+    ? { status: 'unknown', traceId, unsetCount: 0, reason: "no span of this session's own records" }
+    : rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans)
+  const failedSpan = firstFailure.status === 'found' ? ownSpans.find((span) => span.span_id === firstFailure.spanId) : undefined
   const agent = agentFact(spans, sessionId, harness, options.agentIdentity)
 
   const facts: SessionFacts = {
@@ -1222,7 +1246,22 @@ function readSession(
             `no span carries ${CORRUPTION_COUNT_ATTR}; this trace was not read through the session ` +
             'integrity path, so whether any record was skipped is unknown',
         },
-    measurements: computeSessionMeasurements(ownSpans, invoked, sessionId, harness),
+    repo: repoSpan
+      ? {
+          value: {
+            repository: stringAttr(repoSpan, ATTR.GIT_REPOSITORY)!,
+            branch: stringAttr(repoSpan, ATTR.GIT_BRANCH_NAME),
+            commit: stringAttr(repoSpan, ATTR.GIT_COMMIT),
+          },
+          spanIds: [repoSpan.span_id],
+          unavailable: null,
+        }
+      : {
+          value: null,
+          spanIds: [],
+          unavailable: `no span carries ${ATTR.GIT_REPOSITORY}: the recorded cwd is not a checkout with a remote, or no longer exists`,
+        },
+    measurements: computeSessionMeasurements({ spans: ownSpans, records: ownSpans.filter(isRecordSpan), tools: invoked, sessionId, harness }),
     toolCalls: {
       value: invoked.length,
       spanIds: invoked.map((span) => span.span_id),
@@ -1272,10 +1311,7 @@ function readSession(
     // UNSET", which it reports as status 'unknown'); a trace whose spans are
     // all traces.span.subagent — every record folded into subagents' own
     // reports — legitimately has no records of its own to rank.
-    firstFailure:
-      ownSpans.length === 0
-        ? { status: 'unknown', traceId, unsetCount: 0, reason: "no span of this session's own records" }
-        : rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans),
+    firstFailure: failedSpan ? { ...firstFailure, at: failedSpan.end_time } : firstFailure,
     tokens,
     // Priced by `priceReport`, which loads the price table only when a session needs it.
     cost: sessionCost(tokens, undefined),
@@ -1291,6 +1327,7 @@ function readSession(
   const withheldFacts: SessionFacts = {
     ...facts,
     cwd: withheld(),
+    repo: withheld(),
     humanTurns: withheld(),
     finalMessages: withheld(),
     changedFiles: withheld(),
@@ -1304,6 +1341,16 @@ function readSession(
     firstFailure: facts.firstFailure.status === 'found'
       ? { ...facts.firstFailure, message: null, classification: facts.firstFailure.classification ? { ...facts.firstFailure.classification, reason: 'Content was not requested.' } : null }
       : facts.firstFailure,
+    measurements: {
+      ...facts.measurements,
+      waste: {
+        ...facts.measurements.waste,
+        failingStreaks: {
+          ...facts.measurements.waste.failingStreaks,
+          value: facts.measurements.waste.failingStreaks.value?.map((streak) => ({ ...streak, command: null })) ?? null,
+        },
+      },
+    },
   }
   return { facts: withheldFacts, spans, turns: [] }
 }
@@ -1476,100 +1523,149 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
   }
 }
 
-function factLine(label: string, fact: SessionFact<unknown>, rendered: string): string {
-  if (fact.value === null) return `  ${label}: unavailable — ${fact.unavailable}`
-  const partial = fact.partial ? ` (partial: ${fact.partial})` : ''
-  return `  ${label}: ${rendered}${partial}`
+/** Characters of a message, command or reason a sheet line keeps. */
+const SHEET_TEXT_CAP = 100
+
+/** One line of `text`, at most `cap` characters, with `…` where it was cut. */
+function sheetText(text: string, cap = SHEET_TEXT_CAP): string {
+  const line = text.trim().split('\n', 1)[0]!.replace(/\s+/gu, ' ')
+  return line.length > cap || text.trim().includes('\n') ? `${line.slice(0, cap - 1)}…` : line
 }
 
-/** The short readable form: the same facts, one screen, no span-id lists. */
+/** `MM-DD HH:MM` in UTC; a time no reader can parse is printed as recorded. */
+function utcMinute(iso: string): string {
+  const ms = Date.parse(iso)
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(5, 16).replace('T', ' ') : iso
+}
+
+/** `18 s` under a minute, `42 min`, or `3.1 h` from an hour up. */
+function duration(minutes: number): string {
+  if (minutes > 0 && minutes < 1) return `${Math.round(minutes * 60)} s`
+  return minutes < 60 ? `${Math.round(minutes)} min` : `${(minutes / 60).toFixed(1)} h`
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+/** `name 3, other 1, …`: the largest counts first, at most `keep` of them. */
+function topCounts(counts: Readonly<Record<string, number>>, keep = 3): string {
+  const rows = Object.entries(counts).sort(([leftName, left], [rightName, right]) => right - left || leftName.localeCompare(rightName))
+  return rows.slice(0, keep).map(([name, count]) => `${name} ${count}`).join(', ') + (rows.length > keep ? ', …' : '')
+}
+
+/**
+ * The text sheet: at most 25 lines per session, each a fact a person reads
+ * first. Times are UTC. A fact the spans cannot support says `unknown` with
+ * the reason; `--format json` carries every value with its span ids.
+ */
 export function renderSessionFacts(report: SessionFactsReport): string {
-  const lines: string[] = [
-    `session facts — ${report.sessions.length} session(s), ${report.spanCount} span(s), deterministic, $0`,
-  ]
+  const lines: string[] = []
   const selection = report.selection
-  if (selection) {
-    lines.push(
-      `window [${selection.since ?? 'open'}, ${selection.until ?? 'open'}): turn facts count only turns inside it; ` +
-        `${selection.outsideWindow.length} session(s) read with no record inside it`,
-    )
-    for (const unread of selection.unreadSessions) {
-      lines.push(`  unread session ${unread.sessionId ?? unread.traceId ?? unread.source ?? 'unknown'}: ${unread.reason}`)
+  if (selection !== null || report.sessions.length !== 1) {
+    const window = selection && (selection.since !== null || selection.until !== null)
+      ? ` · window ${selection.since ?? 'open'} → ${selection.until ?? 'open'}, ${selection.outsideWindow.length} read with no record inside it`
+      : ''
+    const unread = selection?.unreadSessions ?? []
+    lines.push(`${plural(report.sessions.length, 'session')}${window}${unread.length > 0 ? ` · ${unread.length} unreadable` : ''} · $0, no model call`)
+    for (const entry of unread.slice(0, 3)) {
+      lines.push(`unreadable ${entry.sessionId ?? entry.traceId ?? entry.source ?? 'unknown'}: ${sheetText(entry.reason)}`)
     }
+    if (unread.length > 3) lines.push(`… ${unread.length - 3} more unreadable: --format json | jq .selection.unreadSessions`)
   }
   for (const facts of report.sessions) {
-    lines.push('', `${facts.sessionId ?? facts.traceId} [${facts.harness ?? 'unknown harness'}] ${facts.spanCount} spans`)
-    lines.push(factLine('cwd', facts.cwd, String(facts.cwd.value)))
-    lines.push(factLine('who', facts.agent, facts.agent.value ? renderAgent(facts.agent.value) : ''))
-    lines.push(
-      factLine(
-        'tool calls',
-        facts.toolCalls,
-        `${facts.toolCalls.value} (${facts.synthesizedToolSpans.value ?? 0} synthesized span(s) excluded` +
-          `${(facts.subagentToolSpans.value ?? 0) > 0 ? `, ${facts.subagentToolSpans.value} made by subagents` : ''})`,
-      ),
-    )
-    lines.push(
-      factLine(
-        'subagents',
-        facts.subagents,
-        `${facts.subagents.value?.length ?? 0}${
-          facts.subagents.value?.length
-            ? `: ${facts.subagents.value.map((entry) => entry.taskName ?? '<unnamed>').join(', ')}`
-            : ''
-        }`,
-      ),
-    )
-    lines.push(
-      factLine(
-        'pull requests',
-        facts.pullRequests,
-        `${facts.pullRequests.value?.created.length ?? 0} created${
-          facts.pullRequests.value?.created.length
-            ? ` (${facts.pullRequests.value.created.map((entry) => entry.identifier ?? 'unidentified').join(', ')})`
-            : ''
-        }, ${facts.pullRequests.value?.merged.length ?? 0} merged${
-          facts.pullRequests.value?.merged.length
-            ? ` (${facts.pullRequests.value.merged.map((entry) => entry.identifier ?? 'unidentified').join(', ')})`
-            : ''
-        }`,
-      ),
-    )
-    const turns = facts.humanTurns.value ?? []
-    const signalled = (signal: TurnSignal): number => turns.filter((turn) => turn.signals.includes(signal)).length
-    lines.push(factLine(
-      'human turns',
-      facts.humanTurns,
-      `${turns.length} (after an interrupt ${signalled('interrupt')}, after a rejected tool ${signalled('rejected-tool')}, ` +
-        `after a completion claim ${signalled('after-claim')})`,
-    ))
-    for (const entry of facts.excludedTurns.value ?? []) {
-      lines.push(`  turns not counted: ${entry.turns} — ${entry.reason}`)
-    }
-    lines.push(
-      factLine(
-        'turns by actor',
-        facts.turnsByActor,
-        facts.turnsByActor.value?.length
-          ? facts.turnsByActor.value.map((entry) => `${entry.actor} ${entry.turns}`).join(', ')
-          : 'none',
-      ),
-    )
-    lines.push(factLine('changed files', facts.changedFiles, String(facts.changedFiles.value?.length ?? 0)))
-    lines.push(factLine('first record', facts.firstRecordAt, String(facts.firstRecordAt.value)))
-    lines.push(factLine('last record', facts.lastRecordAt, String(facts.lastRecordAt.value)))
-    lines.push(factLine('compactions', facts.measurements.compactions, String(facts.measurements.compactions.value?.length ?? 0)))
-    lines.push('  skills: ' + facts.measurements.adoption.totalSkillInvocations + ' recorded invocation(s), ' + facts.measurements.adoption.totalSkillDocumentReads + ' document read(s); telemetry ' + facts.measurements.adoption.skillTelemetryStatus)
-    lines.push(`  tokens: ${renderTokens(facts.tokens, facts.cost)}`)
-    lines.push(`  first failure: ${renderFirstFailure(facts.firstFailure)}`)
-    if ((facts.unreadRecords.value ?? 0) > 0) {
-      lines.push(`  unread records: ${facts.unreadRecords.value} (the facts above are computed from the rest)`)
-    }
-    for (const message of facts.finalMessages.value ?? []) {
-      lines.push(`  final message [${message.task ?? 'session agent'}]: ${message.text.split('\n')[0]?.slice(0, 160) ?? ''}`)
-    }
+    if (lines.length > 0) lines.push('')
+    lines.push(...sessionSheet(facts))
   }
   return `${lines.join('\n')}\n`
+}
+
+function sessionSheet(facts: SessionFacts): string[] {
+  const lines = [sheetHeader(facts)]
+  if (facts.agent.value) lines.push(`who ${renderAgent(facts.agent.value)}`)
+  lines.push(turnLine(facts))
+  const subagents = facts.subagents.value ?? []
+  const names = subagents.map((entry) => entry.taskName).filter((name): name is string => name !== null)
+  lines.push(
+    `tools ${facts.toolCalls.value}${facts.toolCalls.value ? ` (${topCounts(facts.toolCallsByName.value ?? {})})` : ''}` +
+      ` · subagents ${subagents.length}${names.length > 0 ? ` (${names.slice(0, 3).map((name) => sheetText(name, 40)).join(', ')}${names.length > 3 ? ', …' : ''})` : ''}`,
+  )
+  const skills = Object.fromEntries(Object.entries(facts.measurements.skills).map(([name, use]) => [name, use.model + use.slash + use.read]))
+  if (Object.keys(skills).length > 0) lines.push(`skills ${topCounts(skills, 5)}`)
+  lines.push(`tokens ${renderTokens(facts.tokens, facts.cost)}`)
+  lines.push(wasteLine(facts))
+  lines.push(pullRequestLine(facts))
+  lines.push(`first failure ${renderFirstFailure(facts.firstFailure)}`)
+  const final = facts.finalMessages.value?.find((message) => message.task === null)
+  if (final && final.text.trim().length > 0) lines.push(`final "${sheetText(final.text)}"`)
+  if ((facts.unreadRecords.value ?? 0) > 0) {
+    lines.push(`unread records ${facts.unreadRecords.value}: the facts above are computed from the rest`)
+  }
+  return lines
+}
+
+/** `99d75d4b claude-code · agent-dev-container (feat/x) · 10-15 09:12→12:40 UTC · active 3.1 h`. */
+function sheetHeader(facts: SessionFacts): string {
+  const parts = [`${(facts.sessionId ?? facts.traceId).slice(0, 8)} ${facts.harness ?? 'unknown harness'}`]
+  const repo = facts.repo.value
+  const place = repo
+    ? `${repo.repository.split('/').at(-1)}${repo.branch ? ` (${repo.branch})` : ''}`
+    : facts.cwd.value?.split('/').filter(Boolean).at(-1)
+  if (place) parts.push(place)
+  const first = facts.firstRecordAt.value
+  const last = facts.lastRecordAt.value
+  if (first !== null && last !== null) {
+    const [from, to] = [utcMinute(first), utcMinute(last)]
+    parts.push(`${from}→${from.slice(0, 5) === to.slice(0, 5) ? to.slice(6) : to} UTC`)
+  }
+  const active = facts.measurements.activeMinutes.value
+  if (active !== null) parts.push(`active ${duration(active)}`)
+  if (facts.parentSessionId) parts.push(`child of ${facts.parentSessionId.slice(0, 8)}`)
+  return parts.join(' · ')
+}
+
+/** `human turns 14 (excluded: fleet 2, injected 6) · interrupts 2`. */
+function turnLine(facts: SessionFacts): string {
+  const turns = facts.humanTurns.value
+  if (turns === null) return `human turns unknown: ${facts.humanTurns.unavailable}`
+  const excluded: Record<string, number> = {}
+  for (const entry of facts.excludedTurns.value ?? []) excluded[entry.author] = (excluded[entry.author] ?? 0) + entry.turns
+  const signalled = (signal: TurnSignal): number => turns.filter((turn) => turn.signals.includes(signal)).length
+  return [
+    `human turns ${turns.length}${Object.keys(excluded).length > 0 ? ` (excluded: ${topCounts(excluded, 6)})` : ''}`,
+    `interrupts ${turns.filter((turn) => turn.interrupted).length}`,
+    ...(signalled('rejected-tool') > 0 ? [`after a rejected tool ${signalled('rejected-tool')}`] : []),
+    ...(signalled('after-claim') > 0 ? [`after a completion claim ${signalled('after-claim')}`] : []),
+  ].join(' · ')
+}
+
+/** `waste 52 min: \`pnpm test\` failed 14× in a row (31 min) · 2 stalls ≥ 10 min (21 min) · reverts 1`. */
+function wasteLine(facts: SessionFacts): string {
+  const waste = facts.measurements.waste
+  if (waste.minutes === null) return `waste unknown: ${waste.unavailable}`
+  const parts: string[] = []
+  const streaks = waste.failingStreaks.value ?? []
+  const worst = [...streaks].sort((left, right) => right.minutes - left.minutes || right.runs - left.runs)[0]
+  if (worst) {
+    const command = worst.command === null ? `a ${worst.tool} command` : `\`${sheetText(worst.command, 60)}\``
+    parts.push(`${command} failed ${worst.runs}× in a row (${duration(worst.minutes)})${streaks.length > 1 ? ` + ${plural(streaks.length - 1, 'more streak')}` : ''}`)
+  }
+  const stalls = waste.stalls.value ?? []
+  if (stalls.length > 0) {
+    parts.push(`${plural(stalls.length, 'stall')} ≥ ${STALL_MINUTES} min (${duration(stalls.reduce((sum, stall) => sum + stall.minutes, 0))})`)
+  }
+  if ((waste.rollbacks.value ?? 0) > 0) parts.push(`reverts ${waste.rollbacks.value}`)
+  return `waste ${duration(waste.minutes)}${parts.length > 0 ? `: ${parts.join(' · ')}` : ''}`
+}
+
+/** `PRs opened #11021 #11022 · merged #11006 · changed 23 files`. */
+function pullRequestLine(facts: SessionFacts): string {
+  const files = facts.changedFiles.value === null ? '' : ` · changed ${plural(facts.changedFiles.value.length, 'file')}`
+  const prs = facts.pullRequests.value
+  if (prs === null) return `PRs unknown: ${facts.pullRequests.unavailable}${files}`
+  const named = (entries: readonly { readonly identifier: string | null }[]): string =>
+    entries.length === 0 ? 'none' : entries.map((entry) => entry.identifier === null ? '?' : /^\d+$/u.test(entry.identifier) ? `#${entry.identifier}` : entry.identifier).join(' ')
+  return `PRs opened ${named(prs.created)} · merged ${named(prs.merged)}${files}`
 }
 
 /** What a `--match` row is: a turn a person typed, a message the agent wrote, or one shell command it ran. */
@@ -1720,7 +1816,7 @@ export function readSessionIndex(
 
 /** `in 2.1M · out 310k · cache read 88M · $38.20 list price (Router rates)`, or why a part is unknown. */
 function renderTokens(tokens: SessionTokens, cost: SessionCost): string {
-  if (tokens.input === null) return `unavailable — ${tokens.unavailable}`
+  if (tokens.input === null) return `unknown: ${tokens.unavailable}`
   const parts = [`in ${tokenCount(tokens.input)}`, `out ${tokenCount(tokens.output ?? 0)}`]
   if ((tokens.cacheRead ?? 0) > 0) parts.push(`cache read ${tokenCount(tokens.cacheRead!)}`)
   if ((tokens.cacheWrite ?? 0) > 0) parts.push(`cache write ${tokenCount(tokens.cacheWrite!)}`)
@@ -1741,14 +1837,13 @@ function renderAgent(agent: AgentIdentityFact): string {
   return `${[profile, agent.model, agent.directiveVariant].filter(Boolean).join(' · ')} (from ${agent.source})`
 }
 
-function renderFirstFailure(failure: FirstFailure): string {
-  if (failure.status === 'unknown') return `unknown — not recorded whether this run failed (${failure.reason})`
-  if (failure.status === 'none') return `none recorded (${failure.reason})`
-  if (failure.status === 'ambiguous') {
-    return `ambiguous ${failure.stage}: ${failure.reason} (${failure.candidates.join(', ')})`
-  }
-  const message = failure.message ? ` — ${failure.message.split('\n')[0]?.slice(0, 160)}` : ''
-  return `${failure.stage} ${failure.kind} "${failure.name}" [${failure.spanId}], blame ${failure.blame}${message}`
+function renderFirstFailure(failure: SessionFirstFailure): string {
+  if (failure.status === 'unknown') return `unknown: ${sheetText(failure.reason)}`
+  if (failure.status === 'none') return `none: ${sheetText(failure.reason)}`
+  if (failure.status === 'ambiguous') return `ambiguous ${failure.stage}: ${sheetText(failure.reason)} (spans ${failure.candidates.join(', ')})`
+  const when = failure.at ? `${utcMinute(failure.at).slice(6)} ` : ''
+  const message = failure.message ? `: ${sheetText(failure.message, 80)}` : ''
+  return `${when}${failure.name}${message} (blame ${failure.blame}, span ${failure.spanId})`
 }
 
 /**

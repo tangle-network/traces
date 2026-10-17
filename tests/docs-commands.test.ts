@@ -24,7 +24,6 @@ const HIDDEN_FLAGS: Readonly<Record<string, Readonly<Record<string, boolean>>>> 
   check: { '--junit': true, '--annotations': false, '--explain': false },
   diff: { '--kind': true },
   watch: { '--window': true, '--interval': true },
-  skills: { '--no-refresh': false, '--store': true, '--sweep': true },
 }
 
 /** Commands that read sessions and need a selection (spec §2.1), with the flags that select. */

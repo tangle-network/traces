@@ -298,6 +298,9 @@ function count(text: string, needle: string): number {
   return text.split(needle).length - 1
 }
 
+/** The record a harness writes when the person stops the agent: Claude Code's marker, Codex's context block. */
+export const INTERRUPT_TEXT = /^(?:\[Request interrupted by user|<turn_aborted>)/iu
+
 /**
  * Who typed a turn the session reader called human, by org convention:
  *   harness text (a notification, a hook wrapper)  → `injected`

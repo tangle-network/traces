@@ -7,7 +7,6 @@ import { pathToFileURL } from 'node:url'
 import { inspect } from 'node:util'
 import { deriveHexId, validateTraceSpans } from '@tangle-network/agent-trace-contract'
 import { afterAll, describe, expect, it } from 'vitest'
-import { analyzeAdoption } from '../src/adoption.js'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
 import { capText, CONTENT_CAP } from '../src/adapters/conversation.js'
 import { CodexAdapter } from '../src/adapters/codex.js'
@@ -17,6 +16,7 @@ import { JsonSourceError, type JsonSourceErrorKind } from '../src/json.js'
 import { stampSessionIntegrity } from '../src/integrity.js'
 import { JsonlParseError } from '../src/jsonl.js'
 import type { OtlpSpan } from '../src/otlp.js'
+import { buildSessionFactsReport } from '../src/session-facts.js'
 import { parseSession } from '../src/session-source.js'
 import { describeSessionRelationship } from '../src/session-relationship.js'
 import type { SessionRef } from '../src/types.js'
@@ -2195,7 +2195,7 @@ describe('codex current tool and subagent events', () => {
       status: { code: 'OK' },
       attributes: { 'traces.poll.outcome': 'timeout' },
     })
-    expect((await analyzeAdoption(parentSpans)).totalSubagentSpawns).toBe(1)
+    expect(buildSessionFactsReport(parentSpans).sessions[0]!.subagents.value).toHaveLength(1)
 
     const childRoot = childSpans[0]!
     expect(childRoot.trace_id).toBe(codexTraceId(childId))
