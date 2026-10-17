@@ -61,7 +61,7 @@ The internal trace pipeline keeps its own storage and issue filer.
 ## Scope limits, stated before the sale
 
 - We diagnose what the trace records. A defect that leaves no trace is invisible to us,
-  and `traces validate` reports which capabilities a given trace cannot support.
+  and `traces check <trace> --contract conformance` reports which capabilities a given trace cannot support.
 - Metadata cannot show reasoning quality. It shows cost, latency, loops, tool failure
   rates, retry storms and convergence. Prompt-level quality work needs content opt-in.
 - Five days is a diagnosis, not a remediation. Fixes are a separate engagement.

@@ -5,7 +5,9 @@
  *   1. An existing path is read by its content: a harness session file (its
  *      harness from its store root, else from its first records), a Sandbox
  *      live stream (Codex events in `raw` envelopes, read by codex-exec), a
- *      sandbox-events recording, OTLP or OpenInference JSONL, a
+ *      sandbox-events recording, OTLP or OpenInference JSONL, standard
+ *      OTLP/JSON (`resourceSpans`, one document or one envelope per line),
+ *      the span rows Tangle Intelligence serves, a
  *      directory of OTLP files, a bundle directory, a Runtime run directory,
  *      or a store root: a directory that holds harness stores the way a home
  *      does (a trace archive's `<host>/home`, a fleet seat). `path#<trace id>`
@@ -28,7 +30,7 @@ import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { detectEvidenceFormat, exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
-import { readOtlpInput } from './otlp-input.js'
+import { isOtlpJsonFile, isStandardOtlpRow, readOtlpInput } from './otlp-input.js'
 import { listAdapters, resolveAdapter } from './registry.js'
 import { parseSession } from './session-source.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -182,11 +184,15 @@ type Sniffed =
 export async function sniffTraceFile(path: string): Promise<Sniffed> {
   const stored = harnessOfStorePath(path)
   if (stored) return { kind: 'session', harness: stored }
+  // Standard OTLP/JSON is known from its first bytes; its lines can be too large to parse just to look.
+  if (await isOtlpJsonFile(path)) return { kind: 'spans', reader: 'otlp' }
   const rows = await headRows(path)
   if (rows.some(isCodexExecRecord)) return { kind: 'session', harness: 'codex-exec' }
   if (rows.length > 0 && rows.every((row) => isObject(row) && typeof row.trace_id === 'string' && typeof row.span_id === 'string')) {
     return { kind: 'spans', reader: 'otlp' }
   }
+  // Standard OTLP/JSON (`resourceSpans`), or the camelCase span rows Tangle Intelligence serves.
+  if (rows.length > 0 && rows.every(isStandardOtlpRow)) return { kind: 'spans', reader: 'otlp' }
   if (!rows.some((row) => isObject(row) && typeof row.span_id === 'string')) {
     if (rows.some(isClaudeRecord)) return { kind: 'session', harness: 'claude-code' }
     if (rows.some((row) => isObject(row) && CODEX_ROLLOUT_TYPES.has(String(row.type)) && isObject(row.payload))) {

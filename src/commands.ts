@@ -7,7 +7,7 @@
  * <command> --help` are rendered from these rows, so help cannot list a flag
  * the parser refuses or miss one it takes.
  *
- * A hidden row is a 0.x spelling whose replacement lands in a later step
+ * A hidden flag is a 0.x spelling whose replacement lands in a later step
  * (spec §2.4): it is parsed and run, and absent from help. When its
  * replacement works, the spelling leaves this table for `moved.ts`.
  *
@@ -74,7 +74,10 @@ export interface Args {
   questionsFile?: string
   budget?: number
   model?: string
-  contract?: string
+  /** `check --contract`: contract files, or `conformance`, in the order given. */
+  contracts: string[]
+  /** `check --share-safe`: read each ref as bytes and give its share verdict. */
+  shareSafe: boolean
   once: boolean
   dryRun: boolean
   yes: boolean
@@ -85,11 +88,7 @@ export interface Args {
   /** Seconds. */
   questionTimeout?: number
   concurrency: number
-  junit?: string
-  annotations: boolean
-  explain: boolean
   kinds: string[]
-  profile?: string
   knownSecretEnvs: string[]
 }
 
@@ -104,13 +103,13 @@ function emptyArgs(command: string): Args {
     latestTurn: false,
     noContent: false,
     questions: [],
+    contracts: [],
+    shareSafe: false,
     once: false,
     dryRun: false,
     yes: false,
     unused: false,
     concurrency: 4,
-    annotations: false,
-    explain: false,
     kinds: [],
     knownSecretEnvs: [],
   }
@@ -181,7 +180,11 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--questions': { value: 'FILE', help: 'a JSON array of questions: strings or {id?, question, answerSchema?}', set: (a, v) => { a.questionsFile = v } },
   '--budget': { value: 'USD', help: 'one spending ceiling shared by every question', set: (a, v) => { a.budget = positiveNumber('--budget', v, 'USD') } },
   '--model': { value: 'ID', help: `the analyst model (default ${DEFAULT_ANALYST_MODEL})`, set: (a, v) => { a.model = v } },
-  '--contract': { value: 'FILE', help: 'the trace contract to gate on (required)', set: (a, v) => { a.contract = v } },
+  '--contract': { value: 'FILE|conformance', help: 'gate on a trace contract file, or on conformance (repeatable)', set: (a, v) => { a.contracts.push(v) } },
+  '--share-safe': {
+    help: 'gate on whether each path is safe to share, read as bytes: SAFE passes, UNSAFE fails, UNKNOWN cannot decide',
+    set: (a) => { a.shareSafe = true },
+  },
   '--once': { help: 'one pass, then exit', set: (a) => { a.once = true } },
   '--dry-run': { help: 'redact and preview; send nothing', set: (a) => { a.dryRun = true } },
   '--yes': { help: 'skip the confirmation prompt', set: (a) => { a.yes = true } },
@@ -198,12 +201,12 @@ const FLAGS: Readonly<Record<string, Flag>> = {
     },
   },
   '--concurrency': { value: 'N', help: 'questions running at once (default 4)', set: (a, v) => { a.concurrency = positiveInteger('--concurrency', v) } },
-  '--junit': { value: 'FILE', help: 'write JUnit XML to FILE', set: (a, v) => { a.junit = v } },
-  '--annotations': { help: 'print GitHub workflow annotations', set: (a) => { a.annotations = true } },
-  '--explain': { help: 'print what the contract checks and read no trace', set: (a) => { a.explain = true } },
   '--kind': { value: 'KIND', help: 'keep only steps of this span kind (repeatable)', set: (a, v) => { a.kinds.push(v) } },
-  '--profile': { value: 'P', help: 'default, share or strict', set: (a, v) => { a.profile = v } },
-  '--known-secret-env': { value: 'NAME', help: 'a variable holding a secret to look for (repeatable)', set: (a, v) => { a.knownSecretEnvs.push(v) } },
+  '--known-secret-env': {
+    value: 'NAME',
+    help: 'with --share-safe: an environment variable whose value must appear nowhere (repeatable)',
+    set: (a, v) => { a.knownSecretEnvs.push(v) },
+  },
 }
 
 const ALIASES: Readonly<Record<string, string>> = { '-y': '--yes' }
@@ -228,10 +231,8 @@ interface CommandSpec {
   readonly select?: 'required'
   readonly jq?: ReadonlyArray<readonly [path: string, what: string]>
   readonly examples: readonly string[]
-  /** A 0.x command kept until its step: parsed and run, absent from `traces --help`. */
-  readonly hidden?: true
-  /** Its row in `traces --help`: the question it answers and how to ask it. */
-  readonly overview?: readonly [question: string, example: string]
+  /** Its rows in `traces --help`: each question it answers and how to ask it. */
+  readonly overview?: ReadonlyArray<readonly [question: string, example: string]>
 }
 
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn'] as const
@@ -256,7 +257,7 @@ const COMMANDS = [
       ['.selection.unreadSessions', 'sessions that could not be read, and why'],
     ],
     examples: ['traces list --cwd . --last 5', 'traces list --since 1d --harness codex', "traces list --format json | jq -r '.sessions[0].id'"],
-    overview: ['Which sessions ran?', 'traces list [--cwd .] [--last N]'],
+    overview: [['Which sessions ran?', 'traces list [--cwd .] [--last N]']],
   },
   {
     name: 'facts',
@@ -277,7 +278,7 @@ const COMMANDS = [
       ['.matches[] | {sessionId, kind, text}', 'with --match: each hit'],
     ],
     examples: ['traces facts --current', "traces facts 019a3c7e --format json | jq '.sessions[0].measurements.waste'", "traces facts --since 30d --match '^gh pr merge'"],
-    overview: ['What happened (turns, PRs, failure, cost)? $0', 'traces facts <ref> | --current | --since 1d'],
+    overview: [['What happened (turns, PRs, failure, cost)? $0', 'traces facts <ref> | --current | --since 1d']],
   },
   {
     name: 'analyze',
@@ -298,7 +299,7 @@ const COMMANDS = [
       ['.facts.sessions[0].measurements.waste', 'failing streaks, stalls, reverts'],
     ],
     examples: ['traces analyze --current', 'traces analyze 019a3c7e --out analysis', 'traces analyze --since 1d --cwd .'],
-    overview: ['Where did it waste time or get interrupted? $0', 'traces analyze <ref>'],
+    overview: [['Where did it waste time or get interrupted? $0', 'traces analyze <ref>']],
   },
   {
     name: 'ask',
@@ -316,28 +317,38 @@ const COMMANDS = [
       'traces ask 019a3c7e --questions questions.json --budget 5',
       'traces ask --last 3 --question "Did it verify the fix?" --budget 2',
     ],
-    overview: ["A question facts can't answer (model, $)", 'traces ask <ref> --question "…" --budget 1'],
+    overview: [["A question facts can't answer (model, $)", 'traces ask <ref> --question "…" --budget 1']],
   },
   {
     name: 'check',
-    usage: 'check <ref…> | --current | --last N | --since T --contract FILE [flags]',
-    job: 'The gate: does this run satisfy a trace contract?',
-    notes: ['Exit 0 pass, 1 fail, 2 could not decide: a bad contract, a rule that could not run, or an unreadable or ambiguous trace.'],
-    flags: [
-      '--contract', ...SELECT.slice(0, 4), { flag: '--harness', help: 'force the reader of a file ref (claude-code, codex, …)' },
-      { flag: '--format', help: 'text (default) or json, the full report' },
-      { flag: '--out', value: 'DIR', help: 'write evidence for each trace that did not pass under DIR' },
-      hidden('--junit'), hidden('--annotations'), hidden('--explain'),
+    usage: 'check <ref…> | --current | --last N | --since T  --contract FILE|conformance | --share-safe  [flags]',
+    job: 'The one gate: does this run pass a trace contract or conform, and is this file safe to share?',
+    notes: [
+      'A gate is required. --share-safe reads each path as bytes, never as a trace. --contract F with no ref explains F.',
+      'Exit 0 pass, 1 any gate fails, 2 a gate could not decide: a bad contract, a rule or verdict that could not run, an unreadable ref.',
     ],
-    formats: ['text', 'json'],
+    flags: [
+      '--contract', '--share-safe', '--known-secret-env',
+      ...SELECT.slice(0, 4), { flag: '--harness', help: 'force the reader of a file ref (claude-code, codex, …)' },
+      { flag: '--format', help: 'text (default), json, junit or github: the verdict, on stdout' },
+      { flag: '--out', value: 'DIR', help: 'write evidence for each gate that did not pass under DIR' },
+    ],
+    formats: ['text', 'json', 'junit', 'github'],
     refs: [0, MANY],
     select: 'required',
-    examples: [
-      'traces check spans.otlp.jsonl --contract contract.json',
-      'traces check --current --contract contract.json',
-      'traces check run.jsonl --harness claude-code --contract c.json --out evidence',
+    jq: [
+      ['.gates[] | {gate, status}', 'each gate and what it decided'],
+      ['.gates[].report.traces[]?.verdict.violations', 'each rule a run broke, with span ids'],
     ],
-    overview: ['Does this run pass? (CI)', 'traces check <ref> --contract c.json'],
+    examples: [
+      'traces check run.otlp.jsonl --contract contract.json --format junit > contract.xml',
+      'traces check spans.otlp.jsonl --contract conformance',
+      'traces check handoff.md --share-safe --known-secret-env TANGLE_API_KEY',
+    ],
+    overview: [
+      ['Does this run pass? (CI)', 'traces check <ref> --contract c.json|conformance'],
+      ['Is this safe to share?', 'traces check <path> --share-safe'],
+    ],
   },
   {
     name: 'diff',
@@ -359,7 +370,7 @@ const COMMANDS = [
       'traces diff runs.otlp.jsonl#branch=a runs.otlp.jsonl#branch=b',
       'traces diff a.jsonl b.jsonl --format json | jq .diff.firstDivergence',
     ],
-    overview: ['Where did two runs diverge?', 'traces diff <a> <b>'],
+    overview: [['Where did two runs diverge?', 'traces diff <a> <b>']],
   },
   {
     name: 'watch',
@@ -382,7 +393,7 @@ const COMMANDS = [
       ['select(.event == "tick") | .unreadSessions', 'sessions a pass could not read, and why'],
     ],
     examples: ['traces watch --once', 'traces watch runs/my-run --once', 'traces watch --since 2h --format jsonl'],
-    overview: ['What is happening right now?', 'traces watch [<run-dir>] [--once]'],
+    overview: [['What is happening right now?', 'traces watch [<run-dir>] [--once]']],
   },
   {
     name: 'bundle',
@@ -393,7 +404,7 @@ const COMMANDS = [
     refs: [0, 1],
     select: 'required',
     examples: ['traces bundle 019a3c7e --out evidence/019a3c7e', 'traces bundle --current --out evidence/now', 'traces bundle verify evidence/019a3c7e'],
-    overview: ["Keep a session's evidence", 'traces bundle <ref> --out <dir> · bundle verify <dir>'],
+    overview: [["Keep a session's evidence", 'traces bundle <ref> --out <dir> · bundle verify <dir>']],
   },
   {
     name: 'bundle verify',
@@ -422,7 +433,7 @@ const COMMANDS = [
       'traces convert sandbox-events.json --out spans.otlp.jsonl',
       'traces convert live-stream.jsonl --harness codex-exec > spans.otlp.jsonl',
     ],
-    overview: ['Hand spans to another tool', 'traces convert <ref> --out <file>'],
+    overview: [['Hand spans to another tool', 'traces convert <ref> --out <file>']],
   },
   {
     name: 'upload',
@@ -437,7 +448,7 @@ const COMMANDS = [
     ],
     refs: [0, MANY],
     examples: ['traces upload --since 24h --dry-run', 'traces upload 019a3c7e --yes', 'traces upload spans.otlp.jsonl --dry-run --out preview.otlp.jsonl'],
-    overview: ['Ship sessions to Intelligence', 'traces upload <ref>|--since T [--dry-run]'],
+    overview: [['Ship sessions to Intelligence', 'traces upload <ref>|--since T [--dry-run]']],
   },
   {
     name: 'skills',
@@ -455,7 +466,7 @@ const COMMANDS = [
       ['.unused[].skill', 'installed skills never used in the window'],
     ],
     examples: ['traces skills --since 30d', 'traces skills --unused', "traces skills --format json | jq '.rows[] | {skill, sessions}'"],
-    overview: ['Which skills are used?', 'traces skills [--unused]'],
+    overview: [['Which skills are used?', 'traces skills [--unused]']],
   },
   {
     name: 'mcp',
@@ -469,27 +480,7 @@ const COMMANDS = [
     refs: [0, MANY],
     select: 'required',
     examples: ['traces mcp spans.otlp.jsonl', 'traces mcp --last 5', 'claude mcp add traces -- traces mcp spans.otlp.jsonl'],
-    overview: ['Serve span tools over MCP', 'traces mcp <ref>|--last N'],
-  },
-  // Hidden until their step (spec §2.4): validate and verify-safe (15).
-  {
-    name: 'validate',
-    usage: 'validate <file|dir> [--out FILE]',
-    job: 'What a trace can and cannot answer. Exit 1 on an error finding.',
-    flags: ['--out'],
-    refs: [1, 1],
-    examples: ['traces validate spans.otlp.jsonl'],
-    hidden: true,
-  },
-  {
-    name: 'verify-safe',
-    usage: 'verify-safe <file|dir> [--profile P] [--known-secret-env NAME]… [--format text|json]',
-    job: 'Whether files are safe to share. Exit 0 SAFE or SAFE_WITH_WARNINGS, 1 UNSAFE, 2 UNKNOWN.',
-    flags: ['--profile', '--known-secret-env', { flag: '--format', help: 'text (default) or json' }],
-    formats: ['text', 'json'],
-    refs: [1, 1],
-    examples: ['traces verify-safe handoff.md'],
-    hidden: true,
+    overview: [['Serve span tools over MCP', 'traces mcp <ref>|--last N']],
   },
 ] as const satisfies readonly CommandSpec[]
 
@@ -514,7 +505,7 @@ function commandAt(argv: readonly string[]): CommandSpec | undefined {
 
 /** The commands that take `flag`: the ones that show it, else the ones that hide it. */
 function appliesTo(flag: string): string[] {
-  const shown = SPECS.filter((spec) => !spec.hidden && usesOf(spec).some((use) => use.flag === flag && !use.hidden))
+  const shown = SPECS.filter((spec) => usesOf(spec).some((use) => use.flag === flag && !use.hidden))
   const any = shown.length > 0 ? shown : SPECS.filter((spec) => usesOf(spec).some((use) => use.flag === flag))
   return any.map((spec) => spec.name)
 }
@@ -527,9 +518,8 @@ const OVERVIEW_COLUMN = 49
 
 /** `traces --help`: one row per question, from the table. At most 40 lines. */
 export function renderGlobalHelp(): string {
-  const rows = SPECS.flatMap((spec) =>
-    spec.overview && !spec.hidden ? [`  ${spec.overview[0].padEnd(OVERVIEW_COLUMN - 1)} ${spec.overview[1]}`] : [])
-  const formats = [...new Set(SPECS.filter((spec) => !spec.hidden).flatMap((spec) => spec.formats ?? []))]
+  const rows = SPECS.flatMap((spec) => (spec.overview ?? []).map(([question, example]) => `  ${question.padEnd(OVERVIEW_COLUMN - 1)} ${example}`))
+  const formats = [...new Set(SPECS.flatMap((spec) => spec.formats ?? []))]
   return [
     'traces: what your agents did, where they wasted time, whether a run passes',
     '',
@@ -657,7 +647,10 @@ function checkArgs(spec: CommandSpec, args: Args, argv: readonly string[]): void
   if (spec.name === 'upload' && !selected) {
     throw new UsageError(`upload with no selection was removed in traces 1.0. Instead: ${tracesCommand([...argv, '--since', '24h'])}`)
   }
-  if (spec.select === 'required' && !selected && !args.explain) {
+  if (spec.name === 'check') checkGates(args)
+  // `check --contract F` with nothing selected explains F and reads no trace.
+  const explains = spec.name === 'check' && !selected
+  if (spec.select === 'required' && !selected && !explains) {
     const flags = new Set(usesOf(spec).map((use) => use.flag))
     const ways = ['a ref', ...['--current', '--last N', '--since T'].filter((way) => flags.has(way.split(' ')[0]!))]
     const choice = ways.length === 1 ? ways[0] : `${ways.slice(0, -1).join(', ')} or ${ways.at(-1)}`
@@ -666,6 +659,22 @@ function checkArgs(spec: CommandSpec, args: Args, argv: readonly string[]): void
         `${flags.has('--cwd') ? '; --cwd and --harness only narrow' : ''}. traces list finds a session`,
     )
   }
+}
+
+/**
+ * check fails closed: with no gate it exits 2 naming both, so a CI step whose
+ * contract variable expanded to nothing never passes. `--share-safe` reads the
+ * paths named on the command line, not a selection of sessions.
+ */
+function checkGates(args: Args): void {
+  if (args.contracts.length === 0 && !args.shareSafe) {
+    throw new UsageError('check needs a gate: --contract FILE|conformance (repeatable), or --share-safe')
+  }
+  if (args.shareSafe && (args.current || args.last > 0 || args.since !== undefined)) {
+    throw new UsageError('--share-safe reads the paths you name; --current, --last and --since select sessions for a contract. Run them as two checks')
+  }
+  if (args.shareSafe && args.refs.length === 0) throw new UsageError('--share-safe needs the files or directories to read: traces check <path> --share-safe')
+  if (args.knownSecretEnvs.length > 0 && !args.shareSafe) throw new UsageError('--known-secret-env applies with --share-safe')
 }
 
 /** `--format json|jsonl` on the command line: an error is then one JSON object on stderr. */

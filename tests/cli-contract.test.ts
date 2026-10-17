@@ -174,7 +174,27 @@ const STEP_14: readonly MovedCase[] = [
   { argv: ['help', 'stream'], spelling: 'stream', instead: 'traces help watch' },
 ]
 
-const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13, ...STEP_14]
+/** Step 15: check is the one gate; validate and verify-safe are two of its gates. */
+const STEP_15: readonly MovedCase[] = [
+  { argv: ['validate', 'spans.otlp.jsonl'], spelling: 'validate', instead: 'traces check spans.otlp.jsonl --contract conformance' },
+  { argv: ['validate', 'results/sessions', '--out', 'conformance.md'], spelling: 'validate', instead: 'traces check <f> --contract conformance' },
+  { argv: ['help', 'validate'], spelling: 'validate', instead: 'traces help check' },
+  {
+    argv: ['verify-safe', 'out', '--profile', 'strict', '--known-secret-env', 'TANGLE_API_KEY', '--format', 'json'],
+    spelling: 'verify-safe',
+    instead: 'traces check out --known-secret-env TANGLE_API_KEY --format json --share-safe',
+  },
+  {
+    argv: ['check', 'run.jsonl', '--contract', 'c.json', '--junit', 'contract.xml'],
+    spelling: '--junit',
+    instead: 'check … --format junit > FILE: the JUnit XML is the verdict on stdout',
+  },
+  { argv: ['check', 'run.jsonl', '--contract', 'c.json', '--annotations'], spelling: '--annotations', instead: 'traces check run.jsonl --contract c.json --format github' },
+  { argv: ['check', '--contract', 'c.json', '--explain'], spelling: '--explain', instead: 'traces check --contract c.json' },
+  { argv: ['check', 'spans.jsonl', '--contract', 'c.json', '--explain'], spelling: '--explain', instead: 'traces check --contract c.json' },
+]
+
+const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13, ...STEP_14, ...STEP_15]
 
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
@@ -183,7 +203,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--match', '--no-content', '--format', '--out'],
   analyze: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--format', '--out'],
   ask: [...SELECT, '--question', '--questions', '--budget', '--model'],
-  check: ['--contract', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
+  check: ['--contract', '--share-safe', '--known-secret-env', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
   diff: ['--format'],
   watch: ['--since', '--cwd', '--harness', '--once', '--format'],
   bundle: ['--current', '--harness', '--out'],
@@ -194,23 +214,17 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   mcp: ['--current', '--last', '--since', '--cwd', '--harness'],
 }
 
-/**
- * The 24 options of §2.5, less the two whose command takes them in a later
- * step: `--share-safe` and `--known-secret-env` (check, step 15). `--help` and
- * `--version` are global.
- */
+/** The 24 options of §2.5; `--help` and `--version` are global. */
 const OPTIONS = [
   '--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn',
   '--format', '--out', '--match', '--no-content',
   '--question', '--questions', '--budget', '--model',
-  '--contract', '--once', '--dry-run', '--yes', '--unused',
+  '--contract', '--share-safe', '--known-secret-env', '--once', '--dry-run', '--yes', '--unused',
 ]
 
-/** 0.x spellings kept, hidden, until the step that moves each (spec §2.4). */
-const HIDDEN_COMMANDS = ['validate', 'verify-safe']
+/** 0.x flags kept, hidden, until the step that moves each (spec §2.4). */
 const HIDDEN_FLAGS: Readonly<Record<string, readonly string[]>> = {
   ask: ['--dir', '--question-budget', '--question-timeout', '--concurrency'],
-  check: ['--junit', '--annotations', '--explain'],
   diff: ['--kind'],
 }
 
@@ -441,7 +455,7 @@ describe('exit codes: 0 yes, 1 no, 2 could not answer, with the reason as code',
 
     const passed = await runCli(['check', run, '--contract', contract, '--format', 'json'], { env })
     expect(passed.code).toBe(0)
-    expect(JSON.parse(passed.stdout)).toMatchObject({ contract: 'bash-required', status: 'pass', exitCode: 0 })
+    expect(JSON.parse(passed.stdout)).toMatchObject({ status: 'pass', exitCode: 0, gates: [{ gate: 'contract', status: 'pass', report: { contract: 'bash-required' } }] })
 
     const unreadable = await runCli(['check', join(dir, 'missing.otlp.jsonl'), '--contract', contract, '--format', 'json'], { env })
     expect(unreadable.code).toBe(2)
@@ -459,9 +473,9 @@ describe('exit codes: 0 yes, 1 no, 2 could not answer, with the reason as code',
     expect(badContract.code).toBe(2)
     expect(errorOf(badContract.stderr).code).toBe('usage')
 
-    const noContract = await runCli(['check', run], { env })
-    expect(noContract.code).toBe(2)
-    expect(noContract.stderr).toContain('check needs --contract')
+    const noGate = await runCli(['check', run], { env })
+    expect(noGate.code).toBe(2)
+    expect(noGate.stderr).toContain('check needs a gate: --contract FILE|conformance (repeatable), or --share-safe')
   }, 60_000)
 
   it('diff exits 0 when two runs agree, and 2 when neither records an outcome to agree on', async () => {
@@ -483,7 +497,6 @@ describe('exit codes: 0 yes, 1 no, 2 could not answer, with the reason as code',
 describe('hidden spellings', () => {
   it('are absent from help', async () => {
     const global = (await runCli(['--help'], { env })).stdout
-    for (const command of HIDDEN_COMMANDS) expect(global).not.toMatch(new RegExp(`(^ {2}|traces )${command}($|\\s)`, 'mu'))
     for (const [command, flags] of Object.entries(HIDDEN_FLAGS)) {
       const help = (await runCli([command, '--help'], { env })).stdout
       for (const flag of flags) expect(help, `${command} --help lists ${flag}`).not.toContain(flag)
@@ -518,8 +531,6 @@ describe('hidden spellings', () => {
       }),
     ].map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
 
-    expect((await runCli(['validate', spans], { env })).code).toBe(0)
-    expect((await runCli(['verify-safe', spans, '--profile', 'share', '--format', 'json'], { env })).code).toBe(0)
     const diff = await runCli(['diff', spans, spans, '--kind', 'TOOL', '--format', 'json'], { env })
     expect(diff.code).toBe(2)
     expect((JSON.parse(diff.stderr) as { code: string }).code).toBe('no-outcome')

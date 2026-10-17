@@ -433,8 +433,8 @@ export function renderConformance(
 }
 
 /**
- * The `traces validate` report. Same body, plus a verdict line a reader (or a
- * CI job reading the exit code) can act on.
+ * The `traces check --contract conformance` report. Same body, plus a verdict
+ * line a reader (or a CI job reading the exit code) can act on.
  *
  * The three verdicts are the three answers `@tangle-network/agent-trace-contract`
  * can give, in its own terms — `ok` says whether the input is a trace AT ALL, and
@@ -459,23 +459,4 @@ export function renderValidation(
       : 'CONFORMS — analysable. Every finding below is a degradation of a readable trace, not a bar to ' +
         'reading it; each one names the capability it costs.'
   return `# trace conformance — ${opts.subject}\n\n**${verdict}**\n\n${conformanceBody(validation, { ...opts, headingLevel: 2 })}`
-}
-
-/**
- * Exit code for `traces validate`, which is read by CI.
- *
- * Non-zero on exactly one condition: the input is not a trace. That is what
- * `TraceValidation.ok` means and the contract's severities are defined to match
- * it — `error` is "nothing readable", `warn` is "readable but degraded", `info`
- * is "nothing lost" — so a severity scan here would only be a second, driftable
- * copy of the same rule.
- *
- * A degraded trace exits 0 deliberately. Failing on degradation is failing on
- * thinness, and every real-world trace is thin somewhere: a gate that red-lights
- * `flat-hierarchy` or `no-usage` is one a producer learns to ignore. What a
- * missing field costs is stated per capability, in the table, where it can be
- * acted on.
- */
-export function validationExitCode(validation: TraceValidation): number {
-  return validation.ok ? 0 : 1
 }

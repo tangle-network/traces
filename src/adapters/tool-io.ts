@@ -89,6 +89,18 @@ function truncatedValue(value: string, bytes: number): string {
   return `${prefix}\n[truncated ${omittedBytes} bytes]`
 }
 
+/**
+ * `value` within {@link TOOL_IO_VALUE_MAX_BYTES}: unchanged when it fits, else
+ * its prefix and a `[truncated N bytes]` marker, as a fresh string that keeps
+ * no reference to the long one. A reader that streams a file it cannot hold
+ * keeps each value it retains to this size.
+ */
+export function boundedString(value: string): string {
+  if (value.length <= TOOL_IO_VALUE_MAX_BYTES / 4) return value
+  const bytes = Buffer.byteLength(value)
+  return bytes > TOOL_IO_VALUE_MAX_BYTES ? truncatedValue(value, bytes) : value
+}
+
 function valueAttributes(side: 'input' | 'output', raw: unknown): Record<string, unknown> {
   const serialized = serialize(raw)
   if (!serialized) return {}

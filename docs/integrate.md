@@ -10,7 +10,7 @@ npm i @tangle-network/agent-trace-contract    # zero runtime dependencies
 
 You install it to PRODUCE spans. This package already depends on it to read
 them, so `npx @tangle-network/traces@latest` arrives with the contract-backed
-analyses working: trace conformance, `traces validate`, OTLP files as refs,
+analyses working: trace conformance (`traces check <f> --contract conformance`), OTLP files as refs,
 round-over-round convergence and the steering chain, and OpenInference
 conversion.
 
@@ -33,7 +33,7 @@ const round2 = loopSpan({ traceId, spanId: 'round-2', parentSpanId: null, name: 
 Write one span per line to a `.jsonl` file, then:
 
 ```bash
-traces validate spans.otlp.jsonl        # exit 1 only when the file is not a trace
+traces check spans.otlp.jsonl --contract conformance   # exit 1 only when the file is not a trace
 traces analyze spans.otlp.jsonl        # a directory reads the OTLP files under it
 ```
 

@@ -2,7 +2,7 @@
 
 [traces](../README.md#docs) › Upload and share safely
 
-`traces upload` sends sessions to the Tangle Intelligence Platform. `traces verify-safe` says whether files are safe to share.
+`traces upload` sends sessions to the Tangle Intelligence Platform. `traces check <path> --share-safe` says whether files are safe to share.
 
 `upload` **redacts locally before anything leaves the machine**, dedups against already-uploaded sessions, and tags each with metadata (harness, cwd, git branch, host).
 It then checks the final events of each session, exactly as they would be sent, with the share-safety verdict.
@@ -34,19 +34,19 @@ Always `--dry-run` first to see exactly what would be sent.
 
 ## Check before sharing
 
-`verify-safe` reads files and says whether they are safe to share. It never changes them.
+`traces check <path> --share-safe` reads files as bytes and says whether they are safe to share, under the `share` profile. It never changes them, and never reads a path as a trace.
 
 ```bash
-traces verify-safe bundle-dir                              # share profile (default)
-traces verify-safe session.jsonl --profile strict --format json
-traces verify-safe out/ --known-secret-env TANGLE_API_KEY  # also look for this exact key, in any encoding
+traces check bundle-dir --share-safe
+traces check session.jsonl --share-safe --format json
+traces check out/ --share-safe --known-secret-env TANGLE_API_KEY  # also look for this exact key, in any encoding
 ```
 
 | Status | Meaning | Exit |
 |---|---|---|
 | `SAFE` | Nothing found | 0 |
 | `SAFE_WITH_WARNINGS` | Only warnings: raw content, identifiers, embedded media | 0 |
-| `UNSAFE` | A credential remains, or personal data under `share` or `strict` | 1 |
+| `UNSAFE` | A credential or personal data remains | 1 |
 | `UNKNOWN` | A file, line or byte range could not be read, so its safety is unknown | 2 |
 
 `.json` files are parsed whole and `.jsonl` or `.ndjson` files line by line. Any other file is scanned as text.

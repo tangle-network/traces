@@ -56,10 +56,10 @@ Do not stage another operator-side copy outside this engagement directory.
 If the customer delivered a separate copy earlier, inventory and delete it at handoff.
 
 ```bash
-traces validate "$ENGAGEMENT_DIR/incoming/spans.otlp.jsonl"
+traces check "$ENGAGEMENT_DIR/incoming/spans.otlp.jsonl" --contract conformance
 ```
 
-`validate` never throws on a foreign trace. It reports conformance, then a capability
+The conformance gate never throws on a foreign trace. It reports conformance, then a capability
 table: token-accounting, cost-attribution, tool-usage, loop-convergence,
 tree-comparison, steering-chain, latency-analysis, each available or not with the
 trace's own reason.

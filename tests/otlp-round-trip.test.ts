@@ -32,7 +32,6 @@ import {
   type TraceValidation,
   validateTraceSpans,
 } from '@tangle-network/agent-trace-contract'
-import { validationExitCode } from '../src/conformance.js'
 import { readOtlpInput } from '../src/otlp-input.js'
 import { writeOtlpFile } from '../src/otlp.js'
 
@@ -463,7 +462,6 @@ describe('re-exporting a trace does not change what a validator says about it', 
       // Verdict, exit code and capabilities: equal, with no exception mechanism.
       // A caller decides whether to spend a run on these three.
       expect(trip.artifact.ok).toBe(trip.source.ok)
-      expect(validationExitCode(trip.artifact)).toBe(validationExitCode(trip.source))
       expect(capabilitiesOf(trip.artifact)).toEqual(capabilitiesOf(trip.source))
 
       // The finding set: equal, modulo deviations DECLARED on this fixture.
