@@ -29,7 +29,7 @@ import { isInheritedSpan, isSubagentSpan, isSynthesizedSpan } from './adapters/p
 import { classifyFailureFollowUps, type FailureFollowUpReport } from './failure-followup.js'
 import type { OtlpSpan } from './otlp.js'
 import { toRuntimeStore } from './runtime-store.js'
-import { computeSessionFacts, isCompletionClaim, isOwnAgentMessage, type SessionFacts } from './session-facts.js'
+import { computeSessionFacts, type SessionFacts } from './session-facts.js'
 import { commandLines, commandTextFromInput } from './shell-commands.js'
 
 export interface PipelineReport {
@@ -92,7 +92,7 @@ export interface TraceStreamSession {
   readonly path?: string
 }
 
-export type TraceLiveActionKind = 'tool' | 'read' | 'edit' | 'verify' | 'claim' | 'other'
+export type TraceLiveActionKind = 'tool' | 'read' | 'edit' | 'verify' | 'other'
 
 export interface TraceLiveAction {
   readonly kind: TraceLiveActionKind
@@ -138,42 +138,14 @@ function spanKind(span: OtlpSpan): string {
   return asString(span.attributes['openinference.span.kind'])?.toUpperCase() ?? 'UNKNOWN'
 }
 
-function spanContent(span: OtlpSpan): string {
-  return (
-    asString(span.attributes.content) ??
-    asString(span.attributes['input.value']) ??
-    asString(span.attributes['llm.input']) ??
-    asString(span.attributes['gen_ai.prompt']) ??
-    ''
-  )
-}
-
 function toolName(span: OtlpSpan): string {
   return asString(span.attributes['tool.name']) ?? span.name.replace(/^tool\./, '')
 }
 
-/** A Codex code-mode call's commands: `tools.exec_command({cmd:"…"})` in the script it ran. */
-const CODE_MODE_COMMAND = /\bexec_command\(\s*\{\s*cmd\s*:\s*("(?:[^"\\]|\\.)*")/gu
-
-/**
- * The script a shell call ran, or undefined for a call that is not a shell
- * call. A Codex code-mode span records the JavaScript it ran; its
- * `exec_command` calls name the commands, one script line each.
- */
+/** The script a shell call ran (a Codex code-mode script's commands included), or undefined for a call that ran none. */
 function scriptOf(span: OtlpSpan): string | undefined {
   const input = span.attributes['input.value']
-  if (typeof input !== 'string') return undefined
-  const script = commandTextFromInput(input)
-  if (script !== undefined) return script
-  const commands = [...input.matchAll(CODE_MODE_COMMAND)].flatMap((match) => {
-    try {
-      const command = JSON.parse(match[1]!) as unknown
-      return typeof command === 'string' && command.length > 0 ? [command] : []
-    } catch {
-      return []
-    }
-  })
-  return commands.length > 0 ? commands.join('\n') : undefined
+  return typeof input === 'string' ? commandTextFromInput(input) : undefined
 }
 
 /**
@@ -338,11 +310,10 @@ function actionKind(span: OtlpSpan, commands: readonly string[]): TraceLiveActio
     if (READ_TOOL.test(toolName(span)) || (commands.length > 0 && commands.every((line) => READ_COMMAND.test(line)))) return 'read'
     return 'tool'
   }
-  if (isOwnAgentMessage(span) && isCompletionClaim(spanContent(span))) return 'claim'
   return 'other'
 }
 
-/** The session's own acts, in order, each classified as a check, an edit, a read, another tool call, or a completion claim. */
+/** The session's own acts, in order, each classified as a check, an edit, a read, another tool call, or something else. */
 export function classifyLiveActions(spans: readonly OtlpSpan[]): TraceLiveAction[] {
   return orderSpans(spans).filter(isOwnAct).map((span) => {
     const tool = isTool(span) ? toolName(span) : undefined
@@ -478,51 +449,6 @@ const verificationWithoutChangeAnalyst: TraceLiveAnalyst = {
   },
 }
 
-/**
- * Completion claims made after an edit with no check since it: the claim says
- * done, the last change was never run against a test, build, typecheck or
- * lint. A claim with no edit before it claims nothing a check could confirm.
- *
- * Labelled by hand on 10 real sessions (traces 1.0 step 13), 0 of 9 such
- * findings held: the claims were status reports (merged, landed, collected)
- * and the edits notes or state files. The finding is LOW until a better rule
- * earns more; `analyze` still lists the claims.
- */
-export function unverifiedClaims(actions: readonly TraceLiveAction[]): TraceLiveAction[] {
-  const unverified: TraceLiveAction[] = []
-  let editSinceCheck = false
-  for (const action of actions) {
-    if (action.kind === 'edit') editSinceCheck = true
-    else if (action.kind === 'verify') editSinceCheck = false
-    else if (action.kind === 'claim' && editSinceCheck) unverified.push(action)
-  }
-  return unverified
-}
-
-const completionClaimWithoutVerificationAnalyst: TraceLiveAnalyst = {
-  id: 'completion-claim-without-verification',
-  analyze(context) {
-    const claims = unverifiedClaims(context.actions)
-    const last = claims.at(-1)
-    if (!last) return []
-    return [finding({
-      ruleId: 'completion-claim-without-verification',
-      severity: 'low',
-      title: 'Completion claimed after an edit with no check since',
-      claim: `${claims.length} completion claim(s) followed an edit with no test, build, typecheck or lint run after it; the last: "${oneLine(spanContent(last.span), 160)}"`,
-      action: 'Run the check that covers the last edit before claiming completion, or state the claim as unverified.',
-      check: 'A test, build, typecheck or lint command should run between the last edit and the claim.',
-      evidence: [
-        evidence('span', 'claim_span', oneLine(spanContent(last.span), 240), claims.slice(-3).map((claim) => claim.spanId)),
-        evidence('metric', 'unverified_claims', String(claims.length)),
-      ],
-      session: context.session,
-      observedAt: context.generatedAt,
-      signature: [last.spanId, String(claims.length)],
-    })]
-  },
-}
-
 const highToolErrorRateAnalyst: TraceLiveAnalyst = {
   id: 'high-tool-error-rate',
   analyze(context) {
@@ -547,7 +473,6 @@ const highToolErrorRateAnalyst: TraceLiveAnalyst = {
 export const defaultTraceLiveAnalysts: readonly TraceLiveAnalyst[] = [
   sameFailingCommandAnalyst,
   verificationWithoutChangeAnalyst,
-  completionClaimWithoutVerificationAnalyst,
   highToolErrorRateAnalyst,
 ]
 

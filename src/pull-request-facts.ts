@@ -29,7 +29,7 @@
 
 import type { OtlpSpan } from './otlp.js'
 import { isInnerToolCall } from './adapters/tool-io.js'
-import { commandTextFromInput, shellCommands } from './shell-commands.js'
+import { commandTextFromInput, isCodeModeScript, shellCommands } from './shell-commands.js'
 
 /** The `gh` executables an audit recognizes, including the wrapper this project uses. */
 const GH_NAMES: ReadonlySet<string> = new Set(['gh', 'gh-drew'])
@@ -107,6 +107,7 @@ interface CommandRecord {
   readonly spanId: string
   readonly script: string
   readonly output: string
+  /** Not known to have succeeded: a non-zero exit, or a code-mode script, whose status is the script's, not the command's. */
   readonly failed: boolean
   readonly inputTruncated: boolean
   readonly outputTruncated: boolean
@@ -145,11 +146,14 @@ function basename(word: string): string {
  */
 function commandRecords(spans: readonly OtlpSpan[]): CommandRecord[] {
   const scripted = new Map<OtlpSpan, string>()
+  const codeMode = new Set<OtlpSpan>()
   for (const span of spans) {
     const input = stringAttribute(span, 'input.value')
     if (input === null) continue
     const script = commandTextFromInput(input)
-    if (script !== undefined) scripted.set(span, script)
+    if (script === undefined) continue
+    scripted.set(span, script)
+    if (isCodeModeScript(input)) codeMode.add(span)
   }
   const innerParents = new Set<string>()
   const innerScripts = new Set<string>()
@@ -168,7 +172,7 @@ function commandRecords(spans: readonly OtlpSpan[]): CommandRecord[] {
       spanId: span.span_id,
       script,
       output: stringAttribute(span, 'output.value') ?? '',
-      failed: exitCode === null ? span.status.code === 'ERROR' : exitCode !== 0,
+      failed: codeMode.has(span) || (exitCode === null ? span.status.code === 'ERROR' : exitCode !== 0),
       inputTruncated: span.attributes['traces.input.truncated'] === true,
       outputTruncated: span.attributes['traces.output.truncated'] === true,
     })
@@ -263,7 +267,7 @@ function inferHeadBranch(commands: readonly string[][], upTo: number, output: st
   return PUSH_TRACKING.exec(output)?.[1] ?? PUSH_NEW_BRANCH.exec(output)?.[1] ?? null
 }
 
-/** Whether the shell reached `gh` at all, for a command that exited non-zero. */
+/** Whether the shell reached `gh` at all, for a command not known to have succeeded. */
 function reachedGh(record: CommandRecord, action: 'create' | 'merge', sawNumber: boolean): boolean {
   if (!record.failed) return true
   if (sawNumber || PULL_REQUEST_URL.test(record.output)) return true

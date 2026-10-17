@@ -8,14 +8,13 @@
  *   5  tool-error clusters
  *   6  stalls of 10 minutes or more no turn ended
  *   7  interrupts and rejections
- *   8  unverified completion claims
- *   9  pull requests
- *   10 findings, HIGH first, each with span ids
- *   11 how many questions the trace cannot answer, and where they are listed
+ *   8  pull requests
+ *   9  findings, HIGH first, each with span ids
+ *   10 how many questions the trace cannot answer, and where they are listed
  *
- * Several sessions put sections 2–9 in a table of the 15 with the most waste.
+ * Several sessions put sections 2–8 in a table of the 15 with the most waste.
  * A section whose data is absent is left out; a fact that is unknown is one
- * of the questions section 11 counts, never a 0. Every number is the facts
+ * of the questions section 10 counts, never a 0. Every number is the facts
  * sheet's (`session-facts.ts`) or the measure's that owns it.
  */
 
@@ -23,7 +22,7 @@ import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { isInheritedSpan } from './adapters/provenance.js'
 import { ATTR, sessionIdFromAttributes } from './attributes.js'
-import type { CannotAnswer, SessionToolErrors, TraceInvestigationResult, UnverifiedClaim } from './improvement.js'
+import type { CannotAnswer, SessionToolErrors, TraceInvestigationResult } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
 import { describeSessionRelationship } from './session-relationship.js'
 import {
@@ -256,20 +255,13 @@ function interruptLines(facts: SessionFacts): string[] {
   ]
 }
 
-/** 8: completion claims after an edit with no check since, the latest first. */
-function claimLine(claims: readonly UnverifiedClaim[]): string | null {
-  if (claims.length === 0) return null
-  const shown = claims.slice(-2).reverse().map((claim) => `${utcMinute(claim.at).slice(6)} "${sheetText(claim.text, 70)}" (span ${claim.spanId})`)
-  return `unverified claims ${claims.length}: ${shown.join(' · ')}`
-}
-
 /** PR numbers as `#12 #13`, at most `keep` of them, then how many more. */
 function prList(entries: readonly { readonly identifier: string | null }[], keep = 6): string {
   const ids = entries.map((entry) => entry.identifier === null ? 'unnumbered' : /^\d+$/u.test(entry.identifier) ? `#${entry.identifier}` : sheetText(entry.identifier, 30))
   return `${entries.length}${ids.length > 0 ? ` (${ids.slice(0, keep).join(' ')}${ids.length > keep ? ` +${ids.length - keep}` : ''})` : ''}`
 }
 
-/** 9: pull requests, when the session opened or merged any. */
+/** 8: pull requests, when the session opened or merged any. */
 function prLine(facts: SessionFacts): string | null {
   const prs = facts.pullRequests.value
   if (prs === null || prs.created.length + prs.merged.length === 0) return null
@@ -302,7 +294,7 @@ function findingLine(finding: AnalystFinding, sessions: number): string {
   return `  ${SEVERITY_LABEL[finding.severity].padEnd(4)} ${session}${finding.subject ?? finding.area}: ${sheetText(finding.claim, 110)}${cite}`
 }
 
-/** 10 and 11, fitted into the lines left. */
+/** 9 and 10, fitted into the lines left. */
 function closingLines(result: TraceInvestigationResult, used: number): string[] {
   const findings = result.packet.findings
   const lines: string[] = []
@@ -335,7 +327,6 @@ function singleSession(result: TraceInvestigationResult, facts: SessionFacts): s
     toolErrorLine(result.measures.toolErrors.find((entry) => entry.sessionId === sessionId)),
     stallLine(facts),
     ...interruptLines(facts),
-    claimLine(result.measures.unverifiedClaims.filter((claim) => claim.sessionId === sessionId)),
     prLine(facts),
   ].filter((line): line is string => line !== null)
 }
@@ -378,7 +369,7 @@ function cell(text: string, width: number): string {
   return text.length > width ? `${text.slice(0, width - 1)}…` : text.padEnd(width)
 }
 
-/** 2–9 for several sessions: one row each for the 15 with the most waste. */
+/** 2–8 for several sessions: one row each for the 15 with the most waste. */
 function sessionTable(result: TraceInvestigationResult): string[] {
   const sessions = [...result.facts.sessions].sort((a, b) =>
     (b.measurements.waste.minutes ?? -1) - (a.measurements.waste.minutes ?? -1))

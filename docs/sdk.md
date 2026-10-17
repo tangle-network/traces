@@ -21,11 +21,8 @@ The CLI is a thin consumer of these exports.
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | what `traces analyze <ref> --format json` prints: facts, finding packet, measures, conformance, `cannotAnswer` |
 | `runTraceQuestions` | `(TraceQuestionsOptions) → TraceQuestionsResult` | ask many free-form questions of one span list, concurrently, under one shared cost ledger; keeps each answer and checks its citations |
 | `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | render any `AnalystFinding[]` without changing its schema |
-| `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
-| `streamSessions` | `(TraceStreamOptions) → Promise<void>` | live JSONL-ready event stream over active sessions |
-| `traceStreamEventsFromSpans` | `(spans, opts?) → TraceStreamEvent[]` | replay an existing span list as stream events |
-| `analyzeLiveBatch` | `(spans, opts?) → TraceLiveBatch` | compute semantic online findings for one batch |
-| `classifyLiveActions` | `(spans) → TraceLiveAction[]` | classify spans once as read/edit/verify/claim/tool/other |
+| `streamSessions` | `(TraceStreamOptions) → Promise<void>` | the session, finding and tick events `traces watch --format jsonl` prints, over active or named sessions |
+| `classifyLiveActions` | `(spans) → TraceLiveAction[]` | classify spans once as read/edit/verify/tool/other |
 | `defaultTraceLiveAnalysts` | `TraceLiveAnalyst[]` | the built-in online analysts; extend or replace them |
 | `collectSessionWorkflow` | `(adapter, seeds, opts?) → SessionWorkflow` | resolve a bounded parent/child session tree with explicit relationship issues |
 | `collectSessionSelection` | `(groups, opts?) → SessionSelection` | parse, expand, and optionally byte-bind selected session groups |
@@ -40,7 +37,7 @@ The CLI is a thin consumer of these exports.
 ```ts
 import {
   AnalystRegistry, analyzeSpans, makeFinding, readOtlpInput, renderValidation,
-  streamSessions, watchSessions,
+  streamSessions,
 } from '@tangle-network/traces'
 
 // Read OTLP any system emitted, and find out what it can answer before analysing:
@@ -48,12 +45,9 @@ const input = await readOtlpInput('spans.otlp.jsonl')   // or a directory
 console.log(renderValidation(input.validation, { subject: 'spans.otlp.jsonl', spans: input.spans }))
 if (input.validation.ok) await analyzeSpans(input.spans)
 
-// Observe live sessions, feed findings anywhere (read-only, cancellable):
+// Watch live sessions and feed their findings anywhere (read-only, cancellable):
 const c = new AbortController()
-await watchSessions({ all: true, signal: c.signal, onLoop: (l) => alert(`${l.toolName} x${l.occurrences}`) })
-
-// Feed a visualizer or dashboard:
-await streamSessions({ all: true, signal: c.signal, includeSpans: false, onEvent: (event) => console.log(event) })
+await streamSessions({ signal: c.signal, onEvent: (event) => { if (event.event === 'finding') alert(event.finding.claim) } })
 
 // Run your own analyst instead of the built-ins:
 const registry = new AnalystRegistry()

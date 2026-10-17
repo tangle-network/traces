@@ -1,170 +1,143 @@
-import { describe, expect, it } from 'vitest'
-import {
-  analyzeLiveBatch,
-  classifyLiveActions,
-  serializeTraceStreamEvent,
-  span,
-  streamSessions,
-  traceStreamEventsFromSpans,
-  type HarnessTraceAdapter,
-  type OtlpSpan,
-  type SessionRef,
-  type TraceLiveAnalyst,
-  type TraceStreamEvent,
-} from '../src/index.js'
+/**
+ * `traces watch` through the built CLI: the rules `analyze` ranks, over live
+ * sessions, as one text line per finding or as the `traces.stream` events. The
+ * clock is faked (`fixtures/clock.mjs`), the one boundary a live loop needs:
+ * it stands still for exact output, or jumps between passes so a second pass
+ * runs at once.
+ */
+import { mkdir, mkdtemp, utimes, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { beforeAll, describe, expect, it } from 'vitest'
+import { streamSessions, type TraceLiveAnalyst, type TraceStreamEvent } from '../src/index.js'
+import { ghReviewSession, jsonl, REPO, REVIEW_ID, WORKER_ID, workerSession } from './fixtures/analyze.js'
+import { claudeTranscript } from './fixtures/home.js'
+import { fakeClock, runCli, runCliUntil } from './run-cli.js'
 
-const ref: SessionRef = {
-  harness: 'synthetic',
-  sessionId: 'sess-live',
-  path: '/tmp/sess-live.jsonl',
-  cwd: '/work/project',
-  mtimeMs: Date.parse('2026-01-01T00:00:10.000Z'),
+const NOW = '2026-10-16T10:40:00.000Z'
+const minutesBefore = (minutes: number): Date => new Date(Date.parse(NOW) - minutes * 60_000)
+
+interface Home {
+  readonly root: string
+  readonly home: string
+  readonly env: Record<string, string>
 }
 
-/** A session that edits, fails one check three times in a row, edits again, and claims done with no check after. */
-function liveSpans(): OtlpSpan[] {
-  const base = Date.parse('2026-01-01T00:00:00.000Z')
-  const at = (second: number) => new Date(base + second * 1_000).toISOString()
-  const tool = (spanId: string, second: number, name: string, input: Record<string, unknown>, status: 'OK' | 'ERROR' = 'OK') => span({
-    traceId: 'sess-live',
-    spanId,
-    parentSpanId: 'root',
-    name: `tool.${name}`,
-    kind: 'TOOL',
-    startTime: at(second),
-    endTime: at(second + 0.5),
-    service: 'synthetic',
-    tool: name,
-    status,
-    step: second,
-    extra: { 'input.value': JSON.stringify(input) },
+/** A HOME holding Claude Code sessions, each file's mtime `minutes` before NOW. */
+async function homeWith(sessions: ReadonlyArray<{ id: string; text: string; minutes: number; project?: string }>): Promise<Home & { paths: string[] }> {
+  const root = await mkdtemp(join(tmpdir(), 'traces-watch-'))
+  const home = join(root, 'home')
+  const paths: string[] = []
+  for (const { id, text, minutes, project = REPO } of sessions) {
+    const path = join(home, '.claude', 'projects', project.replaceAll('/', '-'), `${id}.jsonl`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, text)
+    await utimes(path, minutesBefore(minutes), minutesBefore(minutes))
+    paths.push(path)
+  }
+  return { root, home, env: { HOME: home, XDG_STATE_HOME: join(root, 'state') }, paths }
+}
+
+const events = (stdout: string): TraceStreamEvent[] => stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as TraceStreamEvent)
+const ticks = (stdout: string): number => (stdout.match(/"event":"tick"/gu) ?? []).length
+
+let fx: Home & { paths: string[] }
+beforeAll(async () => {
+  fx = await homeWith([
+    { id: WORKER_ID, text: jsonl(workerSession()), minutes: 2 },
+    { id: REVIEW_ID, text: jsonl(ghReviewSession()), minutes: 4 },
+  ])
+})
+
+describe('traces watch, one pass', () => {
+  it('prints one line per finding of a named session, then what it read', async () => {
+    const run = await runCli(['watch', fx.paths[0]!, '--once'], { env: { ...fx.env, ...fakeClock(NOW) } })
+    expect(run.code, run.stderr).toBe(0)
+    expect(run.stderr).toBe('')
+    const lines = run.stdout.trimEnd().split('\n')
+    expect(lines[0]).toMatch(/^10:40:00 HIGH a11a1a11 claude-code same-failing-command: `pnpm test` failed 3× in a row \(5 min\)\. \(spans \S+, \S+, …\)$/u)
+    expect(lines[1]).toMatch(/^10:40:00 MED a11a1a11 claude-code verification-without-change: `pnpm test` ran 3× with no edit between\. \(spans /u)
+    expect(lines[2]).toMatch(/^10:40:00 MED a11a1a11 claude-code high-tool-error-rate: 3\/6 tool call\(s\) ended with ERROR\. \(spans /u)
+    expect(lines.slice(3)).toEqual(['1 named session: 1 session read · 3 findings'])
   })
-  return [
-    span({
-      traceId: 'sess-live',
-      spanId: 'root',
-      name: 'session',
-      kind: 'AGENT',
-      startTime: at(0),
-      service: 'synthetic',
-      extra: { 'tangle.cwd': '/work/project' },
-    }),
-    tool('edit-1', 1, 'Edit', { file_path: '/work/project/src/parse.ts', old_string: 'a', new_string: 'b' }),
-    tool('test-1', 2, 'Bash', { command: 'pnpm test' }, 'ERROR'),
-    tool('test-2', 3, 'Bash', { command: 'pnpm test' }, 'ERROR'),
-    tool('test-3', 4, 'Bash', { command: 'pnpm test' }, 'ERROR'),
-    tool('edit-2', 5, 'Edit', { file_path: '/work/project/src/parse.ts', old_string: 'b', new_string: 'c' }),
-    span({
-      traceId: 'sess-live',
-      spanId: 'claim-1',
-      parentSpanId: 'root',
-      name: 'message.assistant',
-      kind: 'CHAIN',
-      startTime: at(6),
-      service: 'synthetic',
-      content: 'Done. The bug is fixed and tests pass.',
-      step: 6,
-    }),
-  ]
-}
 
-describe('live trace intelligence', () => {
-  it('turns an online span batch into semantic findings beyond identical-tool alerts', () => {
-    const batch = analyzeLiveBatch(liveSpans(), {
-      generatedAt: '2026-01-01T00:00:05.000Z',
-      session: { harness: 'synthetic', sessionId: 'sess-live', cwd: '/work/project', path: ref.path },
-    })
-
-    expect(batch.kind).toBe('traces.live_batch')
-    expect(batch.toolCallCount).toBe(5)
-    expect(batch.erroredToolCallCount).toBe(3)
-    expect(batch.verificationCallCount).toBe(3)
-    expect(batch.changeCallCount).toBe(2)
-    expect(batch.actionCounts.verify).toBe(3)
-    expect(batch.actionCounts.claim).toBe(1)
-    expect(batch.findings.map((f) => f.ruleId).sort()).toEqual([
-      'completion-claim-without-verification',
-      'high-tool-error-rate',
-      'same-failing-command',
-      'verification-without-change',
+  it('reads every session active in the window by default, and none older', async () => {
+    const stale = await homeWith([
+      { id: WORKER_ID, text: jsonl(workerSession()), minutes: 45 },
+      { id: REVIEW_ID, text: jsonl(ghReviewSession()), minutes: 4 },
     ])
-    const repeated = batch.findings.find((f) => f.ruleId === 'same-failing-command')
-    expect(repeated?.action).toContain('Stop rerunning it')
-    expect(repeated?.evidence[0]?.spanIds).toEqual(['test-1', 'test-2', 'test-3'])
+    const recent = await runCli(['watch', '--once'], { env: { ...fx.env, ...fakeClock(NOW) } })
+    expect(recent.stdout.trimEnd().split('\n').at(-1)).toBe('every session active in the last 30m: 2 sessions read · 3 findings')
+    const one = await runCli(['watch', '--once', '--format', 'jsonl'], { env: { ...stale.env, ...fakeClock(NOW) } })
+    expect(events(one.stdout).flatMap((event) => (event.event === 'session' ? [event.session.sessionId] : []))).toEqual([REVIEW_ID])
+    const wider = await runCli(['watch', '--once', '--since', '1h', '--format', 'jsonl'], { env: { ...stale.env, ...fakeClock(NOW) } })
+    expect(events(wider.stdout).filter((event) => event.event === 'session')).toHaveLength(2)
   })
 
-  it('classifies actions once and lets callers bring custom live analysts', () => {
-    const actions = classifyLiveActions(liveSpans())
-    expect(actions.map((action) => action.kind)).toEqual(['other', 'edit', 'verify', 'verify', 'verify', 'edit', 'claim'])
+  it('reads the sessions of a store root', async () => {
+    const run = await runCli(['watch', fx.home, '--once', '--format', 'jsonl'], { env: { HOME: join(fx.root, 'elsewhere'), ...fakeClock(NOW) } })
+    expect(run.code, run.stderr).toBe(0)
+    expect(events(run.stdout).flatMap((event) => (event.event === 'session' ? [event.session.sessionId] : [])).sort()).toEqual([WORKER_ID, REVIEW_ID].sort())
+  })
+})
 
-    const analyst: TraceLiveAnalyst = {
-      id: 'custom-live',
+describe('traces watch, live', () => {
+  it('names each session and each finding once, however many passes read them', async () => {
+    const run = await runCliUntil(['watch', '--format', 'jsonl'], (stdout) => ticks(stdout) >= 3, { env: { ...fx.env, ...fakeClock(NOW, 5_000) } })
+    expect(run.code, run.stderr).toBe(0)
+    const seen = events(run.stdout)
+    const passes = seen.filter((event) => event.event === 'tick')
+    expect(passes.slice(0, 3).map((tick) => [tick.sessions, tick.findings, tick.newSpans > 0])).toEqual([[2, 3, true], [2, 0, false], [2, 0, false]])
+    expect(seen.filter((event) => event.event === 'session')).toHaveLength(2)
+    expect(seen.filter((event) => event.event === 'finding')).toHaveLength(3)
+    expect(run.stderr).toContain('traces watch: every session active in the last 30m, every 5 s')
+  })
+
+  it('slides the window: 40 minutes on, a session idle for 35 minutes leaves it and one idle for 10 stays', async () => {
+    // At the start both were active in the last 30 minutes; 40 minutes later only the newer one is.
+    const sliding = await homeWith([
+      { id: 'a0000000-aaaa-4aaa-8aaa-00000000000a', text: claudeTranscript('a0000000-aaaa-4aaa-8aaa-00000000000a', REPO, 30, 'Newer.'), minutes: -30 },
+      { id: 'b0000000-bbbb-4bbb-8bbb-00000000000b', text: claudeTranscript('b0000000-bbbb-4bbb-8bbb-00000000000b', REPO, 5, 'Older.'), minutes: -5 },
+    ])
+    const watched = async (since: string): Promise<number[]> => {
+      const run = await runCliUntil(['watch', '--since', since, '--format', 'jsonl'], (stdout) => ticks(stdout) >= 2, {
+        env: { ...sliding.env, ...fakeClock(NOW, 40 * 60_000) },
+      })
+      expect(run.code, run.stderr).toBe(0)
+      return events(run.stdout).flatMap((event) => (event.event === 'tick' ? [event.sessions] : [])).slice(0, 2)
+    }
+    expect(await watched('30m')).toEqual([2, 1])
+    // A start given as a time does not slide.
+    expect(await watched(minutesBefore(30).toISOString())).toEqual([2, 2])
+  })
+})
+
+describe('streamSessions (SDK)', () => {
+  it('runs a caller\'s own rule after the built-in ones, on the same classified actions', async () => {
+    const counted: TraceLiveAnalyst = {
+      id: 'action-count',
       analyze(context) {
         return [{
           schemaVersion: 1,
           kind: 'traces.live_finding',
-          id: 'live.custom-live.action-count',
-          ruleId: 'custom-live',
-          fingerprint: 'custom-live',
+          id: `live.action-count.${context.session.sessionId}`,
+          ruleId: 'action-count',
+          fingerprint: context.session.sessionId,
           severity: 'info',
-          title: 'Custom live analyst saw the batch',
-          claim: `Saw ${context.actions.length} classified action(s).`,
-          action: 'Keep streaming.',
-          check: 'The custom analyst emitted a typed finding.',
-          evidence: [{ kind: 'metric', label: 'actions', value: String(context.actions.length) }],
+          title: 'Actions counted',
+          claim: `${context.actions.length} action(s).`,
+          action: 'None.',
+          check: 'None.',
+          evidence: [],
           session: context.session,
           observedAt: context.generatedAt,
         }]
       },
     }
-    const batch = analyzeLiveBatch(liveSpans(), { analysts: [], extraAnalysts: [analyst] })
-    expect(batch.findings.map((finding) => finding.ruleId)).toEqual(['custom-live'])
-  })
-
-  it('builds replayable JSONL stream events for visualizers and downstream agents', () => {
-    const events = traceStreamEventsFromSpans(liveSpans(), {
-      ref,
-      generatedAt: '2026-01-01T00:00:05.000Z',
-    })
-
-    expect(events[0]?.event).toBe('session')
-    expect(events.filter((event) => event.event === 'span')).toHaveLength(liveSpans().length)
-    expect(events.some((event) => event.event === 'analysis_batch')).toBe(true)
-    expect(events.filter((event) => event.event === 'finding')).toHaveLength(4)
-    const line = serializeTraceStreamEvent(events.find((event) => event.event === 'finding')!)
-    expect(JSON.parse(line).finding.ruleId).toBeTruthy()
-  })
-
-  it('streams live sessions without re-emitting unchanged span pulses across ticks', async () => {
-    const adapter: HarnessTraceAdapter = {
-      harness: 'synthetic',
-      async locate() {
-        return [ref]
-      },
-      async parse() {
-        return liveSpans()
-      },
-    }
-    const controller = new AbortController()
-    const events: TraceStreamEvent[] = []
-    let ticks = 0
-    await streamSessions({
-      adapters: [adapter],
-      intervalMs: 250,
-      includeReports: true,
-      signal: controller.signal,
-      onEvent: (event) => {
-        events.push(event)
-        if (event.event === 'tick') {
-          ticks += 1
-          if (ticks === 2) controller.abort()
-        }
-      },
-    })
-
-    expect(events.filter((event) => event.event === 'span')).toHaveLength(liveSpans().length)
-    expect(events.filter((event) => event.event === 'analysis_batch')).toHaveLength(2)
-    expect(events.filter((event) => event.event === 'report')).toHaveLength(2)
-    expect(events.filter((event) => event.event === 'finding')).toHaveLength(4)
+    const seen: TraceStreamEvent[] = []
+    await streamSessions({ harnesses: ['claude-code'], home: fx.home, sinceMs: 0, once: true, extraAnalysts: [counted], onEvent: (event) => { seen.push(event) } })
+    const rules = seen.flatMap((event) => (event.event === 'finding' ? [`${event.finding.session.sessionId.slice(0, 8)} ${event.finding.ruleId}`] : []))
+    expect(rules).toEqual(expect.arrayContaining(['a11a1a11 same-failing-command', 'a11a1a11 action-count', 'b22b2b22 action-count']))
+    expect(rules.indexOf('a11a1a11 action-count')).toBeGreaterThan(rules.indexOf('a11a1a11 same-failing-command'))
   })
 })

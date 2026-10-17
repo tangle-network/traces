@@ -174,10 +174,16 @@ describe('every command writes only to --out and $XDG_STATE_HOME/traces', () => 
     expect((await run(['diff', spans, spans])).code).toBe(0)
   })
 
-  it('watch', async () => {
+  it('watch, a run tree and every active session', async () => {
     const watched = await run(['watch', spans, '--once'])
     expect(watched.code).toBe(0)
     expect(watched.stdout).not.toBe('')
+    // Every harness, the OpenCode SQLite store and the unreadable session among them.
+    const sessions = await run(['watch', '--once', '--format', 'jsonl'])
+    expect(sessions.code).toBe(0)
+    const events = sessions.stdout.trim().split('\n').map((line) => JSON.parse(line) as { event: string; session?: { sessionId: string }; unreadSessions?: unknown[] })
+    expect(events.flatMap((event) => (event.event === 'session' ? [event.session!.sessionId] : []))).toContain(IDS.opencode)
+    expect(events.at(-1)!.unreadSessions).toHaveLength(1)
   })
 
   it('convert, to stdout and to --out', async () => {

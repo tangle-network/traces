@@ -142,8 +142,15 @@ interface FileEntry {
   unread: string | null
 }
 
-interface StoreV1 {
-  version: 1
+/**
+ * The index format. A store of another version is rebuilt from the sessions,
+ * so a change to what a row holds bumps it. 2: command rows include the
+ * commands a Codex code-mode script ran.
+ */
+const INDEX_VERSION = 2
+
+interface Store {
+  version: typeof INDEX_VERSION
   files: Record<string, FileEntry>
 }
 
@@ -292,8 +299,8 @@ export class TurnIndex {
     await mkdir(join(dir, 'rows'), { recursive: true })
     await index.lock()
     try {
-      const parsed = JSON.parse(await readFile(join(dir, 'index.json'), 'utf8')) as Partial<StoreV1>
-      if (parsed.version === 1 && typeof parsed.files === 'object' && parsed.files !== null) index.files = parsed.files
+      const parsed = JSON.parse(await readFile(join(dir, 'index.json'), 'utf8')) as Partial<Store>
+      if (parsed.version === INDEX_VERSION && typeof parsed.files === 'object' && parsed.files !== null) index.files = parsed.files
     } catch {
       // No index yet, or one this version cannot read: it is rebuilt from the sessions.
     }
@@ -388,7 +395,7 @@ export class TurnIndex {
     try {
       if (!this.changed) return
       const temporary = join(this.dir, `index.json.${process.pid}.tmp`)
-      await writeFile(temporary, JSON.stringify({ version: 1, files: this.files } satisfies StoreV1))
+      await writeFile(temporary, JSON.stringify({ version: INDEX_VERSION, files: this.files } satisfies Store))
       await rename(temporary, join(this.dir, 'index.json'))
     } finally {
       const held = await readFile(this.lockPath, 'utf8').catch(() => '')

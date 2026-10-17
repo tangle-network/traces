@@ -98,8 +98,7 @@ export { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL } from './analyst-model-ca
 export type { AnalysisEngineFromEnvOptions } from './analyst-model-call.js'
 
 // ── Live observation (event-driven; feed any system) ──────────────────────
-export * from './live.js' // streamSessions(), traceStreamEventsFromSpans(), semantic live findings
-export * from './observer.js' // watchSessions({ onLoop, onReport, signal })
+export * from './live.js' // streamSessions(): the session, finding and tick events traces watch prints
 
 // ── Run trees: the live view `traces watch <target>` renders ─────────────
 // Two sources behind one view. The GENERAL one folds OTLP spans by

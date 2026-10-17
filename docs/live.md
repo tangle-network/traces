@@ -1,31 +1,39 @@
-# Watch and stream live sessions
+# Watch live sessions
 
-[traces](../README.md#docs) › Watch and stream live sessions
+[traces](../README.md#docs) › Watch live sessions
 
-## Live stream
+## Live sessions
 
-`traces watch` is the human terminal view.
-It prints repeated-tool loops and semantic findings while a coding agent is still running.
-
-`traces stream` is the machine feed.
-It emits newline-delimited JSON events that a dashboard, art visualizer, local watcher, or hosted product can consume without scraping terminal prose.
+`traces watch` follows every session active in the last 30 minutes, on every harness, and reports what the `traces analyze` rules find while the agents are still running (`src/pipelines.ts`): a command that failed 3 or more times in a row, a check rerun 3 or more times with no edit between, and half or more of a session's tool calls failing.
+Sessions are read every 5 s. The window slides: each pass watches the sessions active in the last `--since` (default `30m`), so a feed left running never goes blind.
+A session that cannot be read is skipped and named; the watch goes on.
 
 ```bash
-traces stream
-traces stream --mode findings
-traces stream --mode agent
-traces stream spans.openinference.jsonl --no-spans
+traces watch --once                          # one pass over every active session, then exit
+traces watch --since 2h --cwd .              # this repo's sessions of the last two hours, live
+traces watch 019a3c7e                        # one session, live
+traces watch --format jsonl                  # the machine feed
 ```
 
-Live streaming emits `session`, `span`, `analysis_batch`, `finding`, and `tick` events; `--mode agent` also emits `report` events.
-The findings are the rules `traces analyze` ranks (`src/pipelines.ts`): a command that failed 3 or more times in a row, a check rerun 3 or more times with no edit between, a completion claim after an edit with no check since, and high tool-error rates.
-Use `--mode findings` when you want the low-volume meaning layer; keep `visualizer` for real-time views that need motion, timing, and tool-call texture.
-Use `--mode agent` when another agent needs deterministic loop/tool-use reports alongside the findings.
-The same JSONL shape is used for live sessions and replayed trace files:
+Text prints one line per new finding:
 
-![traces stream findings mode terminal capture](./stream-findings.svg)
+```
+10:06:00 HIGH a11a1a11 claude-code same-failing-command: `pnpm test` failed 3× in a row (5 min). (spans t1, t2, …)
+```
 
-Custom live analysts go through the SDK: `streamSessions({ extraAnalysts })` runs them after the built-in rules, on the same classified actions.
+`--format jsonl` prints the `traces.stream.*` envelope at `schemaVersion` 1, the same events the text renders:
+
+| `kind` | When | Fields |
+|---|---|---|
+| `traces.stream.session` | the first pass that reads a session | `session` (`harness`, `sessionId`, `cwd`, `path`), `spanCount`, `startedAt`, `endedAt` |
+| `traces.stream.finding` | the first pass that finds it | `finding`: `kind: traces.live_finding`, `ruleId`, `fingerprint`, `severity`, `claim`, `action`, `check`, `evidence` (with span ids), `session`, `observedAt` |
+| `traces.stream.tick` | the end of every pass | `sessions`, `newSpans`, `findings`, `unreadSessions` (`sessionId`, `source`, `reason`) |
+
+Every event also carries `schemaVersion`, `event` and `generatedAt`.
+The envelope is a stable API; [`watch-jsonl.v1.example.jsonl`](./watch-jsonl.v1.example.jsonl) is the CLI's output on a fixture, and `tests/watch-jsonl-contract.test.ts` holds it and the fields consumers read.
+A run directory or span file with `--format jsonl` prints the same events for its spans.
+
+Custom live rules go through the SDK: `streamSessions({ extraAnalysts })` runs them after the built-in rules, on the same classified actions.
 
 ## Watch a run tree
 

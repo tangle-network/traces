@@ -323,19 +323,51 @@ export function shellCommands(script: string, depth = 0): string[][] {
 }
 
 /**
+ * A command a Codex code-mode script ran: `tools.exec_command({cmd: …})` with
+ * the command as a string literal, double- or single-quoted or a template
+ * literal. A template's `${…}` parts stay as their literal text, the way a
+ * shell variable does in {@link shellCommands}. A command built any other way
+ * (`{cmd}`, a variable) is not read: the script names no literal command.
+ */
+const CODE_MODE_COMMAND = /\bexec_command\(\s*\{\s*["']?cmd["']?\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/gu
+
+const STRING_ESCAPES: Readonly<Record<string, string>> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', 0: '\0', '\n': '' }
+
+/** The text of a JavaScript string literal, quotes included in `literal`. */
+function stringLiteralText(literal: string): string {
+  return literal.slice(1, -1).replace(/\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/gu, (_, escape: string) =>
+    escape.length > 1 ? String.fromCodePoint(Number.parseInt(escape.replace(/[ux{}]/gu, ''), 16)) : STRING_ESCAPES[escape] ?? escape)
+}
+
+/**
+ * True when a tool span's `input.value` is a Codex code-mode script: the
+ * JavaScript an `exec` call ran, not a JSON argument list. Its recorded status
+ * is the script's ("Script completed"), not each command's exit code.
+ */
+export function isCodeModeScript(input: string): boolean {
+  const trimmed = input.trimStart()
+  return !trimmed.startsWith('{') && !trimmed.startsWith('*** Begin Patch') && trimmed.includes('exec_command(')
+}
+
+/**
  * The script a tool span recorded, from its `input.value`.
  *
  * Adapters store a command as JSON — `{"command": ["/bin/zsh", "-lc", "…"]}`
  * for a Codex `CommandExecution` item, `{"command": "…"}` for a Claude Code
  * `Bash` call, `{"cmd": "…"}` for a Codex `exec_command` argument list. An argv
  * array whose head is a shell keeps only the script that shell was given; any
- * other array is joined back into one command line. A value that is not JSON,
- * or JSON without a command field, yields undefined: the span records something
- * other than an executed command, and guessing from its text is how a heredoc
- * body becomes a pull request.
+ * other array is joined back into one command line. A Codex code-mode script
+ * yields the commands its `exec_command` calls name, one line each. Any other
+ * value, or JSON without a command field, yields undefined: the span records
+ * something other than an executed command, and guessing from its text is how
+ * a heredoc body becomes a pull request.
  */
 export function commandTextFromInput(input: string): string | undefined {
   const trimmed = input.trim()
+  if (isCodeModeScript(trimmed)) {
+    const commands = [...trimmed.matchAll(CODE_MODE_COMMAND)].map((match) => stringLiteralText(match[1]!)).filter((command) => command.length > 0)
+    return commands.length > 0 ? commands.join('\n') : undefined
+  }
   if (!trimmed.startsWith('{')) return undefined
   let parsed: unknown
   try {

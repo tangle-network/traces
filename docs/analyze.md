@@ -22,13 +22,12 @@ At most 40 lines, in this order. A section with nothing to say is left out, and 
 5. Tool-error clusters: the session's own failed calls, by tool and first line of error.
 6. Stalls of 10 minutes or more that no turn ended.
 7. Interrupts and rejections: turns typed after an interrupt, after a rejected tool call, or right after a completion claim, each quoted. Measured against labelled turns, a reply after a claim is a correction at about the base rate, so none of these is called a correction.
-8. Unverified completion claims: a claim made after an edit with no test, build, typecheck or lint since.
-9. Pull requests opened and merged.
-10. Findings, HIGH first, each with span ids.
-11. How many questions the trace cannot answer, and where the list is.
+8. Pull requests opened and merged.
+9. Findings, HIGH first, each with span ids.
+10. How many questions the trace cannot answer, and where the list is.
 
-Sections 3, 4, 6, 7 and 9 and the header are the facts sheet's numbers ([`traces facts`](facts.md)); analyze renders them and never counts them again.
-Several sessions put sections 2–9 in a table of the 15 with the most waste.
+Sections 3, 4, 6, 7 and 8 and the header are the facts sheet's numbers ([`traces facts`](facts.md)); analyze renders them and never counts them again.
+Several sessions put sections 2–8 in a table of the 15 with the most waste.
 
 ## Findings
 
@@ -37,13 +36,13 @@ Several sessions put sections 2–9 in a table of the 15 with the most waste.
 | `same-failing-command` | a failing streak in the facts sheet | HIGH |
 | `verification-without-change` | one check command run 3 or more times with no edit between | MED (HIGH from 5) |
 | `high-tool-error-rate` | half or more of the session's own tool calls failed | MED (HIGH from 75%) |
-| `completion-claim-without-verification` | section 8 | LOW: 0 of 9 held on real sessions |
 | `terminal-failure` | the session's root span ended in an error | HIGH |
 | `monotonic-input-growth`, `output-length-decay` | agent-eval's behavioral analyst | HIGH, MED |
 | `single-tool-dependency` | agent-eval; a run of 10 or more calls of one non-shell tool | MED |
 | `no-self-verification` | agent-eval; 10 or more calls, none a check by name or by command | LOW: 0 of 1 held on real sessions |
 
-The first four are the rules `traces watch` runs on live sessions (`src/pipelines.ts`), so a finding means the same in both.
+The first three are the rules `traces watch` runs on live sessions (`src/pipelines.ts`), so a finding means the same in both.
+A completion claim after an edit with no check since is not a finding: it held 0 of 9 on real sessions, and no stricter claim rule found one in 44.
 
 ## For programs
 

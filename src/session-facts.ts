@@ -798,8 +798,7 @@ const HARNESS_COMMAND_REASON =
 
 /**
  * An agent message that opens by claiming the work is done. A person's turn
- * right after one is the `after-claim` signal, and the live rule
- * `completion-claim-without-verification` fires on the same predicate.
+ * right after one is the `after-claim` signal.
  *
  * Only the opening sentence is read, with markdown marks removed, and a denial
  * or a question there is no claim. A status report that names a merged PR in

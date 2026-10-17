@@ -6,7 +6,7 @@ import { INHERITED_SOURCE_ATTR, INHERITED_SPAN_ATTR } from './adapters/provenanc
 import type { OtlpSpan } from './otlp.js'
 import type { SessionFact } from './session-facts.js'
 import { describeSessionRelationship, type SessionRelationship } from './session-relationship.js'
-import { commandLines, commandTextFromInput } from './shell-commands.js'
+import { commandLines, commandTextFromInput, isCodeModeScript } from './shell-commands.js'
 import { skillUseOfSpans, type SkillUseCount } from './skill-usage.js'
 
 /** Coverage counts refer to observed records, never an assertion that capture was complete. */
@@ -263,6 +263,8 @@ interface CommandRun {
   readonly span: OtlpSpan
   readonly script: string
   readonly command: string
+  /** False for a command inside a Codex code-mode script: its span's status is the script's, not the command's exit code. */
+  readonly statusKnown: boolean
 }
 
 interface TimePoint {
@@ -344,8 +346,9 @@ function measureTime(spans: readonly OtlpSpan[], records: readonly OtlpSpan[], t
   for (const span of own) {
     const input = span.attributes['input.value']
     const script = typeof input === 'string' ? commandTextFromInput(input) : undefined
-    if (script !== undefined) runs.push({ span, script, command: script.replace(/\s+/gu, ' ').trim() })
+    if (script !== undefined) runs.push({ span, script, command: script.replace(/\s+/gu, ' ').trim(), statusKnown: !isCodeModeScript(input as string) })
   }
+  const statusUnknown = runs.filter((run) => !run.statusKnown).length
   // A trace that kept no tool arguments cannot say which commands ran: that is unknown, not none.
   const unread = own.length > 0 && !own.some((span) => typeof span.attributes['input.value'] === 'string')
     ? 'no tool call recorded its arguments, so which commands ran cannot be read'
@@ -388,7 +391,8 @@ function measureTime(spans: readonly OtlpSpan[], records: readonly OtlpSpan[], t
       continue
     }
     const run = runOf.get(span)
-    if (!run) continue
+    // A run whose status is its script's neither extends a streak nor ends one.
+    if (!run || !run.statusKnown) continue
     if (span.status.code === 'OK') close(run.command)
     else if (span.status.code === 'ERROR') {
       const failed = open.get(run.command)
@@ -406,7 +410,13 @@ function measureTime(spans: readonly OtlpSpan[], records: readonly OtlpSpan[], t
     waste: {
       minutes: unavailable === '' ? minutes(unionMs([...streakIntervals, ...stallIntervals])) : null,
       unavailable: unavailable === '' ? null : unavailable,
-      failingStreaks: commandFact<readonly FailingStreak[]>(streaks, streaks.flatMap((streak) => streak.spanIds)),
+      failingStreaks: unread === null && statusUnknown > 0
+        ? {
+            ...commandFact<readonly FailingStreak[]>(streaks, streaks.flatMap((streak) => streak.spanIds)),
+            partial: `${statusUnknown} of ${runs.length} command runs were inside Codex code-mode scripts, which record the script's ` +
+              "status, not the command's exit code, so no streak among them can be read",
+          }
+        : commandFact<readonly FailingStreak[]>(streaks, streaks.flatMap((streak) => streak.spanIds)),
       stalls: stallFact,
       rollbacks: commandFact(rollbacks.length, rollbacks),
       repeatedCommands: commandFact(
