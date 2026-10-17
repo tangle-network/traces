@@ -4,20 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
-import {
-  buildSpanRunTree,
-  readRunWatchSnapshot,
-  readSpanRunSnapshot,
-  renderRunContextSnapshot,
-  renderRunWatchSnapshot,
-  renderSpanRunSnapshot,
-  resolveRunWatchTarget,
-  readRunContextSnapshot,
-  span,
-  spanRunTotals,
-  watchRunTarget,
-  type OtlpSpan,
-} from '../src/index.js'
+import { span, type OtlpSpan } from '../src/otlp.js'
+import { buildSpanRunTree, readSpanRunSnapshot, renderSpanRunSnapshot, spanRunTotals } from '../src/run-span-tree.js'
+import { readRunWatchSnapshot, renderRunWatchSnapshot, resolveRunWatchTarget, watchRunTarget } from '../src/run-watch.js'
+import { readRunContextSnapshot } from '../src/supervisor-run-context.js'
+import { renderRunContextSnapshot } from '../src/supervisor-run-watch.js'
 
 const execFileAsync = promisify(execFile)
 

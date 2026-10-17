@@ -1,158 +1,68 @@
 /**
- * @tangle-network/traces — library surface.
+ * @tangle-network/traces: the SDK.
  *
- * Build on top of the trace toolkit programmatically: read coding-agent
- * sessions (or register your own harness), convert to OTLP, run the loop/stall
- * pipelines or your OWN analysts, observe live sessions with an event API,
- * redact, and upload to the Tangle Intelligence Platform or your own sink.
+ * Each name is a function a `traces` command is built on, or the analyst
+ * extension point (`analyzeSpans({ registry })`): 25 values and 25 types, each
+ * exported by name. `tests/sdk-surface.test.ts` fails when `dist/index.js` or
+ * `dist/index.d.ts` differs from this list.
  *
- * The CLI (`traces`) is a thin consumer of exactly these primitives.
+ * Import other packages' names from their owners: `AnalystRegistry`,
+ * `makeFinding` and the redaction core from `@tangle-network/agent-eval`, and
+ * the span builders and vocabulary from `@tangle-network/agent-trace-contract`.
  */
 
-// ── Core span model + adapters (read / convert / extend) ──────────────────
-export * from './types.js' // HarnessTraceAdapter, SessionRef, LocateOptions
-export * from './otlp.js' // OtlpSpan, OtlpSpanLink, span(), serializeSpans(), writeOtlpFile()
-// Ingest OTLP from ANY system, no adapter. Exported by name, not with `*`: the
-// module's internals (attribute bridging, tool-io normalization, row readers)
-// are implementation of the ONE entry point below and would otherwise become
-// API this package has to keep.
-export {
-  inferSpanKind,
-  otlpRowToSpan,
-  readOtlpInput,
-  resolveOtlpInputFiles,
-} from './otlp-input.js'
+// ── Read: sessions from a harness store, or OTLP from any producer ────────
+export { knownHarnesses } from './registry.js'
+export { parseSession, scanSessions } from './session-source.js'
+export type { ScanOptions, ScannedSession } from './session-source.js'
+export type { HarnessTraceAdapter, SessionRef } from './types.js'
+export { readOtlpInput } from './otlp-input.js'
+export type { OtlpInput } from './otlp-input.js'
+export { writeOtlpFile } from './otlp.js'
+export type { OtlpSpan } from './otlp.js'
+
+// ── facts: what happened, exactly, for $0 ─────────────────────────────────
+export { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from './session-facts.js'
+export type { SessionFact, SessionFacts, SessionFactsReport, SessionTurnFact } from './session-facts.js'
+
+// ── analyze: what went wrong, ranked; your own analysts through `registry` ─
+export { analyzeSpans } from './analyze.js'
+export type { AnalyzeOptions, AnalyzeResult } from './analyze.js'
+export { buildTraceFindingPacket, runTraceInvestigation } from './improvement.js'
 export type {
-  OtlpIngestIssue,
-  OtlpIngestIssueKind,
-  OtlpInput,
-  OtlpInputFile,
-  OtlpRowConversion,
-  ResolvedOtlpInput,
-  SkippedInputFile,
-} from './otlp-input.js'
-export * from './conformance.js' // what a trace can/cannot answer, and the analyses it costs
-export * from './loop-analysis.js' // did round N+1 improve on N; which verdict caused which retry
-export * from './attributes.js' // ATTR keys, INGEST_SOURCE_CLI, DEFAULT_HARNESS
-export * from './time.js' // parseIsoToEpochMs(), parseSince()
-export { JsonSourceError, readJsonFile } from './json.js'
-export { JsonlParseError, readJsonl, takeJsonl } from './jsonl.js'
-export type { JsonlCorruptionReceipt, JsonlReadOptions } from './jsonl.js'
-export {
-  recordSessionCorruption,
-  sessionIntegrityAttributes,
-  stampSessionIntegrity,
-} from './integrity.js'
-export { knownHarnesses, listAdapters, resolveAdapter, selectAdapters } from './registry.js'
-export * from './session-source.js' // scanSessions() / parseSession() — locate→parse→stamp
-export { SOURCE_ATTRIBUTE_PREFIX, type SourceRecordReference } from './source-location.js'
-export * from './session-relationship.js' // stable parent/child metadata decoding
-export * from './session-workflow.js' // collectSessionWorkflow() — bounded parent/child expansion
-export * from './session-selection.js' // collectSessionSelection() — parse/expand/bind selected groups
-export * from './repo.js' // resolveRepoAttrs() — per-session repo/git resource labels
-export { ClaudeAdapter } from './adapters/claude.js'
-export { CodexAdapter, CodexTaskScopeError } from './adapters/codex.js'
-export { CodexExecAdapter, CodexExecStreamError } from './adapters/codex-exec.js'
-export { OpencodeAdapter } from './adapters/opencode.js'
-export { HarnessSessionsAdapter } from './adapters/harness-sessions.js'
-// Conversation-capture helpers for custom adapters — emit the human's turn the
-// same way every built-in adapter does.
-export { ACTOR_ATTR, CONTENT_CAP, capText, userPromptSpan } from './adapters/conversation.js'
-export type { Actor, UserPromptInput } from './adapters/conversation.js'
-// Actor classification: who typed each turn.
-export { claudeActor, codexActor, looksLikeAgentPrompt, textIsSynthetic } from './adapters/actor.js'
-// Span provenance: which spans an adapter synthesized, and which carry context
-// from outside the parsed scope. A count of what the agent DID excludes both.
-export {
-  INHERITED_SOURCE_ATTR,
-  INHERITED_SPAN_ATTR,
-  INHERITED_SPAN_COUNT_ATTR,
-  INHERITED_SPANS_OMITTED_ATTR,
-  isInheritedSpan,
-  isSynthesizedSpan,
-  SYNTHESIZED_SOURCE_ATTR,
-  SYNTHESIZED_SPAN_ATTR,
-} from './adapters/provenance.js'
-export type { InheritedSpanSource } from './adapters/provenance.js'
+  BuildTraceFindingPacketOptions,
+  TraceFindingPacket,
+  TraceInvestigationOptions,
+  TraceInvestigationResult,
+} from './improvement.js'
 
-// ── Detection / analysis (built-in, or bring your own analysts) ───────────
-export * from './failure-followup.js' // classifyFailureFollowUps() — blind vs adapted retry split
-export * from './pipelines.js' // runPipelines() and the rules analyze and watch share
-export * from './skill-usage.js' // SkillUsageStore, skillUseOfSpans: one skill classifier for traces skills and facts
-export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
-export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
-// Shared execution accounting over normalized spans. `priceReport` (session-facts) prices a sheet's tokens.
-export { summarizeOtlpExecution, summarizeSpanExecution } from './execution.js'
-export type { ModelTokens, SessionCost, SessionTokens, TokenPricer, TraceExecutionOptions } from './execution.js'
-export * from './bundle.js' // assembleSessionBundle() — one session's durable evidence dir
-export * from './diff.js' // diffRuns() — two runs paired step by step, first divergence marked
-export * from './file-export.js' // convert evidence/events files to OpenInference JSONL
-export * from './improvement.js' // runTraceInvestigation(): analyze's result; buildTraceFindingPacket()
-export * from './ask.js' // runTraceQuestions(): concurrent free-form questions, answers kept and citations checked
-export * from './session-facts.js' // computeSessionFacts(): the deterministic, free session-facts sheet
-export * from './pull-request-facts.js' // readPullRequests(): the pull requests the command spans show
-export * from './shell-commands.js' // shellCommands(): the simple commands one script would run
-export * from './answer-schema.js' // the JSON Schema subset an ask answer may be held to
-export * from './finding-rejections.js' // evidence-gate rejections counted per analyst and reason
-export { analysisEngineFromEnv, DEFAULT_ANALYST_MODEL } from './analyst-model-call.js'
-export type { AnalysisEngineFromEnvOptions } from './analyst-model-call.js'
+// ── ask: the one call that spends ─────────────────────────────────────────
+export { runTraceQuestions } from './ask.js'
+export type { TraceQuestion, TraceQuestionsResult } from './ask.js'
+export { analysisEngineFromEnv } from './analyst-model-call.js'
 
-// ── Live observation (event-driven; feed any system) ──────────────────────
-export * from './live.js' // streamSessions(): the session, finding and tick events traces watch prints
+// ── check: conformance here; the contract checker is agent-eval's ─────────
+export { conformanceOfSpans } from './conformance.js'
 
-// ── Run trees: the live view `traces watch <target>` renders ─────────────
-// Two sources behind one view. The GENERAL one folds OTLP spans by
-// trace_id/span_id/parent_span_id, so any emitter is watchable. The SPECIFIC
-// one reads agent-runtime's durable spawn journal, which carries the authored
-// budget and settlement telemetry does not. Its report reader adds coordination
-// evidence to agent-eval's Runtime reader; analysis stays in agent-eval.
-export * from './run-span-tree.js' // general: OTLP spans → tree
-export * from './supervisor-run-context.js' // specific: spawn journal → tree + reader
-export * from './supervisor-run-watch.js' // the journal view
-export * from './run-view-format.js' // shared formatting; unknown is never zero
-export * from './run-watch.js' // target resolution + the tail
+// ── diff ──────────────────────────────────────────────────────────────────
+export { diffRuns, renderRunDiff } from './diff.js'
+export type { RunDiffReport } from './diff.js'
 
-// ── Privacy + upload (pluggable backend) ──────────────────────────────────
-export * from './redact.js' // redactSpans(), assessSpans()
-export * from './verify-safe.js' // verifySafe(): the share-safety verdict for files
-export * from './upload.js' // planUpload / executeUpload({ backend? })
-export * from './upload-state.js' // dedup state
+// ── watch: the events `traces watch --format jsonl` prints ────────────────
+export { streamSessions } from './live.js'
+export type { TraceStreamEvent } from './live.js'
+export type { TraceLiveFinding } from './pipelines.js'
 
-// ── agent-eval extension essentials, re-exported for one-import ergonomics ─
-export {
-  AnalystRegistry,
-  buildDefaultAnalystRegistry,
-  makeFinding,
-} from '@tangle-network/agent-eval/analyst'
-export type { Analyst, AnalystContext, AnalystFinding } from '@tangle-network/agent-eval/analyst'
-export { createHostedClient, hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
-export type { HostedClient } from '@tangle-network/agent-eval/hosted'
-export {
-  assessShareSafety,
-  redact,
-  redactForShare,
-  redactText,
-  shareAllowed,
-} from '@tangle-network/agent-eval/traces'
-// The span contract — emit it and `--otlp` reads you with no adapter.
-//
-// Its BUILDERS are not re-exported. A producer installs
-// `@tangle-network/agent-trace-contract` directly: that is the whole point of a
-// shared vocabulary — one package everyone imports, not one package plus a
-// second copy of its names shipped by a consumer, which is how two spellings of
-// the same attribute end up in one trace. Only its TYPES appear here, so a
-// caller can name what this package's own functions return.
-export type {
-  Capability,
-  ConformanceFinding,
-  ContractSpan,
-  SpanLink,
-  TraceValidation,
-} from '@tangle-network/agent-trace-contract'
-export type {
-  ErrorCluster,
-  RedactionProfile,
-  RedactionReport,
-  ShareSafetyVerdict,
-  TraceAnalysisStore,
-} from '@tangle-network/agent-eval/traces'
+// ── share: redact, judge, upload ──────────────────────────────────────────
+export { assessSpans, redactSpans } from './redact.js'
+export { verifySafe } from './verify-safe.js'
+export type { VerifySafeResult } from './verify-safe.js'
+export { executeUpload, planUpload } from './upload.js'
+export type { UploadBackend, UploadPlan } from './upload.js'
+
+// ── bundle: one session's evidence, kept and verified ─────────────────────
+export { assembleSessionBundle, verifySessionBundle } from './bundle.js'
+export type { SessionBundleManifest } from './bundle.js'
+
+// ── meta ──────────────────────────────────────────────────────────────────
+export { tracesVersion } from './version.js'

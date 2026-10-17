@@ -7,7 +7,7 @@ import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { serializeSpans, span } from '../src/index.js'
+import { serializeSpans, span } from '../src/otlp.js'
 import { claudeStreamJson, codexRollout, IDS, makeFixtureHome, type FixtureHome } from './fixtures/home.js'
 import { runCli } from './run-cli.js'
 

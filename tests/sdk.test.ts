@@ -2,14 +2,10 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
-// Import through the public façade — this also asserts the library surface exports resolve.
-import {
-  AnalystRegistry,
-  analyzeSpans,
-  makeFinding,
-  type OtlpSpan,
-  span,
-} from '../src/index.js'
+import { AnalystRegistry, makeFinding } from '@tangle-network/agent-eval/analyst'
+// The SDK through its public façade; the analyst extension point's types come from their owner, agent-eval.
+import { analyzeSpans, type OtlpSpan } from '../src/index.js'
+import { span } from '../src/otlp.js'
 
 beforeAll(() => {
   // Isolate dedup-state writes from the real ~/.local/state.

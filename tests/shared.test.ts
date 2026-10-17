@@ -1,15 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import {
-  EmptySessionError,
-  type HarnessTraceAdapter,
-  listAdapters,
-  type OtlpSpan,
-  parseIsoToEpochMs,
-  scanSessions,
-  selectAdapters,
-  type SessionRef,
-  span,
-} from '../src/index.js'
+import { type HarnessTraceAdapter, type OtlpSpan, scanSessions, type SessionRef } from '../src/index.js'
+import { span } from '../src/otlp.js'
+import { listAdapters, selectAdapters } from '../src/registry.js'
+import { EmptySessionError } from '../src/session-source.js'
+import { parseIsoToEpochMs } from '../src/time.js'
 
 const ref = (id: string): SessionRef => ({ harness: 'synthetic', sessionId: id, path: `/tmp/${id}`, cwd: null, mtimeMs: 0 })
 

@@ -5,9 +5,9 @@
  * one turn the two must state every number the same; so must a bundle of the
  * session, which keeps its spans as OTLP.
  */
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { IDS, makeFixtureHome, type FixtureHome } from './fixtures/home.js'
 import { makeTokenHome, type TokenHome } from './fixtures/tokens.js'
@@ -16,6 +16,7 @@ import { runCli } from './run-cli.js'
 interface Fact<T> { value: T | null }
 interface Session {
   sessionId: string
+  firstFailure: Record<string, unknown> & { status: string }
   tokens: Record<string, unknown> & { spanIds: string[] }
   cost: unknown
   tokenTotal: Fact<number>
@@ -60,17 +61,67 @@ function numbers(session: Session) {
   }
 }
 
-async function factsNumbers(argv: readonly string[], env: Readonly<Record<string, string>>) {
+async function facts(argv: readonly string[], env: Readonly<Record<string, string>>): Promise<Session[]> {
   const run = await runCli(['facts', ...argv, '--format', 'json'], { env })
   expect(run.stderr).not.toMatch(/^error:/mu)
   expect(run.code).toBe(0)
-  return (JSON.parse(run.stdout) as { sessions: Session[] }).sessions.map(numbers)
+  return (JSON.parse(run.stdout) as { sessions: Session[] }).sessions
+}
+
+async function factsNumbers(argv: readonly string[], env: Readonly<Record<string, string>>) {
+  return (await facts(argv, env)).map(numbers)
+}
+
+/** The first failure without its span and trace ids, which differ by reader. */
+function firstFailure(session: Session): Record<string, unknown> {
+  const { spanId: _spanId, later: _later, traceId: _traceId, ...rest } = session.firstFailure
+  return rest
+}
+
+const EXEC_FAILS_ID = '019a8c00-eeee-7eee-8eee-eeeeeeeeee01'
+
+/**
+ * A Codex session whose `exec_command` exits 1 and whose next one exits 0. Codex
+ * writes the exit code in a text header before `Output:`; the output body names
+ * another code, which is not the status. The calls carry no `workdir`: traces'
+ * own reader classifies the whole argument text, and the test temp root's name
+ * (`traces-vitest-…`) would read as a verification command.
+ */
+async function makeExecFailsHome(): Promise<{ path: string; env: Record<string, string> }> {
+  const root = await mkdtemp(join(tmpdir(), 'traces-exec-fails-'))
+  const home = join(root, 'home')
+  const cwd = join(home, 'w', 'widgets')
+  const at = (second: number): string => `2026-10-17T10:00:${String(second).padStart(2, '0')}.000Z`
+  const exec = (second: number, call: string, cmd: string, code: number, body: string) => [
+    { timestamp: at(second), type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: call, arguments: JSON.stringify({ cmd }) } },
+    {
+      timestamp: at(second + 2),
+      type: 'response_item',
+      payload: { type: 'function_call_output', call_id: call, output: `Chunk ID: ${call}\nWall time: 1.9 seconds\nProcess exited with code ${code}\nOriginal token count: 9\nOutput:\n${body}\n` },
+    },
+  ]
+  const rows = [
+    { timestamp: at(0), type: 'session_meta', payload: { id: EXEC_FAILS_ID, timestamp: at(0), cwd, originator: 'codex_cli_rs', cli_version: '0.150.0' } },
+    { timestamp: at(1), type: 'event_msg', payload: { type: 'task_started', turn_id: `${EXEC_FAILS_ID}-t1` } },
+    { timestamp: at(1), type: 'turn_context', payload: { cwd, model: 'gpt-6.1-sol' } },
+    { timestamp: at(2), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Install the workspace.' }] } },
+    ...exec(3, 'call-install', 'pnpm install --frozen-lockfile', 1, 'ERR_PNPM_OUTDATED_LOCKFILE (a postinstall exited with code 7)'),
+    ...exec(6, 'call-list', 'ls packages', 0, 'core'),
+    { timestamp: at(9), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The lockfile is out of date.' }] } },
+    { timestamp: at(10), type: 'event_msg', payload: { type: 'task_complete', turn_id: `${EXEC_FAILS_ID}-t1` } },
+  ]
+  const path = join(home, '.codex', 'sessions', '2026', '10', '17', `rollout-2026-10-17T10-00-00-${EXEC_FAILS_ID}.jsonl`)
+  await mkdir(dirname(path), { recursive: true })
+  await mkdir(cwd, { recursive: true })
+  await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  return { path, env: { HOME: home, XDG_STATE_HOME: join(root, 'state'), XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache') } }
 }
 
 let th: TokenHome
 let fx: FixtureHome
+let ex: { path: string; env: Record<string, string> }
 beforeAll(async () => {
-  ;[th, fx] = await Promise.all([makeTokenHome(), makeFixtureHome()])
+  ;[th, fx, ex] = await Promise.all([makeTokenHome(), makeFixtureHome(), makeExecFailsHome()])
 })
 
 /** Every single-turn Claude Code and Codex session of both fixture homes. */
@@ -88,6 +139,7 @@ const SESSIONS: Array<[string, () => [string, Readonly<Record<string, string>>]]
   ['Codex in a reaped worktree', () => [IDS.codexReaped, fx.env]],
   ['Codex parent with two spawned children', () => [IDS.parent, fx.env]],
   ['Codex spawned child', () => [IDS.child1, fx.env]],
+  ['Codex exec_command that exits 1', () => [ex.path, ex.env]],
 ]
 
 describe('both read paths state the same numbers', () => {
@@ -110,6 +162,13 @@ describe('both read paths state the same numbers', () => {
     }
     const [claude] = await factsNumbers([th.claude], th.env)
     expect(claude!.subagents).toEqual(['Survey the repo'])
+  })
+
+  // harness-sessions 0.1.6 read every Codex exec_command as completed, so the shared path found no failure.
+  it('names the same first failure for a Codex exec_command that exits 1', async () => {
+    const [[shared], [native]] = await Promise.all([facts([ex.path], ex.env), facts([ex.path, '--latest-turn'], ex.env)])
+    expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', name: 'tool.exec_command', laterCount: 0 })
+    expect(firstFailure(native!)).toEqual(firstFailure(shared!))
   })
 })
 

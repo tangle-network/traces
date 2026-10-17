@@ -59,14 +59,14 @@ Emitting the contract is the supported way to integrate a new system. Adapters a
 ## Library
 
 ```ts
-import { analyzeSpans, readOtlpInput, renderValidation } from '@tangle-network/traces'
+import { analyzeSpans, readOtlpInput } from '@tangle-network/traces'
 
 const input = await readOtlpInput('spans.otlp.jsonl')   // or a directory
-console.log(renderValidation(input.validation, { subject: 'spans.otlp.jsonl', spans: input.spans }))
+console.log(input.validation.capabilities)                 // what this trace can answer
 if (input.validation.ok) await analyzeSpans(input.spans)
 ```
 
-The CLI is a thin consumer of the SDK. The main exports are in [Library (SDK)](docs/sdk.md), and [`src/index.ts`](src/index.ts) is the complete list. Runnable code is in [examples](examples/README.md).
+The CLI is a thin consumer of the SDK: 25 functions and 25 types, listed in [Library (SDK)](docs/sdk.md). Runnable code is in [examples](examples/README.md).
 
 ## Docs
 

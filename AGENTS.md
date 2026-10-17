@@ -6,9 +6,9 @@ content itself — see Ownership.
 
 ## Read for the task
 
-- For the common CLI commands and flags, read [docs/cli.md](docs/cli.md); for the main SDK exports, read
-  [docs/sdk.md](docs/sdk.md). Both are curated: `traces --help` and [src/index.ts](src/index.ts) are the
-  complete inventories. Do not duplicate command inventories here. [README.md](README.md) stays a short
+- For the common CLI commands and flags, read [docs/cli.md](docs/cli.md) (curated; `traces --help` is the
+  complete inventory). For the SDK, read [docs/sdk.md](docs/sdk.md), which names every export. Do not
+  duplicate command inventories here. [README.md](README.md) stays a short
   front page that links to one guide per task.
 - For the analyst engine (agent-eval's deterministic analyst, your own through `analyzeSpans({ registry })`,
   and `traces ask`, the one command that calls a model), read [docs/trace-analysts.md](docs/trace-analysts.md).
@@ -74,6 +74,10 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
 - **The `traces.stream.*` envelope is a stable API.** `traces watch --format jsonl` prints session,
   finding and tick events at `schemaVersion` 1, and trustgate reads them. `tests/watch-jsonl-contract.test.ts`
   pins every field a consumer reads and keeps `docs/watch-jsonl.v1.example.jsonl` equal to the CLI's output.
+- **The SDK is the committed list.** [src/index.ts](src/index.ts) exports 25 functions and 25 types, each
+  by name (no `export *`). `tests/sdk-surface.test.ts` holds `dist/index.js` and `dist/index.d.ts` to that
+  list and `docs/sdk.md` to naming every entry. A name joins only when a command is built on it, it is the
+  analyst extension point, or a named consumer imports it.
 - **Unknown is never rendered as a measured zero.** An unpriced turn reads `cost unknown`, never
   `$0.0000`; a fact the spans cannot support is `null` with its reason, never a guessed value.
 

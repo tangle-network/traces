@@ -20,7 +20,6 @@ import {
 export const SPAWN_JOURNAL_FILE = 'spawn-journal.jsonl'
 export const COORDINATION_LOG_FILE = 'coordination-log.jsonl'
 export const RESULT_FILE = 'result.json'
-export const BLOBS_DIR = 'blobs'
 
 // ---------------------------------------------------------------------------
 // Reading whole lines — a tail can catch the writer mid-line.

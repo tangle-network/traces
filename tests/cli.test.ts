@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { describe, expect, it } from 'vitest'
-import { serializeSpans, span } from '../src/index.js'
+import { serializeSpans, span } from '../src/otlp.js'
 
 const execFileAsync = promisify(execFile)
 

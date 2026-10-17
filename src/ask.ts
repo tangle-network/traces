@@ -201,8 +201,6 @@ const ASK_DEFINITION_VERSION = '1.0.0'
  * therefore stays short and whole, and the rules sit in the first 500
  * characters of the instructions, which is all of them the preview keeps.
  */
-const DSPY_PREVIEW_HEAD_CHARS = 500
-
 const ASK_RULES = [
   'TRACES ASK RULES',
   '1. Answer QUESTION only from trace tool results retrieved in this run.',
@@ -331,9 +329,6 @@ export function renderTraceQuestionInstructions(question: Pick<TraceQuestion, 'i
     question.answerSchema ? `ANSWER SCHEMA:\n${JSON.stringify(question.answerSchema)}` : '',
   ].filter(Boolean).join('\n\n')
 }
-
-/** Characters of the instructions the DSPy preview keeps from the start; the rules must fit. */
-export const TRACE_QUESTION_PREVIEW_HEAD_CHARS = DSPY_PREVIEW_HEAD_CHARS
 
 function describeTraces(spans: readonly OtlpSpan[]): TraceQuestionTrace[] {
   const { sessionByTrace } = indexSessionIdsByTrace(spans)

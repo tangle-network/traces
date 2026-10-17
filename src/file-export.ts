@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { ATTR, stampEnvironmentAttrs } from './attributes.js'
 import type { SessionEnvironment } from './types.js'
 import { capText } from './adapters/conversation.js'
@@ -8,7 +8,7 @@ import { appendAll } from './arrays.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
 import { otlpRowToSpan } from './otlp-input.js'
-import { serializeSpans, span } from './otlp.js'
+import { span } from './otlp.js'
 import { redactSpans } from './redact.js'
 import { validateOtlpSpans } from './span-validation.js'
 
@@ -654,14 +654,4 @@ export async function exportTraceEvidenceFile(
   }
   const text = await readFile(inputPath, 'utf8')
   return exportTraceEvidenceText(text, opts)
-}
-
-export async function writeTraceEvidenceExportFile(
-  inputPath: string,
-  outPath: string,
-  opts: TraceEvidenceExportOptions = {},
-): Promise<TraceEvidenceExportResult & { path: string }> {
-  const result = await exportTraceEvidenceFile(inputPath, opts)
-  await writeFile(outPath, serializeSpans(result.spans), 'utf8')
-  return { ...result, path: outPath }
 }

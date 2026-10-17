@@ -1,13 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import {
-  collectSessionWorkflow,
-  describeSessionRelationship,
-  SessionWorkflowError,
-  span,
-  type HarnessTraceAdapter,
-  type OtlpSpan,
-  type SessionRef,
-} from '../src/index.js'
+import type { HarnessTraceAdapter, OtlpSpan, SessionRef } from '../src/index.js'
+import { span } from '../src/otlp.js'
+import { describeSessionRelationship, SessionWorkflowError } from '../src/session-relationship.js'
+import { collectSessionWorkflow } from '../src/session-workflow.js'
 
 interface Node {
   readonly id: string

@@ -23,11 +23,7 @@ import {
   type ExecutionReport,
   summarizeExecution,
 } from '@tangle-network/agent-eval/contract'
-import {
-  otlpRowsToRunRecords,
-  otlpToRunRecords,
-  type OtlpToRunRecordsOptions,
-} from '@tangle-network/agent-eval/traces'
+import { otlpRowsToRunRecords, type OtlpToRunRecordsOptions } from '@tangle-network/agent-eval/traces'
 import {
   firstNumberAttr,
   LLM_CACHE_WRITE_TOKEN_ATTR_KEYS,
@@ -68,14 +64,6 @@ function* openInferenceRows(
 }
 
 /** Map normalized spans into agent-eval's shared execution accounting. */
-export function summarizeOtlpExecution(
-  otlpJsonl: string,
-  opts: TraceExecutionOptions = {},
-): ExecutionReport {
-  const runs = otlpToRunRecords(otlpJsonl, runOptions(opts))
-  return summarizeExecution({ runs })
-}
-
 export function summarizeSpanExecution(
   spans: readonly OtlpSpan[],
   opts: TraceExecutionOptions = {},
