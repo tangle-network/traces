@@ -250,7 +250,7 @@
       },
       "key": "session file",
       "fields": {
-        "toolSpans": "TOOL spans -> the TOOL spans traces convert writes"
+        "toolSpans": "TOOL spans of the file -> TOOL spans of the named session (its first trace) that traces convert writes"
       },
       "tolerance": 0.9
     },
@@ -264,7 +264,7 @@
         "python3",
         "-B",
         "-c",
-        "import json,sys; sys.path.insert(0, sys.argv[1]); from flatten import flatten; spans = 0; traces = set()\nfor line in open(sys.argv[2], errors='replace'):\n    for row in flatten(line):\n        spans += 1; traces.add(row['trace_id'])\nprint(json.dumps({'spans': spans, 'traces': len(traces)}))",
+        "import json,sys; sys.path.insert(0, sys.argv[1]); from flatten import flatten; spans = set(); traces = set()\nfor line in open(sys.argv[2], errors='replace'):\n    for row in flatten(line):\n        spans.add((row['trace_id'], row['span_id'])); traces.add(row['trace_id'])\nprint(json.dumps({'distinctSpans': len(spans), 'traces': len(traces)}))",
         "{TANGLE_TOOLS}/trace-adapters",
         "{FILE}"
       ],
@@ -281,7 +281,7 @@
       },
       "key": "collector file",
       "fields": {
-        "spans": "flat spans -> spans traces convert writes",
+        "distinctSpans": "distinct (trace_id, span_id) flatten writes -> distinct ones traces convert writes (flatten repeats a span the collector exported twice; traces keeps one)",
         "traces": "distinct trace_id -> distinct trace_id"
       },
       "tolerance": 0.9

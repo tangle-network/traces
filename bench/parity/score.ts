@@ -179,19 +179,27 @@ function run(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<Ran> {
   })
 }
 
-/** Span, TOOL-span and trace counts of an OTLP JSONL file traces wrote, streamed. */
+/**
+ * Counts of an OTLP JSONL file traces wrote, streamed: spans, distinct (trace,
+ * span) pairs, traces, and the TOOL spans of the named session alone (the
+ * file's first trace), since `convert` of a session also writes its spawned children.
+ */
 async function countSpans(file: string): Promise<Fields> {
   let spans = 0
   let toolSpans = 0
+  let named: string | undefined
   const traces = new Set<string>()
+  const distinct = new Set<string>()
   for await (const line of createInterface({ input: createReadStream(file) })) {
     if (!line.trim()) continue
-    const span = JSON.parse(line) as { trace_id?: string; kind?: string }
+    const span = JSON.parse(line) as { trace_id?: string; span_id?: string; kind?: string }
+    named ??= span.trace_id
     spans += 1
-    if (span.kind === 'TOOL') toolSpans += 1
+    if (span.kind === 'TOOL' && span.trace_id === named) toolSpans += 1
     traces.add(String(span.trace_id))
+    distinct.add(`${span.trace_id}:${span.span_id}`)
   }
-  return { spans, toolSpans, traces: traces.size }
+  return { spans, distinctSpans: distinct.size, toolSpans, traces: traces.size }
 }
 
 export interface ScoreOptions {
