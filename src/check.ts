@@ -1,12 +1,18 @@
 /**
- * `traces check`: run a trace contract over a recorded run and report in a
- * form CI reads — an exit code, JUnit XML, GitHub annotations, and, under
- * `--out`, evidence for each trace that does not pass. Without `--out` it
- * writes nothing.
+ * `traces check`: the one gate. It needs at least one gate and answers 0
+ * pass, 1 fail, 2 could not decide, in a form CI reads.
  *
- * The contract engine is agent-eval's and the input is a ref (`refs.ts`);
- * this module maps OTLP spans to the spans a contract reads and renders the
- * verdicts.
+ * - `--contract FILE`: a trace contract over the run's spans (agent-eval's
+ *   engine; repeatable).
+ * - `--contract conformance`: what the trace can answer at all, the contract
+ *   package's own conformance verdict.
+ * - `--share-safe`: whether each path is safe to share, read as bytes and
+ *   never as a trace (`verify-safe.ts`).
+ *
+ * Combined, any failing gate fails the check; otherwise any gate that could
+ * not decide makes it undecided. The verdict goes to stdout as text, JSON,
+ * JUnit XML or GitHub annotations; `--out DIR` receives evidence for each gate
+ * that did not pass, and without it nothing is written.
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -20,10 +26,15 @@ import {
   lintTraceContractSpec,
   type TraceContract,
 } from '@tangle-network/agent-eval'
+import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { toolArgumentsFromAttributes } from './adapters/tool-io.js'
 import type { OtlpSpan } from './otlp.js'
 import { redactSpans } from './redact.js'
 import { parseIsoToEpochMs } from './time.js'
+import { formatVerdict, type VerifySafeResult } from './verify-safe.js'
+
+/** The built-in contract: the trace's conformance, named where a contract file would be. */
+export const CONFORMANCE = 'conformance'
 
 /**
  * Exit codes, the CLI's 0 yes, 1 no, 2 could not answer. CI scripts branch on
@@ -33,7 +44,7 @@ import { parseIsoToEpochMs } from './time.js'
 export const CHECK_EXIT = Object.freeze({
   pass: 0,
   fail: 1,
-  /** A rule could not run, the contract is malformed, or the trace is unreadable or ambiguous. */
+  /** A rule or verdict could not run, the contract is malformed, or the trace is unreadable or ambiguous. */
   couldNotDecide: 2,
 })
 
@@ -48,6 +59,8 @@ class ContractFileError extends Error {
 }
 
 export interface LoadedContract {
+  /** The file it was read from, as the command line named it. */
+  path: string
   contract: TraceContract
   warnings: string[]
 }
@@ -76,6 +89,7 @@ export async function loadContract(path: string): Promise<LoadedContract> {
       )
     }
     return {
+      path,
       contract: compileTraceContractSpec(json),
       warnings: findings.map((f) => `${f.path}: ${f.message} [${f.code}]`),
     }
@@ -231,7 +245,7 @@ function ruleLines(verdict: ContractVerdict): RuleLine[] {
 }
 
 /** Human summary: one line per trace, one line per rule. */
-export function renderCheckText(report: CheckReport): string {
+function renderCheckText(report: CheckReport): string {
   const lines: string[] = []
   for (const t of report.traces) {
     const v = t.verdict
@@ -245,9 +259,9 @@ export function renderCheckText(report: CheckReport): string {
   return lines.join('\n')
 }
 
-/** JUnit XML: one test suite per trace, one test case per rule. */
-export function renderJUnit(report: CheckReport): string {
-  const suites = report.traces.map((t) => {
+/** JUnit test suites of one contract: one suite per trace, one test case per rule. */
+function contractSuites(report: CheckReport): string[] {
+  return report.traces.map((t) => {
     const rules = ruleLines(t.verdict)
     const count = (status: RuleLine['status']) => rules.filter((r) => r.status === status).length
     const cases = rules.map((r) => {
@@ -265,17 +279,155 @@ export function renderJUnit(report: CheckReport): string {
       '  </testsuite>',
     ].join('\n')
   })
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="traces check">\n${suites.join('\n')}\n</testsuites>\n`
 }
 
 /** GitHub workflow commands: one `::error` per failed or errored rule. */
-export function renderGithubAnnotations(report: CheckReport): string {
+function renderGithubAnnotations(report: CheckReport): string {
   const lines: string[] = []
   for (const t of report.traces) {
     for (const r of ruleLines(t.verdict)) {
       if (r.status === 'pass' || r.status === 'skipped') continue
       const detail = r.status === 'error' ? `could not be evaluated: ${r.error ?? 'unknown'}` : r.details.join('\n')
       lines.push(`::error title=${ghProperty(`${report.contract}: ${r.rule}`)}::${ghData(`trace ${t.traceId}: ${detail}`)}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+// ── Gates ─────────────────────────────────────────────────────────────
+
+/** What one gate decided. */
+export type GateStatus = 'pass' | 'fail' | 'unknown'
+
+export type Gate =
+  | { readonly gate: 'contract'; readonly status: GateStatus; readonly report: CheckReport }
+  | {
+    readonly gate: 'conformance'
+    readonly status: GateStatus
+    readonly subject: string
+    readonly validation: TraceValidation
+    /** The conformance report as `traces check --contract conformance` prints it. */
+    readonly text: string
+  }
+  | { readonly gate: 'share-safe'; readonly status: GateStatus; readonly verdict: VerifySafeResult }
+
+export interface CheckVerdict {
+  readonly status: GateStatus
+  readonly exitCode: number
+  readonly gates: readonly Gate[]
+}
+
+export function contractGate(report: CheckReport): Gate {
+  return { gate: 'contract', status: report.status === 'error' ? 'unknown' : report.status, report }
+}
+
+/**
+ * Conformance fails on exactly one condition: the input is not a trace, because
+ * not one entry could be read as a span (`TraceValidation.ok`). A degraded
+ * trace passes on purpose: every real trace is thin somewhere, and a gate that
+ * fails on `flat-hierarchy` or `no-usage` is one a producer learns to ignore.
+ * What a missing field costs is stated per capability in the report.
+ */
+export function conformanceGate(subject: string, validation: TraceValidation, text: string): Gate {
+  return { gate: 'conformance', status: validation.ok ? 'pass' : 'fail', subject, validation, text }
+}
+
+/** SAFE and SAFE_WITH_WARNINGS pass, UNSAFE fails, UNKNOWN cannot decide. */
+export function shareSafeGate(verdict: VerifySafeResult): Gate {
+  const status = verdict.status === 'UNSAFE' ? 'fail' : verdict.status === 'UNKNOWN' ? 'unknown' : 'pass'
+  return { gate: 'share-safe', status, verdict }
+}
+
+/** Every gate together: 1 if any fails, else 2 if any could not decide, else 0. */
+export function combineGates(gates: readonly Gate[]): CheckVerdict {
+  const status: GateStatus = gates.some((gate) => gate.status === 'fail')
+    ? 'fail'
+    : gates.some((gate) => gate.status === 'unknown') ? 'unknown' : 'pass'
+  const exitCode = status === 'pass' ? CHECK_EXIT.pass : status === 'fail' ? CHECK_EXIT.fail : CHECK_EXIT.couldNotDecide
+  return { status, exitCode, gates }
+}
+
+/**
+ * Evidence for each gate that did not pass, under `root`: a contract's per
+ * trace directories (written by {@link runCheck}), the conformance report,
+ * and the share verdict, which names paths and detectors and never a value.
+ */
+export async function writeGateEvidence(root: string, verdict: CheckVerdict): Promise<void> {
+  for (const gate of verdict.gates) {
+    if (gate.status === 'pass' || gate.gate === 'contract') continue
+    await mkdir(root, { recursive: true })
+    if (gate.gate === 'conformance') await writeFile(join(root, 'conformance.md'), `${gate.text}\n`)
+    else await writeFile(join(root, 'share-safe.json'), `${JSON.stringify(gate.verdict, null, 2)}\n`)
+  }
+}
+
+/** What `--contract conformance` checks, for `check --contract conformance` with no ref. */
+export const CONFORMANCE_EXPLAINED = [
+  'conformance: whether the input can be read as a trace at all, and which analyses its spans can support.',
+  '  fail  not one entry could be read as a span (an empty export, or every line unreadable)',
+  '  pass  spans were read; each capability a field they lack costs is listed with what it empties',
+].join('\n')
+
+/** Text: one block per gate, in the order given. */
+export function renderVerdictText(verdict: CheckVerdict): string {
+  return verdict.gates.map((gate) => {
+    if (gate.gate === 'contract') return renderCheckText(gate.report)
+    if (gate.gate === 'conformance') return gate.text
+    return formatVerdict(gate.verdict)
+  }).join('\n\n')
+}
+
+/** JUnit XML: a suite per contract trace, one for conformance, one per shared path. */
+export function renderVerdictJUnit(verdict: CheckVerdict): string {
+  const suites = verdict.gates.flatMap((gate): string[] => {
+    if (gate.gate === 'contract') return contractSuites(gate.report)
+    if (gate.gate === 'conformance') {
+      const readable = gate.validation.ok
+        ? '    <testcase classname="conformance" name="readable"></testcase>'
+        : `    <testcase classname="conformance" name="readable">\n      <failure message="not one entry could be read as a span"/>\n    </testcase>`
+      const capabilities = gate.validation.capabilities.map((capability) => capability.available
+        ? `    <testcase classname="conformance" name="${xml(capability.name)}"></testcase>`
+        : `    <testcase classname="conformance" name="${xml(capability.name)}">\n      <skipped message="${xml(capability.reason ?? 'unavailable')}"/>\n    </testcase>`)
+      const unavailable = gate.validation.capabilities.filter((capability) => !capability.available).length
+      return [[
+        `  <testsuite name="${xml(`conformance @ ${gate.subject}`)}" tests="${capabilities.length + 1}" failures="${gate.validation.ok ? 0 : 1}" errors="0" skipped="${unavailable}">`,
+        readable,
+        ...capabilities,
+        '  </testsuite>',
+      ].join('\n')]
+    }
+    const result = gate.verdict
+    const findings = result.findings.map((finding) => `${finding.severity} ${finding.category}/${finding.detector} x${finding.count} at ${finding.paths.join(', ')}`)
+    const body = gate.status === 'fail'
+      ? `\n      <failure message="${xml(`${result.status}: ${findings[0] ?? ''}`)}">${xml(findings.join('\n'))}</failure>\n    `
+      : gate.status === 'unknown'
+        ? `\n      <error message="${xml(`UNKNOWN: ${result.unreadable[0] ?? 'part of the input could not be read'}`)}">${xml(result.unreadable.join('\n'))}</error>\n    `
+        : findings.length > 0 ? `\n      <system-out>${xml(findings.join('\n'))}</system-out>\n    ` : ''
+    return [[
+      `  <testsuite name="${xml(`share-safe @ ${result.target}`)}" tests="1" failures="${gate.status === 'fail' ? 1 : 0}" errors="${gate.status === 'unknown' ? 1 : 0}" skipped="0">`,
+      `    <testcase classname="share-safe" name="${xml(result.target)}">${body}</testcase>`,
+      '  </testsuite>',
+    ].join('\n')]
+  })
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="traces check">\n${suites.join('\n')}\n</testsuites>\n`
+}
+
+/** GitHub workflow commands: `::error` for each failed or undecided rule and gate, `::warning` for each share warning. */
+export function renderVerdictGithub(verdict: CheckVerdict): string {
+  const lines: string[] = []
+  for (const gate of verdict.gates) {
+    if (gate.gate === 'contract') {
+      const annotations = renderGithubAnnotations(gate.report)
+      if (annotations) lines.push(annotations)
+    } else if (gate.gate === 'conformance') {
+      if (!gate.validation.ok) lines.push(`::error title=${ghProperty('conformance')}::${ghData(`${gate.subject}: not one entry could be read as a span`)}`)
+    } else {
+      const result = gate.verdict
+      for (const finding of result.findings) {
+        const kind = finding.severity === 'error' ? 'error' : 'warning'
+        lines.push(`::${kind} title=${ghProperty(`share-safe: ${finding.category}/${finding.detector}`)}::${ghData(`${result.target}: x${finding.count} at ${finding.paths.join(', ')}`)}`)
+      }
+      for (const entry of result.unreadable) lines.push(`::error title=${ghProperty('share-safe: unreadable')}::${ghData(entry)}`)
     }
   }
   return lines.join('\n')

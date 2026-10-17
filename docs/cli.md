@@ -20,9 +20,9 @@ traces skills   --since 30d                        # skill use across every loca
 traces diff     run-a.otlp.jsonl run-b.otlp.jsonl  # where two runs of one task first diverge
 traces mcp      spans.otlp.jsonl                   # read-only trace tools for an MCP client
 traces analyze  --since 2026-06-18 --format json  # facts, findings, measures, conformance, what it cannot answer
-traces check    spans.otlp.jsonl --contract c.json --junit c.xml  # exit 0 pass, 1 fail, 2 could not decide
-traces validate spans.otlp.jsonl                   # conformance; exit 1 only when it is not a trace
-traces validate results/sessions --out conformance.md  # a whole directory of exports
+traces check    spans.otlp.jsonl --contract c.json --format junit > c.xml  # exit 0 pass, 1 fail, 2 could not decide
+traces check    spans.otlp.jsonl --contract conformance  # what the trace can answer; exit 1 only when it is not a trace
+traces check    results/sessions --contract conformance > conformance.md  # a whole directory of exports
 traces analyze  spans.otlp.jsonl                   # analyse foreign OTLP, no adapter
 traces analyze  results/sessions --out analysis
 traces convert  --harness claude-code --last 1 --out spans.jsonl   # contract OTLP-JSONL; stdout without --out
@@ -39,7 +39,7 @@ traces watch    traces.otlp.jsonl                  # any OTLP span file, any emi
 traces analyze  runs/my-run                        # the full tree report
 traces upload   --since 1h --dry-run               # redact + dedup + preview, no network
 traces upload   --since 24h                        # upload last day to the Intelligence Platform
-traces verify-safe bundle-dir                      # SAFE / SAFE_WITH_WARNINGS / UNSAFE (exit 1) / UNKNOWN (exit 2)
+traces check    bundle-dir --share-safe            # SAFE / SAFE_WITH_WARNINGS / UNSAFE (exit 1) / UNKNOWN (exit 2)
 traces help moved                                  # every 0.x command and flag 1.0 removed, and its replacement
 ```
 
@@ -54,10 +54,10 @@ traces help moved                                  # every 0.x command and flag 
 | `--until <t>` | `facts`: closes the time window (exclusive), same forms as `--since` |
 | `--out <path>` | Write the output to a file; stdout gets one summary line. `convert`: the OTLP file; `upload --dry-run`: the redacted preview (nothing is written without it); `check`: a directory for the evidence of each trace that did not pass; `analyze`: a directory for `report.md` and `findings.json` |
 | `--dir <path>` | `ask`: write `answers.json` + `report.md` there (without it, the report goes to stdout only) |
-| `--contract <file>` | `check`: the declarative trace contract (JSON) |
-| `--junit <file>` | `check`: write JUnit XML, one test case per rule |
-| `--annotations` | `check`: print GitHub workflow annotations (on by default under `GITHUB_ACTIONS=true`) |
-| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`. The input is sniffed |
+| `--contract <file>` | `check`: gate on a declarative trace contract (JSON), or on `conformance`; repeatable |
+| `--share-safe` | `check`: gate on whether each path is safe to share, read as bytes |
+| `--known-secret-env <name>` | `check --share-safe`: also fail on this variable's value, in any encoding; repeatable |
+| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`; `check` also takes `junit` and `github`. The input is sniffed |
 | `--budget <usd>` | `ask`: one ceiling shared by every question. `analyze` calls no model |
 | `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
 | `--questions <file>` | `ask`: JSON array of questions: strings, or `{ id?, question, instructions?, answerSchema? }` |

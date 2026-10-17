@@ -1,6 +1,10 @@
 /**
- * The INBOUND path: read OTLP-JSONL that some other system emitted and hand it
- * to the same analysis pipeline the adapters feed.
+ * The INBOUND path: read OTLP that some other system emitted and hand it to
+ * the same analysis pipeline the adapters feed. Three shapes are read: the
+ * contract's flat OTLP-JSONL rows, standard OTLP/JSON (`resourceSpans`, one
+ * document or the collector file exporter's one envelope per line), and the
+ * camelCase span rows Tangle Intelligence serves. Each file is streamed one
+ * line at a time.
  *
  * The adapters (`src/adapters/`) exist because Claude Code, Codex, OpenCode and
  * friends write proprietary session logs we do not control, so somebody has to
@@ -19,7 +23,7 @@
  *    describing our own repairs back to them.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import {
   ATTR,
@@ -31,8 +35,10 @@ import {
   validateTraceSpans,
 } from '@tangle-network/agent-trace-contract'
 import { TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
-import { toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
+import { boundedString, toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
 import { appendAll } from './arrays.js'
+import { readJsonValues } from './json-values.js'
+import { readJsonlLines } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpSpanLink, OtlpStatusCode } from './otlp.js'
 import { parseIsoToEpochMs } from './time.js'
 
@@ -259,22 +265,27 @@ async function otlpDirectoriesUnder(dir: string): Promise<string[]> {
  * claimed they were spans — so the first few readable lines decide, on the two
  * fields every OTLP span has and no event log does.
  */
-function sniffOtlpFile(text: string): { otlp: true } | { otlp: false; reason: string } {
+async function sniffOtlpFile(path: string): Promise<{ otlp: true } | { otlp: false; reason: string }> {
+  if (await isOtlpJsonFile(path)) return { otlp: true }
   let seen = 0
   let first: { row: unknown } | null = null
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim().length === 0) continue
-    if (++seen > SNIFF_LINES) break
-    let row: unknown
-    try {
-      row = JSON.parse(line)
-    } catch {
-      continue
+  // Only the head is read: a file that is not spans is never read whole.
+  const head = new AbortController()
+  try {
+    for await (const { value: row } of readJsonlLines<unknown>(path, {
+      mode: 'recover',
+      onCorruption: () => {
+        if (++seen >= SNIFF_LINES) head.abort()
+      },
+      signal: head.signal,
+    })) {
+      if (isObject(row) && nonEmptyString(row.span_id) !== null && nonEmptyString(row.name) !== null) return { otlp: true }
+      if (isStandardOtlpRow(row)) return { otlp: true }
+      first ??= { row }
+      if (++seen >= SNIFF_LINES) break
     }
-    if (isObject(row) && nonEmptyString(row.span_id) !== null && nonEmptyString(row.name) !== null) {
-      return { otlp: true }
-    }
-    first ??= { row }
+  } catch (error) {
+    if (!head.signal.aborted) throw error
   }
   if (seen === 0) return { otlp: false, reason: 'file is empty' }
   return { otlp: false, reason: first === null ? 'no line parses as JSON' : describeNonSpanRow(first.row) }
@@ -327,7 +338,7 @@ export async function resolveOtlpInputFiles(path: string): Promise<ResolvedOtlpI
   const files: string[] = []
   const skipped: SkippedInputFile[] = []
   for (const candidate of candidates) {
-    const sniff = sniffOtlpFile(await readFile(candidate, 'utf8'))
+    const sniff = await sniffOtlpFile(candidate)
     if (sniff.otlp) files.push(candidate)
     else skipped.push({ path: candidate, reason: sniff.reason })
   }
@@ -462,6 +473,7 @@ export function capturedToolIo(attributes: Record<string, unknown>): ReturnType<
     attributes['input.value'] ??
     attributes['tool.input'] ??
     attributes.tool_input ??
+    attributes['gen_ai.tool.call.arguments'] ??
     attributes['tool.arguments'] ??
     attributes.tool_arguments ??
     attributes.arguments ??
@@ -470,7 +482,7 @@ export function capturedToolIo(attributes: Record<string, unknown>): ReturnType<
   const capture = toolArgumentsFromAttributes({ ...attributes, 'input.value': input })
   return toolIoAttributes({
     input: capture.args,
-    output: attributes['output.value'] ?? attributes['tool.output'] ?? attributes.tool_output,
+    output: attributes['output.value'] ?? attributes['tool.output'] ?? attributes.tool_output ?? attributes['gen_ai.tool.call.result'],
     argsCaptured: capture.argsCaptured,
   })
 }
@@ -702,41 +714,278 @@ export function otlpRowToSpan(row: unknown, fallbackTraceId: string): OtlpRowCon
   }
 }
 
-/** One parsed row and the 1-indexed line of the file it came from. */
+// ── Standard OTLP/JSON and served span rows ───────────────────────────
+//
+// Standard OTLP/JSON is what every OpenTelemetry exporter writes: an envelope
+// `{resourceSpans: [{resource, scopeSpans: [{scope, spans}]}]}` with camelCase
+// fields, hex ids, nanosecond times as decimal strings, and attributes as
+// `[{key, value: {stringValue|intValue|…}}]` lists. Tangle Intelligence serves
+// spans as flat camelCase rows (`id` is `<traceId>:<spanId>`, times are
+// `startUnixNano`). Each becomes the contract's flat row, so everything after
+// this point reads one shape. Every string value is kept within
+// `boundedString`'s size: with files streamed a line at a time, memory grows
+// with the number of spans, never with the bytes of content they carry.
+
+/** An OTLP/JSON envelope: `{resourceSpans: […]}`. */
+function isOtlpJsonEnvelope(row: unknown): row is Record<string, unknown> & { resourceSpans: unknown[] } {
+  return isObject(row) && Array.isArray(row.resourceSpans)
+}
+
+/** A camelCase span row with no contract `trace_id`: one OTLP/JSON span, or a span Tangle Intelligence serves. */
+function isCamelCaseSpanRow(row: unknown): row is Record<string, unknown> {
+  return isObject(row) && row.trace_id === undefined && typeof row.traceId === 'string' &&
+    (typeof row.spanId === 'string' || typeof row.id === 'string')
+}
+
+/** True for a row read as standard OTLP rather than as the contract's flat row. */
+export function isStandardOtlpRow(row: unknown): boolean {
+  return isOtlpJsonEnvelope(row) || isCamelCaseSpanRow(row)
+}
+
+/** How a file of OTLP/JSON envelopes starts: `resourceSpans` is the only field of an export request. */
+const ENVELOPE_START = /^\s*\{\s*"resourceSpans"\s*:/u
+const ENVELOPE_HEAD_BYTES = 4096
+
+/**
+ * True when the file holds standard OTLP/JSON, from its first bytes alone. A
+ * collector spool's lines can each be hundreds of megabytes, so recognising
+ * one must never parse a line.
+ */
+export async function isOtlpJsonFile(path: string): Promise<boolean> {
+  const handle = await open(path, 'r')
+  try {
+    const head = Buffer.alloc(ENVELOPE_HEAD_BYTES)
+    const { bytesRead } = await handle.read(head, 0, head.length, 0)
+    return ENVELOPE_START.test(head.toString('utf8', 0, bytesRead))
+  } finally {
+    await handle.close()
+  }
+}
+
+const OTEL_SPAN_KINDS = ['SPAN_KIND_UNSPECIFIED', 'SPAN_KIND_INTERNAL', 'SPAN_KIND_SERVER', 'SPAN_KIND_CLIENT', 'SPAN_KIND_PRODUCER', 'SPAN_KIND_CONSUMER']
+const OTEL_STATUS_CODES = ['STATUS_CODE_UNSET', 'STATUS_CODE_OK', 'STATUS_CODE_ERROR']
+/** Where the OpenTelemetry span kind (server, client, …) is kept: the contract's `kind` is the OpenInference kind. */
+const OTEL_SPAN_KIND_ATTR = 'otel.span.kind'
+
+function isPrimitive(value: unknown): value is string | number | boolean {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+}
+
+/** A value as this package's attribute model holds one: a bounded string, a number, a boolean, or a list of them. */
+function plainAttributeValue(value: unknown): unknown {
+  if (value === null || value === undefined) return undefined
+  if (typeof value === 'string') return boundedString(value)
+  if (typeof value === 'number' || typeof value === 'boolean') return value
+  if (Array.isArray(value) && value.every(isPrimitive)) return value.map((item) => (typeof item === 'string' ? boundedString(item) : item))
+  return boundedString(JSON.stringify(value))
+}
+
+/** An OTLP/JSON `AnyValue` as a plain value. */
+function anyValue(value: unknown): unknown {
+  if (!isObject(value)) return undefined
+  if (typeof value.stringValue === 'string') return boundedString(value.stringValue)
+  if (typeof value.boolValue === 'boolean') return value.boolValue
+  if (value.intValue !== undefined) {
+    // int64 is a decimal string in OTLP/JSON; past 2^53 it stays a string, so no digit is invented.
+    const number = Number(value.intValue)
+    return Number.isSafeInteger(number) ? number : String(value.intValue)
+  }
+  if (value.doubleValue !== undefined) {
+    const number = Number(value.doubleValue)
+    return Number.isFinite(number) ? number : String(value.doubleValue)
+  }
+  if (isObject(value.arrayValue)) {
+    return plainAttributeValue(Array.isArray(value.arrayValue.values) ? value.arrayValue.values.map(anyValue) : [])
+  }
+  if (isObject(value.kvlistValue)) return plainAttributeValue(attributeBag(value.kvlistValue.values))
+  if (typeof value.bytesValue === 'string') return value.bytesValue
+  return undefined
+}
+
+/** OTLP/JSON's `[{key, value}]` list, or a bag that is already plain (a served row), as one attribute bag. */
+function attributeBag(value: unknown): Record<string, unknown> {
+  const bag: Record<string, unknown> = {}
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (!isObject(entry) || typeof entry.key !== 'string') continue
+      const plain = anyValue(entry.value)
+      if (plain !== undefined) bag[entry.key] = plain
+    }
+  } else if (isObject(value)) {
+    for (const [key, entry] of Object.entries(value)) {
+      const plain = plainAttributeValue(entry)
+      if (plain !== undefined) bag[key] = plain
+    }
+  }
+  return bag
+}
+
+/** A trace or span id. OTLP/JSON writes hex, read case-insensitively; an exporter that wrote proto3's base64 is decoded. */
+function otlpId(value: unknown, bytes: 8 | 16): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  if (value.length === bytes * 2 && /^[0-9a-f]+$/iu.test(value)) return value.toLowerCase()
+  if (/^[A-Za-z0-9+/]+={0,2}$/u.test(value)) {
+    const decoded = Buffer.from(value, 'base64')
+    if (decoded.length === bytes && decoded.toString('base64') === value) return decoded.toString('hex')
+  }
+  return value
+}
+
+/** Nanoseconds since the epoch, a decimal string in OTLP/JSON, as the ISO time a contract row carries. */
+function nanosToIso(value: unknown): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined
+  try {
+    const nanos = BigInt(typeof value === 'number' ? Math.trunc(value) : value.trim())
+    return nanos > 0n ? new Date(Number(nanos / 1_000_000n)).toISOString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A status as the contract spells it. A code given as OTLP's enum number becomes its name. */
+function statusRow(code: unknown, message: unknown): Record<string, unknown> | undefined {
+  if (code === undefined || code === null) return undefined
+  const text = nonEmptyString(message)
+  return { code: typeof code === 'number' ? OTEL_STATUS_CODES[code] ?? code : code, ...(text ? { message: boundedString(text) } : {}) }
+}
+
+/** One OTLP/JSON span, or one served span row, as the contract's flat row. */
+function contractRowOf(
+  span: Record<string, unknown>,
+  context: { resource?: Record<string, unknown>; scope?: Record<string, unknown> } = {},
+): Record<string, unknown> {
+  // A served row names its span `<traceId>:<spanId>` and carries no spanId of its own.
+  const served = span.spanId === undefined
+  const rawSpanId = served && typeof span.id === 'string' && typeof span.traceId === 'string' && span.id.startsWith(`${span.traceId}:`)
+    ? span.id.slice(span.traceId.length + 1)
+    : span.spanId ?? span.id
+  const traceId = otlpId(span.traceId, 16)
+  const spanId = otlpId(rawSpanId, 8)
+  const start = nanosToIso(span.startTimeUnixNano ?? span.startUnixNano)
+  const end = nanosToIso(span.endTimeUnixNano ?? span.endUnixNano)
+  const attributes = attributeBag(span.attributes)
+  const otelKind = typeof span.kind === 'number' ? OTEL_SPAN_KINDS[span.kind] : nonEmptyString(span.kind) ?? undefined
+  if (otelKind !== undefined && attributes[OTEL_SPAN_KIND_ATTR] === undefined) attributes[OTEL_SPAN_KIND_ATTR] = otelKind
+  // OTLP omits a status whose code is the proto default, UNSET. A served row's null status is unknown, so it stays absent.
+  const status = served
+    ? statusRow(span.statusCode, span.statusMessage)
+    : statusRow(isObject(span.status) ? span.status.code ?? OTEL_STATUS_CODES[0] : OTEL_STATUS_CODES[0], isObject(span.status) ? span.status.message : undefined)
+  // A served row's `links` are the resources it touches (repos, PRs), not span links.
+  const links = !served && Array.isArray(span.links)
+    ? span.links.map((link) => (isObject(link)
+      ? {
+        ...(otlpId(link.traceId, 16) === undefined ? {} : { trace_id: otlpId(link.traceId, 16) }),
+        ...(otlpId(link.spanId, 8) === undefined ? {} : { span_id: otlpId(link.spanId, 8) }),
+        ...(link.attributes === undefined ? {} : { attributes: attributeBag(link.attributes) }),
+      }
+      : link))
+    : undefined
+  return {
+    ...(traceId === undefined ? {} : { trace_id: traceId }),
+    ...(spanId === undefined ? {} : { span_id: spanId }),
+    parent_span_id: otlpId(span.parentSpanId, 8) ?? null,
+    ...(typeof span.name === 'string' ? { name: span.name } : {}),
+    ...(start === undefined ? {} : { start_time: start }),
+    ...(end === undefined ? {} : { end_time: end }),
+    ...(status === undefined ? {} : { status }),
+    attributes,
+    ...(links === undefined ? {} : { links }),
+    ...(context.resource ? { resource: context.resource } : {}),
+    ...(context.scope ? { scope: context.scope } : {}),
+  }
+}
+
+/** The spans of one OTLP/JSON envelope as contract rows. A part that is not an object is passed on for the row reader to name. */
+function* envelopeRows(envelope: { resourceSpans: unknown[] }): Generator<unknown> {
+  for (const resourceSpans of envelope.resourceSpans) {
+    if (!isObject(resourceSpans)) {
+      yield resourceSpans
+      continue
+    }
+    const resource = isObject(resourceSpans.resource) ? { attributes: attributeBag(resourceSpans.resource.attributes) } : undefined
+    // OTLP before 0.15 spelled scopeSpans `instrumentationLibrarySpans`.
+    const scopes = resourceSpans.scopeSpans ?? resourceSpans.instrumentationLibrarySpans
+    if (!Array.isArray(scopes)) continue
+    for (const scopeSpans of scopes) {
+      if (!isObject(scopeSpans)) {
+        yield scopeSpans
+        continue
+      }
+      const declared = scopeSpans.scope ?? scopeSpans.instrumentationLibrary
+      const scope = isObject(declared)
+        ? {
+          ...(typeof declared.name === 'string' ? { name: declared.name } : {}),
+          ...(typeof declared.version === 'string' ? { version: declared.version } : {}),
+        }
+        : undefined
+      if (!Array.isArray(scopeSpans.spans)) continue
+      for (const span of scopeSpans.spans) yield isObject(span) ? contractRowOf(span, { resource, scope }) : span
+    }
+  }
+}
+
+/** One parsed value as the contract rows it holds: an envelope's spans, a served span, or the row itself. */
+function* contractRows(value: unknown): Generator<unknown> {
+  if (isOtlpJsonEnvelope(value)) yield* envelopeRows(value)
+  else if (isCamelCaseSpanRow(value)) yield contractRowOf(value)
+  else yield value
+}
+
+/** One row and the 1-indexed line of the file it came from. */
 interface ReadRow {
   readonly value: unknown
   readonly line: number
 }
 
+/** Past this a file of rows is not read as one JSON document. */
+const MAX_WHOLE_DOCUMENT_BYTES = 256 * 1024 * 1024
+
 /**
- * Split JSONL text into rows, reporting each unparseable line instead of
- * failing. Every row carries the LINE it was read from, not its index in the
- * surviving rows: blank lines and unparseable lines both shift those apart, so
- * an index reported as a line number sends the producer to the wrong place in
- * their own file.
+ * The rows of one file, streamed: a line is parsed, its rows are yielded, and
+ * nothing of it is kept. Every row carries the LINE it was read from, not its
+ * index in the surviving rows: blank and unparseable lines shift those apart,
+ * and an index reported as a line sends the producer to the wrong place. A
+ * line that is not JSON is an issue, in line order, not a failure. A file in
+ * which no line parses is tried as one JSON document (a pretty-printed array
+ * of rows), and its line issues are withdrawn when it is one. Standard
+ * OTLP/JSON, one document or one envelope per line, is parsed as it is read.
  */
-function readRows(text: string, file: string): { rows: ReadRow[]; issues: OtlpIngestIssue[] } {
-  const rows: ReadRow[] = []
-  const issues: OtlpIngestIssue[] = []
-  const lines = text.split(/\r?\n/)
-  for (const [index, line] of lines.entries()) {
-    if (line.trim().length === 0) continue
-    try {
-      rows.push({ value: JSON.parse(line), line: index + 1 })
-    } catch (error) {
-      issues.push({
-        kind: 'unparseable-line',
-        file,
-        line: index + 1,
-        detail: error instanceof Error ? error.message : String(error),
-      })
+async function* fileRows(file: string, issues: OtlpIngestIssue[]): AsyncGenerator<ReadRow> {
+  if (await isOtlpJsonFile(file)) {
+    // Standard OTLP/JSON: a collector's spool, whose lines can each be larger
+    // than a string can hold, is parsed as it is read and keeps only bounded strings.
+    for await (const { value, line } of readJsonValues(file, (line, detail) => issues.push({ kind: 'unparseable-line', file, line, detail }))) {
+      for (const row of contractRows(value)) yield { value: row, line }
     }
+    return
   }
-  return { rows, issues }
+  const firstIssue = issues.length
+  let parsed = 0
+  for await (const { value, lineNumber } of readJsonlLines<unknown>(file, {
+    mode: 'recover',
+    onCorruption: (receipt) => {
+      issues.push({ kind: 'unparseable-line', file, line: receipt.lineNumber, detail: `line is not JSON (${receipt.byteLength} bytes)` })
+    },
+  })) {
+    parsed += 1
+    for (const row of contractRows(value)) yield { value: row, line: lineNumber }
+  }
+  if (parsed > 0 || issues.length === firstIssue || (await stat(file)).size > MAX_WHOLE_DOCUMENT_BYTES) return
+  let document: unknown
+  try {
+    document = JSON.parse(await readFile(file, 'utf8'))
+  } catch {
+    return
+  }
+  issues.splice(firstIssue)
+  for (const value of Array.isArray(document) ? document : [document]) {
+    for (const row of contractRows(value)) yield { value: row, line: 1 }
+  }
 }
 
 /**
- * Read OTLP-JSONL from a file or a directory of them.
+ * Read OTLP from a file or a directory of OTLP-JSONL files: contract rows,
+ * standard OTLP/JSON envelopes, or served span rows, each file streamed.
  *
  * A directory ingests the OTLP files under it, recursively — every `*.jsonl` /
  * `*.ndjson` that holds spans, or only the contents of an `otlp/` subdirectory
@@ -767,15 +1016,15 @@ export async function readOtlpInput(path: string): Promise<OtlpInput> {
   const seenIdentities = new Map<string, string>()
 
   for (const file of paths) {
-    const parsed = readRows(await readFile(file, 'utf8'), file)
-    appendAll(issues, parsed.issues)
     // A file with no trace_id anywhere still needs a grouping key; its own name
     // is the most specific honest one available.
     const fallbackTraceId = `otlp:${basename(file)}`
+    let rowsFromFile = 0
     let spansFromFile = 0
     let repeatsFromFile = 0
     const traceIds = new Set<string>()
-    for (const { value: row, line } of parsed.rows) {
+    for await (const { value: row, line } of fileRows(file, issues)) {
+      rowsFromFile += 1
       rows.push(row)
       const converted = otlpRowToSpan(row, fallbackTraceId)
       if (converted.withheld) withheld.push({ ...converted.withheld, file, line })
@@ -809,7 +1058,7 @@ export async function readOtlpInput(path: string): Promise<OtlpInput> {
     }
     files.push({
       path: file,
-      rows: parsed.rows.length,
+      rows: rowsFromFile,
       spans: spansFromFile,
       repeats: repeatsFromFile,
       traceIds: [...traceIds],
@@ -844,7 +1093,7 @@ function positiveInteger(value: unknown): number {
  * export that this package's own analysts read as spans, and repairing it into
  * one would put invented work into every total. This is the other half of the
  * only honest choice left: the export does not claim to be the source. It
- * carries the number of rows it is missing, so `traces validate` on a
+ * carries the number of rows it is missing, so `traces check --contract conformance` on a
  * re-export reports the loss instead of handing back the clean bill of health
  * the source never earned.
  *

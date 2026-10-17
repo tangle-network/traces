@@ -47,7 +47,7 @@ import {
   type UnreadSessionFact,
 } from './session-facts.js'
 import { sessionIdentityLookup } from './session-identity.js'
-import { renderValidation, validationExitCode } from './conformance.js'
+import { conformanceOfSpans, renderValidation } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession, sessionsInCwd } from './session-source.js'
@@ -459,7 +459,7 @@ async function collectOtlpSpans(path: string, selector?: string): Promise<Collec
   if (input.spans.length === 0) {
     throw new Error(
       `no analyzable spans in ${path} (${input.files.length} file(s), ${input.rows.length} row(s), ` +
-        `${input.issues.length} unusable). Run \`traces validate ${path}\` for the per-finding reason.`,
+        `${input.issues.length} unusable). Run \`traces check ${path} --contract conformance\` for the per-finding reason.`,
     )
   }
   const fileByTrace = new Map<string, string>()
@@ -557,17 +557,109 @@ async function collectSessionSpans(args: CliArgs): Promise<CollectedSpans> {
 }
 
 /**
- * `traces validate <file|dir>` (hidden; `check --contract conformance` in
- * 1.0): what a trace can and cannot answer, before anyone spends a run on it.
- * Exits non-zero on exactly one condition: the input is not a trace, because
- * not one entry in it could be read as a span. A degraded trace exits 0 and
- * states its degradation per capability.
+ * `traces check`, the one gate: each `--contract` file, the built-in
+ * `--contract conformance`, and `--share-safe` decide on their own, and the
+ * check exits 1 if any fails, else 2 if any could not decide, else 0. The
+ * verdict always goes to stdout in `--format`, because CI reads it; evidence
+ * for each gate that did not pass goes under `--out DIR`, and without it
+ * nothing is written. Contracts load before any trace is read, so a bad
+ * contract exits 2 at once; `--share-safe` alone never reads a ref as a trace.
  */
-async function cmdValidate(args: CliArgs): Promise<void> {
-  const path = args.input!
-  const input = await readOtlpInput(path)
-  const report = renderValidation(input.validation, {
-    subject: path,
+async function cmdCheck(args: CliArgs): Promise<void> {
+  const check = await import('./check.js')
+  const { explainTraceContract } = await import('@tangle-network/agent-eval')
+  const contracts = new Map<string, Awaited<ReturnType<typeof check.loadContract>>>()
+  for (const path of args.contracts) {
+    if (path === check.CONFORMANCE || contracts.has(path)) continue
+    try {
+      contracts.set(path, await check.loadContract(path))
+    } catch (error) {
+      throw new UsageError(errorText(error))
+    }
+  }
+  for (const loaded of contracts.values()) for (const warning of loaded.warnings) process.stderr.write(`warning: ${warning}\n`)
+  const traceGates = args.contracts.length > 0
+  const selected = args.refs.length > 0 || args.current || args.last > 0 || args.since !== undefined
+  if (traceGates && !selected && !args.shareSafe) {
+    const explained = args.contracts.map((path) => {
+      const loaded = contracts.get(path)
+      return loaded
+        ? { contract: loaded.contract.name, text: explainTraceContract(loaded.contract) }
+        : { contract: check.CONFORMANCE, text: check.CONFORMANCE_EXPLAINED }
+    })
+    process.stdout.write(args.format === 'json'
+      ? `${JSON.stringify({ explain: explained }, null, 2)}\n`
+      : `${explained.map((entry) => entry.text).join('\n\n')}\n`)
+    return
+  }
+  const gates: Parameters<typeof check.combineGates>[0][number][] = []
+  if (traceGates) {
+    const selected = await withSelection(args)
+    const sources = selected.selection?.spans ?? []
+    // OTLP refs are graded on the rows their producer wrote, and a file that is
+    // not a trace fails conformance rather than going unread.
+    const otlpOnly = selected.selection !== undefined && selected.selection.sessions.length === 0 &&
+      selected.selection.home === undefined && sources.every((source) => source.kind === 'run-dir' || source.reader === 'otlp')
+    let run: CollectedSpans | undefined
+    const runSpans = async (): Promise<CollectedSpans> => {
+      if (run) return run
+      try {
+        run = await collectSpans(selected)
+      } catch (error) {
+        if (error instanceof RefError || error instanceof CliError) throw error
+        throw new CliError(errorText(error), error instanceof check.AmbiguousTraceInputError ? 'ambiguous' : 'unreadable')
+      }
+      if (run.spans.length === 0) throw new CliError('the trace holds no spans', 'unreadable')
+      return run
+    }
+    for (const path of args.contracts) {
+      if (path !== check.CONFORMANCE) {
+        const report = await check.runCheck(contracts.get(path)!.contract, (await runSpans()).spans, args.out === undefined ? {} : { evidenceRoot: args.out })
+        gates.push(check.contractGate(report))
+      } else if (otlpOnly) {
+        for (const source of sources) gates.push(await otlpConformanceGate(check, source.ref, source.path))
+      } else {
+        const { spans } = await runSpans()
+        const subject = args.refs.length > 0 ? args.refs.join(' ') : 'the selected sessions'
+        const validation = conformanceOfSpans(spans)
+        gates.push(check.conformanceGate(subject, validation, renderValidation(validation, { subject, spans })))
+      }
+    }
+  }
+  if (args.shareSafe) {
+    const { verifySafe } = await import('./verify-safe.js')
+    const knownSecrets = args.knownSecretEnvs.map((name) => {
+      const value = process.env[name]
+      if (!value) throw new UsageError(`--known-secret-env ${name || '(missing name)'}: that environment variable is not set`)
+      return value
+    })
+    for (const path of args.refs) gates.push(check.shareSafeGate(await verifySafe(path, { knownSecrets })))
+  }
+  const verdict = check.combineGates(gates)
+  if (args.out !== undefined) await check.writeGateEvidence(args.out, verdict)
+  const output = args.format === 'json'
+    ? JSON.stringify(verdict, null, 2)
+    : args.format === 'junit'
+      ? check.renderVerdictJUnit(verdict).trimEnd()
+      : args.format === 'github' ? check.renderVerdictGithub(verdict) : check.renderVerdictText(verdict)
+  if (output) process.stdout.write(`${output}\n`)
+  if (verdict.exitCode === check.CHECK_EXIT.couldNotDecide) {
+    const undecided = verdict.gates.filter((gate) => gate.status === 'unknown').map((gate) => gate.gate)
+    writeError(`${undecided.join(', ')} could not decide; the verdict on stdout says why`, 'unknown-verdict', args.format === 'json')
+  }
+  process.exitCode = verdict.exitCode
+}
+
+/** Conformance of one OTLP ref, graded on the rows its producer wrote. Only a missing file or directory cannot be graded. */
+async function otlpConformanceGate(check: typeof import('./check.js'), subject: string, path: string) {
+  let input: Awaited<ReturnType<typeof readOtlpInput>>
+  try {
+    input = await readOtlpInput(path)
+  } catch (error) {
+    throw new CliError(errorText(error), 'unreadable')
+  }
+  const text = renderValidation(input.validation, {
+    subject,
     files: input.files,
     skipped: input.skipped,
     issues: input.issues,
@@ -575,66 +667,7 @@ async function cmdValidate(args: CliArgs): Promise<void> {
     unreadable: input.unreadable,
     spans: input.spans,
   })
-  const validation = input.validation
-  if (args.out) {
-    await saveReport(args.out, report)
-    console.log(
-      `conformance report → ${args.out}  (${validation.findings.length} finding(s), ` +
-        `${validation.capabilities.filter((capability) => capability.available).length}/` +
-        `${validation.capabilities.length} capabilities available)`,
-    )
-  } else {
-    console.log(report)
-  }
-  // `validate` is read by CI: an error finding must not exit 0.
-  process.exitCode = validationExitCode(validation)
-}
-
-/**
- * `traces check` — gate a run on a trace contract. Exit 0 pass, 1 fail, 2
- * could not decide: the contract is missing or malformed, a rule could not
- * run (`code: unknown-verdict`), or the trace is unreadable or ambiguous. The
- * verdict always goes to stdout in `--format`, because CI reads it; evidence
- * for every trace that did not pass goes under `--out DIR`, and without it
- * nothing is written.
- */
-async function cmdCheck(args: CliArgs): Promise<void> {
-  const { explainTraceContract } = await import('@tangle-network/agent-eval')
-  const { AmbiguousTraceInputError, CHECK_EXIT, loadContract, renderCheckText, renderGithubAnnotations, renderJUnit, runCheck } = await import('./check.js')
-  if (!args.contract) throw new UsageError('check needs --contract <contract.json>')
-  let loaded: Awaited<ReturnType<typeof loadContract>>
-  try {
-    loaded = await loadContract(args.contract)
-  } catch (error) {
-    throw new UsageError(errorText(error))
-  }
-  for (const warning of loaded.warnings) process.stderr.write(`warning: ${warning}\n`)
-  if (args.explain) {
-    console.log(explainTraceContract(loaded.contract))
-    return
-  }
-  let spans: OtlpSpan[]
-  try {
-    spans = (await collectSpans(await withSelection(args))).spans
-  } catch (error) {
-    if (error instanceof RefError || error instanceof CliError) throw error
-    throw new CliError(errorText(error), error instanceof AmbiguousTraceInputError ? 'ambiguous' : 'unreadable')
-  }
-  if (spans.length === 0) throw new CliError('the trace holds no spans', 'unreadable')
-  const json = args.format === 'json'
-  const report = await runCheck(loaded.contract, spans, args.out === undefined ? {} : { evidenceRoot: args.out })
-  process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : `${renderCheckText(report)}\n`)
-  if (args.junit) await writeFile(args.junit, renderJUnit(report), 'utf8')
-  // Annotations are lines of text: they would corrupt a JSON verdict on stdout.
-  if (!json && (args.annotations || process.env.GITHUB_ACTIONS === 'true')) {
-    const annotations = renderGithubAnnotations(report)
-    if (annotations) console.log(annotations)
-  }
-  if (report.exitCode === CHECK_EXIT.couldNotDecide) {
-    const undecided = report.traces.filter((trace) => trace.verdict.status === 'error').length
-    writeError(`${undecided} trace(s) had a rule that could not run; the verdict above says which`, 'unknown-verdict', json)
-  }
-  process.exitCode = report.exitCode
+  return check.conformanceGate(subject, input.validation, text)
 }
 
 /** `traces convert`: contract OTLP-JSONL to `--out`, or to stdout. */
@@ -1513,27 +1546,6 @@ function reportRefused(refused: readonly RefusedSession[]): void {
   }
 }
 
-/**
- * `traces verify-safe <file|dir>` (hidden; `check --share-safe` in 1.0): the
- * share-safety verdict for files, read-only. Exit 0 SAFE or
- * SAFE_WITH_WARNINGS, 1 UNSAFE, 2 UNKNOWN.
- */
-async function cmdVerifySafe(args: CliArgs): Promise<void> {
-  const { formatVerdict, verdictExitCode, verifySafe } = await import('./verify-safe.js')
-  const profile = args.profile ?? 'share'
-  if (profile !== 'default' && profile !== 'share' && profile !== 'strict') {
-    throw new UsageError(`verify-safe: --profile must be default, share or strict, got "${profile}"`)
-  }
-  const knownSecrets = args.knownSecretEnvs.map((name) => {
-    const value = process.env[name]
-    if (!value) throw new UsageError(`verify-safe: environment variable ${name || '(missing name)'} is not set`)
-    return value
-  })
-  const result = await verifySafe(args.input!, { profile, knownSecrets })
-  process.stdout.write(args.format === 'json' ? `${JSON.stringify(result, null, 2)}\n` : `${formatVerdict(result)}\n`)
-  process.exitCode = verdictExitCode(result)
-}
-
 /** The window `traces skills` counts when no `--since` is given. */
 const SKILLS_SINCE = '30d'
 
@@ -1588,8 +1600,8 @@ await runTraces(process.argv.slice(2), {
   facts: reading(cmdFacts),
   analyze: reading(cmdAnalyze),
   ask: reading(cmdAsk),
-  // check resolves its refs itself, after its contract loads: a bad contract
-  // is reported before any trace is read, with check's own exit codes.
+  // check resolves its refs itself, after its contracts load, and --share-safe
+  // reads paths as bytes: a bad contract exits before any trace is read.
   check: async (args) => cmdCheck(prepare(args)),
   diff: cmdDiff,
   watch: reading(cmdWatch),
@@ -1599,6 +1611,4 @@ await runTraces(process.argv.slice(2), {
   upload: reading(cmdUpload),
   skills: cmdSkills,
   mcp: reading(cmdMcp),
-  validate: cmdValidate,
-  'verify-safe': cmdVerifySafe,
 })

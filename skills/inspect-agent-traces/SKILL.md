@@ -12,7 +12,7 @@ Use the deterministic CLI first; keep inspection local and read-only.
 Read conforming OTLP directly, including `@tangle-network/agent-trace-contract` exports.
 
 ```bash
-traces validate spans.otlp.jsonl          # exit 1 on error findings
+traces check spans.otlp.jsonl --contract conformance   # exit 1 only when it is not a trace
 traces analyze spans.otlp.jsonl --out .traces/current.md
 traces analyze results/sessions --out .traces/all.md   # a directory of exports
 ```

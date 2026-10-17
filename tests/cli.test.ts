@@ -193,8 +193,10 @@ describe('traces CLI', () => {
       '--import',
       'tsx',
       'src/cli.ts',
-      'validate',
+      'check',
       otlp,
+      '--contract',
+      'conformance',
     ], {
       cwd: process.cwd(),
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
@@ -276,8 +278,10 @@ describe('traces CLI', () => {
       '--import',
       'tsx',
       'src/cli.ts',
-      'validate',
+      'check',
       otlp,
+      '--contract',
+      'conformance',
     ], {
       cwd: process.cwd(),
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },

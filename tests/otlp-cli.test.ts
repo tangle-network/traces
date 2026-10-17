@@ -85,12 +85,12 @@ async function writeRows(dir: string, name: string, rows: readonly unknown[]): P
   return path
 }
 
-describe('traces validate', () => {
+describe('traces check --contract conformance', () => {
   it('exits 0 on a conforming trace and lists every capability it unlocks', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-validate-ok-'))
     const path = await writeRows(dir, 'spans.otlp.jsonl', conformingRows())
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('CONFORMS')
     expect(result.stdout).toContain('| `token-accounting` | ✅ available')
@@ -109,7 +109,7 @@ describe('traces validate', () => {
     rows[1] = { ...rows[1], parent_span_id: deriveHexId('round-missing', 8) }
     const path = await writeRows(dir, 'spans.otlp.jsonl', rows)
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('CONFORMS')
     expect(result.stdout).toContain('🟠 WARN | `orphan-parent`')
@@ -125,7 +125,7 @@ describe('traces validate', () => {
       { type: 'delta', index: 1 },
     ])
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(1)
     expect(result.stdout).toContain('NOT A TRACE')
     expect(result.stdout).toContain('🔴 ERROR | `invalid-span`')
@@ -159,7 +159,7 @@ describe('traces validate', () => {
       },
     ])
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('flat-hierarchy')
     expect(result.stdout).toContain('2/2 (100.0%) carry no parent edge')
@@ -174,7 +174,7 @@ describe('traces validate', () => {
     await writeRows(dir, 'a.jsonl', rows.slice(0, 2))
     await writeRows(join(dir, 'nested'), 'b.jsonl', rows.slice(2))
 
-    const result = await runCli(['validate', dir])
+    const result = await runCli(['check', dir, '--contract', 'conformance'])
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('Ingested:** 4 span(s) from 4 row(s) across 2 OTLP file(s)')
   })
@@ -189,7 +189,7 @@ describe('traces validate', () => {
     )
     await writeFile(join(dir, 'reviewer-memory.jsonl'), `${JSON.stringify({ note: 'x' })}\n`, 'utf8')
 
-    const result = await runCli(['validate', dir])
+    const result = await runCli(['check', dir, '--contract', 'conformance'])
     expect(result.code).toBe(0)
     // 4 rows, not 45: the event logs are named, not counted as broken spans.
     expect(result.stdout).toContain('Ingested:** 4 span(s) from 4 row(s) across 1 OTLP file(s)')
@@ -203,7 +203,7 @@ describe('traces validate', () => {
     const path = join(dir, 'junk.jsonl')
     await writeFile(path, '{"hello":"world"}\nnot json at all\n[1,2,3]\n', 'utf8')
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(1)
     expect(result.stdout).toContain('invalid-span')
     expect(result.stdout).toContain('unparseable-line')
@@ -218,7 +218,7 @@ describe('traces validate', () => {
     const path = join(dir, 'spans.otlp.jsonl')
     await writeFile(path, '', 'utf8')
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(1)
     expect(result.stdout).toContain('NOT A TRACE')
     expect(result.stdout).not.toContain('CONFORMS')
@@ -231,7 +231,7 @@ describe('traces validate', () => {
     const path = join(dir, 'spans.otlp.jsonl')
     await writeFile(path, 'not json at all\n{ broken\n<<<>>>\n', 'utf8')
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(1)
     expect(result.stdout).toContain('NOT A TRACE')
     expect(result.stdout).not.toContain('CONFORMS')
@@ -246,7 +246,7 @@ describe('traces validate', () => {
     const good = JSON.stringify(conformingRows()[0])
     await writeFile(path, `garbage line one\n${good}\n{ still broken\n`, 'utf8')
 
-    const result = await runCli(['validate', path])
+    const result = await runCli(['check', path, '--contract', 'conformance'])
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('CONFORMS')
     expect(result.stdout).toContain('Ingested:** 1 span(s) from 1 row(s)')
@@ -443,7 +443,7 @@ describe('traces analyze <otlp file>', () => {
     )
     const artifact = join(dir, 'artifact.jsonl')
 
-    const sourceValidation = await runCli(['validate', source])
+    const sourceValidation = await runCli(['check', source, '--contract', 'conformance'])
     expect(sourceValidation.code).toBe(0)
     expect(sourceValidation.stdout).toContain('🟠 WARN | `invalid-status`')
     expect(sourceValidation.stdout).toContain('ℹ️  INFO | `unknown-span-kind`')
@@ -452,7 +452,7 @@ describe('traces analyze <otlp file>', () => {
     const converted = await runCli(['convert', source, '--out', artifact])
     expect(converted.code).toBe(0)
 
-    const artifactValidation = await runCli(['validate', artifact])
+    const artifactValidation = await runCli(['check', artifact, '--contract', 'conformance'])
     // Same verdict, same exit, same findings — the defects did not wash out.
     expect(artifactValidation.code).toBe(sourceValidation.code)
     expect(artifactValidation.stdout).toContain('CONFORMS')
@@ -482,6 +482,6 @@ describe('traces analyze <otlp file>', () => {
 
     const result = await runCli(['analyze', path])
     expect(result.code).toBe(2)
-    expect(result.stderr).toContain('traces validate')
+    expect(result.stderr).toContain('--contract conformance')
   })
 })

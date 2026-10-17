@@ -112,6 +112,20 @@ export async function* readJsonl<T>(
   path: string,
   options: JsonlReadOptions = { mode: 'strict' },
 ): AsyncGenerator<T> {
+  for await (const row of readJsonlLines<T>(path, options)) yield row.value
+}
+
+/** One parsed JSONL row and the one-based line it was read from. */
+export interface JsonlLine<T> {
+  readonly value: T
+  readonly lineNumber: number
+}
+
+/** {@link readJsonl}, with the line each row was read from. */
+export async function* readJsonlLines<T>(
+  path: string,
+  options: JsonlReadOptions = { mode: 'strict' },
+): AsyncGenerator<JsonlLine<T>> {
   if (
     options.mode === 'recover' &&
     typeof (options as { onCorruption?: unknown }).onCorruption !== 'function'
@@ -136,7 +150,7 @@ export async function* readJsonl<T>(
         fragments = []
         lineNumber += 1
         const parsed = parseLine<T>(rawLine, path, lineNumber, byteOffset, options)
-        if (parsed !== undefined) yield parsed
+        if (parsed !== undefined) yield { value: parsed, lineNumber }
         byteOffset += rawLine.length + 1
         start = newline + 1
         newline = bytes.indexOf(0x0a, start)
@@ -148,7 +162,7 @@ export async function* readJsonl<T>(
       const rawLine = fragments.length === 1 ? fragments[0]! : Buffer.concat(fragments)
       lineNumber += 1
       const parsed = parseLine<T>(rawLine, path, lineNumber, byteOffset, options)
-      if (parsed !== undefined) yield parsed
+      if (parsed !== undefined) yield { value: parsed, lineNumber }
     }
   } finally {
     input.destroy()

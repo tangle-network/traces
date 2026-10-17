@@ -263,6 +263,8 @@ function eventStatus(row: JsonObject, type: string): { status: OtlpStatusCode; m
 
 function eventKind(row: JsonObject, type: string): { kind: OtlpSpanKind; tool?: string } {
   const lowered = type.toLowerCase()
+  // The run's summary: its `toolInvocations` list calls their own events already recorded.
+  if (lowered === 'result') return { kind: 'CHAIN' }
   const tool = findStringKey(row, ['tool', 'toolName', 'tool_name'], 4)
   if (tool || lowered.includes('tool') || stableJson(row).includes('tool-invocation')) return { kind: 'TOOL', tool }
   if (lowered.includes('llm') || lowered === 'token') return { kind: 'LLM' }
@@ -343,14 +345,41 @@ function llmEventUsage(row: JsonObject): {
 }
 
 /**
- * The message part a sandbox tool event reports on. The Sandbox SDK records a
- * tool call as a `message.part.updated` event and again as the harness's raw
- * `tool_use` event, and a part can be updated several times as it runs. All of
- * them carry the same part id, so the id is what makes one tool call one span.
+ * The tool part a sandbox event reports on. The Sandbox SDK records a tool
+ * call as its own `message.part.updated` event (`data.part`) and again inside
+ * the harness's raw envelope (`data.event.part`, OpenCode's `tool_use`), and a
+ * part can be updated several times as it runs. All of them carry the same
+ * part id, so the id is what makes one tool call one span.
  */
-function toolPartId(row: JsonObject): string | undefined {
-  const part = objectValue(objectValue(row.data)?.part) ?? objectValue(row.part)
-  return part && part.type === 'tool' ? stringValue(part.id) : undefined
+function toolPart(row: JsonObject): JsonObject | undefined {
+  const data = objectValue(row.data)
+  const part = objectValue(data?.part) ?? objectValue(row.part) ?? objectValue(objectValue(data?.event)?.part)
+  return part && part.type === 'tool' && stringValue(part.id) ? part : undefined
+}
+
+/** What a tool part's events recorded: the call's name, input, output and error, the latest of each. */
+interface ToolPartState {
+  tool?: string
+  input?: unknown
+  output?: unknown
+  error?: string
+  start?: string
+  end?: string
+}
+
+/** Fold one event's view of a tool part into what the part's earlier events recorded. */
+function foldToolPart(into: ToolPartState, part: JsonObject): void {
+  const state = objectValue(part.state)
+  const time = objectValue(state?.time)
+  into.tool = stringValue(part.tool) ?? into.tool
+  // A pending part can carry an empty input before the call's real one arrives.
+  const input = state?.input
+  if (input !== undefined && !(isObject(input) && Object.keys(input).length === 0)) into.input = input
+  if (state?.output !== undefined) into.output = state.output
+  into.error = stringValue(state?.error) ?? into.error
+  const start = isoTime(time?.start)
+  if (start && (into.start === undefined || start < into.start)) into.start = start
+  into.end = isoTime(time?.end) ?? into.end
 }
 
 function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject): OtlpSpan[] {
@@ -399,46 +428,57 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
   const lastEventOfPart = new Map<string, number>()
   const firstTimeOfPart = new Map<string, string>()
   const errorOfPart = new Map<string, { status: OtlpStatusCode; message?: string }>()
+  const stateOfPart = new Map<string, ToolPartState>()
   rows.forEach((row, index) => {
-    const part = toolPartId(row)
-    if (part === undefined) return
+    const toolPartOfRow = toolPart(row)
+    if (toolPartOfRow === undefined) return
+    const part = stringValue(toolPartOfRow.id)!
     lastEventOfPart.set(part, index)
+    const state = stateOfPart.get(part) ?? {}
+    foldToolPart(state, toolPartOfRow)
+    stateOfPart.set(part, state)
     const time = eventTimestamp(row)
     const first = firstTimeOfPart.get(part)
     if (time && (first === undefined || time < first)) firstTimeOfPart.set(part, time)
-    const status = eventStatus(row, eventType(row) ?? 'event')
+    const partStatus = stringValue(objectValue(toolPartOfRow.state)?.status)
+    const status = partStatus === 'error' || partStatus === 'failed'
+      ? { status: 'ERROR' as const, ...(state.error ? { message: capText(state.error) } : {}) }
+      : eventStatus(row, eventType(row) ?? 'event')
     if (status.status === 'ERROR') errorOfPart.set(part, status)
   })
   const mergedToolEvents = rows.filter((row, index) => {
-    const part = toolPartId(row)
+    const part = stringValue(toolPart(row)?.id)
     return part !== undefined && lastEventOfPart.get(part) !== index
   }).length
   if (mergedToolEvents > 0) spans[0]!.attributes['traces.event.tool_part_updates_merged'] = mergedToolEvents
 
   let previousTime = rootStart
   rows.forEach((row, index) => {
-    const part = toolPartId(row)
+    const part = stringValue(toolPart(row)?.id)
     if (part !== undefined && lastEventOfPart.get(part) !== index) return
+    const partState = part !== undefined ? stateOfPart.get(part) : undefined
     const type = eventType(row) ?? 'event'
-    const time = (part !== undefined ? firstTimeOfPart.get(part) : undefined) ?? eventTimestamp(row) ?? previousTime
+    const time = partState?.start ?? (part !== undefined ? firstTimeOfPart.get(part) : undefined) ?? eventTimestamp(row) ?? previousTime
     previousTime = time
     const { status, message } = (part !== undefined ? errorOfPart.get(part) : undefined) ?? eventStatus(row, type)
-    const { kind, tool } = eventKind(row, type)
+    const { kind, tool } = partState ? { kind: 'TOOL' as const, tool: partState.tool } : eventKind(row, type)
     const name = kind === 'TOOL' && tool ? `tool.${tool}` : `event.${type}`
     const toolInput = kind === 'TOOL'
-      ? eventValue(row, ['toolInput', 'tool_input', 'input', 'args', 'arguments', 'full_command'])
+      ? partState?.input ?? eventValue(row, ['toolInput', 'tool_input', 'input', 'args', 'arguments', 'full_command'])
       : undefined
+    const toolOutput = kind === 'TOOL'
+      ? partState?.output ?? partState?.error ?? eventValue(row, ['toolOutput', 'tool_output', 'output', 'result'])
+      : undefined
+    const invocations = type === 'result' ? objectValue(row.data)?.toolInvocations : undefined
     const extra: JsonObject = {
       'traces.source_format': 'sandbox-events',
       'traces.event.type': type,
       'traces.event.index': index,
       ...(kind === 'TOOL'
-        ? toolIoAttributes({
-            input: toolInput,
-            output: eventValue(row, ['toolOutput', 'tool_output', 'output', 'result']),
-            argsCaptured: toolInput !== undefined,
-          })
+        ? toolIoAttributes({ input: toolInput, output: toolOutput, argsCaptured: toolInput !== undefined })
         : {}),
+      // The Sandbox's own count of the run's tool calls, beside the tool spans counted from their events.
+      ...(Array.isArray(invocations) ? { 'traces.event.tool_invocations': invocations.length } : {}),
     }
     copyDefined(extra, {
       'traces.event.part_id': part,
@@ -453,7 +493,7 @@ function sandboxEventsToSpans(rows: readonly JsonObject[], wrapper?: JsonObject)
       name,
       kind,
       startTime: time,
-      endTime: eventEndTimestamp(row, time),
+      endTime: partState?.end !== undefined && partState.end >= time ? partState.end : eventEndTimestamp(row, time),
       status,
       statusMessage: message,
       service,

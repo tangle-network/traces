@@ -244,6 +244,54 @@ export const MOVED: readonly MovedRow[] = [
     rewrite: (argv) => windowToSince(dropFlag(argv, '--interval', true)),
   },
   { was: [], label: 'SDK watchSessions', now: 'streamSessions({ onEvent }): the session, finding and tick events traces watch prints' },
+  {
+    was: ['validate'],
+    now: 'traces check <f> --contract conformance (exit 1 only when the file is not a trace; the report is stdout)',
+    rewrite: (argv) => {
+      // validate --out FILE wrote the report to FILE; check's --out is a directory of evidence.
+      if (flagIndexes(argv, '--out').length > 0) return undefined
+      const renamed = renameCommand(argv, 'check')
+      return renamed[0] === 'help' ? renamed : [...renamed, '--contract', 'conformance']
+    },
+  },
+  {
+    was: ['verify-safe'],
+    now: 'traces check <path> --share-safe (--known-secret-env is unchanged)',
+    rewrite: (argv) => {
+      const renamed = renameCommand(argv, 'check')
+      return renamed[0] === 'help' ? renamed : [...renamed, '--share-safe']
+    },
+  },
+  {
+    was: ['--profile'],
+    commands: ['verify-safe', 'check'],
+    now: 'removed: a share verdict always uses the share profile',
+    rewrite: (argv) => dropFlag(argv, '--profile', true),
+  },
+  { was: ['--junit'], commands: ['check'], now: 'check … --format junit > FILE: the JUnit XML is the verdict on stdout' },
+  {
+    was: ['--annotations'],
+    commands: ['check'],
+    now: 'check … --format github: the annotations are the verdict on stdout',
+    rewrite: (argv) => {
+      if (flagIndexes(argv, '--format').length > 0) return undefined
+      const at = new Set(flagIndexes(argv, '--annotations'))
+      return argv.flatMap((word, i) => (at.has(i) ? ['--format', 'github'] : [word]))
+    },
+  },
+  {
+    was: ['--explain'],
+    commands: ['check'],
+    now: 'traces check --contract FILE with no ref explains FILE',
+    rewrite: (argv) => {
+      // --explain read no trace: its refs go with it.
+      const rest = dropFlag(argv, '--explain', false)
+      let at = 1
+      while (at < rest.length && !rest[at]!.startsWith('-')) at++
+      return [rest[0]!, ...rest.slice(at)]
+    },
+  },
+  { was: [], label: 'check exit 3 (unreadable) and 4 (ambiguous)', now: 'exit 2, with code unreadable or ambiguous in the JSON error on stderr' },
 ]
 
 /** `--window M` (minutes) as `--since Mm`; `undefined` when M is not a whole number of minutes. */

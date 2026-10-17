@@ -20,7 +20,6 @@ const ROOT = join(dirname(CLI), '..')
 /** Spellings kept, hidden from help, until the step that moves each (spec §2.4); value-taking ones say so. */
 const HIDDEN_FLAGS: Readonly<Record<string, Readonly<Record<string, boolean>>>> = {
   ask: { '--dir': true, '--question-budget': true, '--question-timeout': true, '--concurrency': true },
-  check: { '--junit': true, '--annotations': false, '--explain': false },
   diff: { '--kind': true },
 }
 
@@ -29,7 +28,8 @@ const SELECTORS: Readonly<Record<string, readonly string[]>> = {
   facts: ['--current', '--last', '--since'],
   analyze: ['--current', '--last', '--since'],
   ask: ['--current', '--last', '--since'],
-  check: ['--current', '--last', '--since', '--explain'],
+  // `check --contract F` with no ref explains F.
+  check: ['--current', '--last', '--since', '--contract'],
   convert: ['--current', '--last', '--since'],
   mcp: ['--current', '--last', '--since'],
   bundle: ['--current'],
