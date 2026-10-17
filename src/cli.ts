@@ -19,6 +19,7 @@ import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { findingRejectionDetail } from './finding-rejections.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
+import { metadataOnly } from './metadata-only.js'
 import { shellWord } from './moved.js'
 import type { TraceStreamEvent, WatchedSession } from './live.js'
 import type { TraceLiveFinding } from './pipelines.js'
@@ -594,17 +595,17 @@ async function cmdCheck(args: CliArgs): Promise<void> {
   }
   const gates: Parameters<typeof check.combineGates>[0][number][] = []
   if (traceGates) {
-    const selected = await withSelection(args)
-    const sources = selected.selection?.spans ?? []
+    const resolved = await withSelection(args)
+    const sources = resolved.selection?.spans ?? []
     // OTLP refs are graded on the rows their producer wrote, and a file that is
     // not a trace fails conformance rather than going unread.
-    const otlpOnly = selected.selection !== undefined && selected.selection.sessions.length === 0 &&
-      selected.selection.home === undefined && sources.every((source) => source.kind === 'run-dir' || source.reader === 'otlp')
+    const otlpOnly = resolved.selection !== undefined && resolved.selection.sessions.length === 0 &&
+      resolved.selection.home === undefined && sources.every((source) => source.kind === 'run-dir' || source.reader === 'otlp')
     let run: CollectedSpans | undefined
     const runSpans = async (): Promise<CollectedSpans> => {
       if (run) return run
       try {
-        run = await collectSpans(selected)
+        run = await collectSpans(resolved)
       } catch (error) {
         if (error instanceof RefError || error instanceof CliError) throw error
         throw new CliError(errorText(error), error instanceof check.AmbiguousTraceInputError ? 'ambiguous' : 'unreadable')
@@ -670,18 +671,25 @@ async function otlpConformanceGate(check: typeof import('./check.js'), subject: 
   return check.conformanceGate(subject, input.validation, text)
 }
 
-/** `traces convert`: contract OTLP-JSONL to `--out`, or to stdout. */
+/**
+ * `traces convert`: contract OTLP-JSONL to `--out`, or to stdout. With
+ * `--no-content` the spans go through the metadata-only rule first, and the
+ * summary names every attribute key it removed.
+ */
 async function cmdConvert(args: CliArgs): Promise<void> {
-  const { spans, workflow } = await collectSpans(args)
-  if (spans.length === 0) throw new Error('no spans found for the given selection')
-  warnIncompleteWorkflow(workflow)
+  const collected = await collectSpans(args)
+  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  const { spans, dropped } = args.noContent ? metadataOnly(collected.spans) : { spans: collected.spans, dropped: [] }
   if (args.out === undefined) {
     // Streamed line by line: a conversion can outgrow V8's maximum string length.
     for (const line of iterSerializedSpans(spans)) process.stdout.write(line)
     return
   }
-  const path = await writeOtlpFile(spans, args.out)
-  console.log(`wrote ${spans.length} spans → ${path}`)
+  const out = await writeOtlpFile(spans, args.out)
+  console.log(args.format === 'json'
+    ? JSON.stringify({ out, spans: spans.length, droppedAttributes: dropped })
+    : `wrote ${spans.length} spans → ${out}${args.noContent ? ` (metadata only: ${dropped.length} attribute key(s) dropped)` : ''}`)
 }
 
 function workflowIssueText(issue: SessionWorkflowIssue): string {
@@ -1495,7 +1503,7 @@ async function cmdUpload(args: CliArgs): Promise<void> {
   w(`Sessions found: ${plan.items.length}  ·  final privacy-mode dedup runs before upload\n`)
   w(`PII/secrets redacted: ${totalRedactions}${Object.keys(byDetector).length ? ` (${Object.entries(byDetector).map(([r, n]) => `${r}:${n}`).join(', ')})` : ''}\n`)
   for (const i of candidates.slice(0, 25)) {
-    w(`  + [${i.ref.harness}] ${i.ref.sessionId.slice(0, 8)}  ${i.spans.length} spans  ${i.redaction.redactionCount} redacted  ${i.ref.cwd ?? ''}\n`)
+    w(`  + [${i.ref.harness}] ${i.ref.sessionId.slice(0, 8)}  ${i.spans.length} spans  ${i.redaction.redactionCount} redacted  ${args.noContent ? '' : i.ref.cwd ?? ''}\n`)
   }
   if (candidates.length > 25) w(`  … and ${candidates.length - 25} more\n`)
 
@@ -1507,6 +1515,7 @@ async function cmdUpload(args: CliArgs): Promise<void> {
   if (args.dryRun) {
     const res = await executeUpload(plan, { dryRun: true, otlpOut: args.out, stripContent: args.noContent })
     reportRefused(res.refused)
+    if (res.verdict) console.log(`share verdict: ${res.verdict.status} (the redacted${args.noContent ? ', metadata-only' : ''} payload; UNSAFE and UNKNOWN are refused)`)
     console.log(
       `dry run: ${candidates.length - res.skippedSessions - res.refused.length} session(s), ${totalRedactions} redaction(s).` +
         (res.otlpPath ? ` Redacted OTLP -> ${res.otlpPath}` : ' Pass --out FILE to keep the redacted OTLP.'),

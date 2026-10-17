@@ -18,7 +18,14 @@ import { runCli } from './run-cli.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 const SPEC = join(fixtures, 'otlp-json', 'spec-trace.json')
+/**
+ * Captured with `tangle traces get <id> --ndjson` from production Intelligence on
+ * 2026-10-17, after `traces upload` sent the spec fixture's agent run under the
+ * trace id {@link SERVED_RUN} (traces 1.0 step 16). The tenant id and host are
+ * replaced with placeholders; every other field is as served.
+ */
 const SERVED = join(fixtures, 'otlp-json', 'intelligence-spans.ndjson')
+const SERVED_RUN = 'bde470ac10ae31e5d81a4304a7941192'
 const MAX_RSS = pathToFileURL(join(fixtures, 'max-rss.mjs')).href
 /** The agent run in both fixtures. */
 const RUN = '4bf92f3577b34da6a3ce929d0e0e4736'
@@ -166,10 +173,19 @@ describe('standard OTLP/JSON as a ref', () => {
     expect(Buffer.byteLength(output)).toBeLessThanOrEqual(16 * 1024)
   })
 
-  it('reads the span rows Tangle Intelligence serves (tangle traces get <id> --ndjson)', async () => {
+  it('reads the span rows Tangle Intelligence serves (tangle traces get <id> --ndjson): the run uploaded, span for span', async () => {
     const sheets = await facts(SERVED)
-    expect(sheets.map((sheet) => sheet.traceId)).toEqual([RUN])
+    expect(sheets.map((sheet) => sheet.traceId)).toEqual([SERVED_RUN])
     expect(sheets[0]!.toolCallsByName.value).toEqual(toolCallsIn(spec))
+
+    const out = join(dir, 'served.otlp.jsonl')
+    expect((await runCli(['convert', SERVED, '--out', out], { env })).code).toBe(0)
+    const served = (await readFile(out, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { span_id: string; start_time: string; status?: { code?: string } })
+    const uploaded = spansOf(spec).filter((span) => span.traceId.toLowerCase() === RUN)
+    const key = (spanId: string, start: string) => `${spanId.toLowerCase()}@${start}`
+    expect(served.map((span) => key(span.span_id, span.start_time)).sort())
+      .toEqual(uploaded.map((span) => key(span.spanId, iso(span.startTimeUnixNano))).sort())
+    expect(served.filter((span) => span.status?.code?.endsWith('ERROR')).length).toBe(uploaded.filter((span) => span.status?.code === 2).length)
   })
 })
 

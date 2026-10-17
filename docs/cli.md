@@ -57,7 +57,7 @@ traces help moved                                  # every 0.x command and flag 
 | `--contract <file>` | `check`: gate on a declarative trace contract (JSON), or on `conformance`; repeatable |
 | `--share-safe` | `check`: gate on whether each path is safe to share, read as bytes |
 | `--known-secret-env <name>` | `check --share-safe`: also fail on this variable's value, in any encoding; repeatable |
-| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`; `check` also takes `junit` and `github`. The input is sniffed |
+| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`, and on `convert`'s `--out` summary line; `check` also takes `junit` and `github`. The input is sniffed |
 | `--budget <usd>` | `ask`: one ceiling shared by every question. `analyze` calls no model |
 | `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
 | `--questions <file>` | `ask`: JSON array of questions: strings, or `{ id?, question, instructions?, answerSchema? }` |
@@ -65,7 +65,7 @@ traces help moved                                  # every 0.x command and flag 
 | `--question-timeout <seconds>` | `ask`: wall-clock deadline for ONE question's investigation (default 600); raise it for questions over many large sessions |
 | `--concurrency <n>` | `ask`: questions running at once (default 4) |
 | `--once` | `watch`: one pass (or one run-tree snapshot), then exit |
-| `--no-content` | `facts`: omit conversation, commands, paths and assignment text; `upload`: send metadata only |
+| `--no-content` | One metadata-only rule (`src/metadata-only.ts`): `facts` omits conversation, commands, paths and assignment text; `convert` and `upload` drop prompts, replies, tool input and output, error text, working directories, branch names and subagent briefs from every span |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
 
 Every command exits 0 yes, 1 no (fail, diverged, unsafe), or 2 could not answer. With `--format json`, the reason is one JSON object `{error, code}` on stderr.

@@ -3,8 +3,9 @@
 Five working days, from the day usable traces arrive. Every command below was run
 against this repository. Where a step is not yet proven end to end, it says so.
 
-The `traces` binary is only on PATH when the package is installed. From a checkout,
-substitute `./node_modules/.bin/tsx src/cli.ts` for `traces` in every command.
+`traces` is the public npm package (`npm install -g @tangle-network/traces`, or
+`npx --yes @tangle-network/traces@1` in place of `traces`). The operator scripts in
+`checks/` run the CLI built from this checkout, so run `pnpm build` there first.
 
 ---
 
@@ -13,18 +14,16 @@ substitute `./node_modules/.bin/tsx src/cli.ts` for `traces` in every command.
 Send `intake.md`. Do not accept traces until section 4 comes back signed, because
 that section is what decides whether content may be read at all.
 
-For metadata-only intake, give the customer the merged `traces` repository URL and its exact commit.
-The export script imports other repository files and needs its locked dependencies.
-They run these commands on their own machine before transfer, or use an equivalent metadata-only exporter:
+For metadata-only intake, the customer runs two public npm commands on their own machine before transfer,
+or uses an equivalent metadata-only exporter. Give them the exact version you will analyse with:
 
 ```bash
-git clone https://github.com/tangle-network/traces.git
-cd traces
-git checkout <kit-commit>
-corepack pnpm install --frozen-lockfile
-./node_modules/.bin/tsx diagnosis-kit/checks/scrub-export.ts raw.otlp.jsonl metadata-only.otlp.jsonl
+traces convert raw.otlp.jsonl --no-content --out metadata-only.otlp.jsonl --format json
+traces check metadata-only.otlp.jsonl --share-safe
 ```
 
+`convert --no-content` prints the attribute keys it dropped; `check --share-safe` exits 0 only when the
+file is safe to share (1 unsafe, 2 could not decide), and names the detector and path of each finding, never a value.
 The raw file stays with the customer.
 Ask them to inspect retained span and tool names for privileged prose before sending the exported file.
 If they cannot make that inspection, pause receipt until they remove those names or agree a different data scope.
@@ -71,8 +70,8 @@ seven capabilities are unavailable, say so that day rather than at the end.
 
 ## Day 1 — enforce the data boundary
 
-`--no-content` controls the `traces` upload command.
-This kit does not use that command; the flag does not control `trace-mine` model processing.
+`--no-content` is one metadata-only rule (`src/metadata-only.ts`) wherever it appears: `convert`, `facts` and `upload`.
+It does not control `trace-mine` model processing.
 
 Strip content into the engagement's bundle before analysis:
 
@@ -80,16 +79,21 @@ Strip content into the engagement's bundle before analysis:
 ./node_modules/.bin/tsx diagnosis-kit/checks/prepare-bundle.ts "$ENGAGEMENT_DIR"
 ```
 
-The command refuses an incoming file that still has content-bearing attributes or structured secrets.
+It runs `traces check incoming/spans.otlp.jsonl --share-safe`, then
+`traces convert incoming/spans.otlp.jsonl --no-content --out bundle/spans.flat.jsonl --format json`.
+It refuses an incoming file that is not safe to share, or from which the rule still had to drop anything
+but the reader's own `tool.args_captured` marker, and then keeps no bundle.
 Delete that file and request a new customer-side export if it refuses.
 On success, it writes `bundle/spans.flat.jsonl` with mode 0600.
-Record its span count, dropped attribute names and redaction counts in the appendix.
+Record its span count, dropped attribute names and share verdict in the appendix.
 The raw incoming file remains inside the engagement until close deletes both.
 
-Under the metadata-only default, `stripContent` drops every content key recognized by the shared diagnosis filter.
-It also drops tool argument aliases, structured attribute values, tool I/O digests, lengths, MIME types, provenance, `tool.args_captured`, and free-form error and status messages.
-The kit's `run-checks.ts` uses this same helper before redaction or analysis.
-It reports argument-based stuck-loop and follow-up comparisons as skipped when arguments were removed, instead of treating distinct calls as identical.
+The metadata-only rule drops every content key recognized by agent-eval's diagnosis filter (`gen_ai.*.messages`,
+`gen_ai.tool.call.arguments` and `.result`, `llm.*_messages`, `*.content`, …), tool argument aliases,
+structured attribute values, tool I/O digests, lengths and MIME types, source locations, working directories,
+branch names, subagent briefs, `tool.args_captured`, and free-form error and status messages.
+`traces analyze` then reports argument-based stuck-loop and follow-up comparisons as questions it cannot answer,
+instead of treating distinct calls as identical.
 Without content opt-in, failure follow-ups still count, but whether the agent adapted its arguments remains unknown.
 
 This command refuses content opt-in.
@@ -116,8 +120,13 @@ This is the check set the customer can re-run themselves.
 Run it against the prepared bundle and keep its measured output with the report.
 
 ```bash
-./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" > "$ENGAGEMENT_DIR/work/checks.json"
+./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --label "<customer's words>" > "$ENGAGEMENT_DIR/work/checks.json"
 ```
+
+It runs `traces analyze <bundle> --format json` and maps it onto `templates/findings.schema.json`:
+`conformance` into `coverage.capabilities`, every `cannotAnswer` entry and unreadable row into `coverage.skipped`,
+and the stuck loops, failing tool calls and blind retries into observed findings with their numbers and span ids.
+The customer re-runs `traces analyze metadata-only.otlp.jsonl --format json` to check every number.
 
 `checks/` holds the set to start from. Add one check per symptom the customer named in
 intake section 2, so every complaint has a number attached to it.

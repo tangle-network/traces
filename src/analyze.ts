@@ -124,7 +124,7 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
     opts.signal?.throwIfAborted()
     return { result }
   }
-  const store = openDeterministicTraceStore(metadataOnly(spans))
+  const store = openDeterministicTraceStore(metadataOnly(spans).spans)
   opts.signal?.throwIfAborted()
   const result = await buildDefaultAnalystRegistry({ registry: { log: opts.log } }).run(runId, { traceStore: store }, { signal: opts.signal })
   opts.signal?.throwIfAborted()
