@@ -27,6 +27,6 @@ Tests assert through public boundaries: they spawn `dist/cli.js` with argv (`tes
 ## How quality is measured
 
 [`bench/audit/`](../bench/audit) asks 19 questions about three synthetic sessions and scores answers by exact match, with no model judging anything.
-Three arms answer it: `facts` (`traces facts --format json` mapped by fixed rules, $0; `pnpm test` holds its score to `bench/audit/facts-score.json`, which may only rise), `raw-files` (one `claude -p` agent per question over the raw files) and `traces` (the same agent with `traces` on PATH and the skill installed in its own HOME).
+Three arms answer it: `facts` (`traces facts <ref> --format json` mapped by fixed rules, $0; `pnpm test` holds its score to `bench/audit/facts-score.json`, which may only rise), `raw-files` (one `claude -p` agent per question over the raw files) and `traces` (the same agent with `traces` on PATH and the skill installed in its own HOME).
 `pnpm bench:audit large` runs any arm over one synthetic session of about 50,000 spans.
 The release rule: the traces arm answers at least as many questions as the raw-files arm, at lower cost. [`bench/audit/README.md`](../bench/audit/README.md) has the commands and the rule, and [`bench/parity/`](../bench/parity) scores each parser traces retires against the command that replaces it ([parsers](parsers.md)).

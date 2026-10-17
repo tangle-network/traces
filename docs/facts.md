@@ -68,7 +68,7 @@ A create counts only where an output shows `gh` answered: a script that complete
 
 ## `--no-content`, windows and exit status
 
-`--no-content` withholds conversation, commands, paths and assignments and keeps the measurements; it is a local view, not a share-safety verdict (`traces check --share-safe` is).
+`--no-content` withholds conversation, commands, paths and assignments and keeps the measurements; it is a local view, not a share-safety verdict (`traces check <path> --share-safe` is).
 With `--since`/`--until`, the turn facts keep only turns inside `[since, until)`; every other fact covers the whole session. `selection` names the window, the sessions outside it and every unreadable session.
 A named session that cannot be read exits 2; in a window it is skipped, named, and the run exits 0.
 
