@@ -110,8 +110,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ steps.publish-tag.outputs.tag_name }}
         run: |
+          # A release's notes are docs/release-<version>.md when the tagged commit has one.
+          notes="docs/release-${TAG_NAME#v}.md"
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             echo "GitHub release $TAG_NAME already exists"
+          elif [ -f "$notes" ]; then
+            gh release create "$TAG_NAME" --title "$TAG_NAME" --notes-file "$notes"
           else
             gh release create "$TAG_NAME" \
               --title "$TAG_NAME" \

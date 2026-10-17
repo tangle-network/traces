@@ -1,7 +1,7 @@
 {
   "name": "@tangle-network/traces",
-  "version": "0.23.1",
-  "description": "Point it at your coding-agent session traces (Claude Code, Codex, OpenCode, Pi, \u2026) and get failure-mode + efficiency findings. CLI + SDK over the @tangle-network/agent-eval analyst suite \u2014 observe live sessions, run your own analysts, redact, and upload to the Tangle Intelligence Platform.",
+  "version": "1.0.0",
+  "description": "What your coding agents did, where they wasted time, and whether a run passes: exact facts, ranked findings, one CI gate and a live view over Claude Code, Codex, OpenCode, Pi, Kimi and Factory sessions and any OTLP spans. CLI and SDK.",
   "type": "module",
   "license": "MIT",
   "repository": {

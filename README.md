@@ -1,6 +1,6 @@
 # traces
 
-> Point `traces` at any agent trace — OTLP spans your own system emits, or the session logs Claude Code, Codex, OpenCode, Pi, Kimi and Factory already write to disk. Get failure-mode and efficiency findings, exact session facts, and a straight answer about what the trace cannot tell you. A CLI *and* an SDK.
+> What your coding agents did, where they wasted time, and whether a run passes: exact answers from the sessions Claude Code, Codex, OpenCode, Pi, Kimi and Factory already write to disk, or from the OTLP spans your own system emits. A CLI and an SDK.
 
 ![traces analyzing a real Claude Code session](https://raw.githubusercontent.com/tangle-network/traces/main/docs/demo.gif)
 
@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/npm/l/@tangle-network/traces.svg)](./LICENSE)
 [![node](https://img.shields.io/node/v/@tangle-network/traces.svg)](https://nodejs.org)
 
-The deterministic pass runs locally, with no API key and no cost.
+Every command except `ask` runs locally, with no key and no cost. Agents: run traces, never parse a session store yourself; the [`inspect-agent-traces`](skills/inspect-agent-traces/SKILL.md) skill maps each question to its command.
 
 ## Install
 
@@ -17,59 +17,76 @@ curl -fsSL https://raw.githubusercontent.com/tangle-network/traces/main/install.
 npm i @tangle-network/traces    # as a library
 ```
 
-Requires Node ≥ 22. To run without installing: `npx --yes @tangle-network/traces@latest analyze --last 1`.
+Requires Node 22 or later. `install.sh` refuses to overwrite another program's `traces` and names it. Coming from 0.x: [Migrate to 1.0](docs/migrate-1.0.md).
 
 ## Quick start
 
 ```bash
-traces analyze --harness claude-code --last 1               # where your last session got stuck or wasted tokens
-traces facts   --harness claude-code --last 1 --format text # tool calls, turns, PRs, first failure: exact, $0
-traces analyze spans.otlp.jsonl                             # spans from your own system, no adapter
-traces check   run.jsonl --contract contract.json           # fail CI when a run took a forbidden path
+traces list --cwd . --last 5                     # which sessions ran here
+traces facts --current                           # what this session did: turns, PRs, first failure, cost, $0
+traces facts --since 30d --match 'pnpm test'     # did we already try X
+traces analyze 019a3c7e                          # where it wasted time, ranked
+traces check run.jsonl --contract contract.json  # fail CI when a run took a forbidden path
 ```
 
-## What do you want to do?
+## Commands
 
-| Goal | Command | Guide |
+| Job | Command | Page |
 |---|---|---|
-| Find failure modes and waste in a session | `analyze` | [Analyze a session](docs/analyze.md) |
-| Get exact facts, each citing its spans | `facts` | [Session facts](docs/facts.md) |
-| Ask your own questions, with checked citations | `ask` | [Ask questions](docs/ask.md) |
-| Gate CI on the path a run took | `check` | [Gate CI on a trace contract](docs/check.md) |
-| Read spans from a system you own | `analyze <file>`, `validate` | [Integrate your own system](docs/integrate.md) |
-| Watch sessions or a run tree while they run | `watch` | [Watch](docs/live.md) |
-| Find where two runs diverge | `diff` | [Diff two runs](docs/diff.md) |
-| Give an agent read-only trace tools | `mcp` | [MCP server](docs/mcp.md) |
-| Count which skills get used | `skills` | [Skill usage](docs/skill-usage.md) |
-| Keep one session's evidence after the logs rotate | `bundle` | [Session bundle](docs/bundle.md) |
-| Convert event captures to OTLP spans | `convert` | [Export to OpenInference](docs/evidence.md) |
-| Upload, or check files before sharing | `upload`, `check --share-safe` | [Upload and share safely](docs/upload.md) |
+| Find a session | `list` | [Refs, selection and harnesses](docs/select.md) |
+| What happened, exactly, for $0 | `facts` | [Session facts](docs/facts.md) |
+| What went wrong, ranked, for $0 | `analyze` | [Analyze a session](docs/analyze.md) |
+| A question facts cannot answer, with checked citations | `ask` | [Ask a question](docs/ask.md) |
+| The one gate: contracts, conformance, share safety | `check` | [Check](docs/check.md) |
+| Where two runs split | `diff` | [Diff two runs](docs/diff.md) |
+| Live supervision of sessions or a run tree | `watch` | [Watch](docs/watch.md) |
+| Hand spans to another tool | `convert` | [Convert](docs/convert.md) |
+| Keep a session's evidence | `bundle` | [Session bundle](docs/bundle.md) |
+| Send redacted sessions to Intelligence | `upload` | [Upload](docs/upload.md) |
+| Which skills are used | `skills` | [Skill usage](docs/skills.md) |
+| Span tools for an MCP client with no shell | `mcp` | [MCP server](docs/mcp.md) |
 
-The common commands and flags are in the [CLI reference](docs/cli.md). `traces --help` lists every command and option, and `traces <command> --help` prints that command's own flags.
+Each page embeds its command's `--help`, and `tests/docs-help.test.ts` holds them equal to the CLI.
 
-## Two ways in
+```text
+traces: what your agents did, where they wasted time, whether a run passes
 
-| | Use when | How |
-|---|---|---|
-| **Emit the contract** | You control the system | Emit [`@tangle-network/agent-trace-contract`](https://github.com/tangle-network/agent-sdk/tree/main/packages/agent-trace-contract) spans, then `traces analyze <file\|dir>` |
-| **Adapters** | You do *not* control the format | `traces analyze --harness <id> --last 1` reads a coding agent's own session store; see [Supported harnesses](docs/harnesses.md) |
+  Which sessions ran?                              traces list [--cwd .] [--last N]
+  What happened (turns, PRs, failure, cost)? $0    traces facts <ref> | --current | --since 1d
+  Did we already try X / what was said? $0         traces facts <ref> | --since 30d --match '<re>'
+  Where did it waste time or get interrupted? $0   traces analyze <ref>
+  A question facts can't answer (model, $)         traces ask <ref> --question "…" --budget 1
+  Does this run pass? (CI)                         traces check <ref> --contract c.json|conformance
+  Is this safe to share?                           traces check <path> --share-safe
+  Where did two runs diverge?                      traces diff <a> <b>
+  What is happening right now?                     traces watch [<run-dir>] [--once]
+  Keep a session's evidence                        traces bundle <ref> --out <dir> · bundle verify <dir>
+  Hand spans to another tool                       traces convert <ref> --out <file>
+  Ship sessions to Intelligence                    traces upload <ref>|--since T [--dry-run]
+  Which skills are used?                           traces skills [--unused]
+  Serve span tools over MCP                        traces mcp <ref>|--last N
 
-Emitting the contract is the supported way to integrate a new system. Adapters are the legacy edge: each one translates a format nobody standardised. If you can choose, choose OTLP.
+ref: session id, or 8+ char unique prefix or suffix; session file; OTLP file/dir; bundle dir; run dir; store root
+Select: --current  --last N  --since/--until 2h|1d|ISO  --cwd DIR  --harness ID  --latest-turn
+Output: --format text|json|jsonl|junit|github  --out PATH  --no-content
+Exit: 0 yes · 1 no (fail, diverged, unsafe) · 2 could not answer (stderr says why)
+traces <command> --help for flags, jq paths and examples · moved from 0.x: traces help moved
+```
 
 ## Library
 
 ```ts
-import { analyzeSpans, readOtlpInput } from '@tangle-network/traces'
+import { computeSessionFacts, readOtlpInput } from '@tangle-network/traces'
 
 const input = await readOtlpInput('spans.otlp.jsonl')   // or a directory
-console.log(input.validation.capabilities)                 // what this trace can answer
-if (input.validation.ok) await analyzeSpans(input.spans)
+console.log(input.validation.capabilities)             // what this trace can answer
+const [facts] = computeSessionFacts(input.spans)
 ```
 
-The CLI is a thin consumer of the SDK: 25 functions and 25 types, listed in [Library (SDK)](docs/sdk.md). Runnable code is in [examples](examples/README.md).
+The SDK is 25 functions and 25 types, one engine per command: [Library (SDK)](docs/sdk.md). Runnable code is in [examples](examples/README.md).
 
 ## Docs
 
-- **Guides:** the pages in the table above.
-- **Reference:** [CLI](docs/cli.md) · [Library (SDK)](docs/sdk.md) · [Supported harnesses and session selection](docs/harnesses.md) · [Trace analysts](docs/trace-analysts.md) (custom analysts, benchmarks) · [Agent skills](docs/agent-skills.md)
-- **Contribute:** [Develop and release](docs/develop.md) (local setup, releases, the audit benchmark)
+- **Commands:** the pages in the table above.
+- **Reference:** [Library (SDK)](docs/sdk.md) · [Migrate to 1.0](docs/migrate-1.0.md) · [Parsers outside traces](docs/parsers.md)
+- **Contribute:** [Develop and release](docs/develop.md): local setup, releases and how quality is measured

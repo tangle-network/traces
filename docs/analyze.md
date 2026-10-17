@@ -2,8 +2,7 @@
 
 [traces](../README.md#docs) › Analyze a session
 
-`traces analyze` says what went wrong in the selected sessions, ranked, for $0.
-It calls no model and needs no key: `traces ask` is the one command that spends.
+`traces analyze` says what went wrong in the selected sessions, ranked, for $0. It calls no model: `traces ask` is the one command that spends.
 
 ```bash
 traces analyze --current
@@ -15,48 +14,63 @@ traces analyze --since 1d --cwd .           # a table of the sessions with the m
 
 At most 40 lines, in this order. A section with nothing to say is left out, and a fact the trace cannot support is never printed as 0.
 
-1. Header: short id, harness, repo, the window and its length, active time, cost (list price, Router rates).
+1. Header: short id, harness, repo, window, active time and cost (list price, Router rates).
 2. What was asked: the first human turn, and how many followed.
 3. The first failure and its blame.
-4. Failing commands (a command that failed 3 or more times in a row) and rework (commands rerun, reverts).
+4. Failing commands (3 or more identical failures in a row) and rework (reruns, reverts).
 5. Tool-error clusters: the session's own failed calls, by tool and first line of error.
 6. Stalls of 10 minutes or more that no turn ended.
-7. Interrupts and rejections: turns typed after an interrupt, after a rejected tool call, or right after a completion claim, each quoted. Measured against labelled turns, a reply after a claim is a correction at about the base rate, so none of these is called a correction.
+7. Interrupts and rejections, each quoted. Measured against labelled turns, none of these is called a correction.
 8. Pull requests opened and merged.
-9. Findings, HIGH first, each with span ids.
+9. Findings, HIGH first, with span ids.
 10. How many questions the trace cannot answer, and where the list is.
 
-Sections 3, 4, 6, 7 and 8 and the header are the facts sheet's numbers ([`traces facts`](facts.md)); analyze renders them and never counts them again.
-Several sessions put sections 2–8 in a table of the 15 with the most waste.
+The header and sections 3, 4, 6, 7 and 8 are the [facts](facts.md) sheet's numbers; analyze renders them and never counts them again. Several sessions put sections 2 to 8 in a table of the 15 with the most waste.
 
 ## Findings
 
 | Finding | From | Severity |
 |---|---|---|
 | `same-failing-command` | a failing streak in the facts sheet | HIGH |
-| `verification-without-change` | one check command run 3 or more times with no edit between | MED (HIGH from 5) |
+| `verification-without-change` | one check run 3 or more times with no edit between | MED (HIGH from 5) |
 | `high-tool-error-rate` | half or more of the session's own tool calls failed | MED (HIGH from 75%) |
 | `terminal-failure` | the session's root span ended in an error | HIGH |
 | `monotonic-input-growth`, `output-length-decay` | agent-eval's behavioral analyst | HIGH, MED |
-| `single-tool-dependency` | agent-eval; a run of 10 or more calls of one non-shell tool | MED |
-| `no-self-verification` | agent-eval; 10 or more calls, none a check by name or by command | LOW: 0 of 1 held on real sessions |
+| `single-tool-dependency` | a run of 10 or more calls of one non-shell tool | MED |
+| `no-self-verification` | 10 or more calls, none a check | LOW (0 of 1 held on real sessions) |
 
-The first three are the rules `traces watch` runs on live sessions (`src/pipelines.ts`), so a finding means the same in both.
-A completion claim after an edit with no check since is not a finding: it held 0 of 9 on real sessions, and no stricter claim rule found one in 44.
+The first three are the rules `traces watch` runs live, so a finding means the same in both.
 
 ## For programs
 
-`--format json` prints one object: `facts` (the facts sheet of every session), `packet` (the finding packet ADC's Intelligence API reads), `measures` (stuck loops, failure clusters, tool use and errors, failure follow-ups, unverified claims), `conformance`, and `cannotAnswer` (every question the trace cannot answer, with the reason).
+`--format json` prints `facts`, `packet` (the finding packet ADC's Intelligence API reads), `measures`, `conformance` and `cannotAnswer` (every question the trace cannot answer, with the reason).
+`--out DIR` writes exactly `report.md` (every finding and every cannot-answer reason) and `findings.json` (the packet).
+A Runtime run directory as the ref reports its supervision tree. Your own analysts run through the SDK: `analyzeSpans(spans, { registry })` ([sdk](sdk.md)).
 
-```bash
-traces analyze 019a3c7e --format json | jq '.packet.findings[] | {severity, subject, claim}'
-traces analyze 019a3c7e --format json | jq '.cannotAnswer[] | {analysis, reason}'
+## `traces analyze --help`
+
+```text
+Usage: traces analyze <ref…> | --current | --last N | --since T [flags]
+What went wrong, ranked, for $0: failing commands, stalls, interrupts, findings, and what the trace cannot answer.
+At most 40 lines; several sessions get a table of the 15 with the most waste. A Runtime run dir reports its tree.
+
+  --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
+  --last N            the N newest sessions by file mtime, never the caller's own
+  --since T           every session with a record since T: 30m, 2h, 7d or an ISO time
+  --until T           close the --since window (exclusive); same forms
+  --cwd DIR           sessions recorded in DIR or under it, or in a worktree of its repo
+  --harness ID        read only this harness; with a file ref, force its reader
+  --latest-turn       only the latest task turn of a resumed Codex or Claude Code session
+  --format text|json  text (default, at most 40 lines) or json: facts, packet, measures, conformance, cannotAnswer
+  --out DIR           write report.md and findings.json under DIR; stdout gets one summary line
+
+jq paths (--format json):
+  .packet.findings[] | {severity, subject, claim}  the findings, HIGH first
+  .cannotAnswer[] | {analysis, reason}             what the trace cannot answer, and why
+  .facts.sessions[0].measurements.waste            failing streaks, stalls, reverts
+
+Examples:
+  traces analyze --current
+  traces analyze 019a3c7e --out analysis
+  traces analyze --since 1d --cwd .
 ```
-
-`--out DIR` writes exactly `report.md` (the text, every finding in full, and every cannot-answer reason) and `findings.json` (the packet). No span copy is written: `traces convert <ref> --out <file>` hands spans to another tool.
-
-A Runtime run directory as the ref reports its supervision tree; with `--out DIR` it is written to `DIR/report.md`.
-
-## Your own analysts
-
-Run your analysts through the SDK: `analyzeSpans(spans, { registry })` runs an agent-eval `AnalystRegistry` over the spans in memory ([`examples/custom-analyst.ts`](../examples/custom-analyst.ts)).
