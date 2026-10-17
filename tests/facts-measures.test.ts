@@ -247,6 +247,23 @@ describe('facts skill counts', () => {
     expect(claudeRows).toEqual(facts.measurements.skills)
   })
 
+  it('prints skills as one header line and the table; the bookkeeping is in JSON, and the window defaults to 30 days', async () => {
+    const text = await runCli(['skills', '--since', '2026-10-01T00:00:00Z'], { env })
+    expect(text.code).toBe(0)
+    const lines = text.stdout.trimEnd().split('\n')
+    expect(lines[0]).toBe('2 skills used since 2026-10-01 · 0 installed with no use (traces skills --unused) · no model call')
+    expect(lines[1]).toMatch(/^skill\s+model\s+slash\s+read\s+sessions\s+last\s+installed$/u)
+    expect(lines).toHaveLength(4)
+    expect(text.stdout).not.toMatch(/stored events|not indexed|sweep|read \d|MB/u)
+    const json = await runCli(['skills', '--format', 'json'], { env })
+    const report = JSON.parse(json.stdout) as { since: string; refresh: unknown[]; storedEvents: number; notIndexed: string[] }
+    expect(Date.now() - Date.parse(report.since)).toBeGreaterThanOrEqual(30 * 86_400_000 - 60_000)
+    expect(Date.now() - Date.parse(report.since)).toBeLessThan(30 * 86_400_000 + 60_000)
+    expect(report.refresh).toHaveLength(3)
+    expect(report.storedEvents).toBe(2)
+    expect(report.notIndexed.length).toBeGreaterThan(0)
+  })
+
   it('counts a Codex skill-document read, not a catalog sweep or a missing document', async () => {
     const facts = await measured([codexFile])
     expect(facts.measurements.skills).toEqual({ simplify: { model: 0, slash: 0, read: 1 } })
