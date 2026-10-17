@@ -52,7 +52,7 @@ The full table: [docs/migrate-1.0.md](migrate-1.0.md), or `traces help moved`.
 
 The rule is **not met**: the traces arm answered one question fewer, at 36% more cost. The question it loses is `op.role` in all three runs: it counts runs a `labctl run` inside a code-mode script loop started, which no facts field records. Where the agent loaded the skill and ran `traces facts`, the answer cost more than a targeted `grep` on these small files: the operator session's JSON sheet is about 60 KB. A first traces run with Claude Code's 19 bundled skills also listed in the Skill tool scored 15 / 3 / 1 at $1.1506; the arm now turns them off (`bench/audit/README.md`).
 
-**The facts arm** (`traces facts <ref> --format json` mapped by fixed rules, $0, in `pnpm test`): FACTS_ARM of 19 on every wording (5 of 19 before step 20's fixes).
+**The facts arm** (`traces facts <ref> --format json` mapped by fixed rules, $0, in `pnpm test`): 10 of 19 on the canonical wordings and 10 of 19 held out, as in step 20 (5 of 19 before step 20's fixes).
 
 **The large-session arm** (reported apart; it does not decide the rule): one synthetic Codex session of 50,124 spans (27 MB), four questions, one run per arm.
 
