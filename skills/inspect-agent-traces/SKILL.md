@@ -14,6 +14,7 @@ A ref is a session id or 8+ char prefix, a session file, an OTLP file or dir, a 
    `traces facts <ref> --format json | jq '<path>'` with a path below.
    Never print the whole JSON: it is tens of KB of span ids.
 3. To list commands, typed turns or agent messages by text: `traces facts <ref> --match '<re>'`.
+   It prints the count first, then one line per hit; a program's run count is on the sheet.
 
 ```text
 .sessions[0].firstFailure | {name, message, at, spanId}                      first failure, its output
