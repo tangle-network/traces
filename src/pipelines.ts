@@ -152,28 +152,10 @@ function toolName(span: OtlpSpan): string {
   return asString(span.attributes['tool.name']) ?? span.name.replace(/^tool\./, '')
 }
 
-/** A Codex code-mode call's commands: `tools.exec_command({cmd:"…"})` in the script it ran. */
-const CODE_MODE_COMMAND = /\bexec_command\(\s*\{\s*cmd\s*:\s*("(?:[^"\\]|\\.)*")/gu
-
-/**
- * The script a shell call ran, or undefined for a call that is not a shell
- * call. A Codex code-mode span records the JavaScript it ran; its
- * `exec_command` calls name the commands, one script line each.
- */
+/** The script a shell call ran (a Codex code-mode script's commands included), or undefined for a call that ran none. */
 function scriptOf(span: OtlpSpan): string | undefined {
   const input = span.attributes['input.value']
-  if (typeof input !== 'string') return undefined
-  const script = commandTextFromInput(input)
-  if (script !== undefined) return script
-  const commands = [...input.matchAll(CODE_MODE_COMMAND)].flatMap((match) => {
-    try {
-      const command = JSON.parse(match[1]!) as unknown
-      return typeof command === 'string' && command.length > 0 ? [command] : []
-    } catch {
-      return []
-    }
-  })
-  return commands.length > 0 ? commands.join('\n') : undefined
+  return typeof input === 'string' ? commandTextFromInput(input) : undefined
 }
 
 /**
