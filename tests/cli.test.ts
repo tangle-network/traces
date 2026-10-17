@@ -738,13 +738,12 @@ describe('traces CLI', () => {
     })
 
     const rows = parseRows(stdout)
-    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding', 'finding', 'finding', 'finding'])
+    expect(rows.map((row) => row.event)).toEqual(['session', 'analysis_batch', 'finding', 'finding', 'finding'])
     const rules = rows
       .filter((row) => row.event === 'finding')
       .map((row) => (row.finding as Record<string, unknown>).ruleId)
       .sort()
     expect(rules).toEqual([
-      'completion-claim-without-verification',
       'high-tool-error-rate',
       'same-failing-command',
       'verification-without-change',

@@ -81,9 +81,7 @@ describe('live trace intelligence', () => {
     expect(batch.verificationCallCount).toBe(3)
     expect(batch.changeCallCount).toBe(2)
     expect(batch.actionCounts.verify).toBe(3)
-    expect(batch.actionCounts.claim).toBe(1)
     expect(batch.findings.map((f) => f.ruleId).sort()).toEqual([
-      'completion-claim-without-verification',
       'high-tool-error-rate',
       'same-failing-command',
       'verification-without-change',
@@ -95,7 +93,7 @@ describe('live trace intelligence', () => {
 
   it('classifies actions once and lets callers bring custom live analysts', () => {
     const actions = classifyLiveActions(liveSpans())
-    expect(actions.map((action) => action.kind)).toEqual(['other', 'edit', 'verify', 'verify', 'verify', 'edit', 'claim'])
+    expect(actions.map((action) => action.kind)).toEqual(['other', 'edit', 'verify', 'verify', 'verify', 'edit', 'other'])
 
     const analyst: TraceLiveAnalyst = {
       id: 'custom-live',
@@ -130,7 +128,7 @@ describe('live trace intelligence', () => {
     expect(events[0]?.event).toBe('session')
     expect(events.filter((event) => event.event === 'span')).toHaveLength(liveSpans().length)
     expect(events.some((event) => event.event === 'analysis_batch')).toBe(true)
-    expect(events.filter((event) => event.event === 'finding')).toHaveLength(4)
+    expect(events.filter((event) => event.event === 'finding')).toHaveLength(3)
     const line = serializeTraceStreamEvent(events.find((event) => event.event === 'finding')!)
     expect(JSON.parse(line).finding.ruleId).toBeTruthy()
   })
@@ -165,6 +163,6 @@ describe('live trace intelligence', () => {
     expect(events.filter((event) => event.event === 'span')).toHaveLength(liveSpans().length)
     expect(events.filter((event) => event.event === 'analysis_batch')).toHaveLength(2)
     expect(events.filter((event) => event.event === 'report')).toHaveLength(2)
-    expect(events.filter((event) => event.event === 'finding')).toHaveLength(4)
+    expect(events.filter((event) => event.event === 'finding')).toHaveLength(3)
   })
 })

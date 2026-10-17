@@ -21,7 +21,6 @@ import {
   ruleContext,
   runPipelines,
   runRules,
-  unverifiedClaims,
   type PipelineReport,
   type TraceLiveFinding,
 } from './pipelines.js'
@@ -64,14 +63,6 @@ export interface CannotAnswer {
   readonly sessionId?: string
 }
 
-/** A completion claim made after an edit with no check since it. */
-export interface UnverifiedClaim {
-  readonly sessionId: string
-  readonly at: string
-  readonly spanId: string
-  readonly text: string
-}
-
 /** Failed tool calls of one tool that ended with the same first line of error. */
 export interface ToolErrorCluster {
   readonly tool: string
@@ -89,10 +80,9 @@ export interface SessionToolErrors {
   readonly clusters: readonly ToolErrorCluster[]
 }
 
-/** The deterministic measures beside the facts sheet: loops, failure clusters, tool use and errors, failure follow-ups, unverified claims. */
+/** The deterministic measures beside the facts sheet: loops, failure clusters, tool use and errors, failure follow-ups. */
 export interface AnalysisMeasures extends PipelineReport {
   readonly toolErrors: readonly SessionToolErrors[]
-  readonly unverifiedClaims: readonly UnverifiedClaim[]
 }
 
 export interface TraceInvestigationResult {
@@ -187,7 +177,6 @@ export function buildTraceFindingPacket(opts: BuildTraceFindingPacketOptions): T
 const RULE_AREA: Readonly<Record<string, string>> = {
   'same-failing-command': 'tool-use',
   'verification-without-change': 'verification',
-  'completion-claim-without-verification': 'verification',
   'high-tool-error-rate': 'tool-use',
 }
 
@@ -357,7 +346,6 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
   const pipelines = await runPipelines(opts.spans, { minLoopOccurrences: opts.minLoopOccurrences })
   opts.signal?.throwIfAborted()
   const findings: AnalystFinding[] = []
-  const claims: UnverifiedClaim[] = []
   const toolErrors: SessionToolErrors[] = []
   for (const sheet of facts.sessions) {
     const spans = groups.get(sheet.traceId)
@@ -370,10 +358,6 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     })
     for (const live of runRules(context)) findings.push(ruleFinding(live, sheet.traceId))
     toolErrors.push(toolErrorsOf(sessionId, context.tools, context.erroredTools))
-    for (const claim of unverifiedClaims(context.actions)) {
-      const text = typeof claim.span.attributes.content === 'string' ? claim.span.attributes.content : ''
-      claims.push({ sessionId, at: claim.span.start_time, spanId: claim.spanId, text: text.replace(/\s+/gu, ' ').trim().slice(0, 300) })
-    }
   }
   const terminal = terminalFailureFinding(pipelines, opts.spans)
   if (terminal) findings.push(terminal)
@@ -414,7 +398,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
       source: 'traces analyze',
       title: 'traces analyze findings',
     }),
-    measures: { ...pipelines, toolErrors, unverifiedClaims: claims },
+    measures: { ...pipelines, toolErrors },
     conformance,
     cannotAnswer,
   }

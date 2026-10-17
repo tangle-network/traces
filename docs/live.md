@@ -18,7 +18,7 @@ traces stream spans.openinference.jsonl --no-spans
 ```
 
 Live streaming emits `session`, `span`, `analysis_batch`, `finding`, and `tick` events; `--mode agent` also emits `report` events.
-The findings are the rules `traces analyze` ranks (`src/pipelines.ts`): a command that failed 3 or more times in a row, a check rerun 3 or more times with no edit between, a completion claim after an edit with no check since, and high tool-error rates.
+The findings are the rules `traces analyze` ranks (`src/pipelines.ts`): a command that failed 3 or more times in a row, a check rerun 3 or more times with no edit between, and high tool-error rates.
 Use `--mode findings` when you want the low-volume meaning layer; keep `visualizer` for real-time views that need motion, timing, and tool-call texture.
 Use `--mode agent` when another agent needs deterministic loop/tool-use reports alongside the findings.
 The same JSONL shape is used for live sessions and replayed trace files:

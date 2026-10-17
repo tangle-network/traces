@@ -71,7 +71,7 @@ That union reached recall 0.682 on the calibration turns, but at precision 0.353
 A person's reply after a completion claim was a correction about as often as any other reply.
 On the 4,509 turns, that rate was 0.362 with the old claim rule and 0.342 with the new one, against a base rate of 0.333; no stricter claim rule tried raised it.
 So after-claim cannot carry correction recall.
-What it can do is mark real claims, which analyze quotes and which the live rule `completion-claim-without-verification` reads.
+What it can do is mark real claims, which analyze quotes beside the turn that answered them.
 
 The old rule matched a claim word (`merged`, `verified`, `done`, …) anywhere in the message, and it flagged 2,988 of 5,259 Claude Code human turns (57%).
 The new rule reads only the opening sentence, with markdown marks removed, and treats a denial (`not`, `still`, `failed`, …) or a question there as no claim.

@@ -57,7 +57,6 @@ describe('one session, answer first', () => {
       'stalls 1 ≥ 10 min',
       'Interrupts and rejections: 1 turn after an interrupt',
       '  10:09 after an interrupt: "stop, run the tests before you say done"',
-      'unverified claims 1: 10:08 "Done: the parser is fixed."',
       'PRs opened 1 (#12)',
       'findings ',
       'cannot answer ',
@@ -97,8 +96,10 @@ describe('one session, answer first', () => {
     expect(first).toMatchObject({ severity: 'high', subject: 'same-failing-command' })
     expect(first!.metadata?.spanIds).toEqual(streak.spanIds)
     expect(subjects(result)).toContain('verification-without-change')
-    // Measured on real sessions at 0 of 9: shown, as LOW.
-    expect(result.packet.findings.find((finding) => finding.subject === 'completion-claim-without-verification')?.severity).toBe('low')
+    // A claim after an edit with no check since held 0 of 9 on real sessions, and no stricter claim rule
+    // found one in 44 (traces 1.0 step 14): it is neither a finding nor a section.
+    expect(subjects(result)).not.toContain('completion-claim-without-verification')
+    expect(await analyze([fx.worker])).not.toContain('unverified claims')
     expect(result.packet.findings.map((finding) => finding.area)).not.toContain('instrumentation')
     expect(JSON.stringify(result)).not.toContain('stable session identity')
     const text = await analyze([fx.worker])
@@ -129,7 +130,6 @@ describe('false positives 0.23.1 printed', () => {
   it('a gh-only pull-request review is not a repeated verification', async () => {
     const result = await analysis([fx.review])
     expect(subjects(result)).not.toContain('verification-without-change')
-    expect(subjects(result)).not.toContain('completion-claim-without-verification')
   })
 
   it('no one-tool or no-check finding on a run under 10 tool calls', async () => {
