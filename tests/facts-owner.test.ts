@@ -178,12 +178,12 @@ describe('analyze renders the tokens and cost facts owns', () => {
 })
 
 describe('compact JSON', () => {
-  // 6,400 bytes, not the spec's first 6,000: both Codex read paths now name a command that checks
+  // 6,500 bytes, not the spec's first 6,000: both Codex read paths now name a command that checks
   // work exec_command.verify, so this fixture's sheet has one more measurements.tools row (6,204
   // bytes; 5,867 before). No redundant field of a tool row buys the row back: dropping `calls`
-  // leaves 6,164, dropping each measure's `eligible` 6,048. The `commands` fact's rows carry no
-  // span ids, so it fits too.
-  it('keeps the sheet of the 13-span fixture within 6,400 bytes, with no n = 1 distribution', async () => {
+  // leaves 6,164, dropping each measure's `eligible` 6,048. The `commands` fact adds 201 bytes
+  // (6,405), its rows already without span ids.
+  it('keeps the sheet of the 13-span fixture within 6,500 bytes, with no n = 1 distribution', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-facts-size-'))
     const path = join(dir, `${FIXTURE_SESSION_ID}.jsonl`)
     await writeFile(path, `${fixtureRecords().map((record) => JSON.stringify(record)).join('\n')}\n`)
@@ -191,7 +191,7 @@ describe('compact JSON', () => {
     expect(run.code).toBe(0)
     const report = JSON.parse(run.stdout) as { spanCount: number }
     expect(report.spanCount).toBe(13)
-    expect(Buffer.byteLength(run.stdout)).toBeLessThanOrEqual(6_400)
+    expect(Buffer.byteLength(run.stdout)).toBeLessThanOrEqual(6_500)
     expect(run.stdout).not.toMatch(/"p50"|"p95"|"durationMs"/u)
   })
 })
