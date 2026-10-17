@@ -269,10 +269,12 @@ const QUESTION_TIMEOUT_MS = 600_000
 
 /**
  * The traces arm's agent HOME: the skill where Claude Code reads a user's
- * installed skills, and nothing else of the machine's user settings. Its one
- * setting leaves Claude Code's bundled skills out of the Skill tool, so the
- * arms differ by traces and its skill, not by a listing of unrelated skills
- * every question would pay for. Claude Code reads its login from the macOS
+ * installed skills, and nothing else of the machine's user settings. Its two
+ * settings leave Claude Code's bundled skills and the login account's claude.ai
+ * skills out of the Skill tool, so the arms differ by traces and its skill, not
+ * by a listing of unrelated skills every question would pay for. The account's
+ * skills also arrive after the first request, so listing them rewrote the
+ * prompt cache on every question's second turn. Claude Code reads its login from the macOS
  * login keychain under HOME (or `~/.claude/.credentials.json` elsewhere), so
  * that one entry is linked in.
  */
@@ -280,7 +282,7 @@ async function agentHome(dir: string, skills: string): Promise<string> {
   const home = join(dir, 'agent-home')
   await mkdir(join(home, '.claude', 'skills'), { recursive: true })
   await cp(join(skills, 'inspect-agent-traces'), join(home, '.claude', 'skills', 'inspect-agent-traces'), { recursive: true })
-  await writeFile(join(home, '.claude', 'settings.json'), `${JSON.stringify({ disableBundledSkills: true }, null, 2)}\n`)
+  await writeFile(join(home, '.claude', 'settings.json'), `${JSON.stringify({ disableBundledSkills: true, syncClaudeAiSkills: false }, null, 2)}\n`)
   if (process.platform === 'darwin') {
     await mkdir(join(home, 'Library'), { recursive: true })
     await symlink(join(homedir(), 'Library', 'Keychains'), join(home, 'Library', 'Keychains'))

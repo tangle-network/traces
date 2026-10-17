@@ -203,7 +203,10 @@ Code reads a user's installed skills, with `--setting-sources user,project` (the
 that HOME's) and the `Skill` tool. That HOME's `.claude/settings.json` sets `disableBundledSkills`:
 otherwise the Skill tool lists Claude Code's 19 bundled skills in every question, about 5,400 more
 cache-write tokens each that the raw-files arm never pays (2026-10-17, run 1 of the traces arm:
-15/19 correct at $1.15 with them listed, 16/19 at $0.74 with them off). Three built-in skills (`design`, `doctor`,
+15/19 correct at $1.15 with them listed, 16/19 at $0.74 with them off). It also sets `syncClaudeAiSkills: false`: the
+login account's claude.ai skills (docs, xlsx, pdf, …) otherwise reach the Skill tool after the first request, as a
+`commands_changed` event, and the changed listing rewrites the prompt cache on every question's second turn (2026-10-17,
+`op.tokens` with the same two calls in both arms: raw-files $0.0171, traces $0.0310). Three built-in skills (`design`, `doctor`,
 `plugin-authoring`) stay listed. On macOS the agent's HOME links `Library/Keychains`, where Claude
 Code reads its login; elsewhere it links `~/.claude/.credentials.json`. Pass `--skills <dir>` when the
 runner is bundled away from the package's `skills/`. The traces arm's `traces` runs with HOME set to a
