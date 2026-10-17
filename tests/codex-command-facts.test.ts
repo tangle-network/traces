@@ -168,9 +168,6 @@ describe('Codex command and file-change spans', () => {
     expect(outerFacts!.toolCalls.value).toBe(facts!.toolCalls.value)
     expect(outerFacts!.toolCallsByName.value).toEqual(facts!.toolCallsByName.value)
     expect(outerFacts!.measurements.tools).toEqual(facts!.measurements.tools)
-    // agent-eval counts a failed inner command as one more execution error.
-    expect(facts!.measurements.execution!.execution.executionErrors.events)
-      .toBe(outerFacts!.measurements.execution!.execution.executionErrors.events + 1)
     const [pipelines, outerPipelines] = await Promise.all([runPipelines(spans), runPipelines(outerOnly)])
     expect(pipelines.toolUse).toEqual(outerPipelines.toolUse)
     expect(pipelines.stuckLoops.findings).toEqual(outerPipelines.stuckLoops.findings)

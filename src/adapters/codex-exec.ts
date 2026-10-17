@@ -190,6 +190,17 @@ function optionalTokenCount(usage: JsonObject | undefined, key: string, sourcePa
   return value
 }
 
+function cachedInputTokens(usage: JsonObject | undefined, sourcePath: string): number | undefined {
+  return optionalTokenCount(usage, 'cached_input_tokens', sourcePath) ??
+    optionalTokenCount(usage, 'cache_read_input_tokens', sourcePath)
+}
+
+/** `input_tokens` less the cached tokens Codex counts inside it. */
+function freshInputTokens(usage: JsonObject | undefined, sourcePath: string): number | undefined {
+  const input = optionalTokenCount(usage, 'input_tokens', sourcePath)
+  return input === undefined ? undefined : Math.max(0, input - (cachedInputTokens(usage, sourcePath) ?? 0))
+}
+
 function exitCode(item: JsonObject, sourcePath: string): number | undefined {
   const value = item.exit_code
   if (value === undefined || value === null) return undefined
@@ -479,10 +490,10 @@ export class CodexExecAdapter implements HarnessTraceAdapter {
         statusMessage: message,
         service: SERVICE,
         agent: SERVICE,
-        inputTokens: optionalTokenCount(usage, 'input_tokens', ref.path),
-        cachedInputTokens:
-          optionalTokenCount(usage, 'cached_input_tokens', ref.path) ??
-          optionalTokenCount(usage, 'cache_read_input_tokens', ref.path),
+        // Codex counts cached tokens inside `input_tokens`; the shared
+        // vocabulary's prompt categories are exclusive (see `execution.ts`).
+        inputTokens: freshInputTokens(usage, ref.path),
+        cachedInputTokens: cachedInputTokens(usage, ref.path),
         outputTokens: optionalTokenCount(usage, 'output_tokens', ref.path),
         reasoningTokens: optionalTokenCount(usage, 'reasoning_output_tokens', ref.path),
         step: turn.step,

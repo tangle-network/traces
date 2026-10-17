@@ -63,7 +63,9 @@ A report built without a window has `selection: null`.
 | `changedFiles` | paths the harness recorded for the changes it applied, plus paths named by patch headers and file-editing tool arguments, with the operation |
 | `firstRecordAt` / `lastRecordAt` | the earliest span start and latest span end among this session's own records — a subagent that outlives the session does not stretch its window |
 | `unreadRecords` | records the session reader could not parse, from the session's integrity receipt |
-| `tokenTotal` | the harness's own cumulative token total, when a span carries `traces.session.total_tokens` |
+| `tokens` | this session's own agent's tokens, from one owner (`src/execution.ts`) on every harness: `input` is the whole prompt, cache reads and writes included (Claude Code's `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` per response, counted once per message id; Codex's own cumulative `input_tokens`, which already holds its cached tokens), with `output`, `cacheRead`, `cacheWrite`, `reasoning` (null when the harness does not report it), `modelCalls` and `byModel`. A harness's cumulative counter (Codex's `total_token_usage`) is preferred to a sum of its calls. Every count is null, with `unavailable`, when no call reports usage |
+| `cost` | what the Router would charge for `tokens`: agent-runtime's `priceTokens` per model, labelled `list price (Router rates)`. `usd` is null, with `unavailable`, when a model has no Router price, no model is recorded, or the tokens are unknown |
+| `tokenTotal` | `tokens.input + tokens.output`, null with the same reason when the tokens are unknown |
 | `firstFailure` | the first failure among this session's own records, ranked by agent-eval's fixed precedence: the innermost ERROR span that ended first, else a span whose `agent.outcome` is `fail`, else `none` — spans were observed and none of them failed. When every span is UNSET (a capture that failed before any status was written), or a session has no records of its own at all (every span is `traces.span.subagent` — spawned work folded into this trace, with nothing this agent recorded itself), the status is `unknown`, not `none`: the record does not say whether the run failed. Failures that ended at the same instant are `ambiguous` and list the candidates instead of picking one. `blame` separates machine and provider failures from the agent's own, and is `unknown` rather than `agent` when no evidence names the agent |
 
 Three rules hold for every field:
@@ -115,8 +117,9 @@ For Codex the actor comes from the harness's own per-item labelling (`internal_c
 
 The same facts sheet includes observed tool outcomes, captured input/output byte
 volumes, call-to-result intervals, compaction boundaries and available context
-sizes, spawn intervals, and existing skill invocation/document-read evidence.
+sizes, and existing skill invocation/document-read evidence.
 Each measurement carries coverage; absent telemetry remains unknown.
+`--format json` prints the sheet as one compact line, with no distribution of a single value.
 `facts --no-content` withholds conversation (including each turn's `answered` text),
 command, changed-file, working-directory and assignment text while retaining
 measurement metadata. This is a local metadata view, not a
@@ -145,6 +148,7 @@ console.log(renderSessionFacts(buildSessionFactsReport(spans)))
 ```
 
 SDK consumers use `buildSessionFactsReport(spans, { includeContent: false })`.
+Pass `price: await routerPrices()` (agent-runtime's `priceTokens`, loaded on first use) for `cost`; without it `cost.usd` is null with that reason.
 Pass `window: { since, until }` (ISO bounds) for the windowed report `facts --since/--until` prints, and use
 `createSessionFactsReportBuilder(options)` (`add(spans)`, `addUnread(...)`, `build()`) to build it one session at a time.
 Cache by `measurementVersion` and `sourceDigest`; `evidenceThrough` is the latest

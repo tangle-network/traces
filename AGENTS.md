@@ -59,6 +59,13 @@ control should emit the contract directly (`--otlp`), never get a new adapter.
   appended since the last run. Its rows come from the same fold, projection and row functions as a
   whole read, never a second classifier; `tests/turn-index.test.ts` holds it to a whole read, row for
   row, after every appended record.
+- **`facts` owns every session number; the other commands render it.** Tokens and cost have one owner,
+  `src/execution.ts`: `tokens.input` is the whole prompt on every harness, and `cost` is agent-runtime's
+  `priceTokens` (`list price (Router rates)`). `analyze` prints the sum of the sessions' facts, never a
+  second count; `tests/facts-owner.test.ts` checks the numbers against jq over the raw records.
+- **Until harness-sessions reads every view (U18), both read paths state every number the same.**
+  `traces facts <f>` (the shared reader), `--latest-turn` (traces' own reader) and a bundle of `<f>`
+  agree on tokens, cost, tool calls, human turns, subagents and pull requests (`tests/dual-path.test.ts`).
 - **Unknown is never rendered as a measured zero.** An unpriced turn reads `cost unknown`, never
   `$0.0000`; a fact the spans cannot support is `null` with its reason, never a guessed value.
 

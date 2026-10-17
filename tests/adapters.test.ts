@@ -1313,7 +1313,9 @@ describe('codex current tool and subagent events', () => {
     const llms = spans.filter((item) => item.name === 'llm.turn')
 
     expect(llms).toHaveLength(1)
-    expect(llms[0]?.attributes['llm.token_count.prompt']).toBe(49_139)
+    // Exclusive prompt categories: 49,139 input tokens, 40,704 of them cached.
+    expect(llms[0]?.attributes['llm.token_count.prompt']).toBe(8_435)
+    expect(llms[0]?.attributes['llm.token_count.prompt_cache_hit']).toBe(40_704)
   })
 
   it('excludes inherited fork replay before the current task start', async () => {

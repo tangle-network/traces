@@ -52,6 +52,8 @@ import {
   type ReportSource,
   summarizeDeterministicSignals,
 } from './report.js'
+import { routerPrices, totalUsage, type UsageTotal } from './execution.js'
+import { computeSessionFacts } from './session-facts.js'
 import type { SessionWorkflowSummary } from './session-workflow.js'
 
 export interface TracesConfig {
@@ -133,6 +135,8 @@ export interface TraceInvestigationResult {
    */
   readonly conformance: TraceValidation
   readonly execution: ExecutionReport
+  /** The sessions' tokens and cost, summed from their facts (`traces facts` owns both numbers). */
+  readonly usage: UsageTotal
   readonly analystResult: AnalystRunResult
   readonly findings: readonly AnalystFinding[]
   readonly pipelines: PipelineReport
@@ -582,6 +586,7 @@ function renderInvestigationReport(
       unassignedTraceCount: result.unassignedTraceCount,
       spanCount: result.spanCount,
       execution: result.execution,
+      usage: result.usage,
       deterministic: summarizeDeterministicSignals(result.pipelines, result.reactions),
       sources: result.sources,
       workflow: result.workflow,
@@ -695,6 +700,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     spanCount: opts.spans.length,
     conformance: opts.conformance ?? conformanceOfSpans(opts.spans),
     execution: analysis.execution,
+    usage: totalUsage(computeSessionFacts(opts.spans, { price: await routerPrices() })),
     analystResult: analysis.result,
     findings,
     pipelines,

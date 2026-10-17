@@ -101,13 +101,8 @@ describe('execution accounting', () => {
     expect(markdown).toContain('**Sessions with execution errors:** 1/1 (100.00%)')
     expect(markdown).toContain('**Terminal outcomes:** 1 succeeded  |  0 failed')
     expect(markdown).toContain('**Task quality:** not measured')
-    expect(markdown).toContain('| Input | 100 | 1 |')
-    expect(markdown).toContain('| Reasoning (output subset) | 5 | 1 |')
-    expect(markdown).toContain('| Cache read | 50 | 1 |')
-    expect(markdown).toContain('| Observed | 1 | $0.020000 |')
-    expect(markdown).toContain('### Orchestration-reported usage')
-    expect(markdown).toContain('| Input | 1,000 | 1 |')
-    expect(markdown).toContain('Aggregate cost: $0.300000')
+    // Tokens and cost are facts' numbers (`renderUsage`); no second count is printed here.
+    expect(markdown).not.toMatch(/Token category|Cost coverage|Aggregate cost/u)
   })
 
   it('keeps a failed terminal outcome separate from child execution errors', () => {

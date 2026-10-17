@@ -10,13 +10,13 @@ import type { AnalystFinding, AnalystRunResult, AnalystRunSummary } from '@tangl
 import type {
   ExecutionReport,
   ScalarDistribution,
-  TokenUsageInsight,
 } from '@tangle-network/agent-eval/contract'
 import type { AdoptionReport } from './adoption.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { isInheritedSpan } from './adapters/provenance.js'
 import { ATTR, sessionIdFromAttributes } from './attributes.js'
 import { incompleteInputsNote, type UnavailableCapabilities } from './conformance.js'
+import { COST_LABEL, type UsageTotal } from './execution.js'
 import {
   type FindingRejectionCounts,
   type FindingRejectionReasons,
@@ -47,6 +47,8 @@ export interface ReportMeta {
   unassignedTraceCount?: number
   spanCount: number
   execution: ExecutionReport
+  /** The sessions' tokens and cost, summed from each session's facts: the numbers `traces facts` prints. */
+  usage?: UsageTotal
   deterministic?: DeterministicSummary
   sources?: readonly ReportSource[]
   workflow?: SessionWorkflowSummary
@@ -279,19 +281,6 @@ function distributionRow(label: string, distribution: ScalarDistribution, unit =
   return `| ${label} | ${count(distribution.n)} | ${value(distribution.min)} | ${value(distribution.mean)} | ${value(distribution.p50)} | ${value(distribution.p95)} | ${value(distribution.max)} |`
 }
 
-function tokenRows(usage: TokenUsageInsight): string[] {
-  const rows: Array<[string, number, ScalarDistribution]> = [
-    ['Input', usage.totals.input, usage.input],
-    ['Output', usage.totals.output, usage.output],
-    ['Reasoning (output subset)', usage.totals.reasoning, usage.reasoning],
-    ['Cache read', usage.totals.cached, usage.cached],
-    ['Cache write', usage.totals.cacheWrite, usage.cacheWrite],
-  ]
-  return rows.map(([label, total, values]) =>
-    `| ${label} | ${count(total)} | ${count(values.n)} | ${measured(values.mean, decimal)} | ${measured(values.p50, decimal)} | ${measured(values.p95, decimal)} | ${measured(values.max, count)} |`,
-  )
-}
-
 function analysisCost(result: AnalystRunResult): string {
   const cost = `$${result.total_cost_usd.toFixed(4)}`
   if (result.total_cost_provenance?.kind === 'observed') return `Analysis cost: ${cost} observed.`
@@ -385,49 +374,38 @@ export function renderExecution(
   lines.push('')
   lines.push('Recorded session interval is first-to-last trace time and can include idle time; it is not active agent runtime.')
   lines.push('')
-  lines.push(`### Direct model usage${unavailable?.has('token-accounting') ? ' — inputs incomplete' : ''}`)
-  lines.push('')
-  pushGate(lines, unavailable, 'token-accounting')
-  lines.push('| Token category | Total | Runs measured | Mean | p50 | p95 | Max |')
-  lines.push('|---|---:|---:|---:|---:|---:|---:|')
-  lines.push(...tokenRows(execution.tokenUsage))
-  lines.push('')
   lines.push('| Model | Runs |')
   lines.push('|---|---:|')
   for (const model of execution.models) {
     lines.push(`| \`${tableCell(model.model)}\` | ${count(model.runs)} |`)
   }
   lines.push('')
-  lines.push(`### Cost coverage${unavailable?.has('cost-attribution') ? ' — inputs incomplete' : ''}`)
-  lines.push('')
-  pushGate(lines, unavailable, 'cost-attribution')
-  lines.push('| Source | Runs | Total USD |')
-  lines.push('|---|---:|---:|')
-  lines.push(`| Observed | ${count(report.costProvenance.observed.n)} | $${report.costProvenance.observed.totalUsd.toFixed(6)} |`)
-  lines.push(`| Estimated | ${count(report.costProvenance.estimated.n)} | $${report.costProvenance.estimated.totalUsd.toFixed(6)} |`)
-  lines.push(`| Uncaptured | ${count(report.costProvenance.uncaptured.n)} | not available |`)
-  lines.push('')
-  lines.push(`Known cost coverage: ${decimal(report.costProvenance.knownFraction * 100, 2)}%.`)
-  lines.push('')
-  if (execution.aggregateUsage.runs > 0) {
-    lines.push(`### Orchestration-reported usage${unavailable?.has('token-accounting') ? ' — inputs incomplete' : ''}`)
-    lines.push('')
-    pushGate(lines, unavailable, 'token-accounting')
+  return lines.join('\n')
+}
+
+/**
+ * The sessions' tokens and cost: the sum of each session's facts, so a reader
+ * of `traces facts` and of this report sees one number.
+ */
+export function renderUsage(usage: UsageTotal, unavailable?: UnavailableCapabilities): string {
+  const lines = [`### Tokens and cost${unavailable?.has('token-accounting') ? ' — inputs incomplete' : ''}`, '']
+  pushGate(lines, unavailable, 'token-accounting')
+  const { tokens } = usage
+  if (usage.unmeasured === usage.sessions) {
+    lines.push(`- **Tokens:** unknown — ${usage.tokensUnavailable}`)
+  } else {
     lines.push(
-      `Kept separate from direct model usage because orchestration totals can overlap model-call telemetry. ` +
-        `${count(execution.aggregateUsage.runs)} run(s) reported aggregate values.`,
+      `- **Tokens:** in ${count(tokens.input)} · out ${count(tokens.output)} · cache read ${count(tokens.cacheRead)} · ` +
+        `cache write ${count(tokens.cacheWrite)} (${count(tokens.modelCalls)} model calls; in is the whole prompt, cache included)`,
     )
-    lines.push('')
-    lines.push('| Token category | Total | Runs measured | Mean | p50 | p95 | Max |')
-    lines.push('|---|---:|---:|---:|---:|---:|---:|')
-    lines.push(...tokenRows(execution.aggregateUsage.tokenUsage))
-    lines.push('')
-    lines.push(
-      `Aggregate cost: $${execution.aggregateUsage.totalCostUsd.toFixed(6)} across ` +
-        `${count(execution.aggregateUsage.costUsd.n)} reporting run(s).`,
-    )
-    lines.push('')
+    if (usage.unmeasured > 0) {
+      lines.push(`- **Sessions with no token counts:** ${count(usage.unmeasured)}, left out of the totals: ${usage.tokensUnavailable}`)
+    }
   }
+  lines.push(usage.usd === null
+    ? `- **Cost:** unknown — ${usage.costUnavailable}`
+    : `- **Cost:** $${usage.usd.toFixed(6)} ${COST_LABEL}`)
+  lines.push('')
   return lines.join('\n')
 }
 
@@ -502,6 +480,7 @@ export function renderReport(result: AnalystRunResult, meta: ReportMeta): string
 
   lines.push(renderExecution(meta.execution, meta.unavailableCapabilities))
   lines.push('')
+  if (meta.usage) lines.push(renderUsage(meta.usage, meta.unavailableCapabilities))
 
   if (meta.sources && meta.sources.length > 0) {
     lines.push('## Selected sessions')

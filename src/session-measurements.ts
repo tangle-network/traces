@@ -1,8 +1,6 @@
-import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
 import { computeAdoption, type AdoptionReport } from './adoption.js'
 import { canonicalJson } from './adapters/tool-io.js'
 import { INHERITED_SOURCE_ATTR } from './adapters/provenance.js'
-import { summarizeSpanExecution } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import type { SessionFact } from './session-facts.js'
 import { describeSessionRelationship, type SessionRelationship } from './session-relationship.js'
@@ -41,23 +39,17 @@ export interface ContentFootprint {
   /** Source representation, not the reconstructed full model request. */
   readonly scope: 'captured-attribute'
 }
+/**
+ * Measures beside the sheet's counts. Token counts and cost are the sheet's own
+ * `tokens` and `cost` (`execution.ts`), and spawns are its `subagents`; none is
+ * measured a second way here.
+ */
 export interface SessionMeasurements {
-  readonly execution: ExecutionReport | null
   readonly adoption: AdoptionReport
   readonly relationship: SessionRelationship
   readonly tools: readonly ToolMeasurement[]
-  readonly observedSpawns: number
-  readonly spawnIntervalsMs: readonly { readonly spanId: string; readonly intervalMs: number | null }[]
   readonly compactions: SessionFact<readonly CompactionMeasurement[]>
   readonly contextFootprints: readonly ContentFootprint[]
-  readonly coverage: {
-    readonly profile: string
-    readonly materializedResources: string
-    readonly contextTokens: string
-    readonly toolTokens: string
-    readonly compaction: string
-    readonly semanticAssessments: string
-  }
 }
 const number = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
@@ -160,17 +152,7 @@ function contextFootprints(spans: readonly OtlpSpan[]): ContentFootprint[] {
 export function computeSessionMeasurements(
   spans: readonly OtlpSpan[], tools: readonly OtlpSpan[], sessionId: string | null, harness: string | null,
 ): SessionMeasurements {
-  const spawns = tools.filter((span) => span.attributes['traces.agent.spawn'] === true
-    || span.attributes['traces.codex.agent_operation'] === 'spawn_agent')
-    .sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time))
   return {
-    observedSpawns: spawns.length,
-    spawnIntervalsMs: spawns.map((span, i) => {
-      const previous = spawns[i - 1]
-      const interval = previous ? Date.parse(span.start_time) - Date.parse(previous.start_time) : NaN
-      return { spanId: span.span_id, intervalMs: Number.isFinite(interval) && interval >= 0 ? interval : null }
-    }),
-    execution: spans.length > 0 ? summarizeSpanExecution(spans) : null,
     adoption: computeAdoption(spans),
     relationship: describeSessionRelationship({
       sessionId: sessionId ?? spans[0]?.trace_id ?? '', harness: harness ?? '', path: '', cwd: null, mtimeMs: 0,
@@ -178,14 +160,6 @@ export function computeSessionMeasurements(
     tools: toolMeasurements(tools),
     compactions: compactions(spans),
     contextFootprints: contextFootprints(spans),
-    coverage: {
-      profile: 'Native spans do not establish the authored or effective AgentProfile revision; join the Runtime profile receipt by recorded identity.',
-      materializedResources: 'Captured attributes measure only the visible representation. Missing tools, skills, MCP definitions, and resources are unknown.',
-      contextTokens: 'No tokenizer estimates are substituted for the actual request. Per-component context token counts require producer telemetry.',
-      toolTokens: 'Tool byte counts are not model input tokens; token attribution to tool content is not captured.',
-      compaction: 'Only recorded boundaries are counted. Zero-duration adapter defaults are not measured compaction latency.',
-      semanticAssessments: 'Success at the task, useful skill application, waste, reward hacking, safety, and dishonesty require separately attributed evaluation.',
-    },
   }
 }
 

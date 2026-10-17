@@ -57,8 +57,8 @@ interface ExecFacts {
   toolCalls: { value: number }
   measurements: {
     tools: Array<{ outcomes: { error: number } }>
-    execution: { execution: { modelCalls: { events: number }; tokenUsage: { totals: { input: number; output: number } } } }
   }
+  tokens: { input: number | null; output: number | null; cacheRead: number | null; modelCalls: number; unavailable: string | null }
 }
 
 /** `traces facts <path> --harness codex-exec --format json`, the one session it reads. */
@@ -203,7 +203,8 @@ describe('Codex exec JSONL adapter', () => {
       status: { code: 'ERROR', message: 'recovered transient failure' },
     })
     expect(llms[0]!.attributes).toMatchObject({
-      'llm.token_count.prompt': 39_700,
+      // The prompt categories are exclusive: 39,700 input tokens, 29,184 of them cached.
+      'llm.token_count.prompt': 10_516,
       'llm.token_count.prompt_cache_hit': 29_184,
       'llm.token_count.completion': 68,
       'llm.token_count.reasoning': 23,
@@ -225,10 +226,8 @@ describe('Codex exec JSONL adapter', () => {
     const facts = await factsOf(session.path)
     expect(facts).toMatchObject({ sessionId: 'thread-1', harness: 'codex-exec', spanCount: 6, toolCalls: { value: 2 } })
     expect(facts.measurements.tools.reduce((errors, tool) => errors + tool.outcomes.error, 0)).toBe(0)
-    expect(facts.measurements.execution.execution).toMatchObject({
-      modelCalls: { events: 1 },
-      tokenUsage: { totals: { input: 39_700, output: 68 } },
-    })
+    // `tokens.input` is the whole prompt again: Codex's own input_tokens.
+    expect(facts.tokens).toMatchObject({ modelCalls: 1, input: 39_700, output: 68, cacheRead: 29_184 })
   })
 
   it('marks an unfinished command, its turn, and its session as failed', async () => {
@@ -259,7 +258,9 @@ describe('Codex exec JSONL adapter', () => {
     const facts = await factsOf(session.path)
     expect(facts.toolCalls.value).toBe(1)
     expect(facts.measurements.tools.reduce((errors, tool) => errors + tool.outcomes.error, 0)).toBe(1)
-    expect(facts.measurements.execution.execution.modelCalls.events).toBe(1)
+    // The failed turn reported no usage: unknown, never zero.
+    expect(facts.tokens).toMatchObject({ modelCalls: 0, input: null })
+    expect(facts.tokens.unavailable).toContain('reports token usage')
   })
 
   it.each([
@@ -474,6 +475,7 @@ describe('Codex exec events inside a Sandbox live stream', () => {
   it('answers through the CLI for a live-stream session', async () => {
     const facts = await factsOf(join(liveStreamFixtures, 'codex-director-in-progress.jsonl'))
     expect(facts.toolCalls.value).toBe(6)
-    expect(facts.measurements.execution.execution.modelCalls.events).toBe(1)
+    // The stream is still running: no turn has reported usage yet.
+    expect(facts.tokens).toMatchObject({ modelCalls: 0, input: null })
   })
 })

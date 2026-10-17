@@ -431,10 +431,11 @@ describe('session facts from a Claude Code transcript', () => {
     expect(facts.excludedTurns.value!.map((entry) => entry.turns)).toEqual([1])
   })
 
-  it('states that the transcript carries no cumulative token total', async () => {
+  it('states that a transcript whose calls report no usage has unknown tokens, never zero', async () => {
     const facts = await factsFor(writeDelegatingSession('token-total'))
 
+    expect(facts.tokens.input).toBeNull()
     expect(facts.tokenTotal.value).toBeNull()
-    expect(facts.tokenTotal.unavailable).toContain('traces.session.total_tokens')
+    expect(facts.tokenTotal.unavailable).toContain('reports token usage')
   })
 })
