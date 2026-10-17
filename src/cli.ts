@@ -66,7 +66,6 @@ import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import type { RefusedSession, UploadPlan } from './upload.js'
 import {
   buildSkillUsageReport,
-  DEFAULT_SWEEP_THRESHOLD,
   defaultSkillUsageStorePath,
   readInstalledSkills,
   renderSkillUsage,
@@ -451,7 +450,6 @@ type SelectedSessionSource = ReportSource
 interface CollectedSpans {
   spans: OtlpSpan[]
   harness: string
-  cwds: string[]
   sources: SelectedSessionSource[]
   workflow?: SessionWorkflowSummary
   /**
@@ -507,7 +505,6 @@ async function collectOtlpSpans(path: string, selector?: string): Promise<Collec
   return {
     spans: [...selected],
     harness: 'otlp',
-    cwds: [],
     sources: [...byTrace].map(([traceId, spans]) => sessionReportSource({
       harness: 'otlp',
       sessionId: traceId,
@@ -550,20 +547,17 @@ async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
 /** Spans of several refs together. A source's conformance describes that source alone, so it is not carried. */
 function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
   const spans: OtlpSpan[] = []
-  const cwds: string[] = []
   const sources: SelectedSessionSource[] = []
   const unread: UnreadSessionFact[] = []
   const workflows = parts.flatMap((part) => (part.workflow ? [part.workflow] : []))
   for (const part of parts) {
     appendAll(spans, part.spans)
-    appendAll(cwds, part.cwds)
     appendAll(sources, part.sources)
     appendAll(unread, part.unread ?? [])
   }
   return {
     spans,
     harness: [...new Set(parts.flatMap((part) => part.harness.split('+')))].join('+'),
-    cwds,
     sources,
     ...(workflows[0] ? { workflow: workflows[0] } : {}),
     ...(unread.length > 0 ? { unread } : {}),
@@ -576,18 +570,15 @@ async function collectSessionSpans(args: CliArgs): Promise<CollectedSpans> {
   const selection = await collectSessionRows(args, args.last || 1)
   const spans: OtlpSpan[] = []
   const harnesses = new Set<string>()
-  const cwds: string[] = []
   const sources: SelectedSessionSource[] = []
   for (const row of selection.rows) {
     harnesses.add(row.adapter.harness)
     appendAll(spans, row.spans)
     sources.push(sessionReportSource(row.ref, row.spans))
-    if (row.ref.cwd) cwds.push(row.ref.cwd)
   }
   return {
     spans,
     harness: [...harnesses].join('+') || (args.harnessExplicit ? args.harness : 'none'),
-    cwds,
     sources,
     ...(selection.workflow ? { workflow: selection.workflow } : {}),
     ...(selection.unread.length > 0 ? { unread: selection.unread } : {}),
@@ -843,9 +834,9 @@ interface TurnRow {
 /**
  * `traces facts` — the deterministic session-facts sheet, printed.
  *
- * No model, no engine, no budget: the numbers come out of the spans. JSON by
- * default because the sheet's consumers are programs; `--format text` prints
- * the short readable form, and `--format jsonl` one row per typed turn. With
+ * No model, no engine, no budget: the numbers come out of the spans. The text
+ * sheet by default, at most 25 lines a session; `--format json` prints the
+ * whole sheet for programs, and `--format jsonl` one row per typed turn. With
  * `--match RE` it prints the human turns, agent messages and shell commands
  * that match instead of the sheet. Every fact names the span ids it came from.
  *
@@ -857,7 +848,7 @@ interface TurnRow {
  * the window, read one at a time.
  */
 async function cmdFacts(args: CliArgs): Promise<void> {
-  const format = args.format ?? 'json'
+  const format = args.format ?? 'text'
   const pattern = args.match === undefined ? undefined : new RegExp(args.match)
   if (args.noContent && (pattern !== undefined || format === 'jsonl')) {
     throw new UsageError(`${pattern ? '--match searches' : '--format jsonl rows carry'} turn text, which --no-content withholds; drop one of them`)
@@ -1154,7 +1145,6 @@ async function collectImportedSpans(
   return {
     spans,
     harness: result.format,
-    cwds: [],
     sources: [...sessions].map(([sessionId, grouped]) => sessionReportSource({
       harness: result.format,
       sessionId,
@@ -1208,7 +1198,7 @@ function conformanceOptions(collected: CollectedSpans) {
 async function investigate(args: CliArgs) {
   const { loadTracesConfig, mergeTracesConfig, runTraceInvestigation } = await import('./improvement.js')
   const collected = await collectSpans(args)
-  const { spans, harness, cwds, sources, workflow } = collected
+  const { spans, harness, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = args.config !== undefined ? await loadTracesConfig(args.config) : undefined
   const analystModel = analystModelFor(args)
@@ -1218,7 +1208,6 @@ async function investigate(args: CliArgs) {
     harness,
     sources,
     workflow,
-    cwds,
     engine,
     model: args.llm ? analystModel : args.model,
     budgetUsd: args.budget,
@@ -1234,7 +1223,7 @@ async function cmdImprove(args: CliArgs): Promise<void> {
   const outDir = args.dir ?? args.out
   if (outDir === undefined) throw new UsageError('improve needs --dir DIR for its artifacts')
   const collected = await collectSpans(args)
-  const { spans, harness, cwds, sources, workflow } = collected
+  const { spans, harness, sources, workflow } = collected
   if (spans.length === 0) throw new Error('no spans found for the given selection')
   const config = await loadTracesConfig(args.config)
   const analystModel = analystModelFor(args)
@@ -1245,7 +1234,6 @@ async function cmdImprove(args: CliArgs): Promise<void> {
       harness,
       sources,
       workflow,
-      cwds,
       engine,
       model: args.llm ? analystModel : args.model,
       budgetUsd: args.budget,
@@ -1679,19 +1667,21 @@ async function cmdVerifySafe(args: CliArgs): Promise<void> {
   process.exitCode = verdictExitCode(result)
 }
 
-/** `traces skills`: skill use across Claude Code, Codex and Kimi Code sessions, incrementally, with no model call. */
+/** The window `traces skills` counts when no `--since` is given. */
+const SKILLS_SINCE = '30d'
+
+/**
+ * `traces skills`: skill use across Claude Code, Codex and Kimi Code sessions,
+ * with no model call. Each run reads the bytes sessions appended since the
+ * last into the store under `$XDG_STATE_HOME/traces`, then counts the window.
+ */
 async function cmdSkills(args: CliArgs): Promise<void> {
-  if (args.store === '') throw new UsageError('skills: --store needs a path')
-  const since = args.since === undefined ? undefined : parseSince(args.since)
-  const storePath = args.store ?? defaultSkillUsageStorePath()
+  const since = parseSince(args.since ?? SKILLS_SINCE)
+  const storePath = defaultSkillUsageStorePath()
   const store = await SkillUsageStore.load(storePath)
-  const refreshed = args.noRefresh ? null : await store.refresh()
-  if (refreshed) await store.save()
-  const report = buildSkillUsageReport(store.list(), await readInstalledSkills(), storePath, {
-    since,
-    sweepThreshold: args.sweep ?? DEFAULT_SWEEP_THRESHOLD,
-    refresh: refreshed,
-  })
+  const refreshed = await store.refresh()
+  await store.save()
+  const report = buildSkillUsageReport(store.list(), await readInstalledSkills(), storePath, { since, refresh: refreshed })
   const json = args.format === 'json'
   if (args.unused) {
     if (json) process.stdout.write(`${JSON.stringify(report.unused, null, 2)}\n`)

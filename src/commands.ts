@@ -101,9 +101,6 @@ export interface Args {
   /** Minutes. */
   window: number
   kinds: string[]
-  noRefresh: boolean
-  store?: string
-  sweep?: number
   profile?: string
   knownSecretEnvs: string[]
 }
@@ -134,7 +131,6 @@ function emptyArgs(command: string): Args {
     intervalExplicit: false,
     window: 30,
     kinds: [],
-    noRefresh: false,
     knownSecretEnvs: [],
   }
 }
@@ -233,9 +229,6 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--interval': { value: 'S', help: 'poll every S seconds', set: (a, v) => { a.interval = positiveNumber('--interval', v, 'seconds'); a.intervalExplicit = true } },
   '--window': { value: 'M', help: 'sessions active in the last M minutes (default 30)', set: (a, v) => { a.window = positiveNumber('--window', v, 'minutes') } },
   '--kind': { value: 'KIND', help: 'keep only steps of this span kind (repeatable)', set: (a, v) => { a.kinds.push(v) } },
-  '--no-refresh': { help: 'answer from the store without reading transcripts', set: (a) => { a.noRefresh = true } },
-  '--store': { value: 'PATH', help: 'the skill-use store', set: (a, v) => { a.store = v } },
-  '--sweep': { value: 'N', help: 'a command reading N or more skills is a catalog sweep, not use', set: (a, v) => { a.sweep = positiveInteger('--sweep', v) } },
   '--profile': { value: 'P', help: 'default, share or strict', set: (a, v) => { a.profile = v } },
   '--known-secret-env': { value: 'NAME', help: 'a variable holding a secret to look for (repeatable)', set: (a, v) => { a.knownSecretEnvs.push(v) } },
 }
@@ -295,22 +288,22 @@ const COMMANDS = [
   {
     name: 'facts',
     usage: 'facts <ref…> | --current | --last N | --since T [flags]',
-    job: 'What happened, exactly, for $0: who acted, tools, subagents, human turns, PRs, first failure, tokens and cost.',
+    job: 'What happened, exactly, for $0: who acted, turns, tools, PRs, first failure, tokens, cost and time lost.',
     flags: [
       ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--match', '--no-content',
-      { flag: '--format', help: 'json (default), text, or jsonl: one row per typed turn' },
+      { flag: '--format', help: 'text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn' },
       { flag: '--out', help: 'write the sheet to PATH; stdout gets one summary line' },
     ],
-    formats: ['json', 'text', 'jsonl'],
+    formats: ['text', 'json', 'jsonl'],
     refs: [0, MANY],
     select: 'required',
     jq: [
       ['.sessions[0].humanTurns.value[] | {text, reply, signals}', 'each ask, its reply, its signals'],
       ['.sessions[0].agent.value', 'who acted: profile, model, directive'],
-      ['.sessions[0] | {firstFailure, tokens, cost}', 'first failure, tokens, list-price cost'],
+      ['.sessions[0] | {firstFailure, cost, waste: .measurements.waste}', 'first failure, cost, streaks, stalls, reverts'],
       ['.matches[] | {sessionId, kind, text}', 'with --match: each hit'],
     ],
-    examples: ['traces facts --current', 'traces facts 019a3c7e --format jsonl', "traces facts --since 30d --match '^gh pr merge'"],
+    examples: ['traces facts --current', "traces facts 019a3c7e --format json | jq '.sessions[0].measurements.waste'", "traces facts --since 30d --match '^gh pr merge'"],
     overview: ['What happened (turns, PRs, failure, cost)? $0', 'traces facts <ref> | --current | --since 1d'],
   },
   {
@@ -459,9 +452,8 @@ const COMMANDS = [
     job: 'Which skills are used, and which installed skills never are; no model call.',
     notes: ['Reads Claude Code, Codex and Kimi Code sessions; each run reads only bytes appended since the last.'],
     flags: [
-      { flag: '--since', help: 'count use since T: 30m, 2h, 7d or an ISO time (default: all stored)' },
-      '--unused', { flag: '--format', help: 'text (default) or json' },
-      hidden('--no-refresh'), hidden('--store'), hidden('--sweep'),
+      { flag: '--since', help: 'count use since T: 30m, 2h, 7d or an ISO time (default 30d)' },
+      '--unused', { flag: '--format', help: 'text (default), or json with the refresh cost and sweep exclusions' },
     ],
     formats: ['text', 'json'],
     refs: [0, 0],

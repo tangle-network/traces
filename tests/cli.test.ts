@@ -215,19 +215,15 @@ describe('traces CLI', () => {
       spanCount: number
       sessionCount: number
       unassignedTraceCount: number
-      adoption: {
-        sessionIdentityConflicts: Array<{ traceId: string; sessionIds: string[] }>
-      }
+      sessionIdentityConflicts: Array<{ traceId: string; sessionIds: string[] }>
     }
     expect(result).toMatchObject({
       spanCount: 2,
       sessionCount: 0,
       unassignedTraceCount: 1,
-      adoption: {
-        sessionIdentityConflicts: [
-          { traceId: 'trace-conflict', sessionIds: ['session-a', 'session-b'] },
-        ],
-      },
+      sessionIdentityConflicts: [
+        { traceId: 'trace-conflict', sessionIds: ['session-a', 'session-b'] },
+      ],
     })
     expect(parseRows(await readFile(join(improvement, 'traces.otlp.jsonl'), 'utf8'))).toHaveLength(2)
     expect(await readFile(join(improvement, 'report.md'), 'utf8')).toContain(

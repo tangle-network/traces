@@ -16,7 +16,7 @@ The directory contains:
 
 | File | Purpose |
 |---|---|
-| `result.json` | findings, actions, checks, execution facts, adoption data, and the chosen LLM analysis route |
+| `result.json` | findings, actions, checks, execution facts, session identity conflicts, and the chosen LLM analysis route |
 | `evidence.jsonl` | one row per evidence ref, suitable for downstream mining |
 | `report.md` | human-readable report rendered from the typed data |
 | `traces.otlp.jsonl` | canonical trace used by the analysts and execution accounting |

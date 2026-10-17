@@ -287,6 +287,12 @@ const FLEET_TURN_PREFIXES: readonly RegExp[] = [
   /^Handoff from the Mac operator/u, /^You run on [\w.-]+ as a/u, /^Read (?:~|\/home\/drew|\/Users\/drew)\/code\/_handoff\//u,
 ]
 
+/** True when a turn opens the way another agent or session sends one in (see {@link FLEET_TURN_PREFIXES}). */
+export function isFleetTurn(text: string): boolean {
+  const trimmed = text.trim()
+  return FLEET_TURN_PREFIXES.some((prefix) => prefix.test(trimmed))
+}
+
 /**
  * Above this length a session's first turn is a brief another agent or an
  * operator sent (`extract.mjs`), and a later turn may be pasted agent output
@@ -297,6 +303,9 @@ const LONG_TURN_CHARS = 1500
 function count(text: string, needle: string): number {
   return text.split(needle).length - 1
 }
+
+/** The record a harness writes when the person stops the agent: Claude Code's marker, Codex's context block. */
+export const INTERRUPT_TEXT = /^(?:\[Request interrupted by user|<turn_aborted>)/iu
 
 /**
  * Who typed a turn the session reader called human, by org convention:

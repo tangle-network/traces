@@ -137,7 +137,13 @@ const STEP_7: readonly MovedCase[] = [
   },
 ]
 
-const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7]
+/** Step 12: skills keeps its store, refresh and sweep as code defaults. */
+const STEP_12: readonly MovedCase[] = [
+  { argv: ['skills', '--no-refresh', '--format', 'json'], spelling: '--no-refresh', instead: 'traces skills --format json' },
+  { argv: ['skills', '--since', '7d', '--store', 'skills.json', '--sweep', '5'], spelling: '--store', instead: 'traces skills --since 7d' },
+]
+
+const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12]
 
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
@@ -177,7 +183,6 @@ const HIDDEN_FLAGS: Readonly<Record<string, readonly string[]>> = {
   check: ['--junit', '--annotations', '--explain'],
   diff: ['--kind'],
   watch: ['--window', '--interval'],
-  skills: ['--no-refresh', '--store', '--sweep'],
 }
 
 let dir: string
@@ -250,6 +255,7 @@ describe('traces help moved', () => {
     expect(run.stdout).toContain('traces convert X --out f, your scrubber on f, then traces upload f')
     expect(run.stdout).toContain('--harness default claude-code')
     expect(run.stdout).toContain('upload with no selection')
+    expect(run.stdout).toContain('facts JSON by default')
   })
 
   it('is named by the global help, which advertises no moved spelling', async () => {
@@ -480,10 +486,6 @@ describe('hidden spellings', () => {
     const diff = await runCli(['diff', spans, spans, '--kind', 'TOOL', '--format', 'json'], { env })
     expect(diff.code).toBe(2)
     expect((JSON.parse(diff.stderr) as { code: string }).code).toBe('no-outcome')
-
-    const skills = await runCli(['skills', '--no-refresh', '--store', join(dir, 'skills.json'), '--sweep', '3', '--format', 'json'], { env })
-    expect(skills.code).toBe(0)
-    expect(JSON.parse(skills.stdout)).toMatchObject({ storedEvents: 0 })
 
     const stream = await runCli(['stream', spans, '--mode', 'findings', '--no-spans'], { env })
     expect(stream.code).toBe(0)

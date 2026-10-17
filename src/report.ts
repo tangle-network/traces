@@ -11,10 +11,9 @@ import type {
   ExecutionReport,
   ScalarDistribution,
 } from '@tangle-network/agent-eval/contract'
-import type { AdoptionReport } from './adoption.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { isInheritedSpan } from './adapters/provenance.js'
-import { ATTR, sessionIdFromAttributes } from './attributes.js'
+import { ATTR, sessionIdFromAttributes, type SessionIdentityConflict } from './attributes.js'
 import { incompleteInputsNote, type UnavailableCapabilities } from './conformance.js'
 import { COST_LABEL, type UsageTotal } from './execution.js'
 import {
@@ -927,95 +926,20 @@ export function renderReactions(rr: ReactionReport): string {
   return lines.join('\n')
 }
 
-/**
- * Render skill + subagent adoption without treating a catalog, a document read,
- * or unlinked repository history as an invocation.
- */
-export function renderAdoption(ar: AdoptionReport): string {
-  const lines: string[] = ['## skill & subagent adoption (deterministic)', '']
-  const scopeParts = [`${ar.identifiedSessionCount} identified session(s)`]
-  if (ar.unassignedTraceCount > 0) {
-    scopeParts.push(`${ar.unassignedTraceCount} trace(s) without a single stable session identity`)
-  }
-  lines.push(`- **Scope:** ${scopeParts.join(' + ')}`)
-  if (ar.sessionIdentityConflicts.length > 0) {
-    const displayed = ar.sessionIdentityConflicts.slice(0, SOURCE_DISPLAY_LIMIT)
-    const details = displayed
-      .map((conflict) => `\`${conflict.traceId}\` (${conflict.sessionIds.map((id) => `\`${id}\``).join(', ')})`)
-      .join('; ')
-    const omitted = ar.sessionIdentityConflicts.length - displayed.length
-    lines.push(
-      `- **Conflicting session identity:** ${ar.sessionIdentityConflicts.length} trace(s): ${details}` +
-        `${omitted > 0 ? `; ${omitted} more omitted from this report` : ''}`,
-    )
-  }
-  lines.push(
-    '- **Prompt, tools, MCP, hooks, and full agent profile:** not assessed; no baseline profile was supplied.',
-  )
-  if (ar.skillPenetration === null) {
-    const label = ar.skillTelemetryStatus === 'unsupported' ? 'uncaptured/unsupported' : 'uncaptured/unknown'
-    lines.push(
-      `- **Explicit skill invocation rate:** ${label} ` +
-        `(${ar.skillTelemetrySessions}/${ar.executionGroupCount} observed group(s) expose a dedicated Skill event)`,
-    )
-  } else {
-    const excluded = ar.executionGroupCount - ar.skillTelemetrySessions
-    lines.push(
-      `- **Explicit skill invocation rate:** ${(ar.skillPenetration * 100).toFixed(0)}% ` +
-        `(${ar.sessionsWithSkill}/${ar.skillTelemetrySessions} measurable group(s)` +
-        `${excluded > 0 ? `; ${excluded} unmeasurable group(s) excluded` : ''})`,
-    )
-  }
-  lines.push(
-    `- **Materialized skill catalogs/instructions:** ${ar.sessionsWithMaterializedSkills}/${ar.executionGroupCount} observed group(s)  ·  ` +
-      `**Sessions with successful skill-document reads:** ${ar.sessionsWithSkillFileReference}/${ar.executionGroupCount}`,
-  )
-  lines.push(
-    `- **Explicit skill invocations:** ${ar.totalSkillInvocations} (Skill tool spans)  ·  ` +
-      `**Session-linked loop runs:** ${ar.totalLoopDispatchedRuns}`,
-  )
-  if (ar.totalUnlinkedLoopDispatchedRuns > 0) {
-    lines.push(
-      `- **Unlinked repository history:** ${ar.totalUnlinkedLoopDispatchedRuns} run(s) from ` +
-        `${ar.skillRunFilesRead} current or legacy \`skill-runs.jsonl\` file(s); unassigned to these sessions.`,
-    )
-  }
-  if (ar.totalSkillDocumentReads > 0) {
-    lines.push(`- **Successful skill-document reads:** ${ar.totalSkillDocumentReads}; inspection is not outcome evidence.`)
-  }
-  lines.push(
-    `- **Subagent spawns observed:** ${ar.totalSubagentSpawns} across ${ar.sessionsWithSubagent} observed group(s); ` +
-      'capture completeness depends on source telemetry.',
-  )
-  lines.push('')
-
-  const skillRows = Object.entries(ar.skillInvocations).sort((a, b) => b[1] - a[1])
-  const documentRows = Object.entries(ar.skillDocumentReads).sort((a, b) => b[1] - a[1])
-  const loopRows = Object.entries(ar.loopDispatchedRuns).sort((a, b) => b[1] - a[1])
-  if (skillRows.length > 0 || documentRows.length > 0 || loopRows.length > 0) {
-    lines.push('| Skill | Explicit invocations | Documents read | Session-linked loop runs |')
-    lines.push('|---|---|---|---|')
-    const names = [...new Set([
-      ...skillRows.map((r) => r[0]),
-      ...documentRows.map((r) => r[0]),
-      ...loopRows.map((r) => r[0]),
-    ])].sort(
-      (a, b) =>
-        (ar.skillInvocations[b] ?? 0) + (ar.skillDocumentReads[b] ?? 0) + (ar.loopDispatchedRuns[b] ?? 0) -
-        (ar.skillInvocations[a] ?? 0) - (ar.skillDocumentReads[a] ?? 0) - (ar.loopDispatchedRuns[a] ?? 0),
-    )
-    for (const n of names) {
-      lines.push(`| \`${n}\` | ${ar.skillInvocations[n] ?? 0} | ${ar.skillDocumentReads[n] ?? 0} | ${ar.loopDispatchedRuns[n] ?? 0} |`)
-    }
-    lines.push('')
-  }
-
-  const agentRows = Object.entries(ar.subagentSpawns).sort((a, b) => b[1] - a[1])
-  if (agentRows.length > 0) {
-    lines.push('| Subagent | Spawns |')
-    lines.push('|---|---|')
-    for (const [n, c] of agentRows) lines.push(`| \`${n}\` | ${c} |`)
-    lines.push('')
-  }
-  return lines.join('\n')
+/** The traces left out of session grouping because their sources name different sessions; empty when there are none. */
+export function renderSessionIdentity(result: { readonly sessionIdentityConflicts: readonly SessionIdentityConflict[] }): string {
+  const conflicts = result.sessionIdentityConflicts
+  if (conflicts.length === 0) return ''
+  const displayed = conflicts.slice(0, SOURCE_DISPLAY_LIMIT)
+  const details = displayed
+    .map((conflict) => `\`${conflict.traceId}\` (${conflict.sessionIds.map((id) => `\`${id}\``).join(', ')})`)
+    .join('; ')
+  const omitted = conflicts.length - displayed.length
+  return [
+    '## session identity',
+    '',
+    `- **Conflicting session identity:** ${conflicts.length} trace(s): ${details}` +
+      `${omitted > 0 ? `; ${omitted} more omitted from this report` : ''}`,
+    '',
+  ].join('\n')
 }

@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
-import { analyzeAdoption } from '../src/adoption.js'
 import { ATTR } from '../src/attributes.js'
 import { serializeSpans, span, toOpenInferenceSpan } from '../src/otlp.js'
 import {
@@ -15,6 +14,7 @@ import {
   resolveSessionRepoAttrs,
   stampRepoAttrs,
 } from '../src/repo.js'
+import { buildSessionFactsReport } from '../src/session-facts.js'
 import { locateSessions, parseSession } from '../src/session-source.js'
 import type { HarnessTraceAdapter, OtlpSpan, SessionRef } from '../src/index.js'
 
@@ -95,12 +95,10 @@ describe('normalizeRemote', () => {
 describe('parseSession identity', () => {
   it('stamps one source-derived identity when the adapter omitted it', async () => {
     const spans = await parseSession(adapter(), ref('sessIdentity', null))
-    const adoption = await analyzeAdoption(spans)
+    const facts = buildSessionFactsReport(spans)
 
     expect(spans.every((item) => item.attributes[ATTR.SESSION_ID] === 'sessIdentity')).toBe(true)
-    expect(adoption.identifiedSessionCount).toBe(1)
-    expect(adoption.unassignedTraceCount).toBe(0)
-    expect(adoption.executionGroupCount).toBe(1)
+    expect(facts.sessions.map((session) => session.sessionId)).toEqual(['sessIdentity'])
   })
 })
 

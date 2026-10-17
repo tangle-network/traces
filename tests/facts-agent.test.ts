@@ -77,6 +77,6 @@ describe('facts: who acted', () => {
   it('prints who acted on the text sheet', async () => {
     const run = await runCli(['facts', fx.paths.claude, '--format', 'text'], { env: fx.env })
     expect(run.code).toBe(0)
-    expect(run.stdout).toContain('who: dotfiles sha256:5843…ca56 · claude-opus-5-5[1m] · evidence-lead-v1 (from session-identity)')
+    expect(run.stdout).toContain('\nwho dotfiles sha256:5843…ca56 · claude-opus-5-5[1m] · evidence-lead-v1 (from session-identity)\n')
   })
 })

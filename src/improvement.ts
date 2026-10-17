@@ -13,7 +13,7 @@ import {
   makeFinding,
 } from '@tangle-network/agent-eval/analyst'
 import type { TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
-import { analyzeAdoption, type AdoptionReport } from './adoption.js'
+import { indexSessionIdsByTrace, type SessionIdentityConflict } from './attributes.js'
 import {
   planTraceAgenticRoute,
   traceAgenticKinds,
@@ -43,11 +43,11 @@ import { type PipelineReport, runPipelines } from './pipelines.js'
 import { analyzeReactions, type ReactionReport } from './reactions.js'
 import {
   condenseAnalystError,
-  renderAdoption,
   renderLoopConvergence,
   renderPipelines,
   renderReactions,
   renderReport,
+  renderSessionIdentity,
   renderSteeringChain,
   type ReportSource,
   summarizeDeterministicSignals,
@@ -67,7 +67,6 @@ export interface TraceInvestigationOptions {
   readonly harness: string
   readonly sources?: readonly ReportSource[]
   readonly workflow?: SessionWorkflowSummary
-  readonly cwds?: readonly string[]
   readonly minLoopOccurrences?: number
   readonly engine?: TraceAnalysisEngine
   readonly model?: string
@@ -141,7 +140,8 @@ export interface TraceInvestigationResult {
   readonly findings: readonly AnalystFinding[]
   readonly pipelines: PipelineReport
   readonly reactions: ReactionReport
-  readonly adoption: AdoptionReport
+  /** Traces left out of session grouping because their sources name different sessions. */
+  readonly sessionIdentityConflicts: readonly SessionIdentityConflict[]
   /** Did round N+1 improve on round N, per loop. */
   readonly loopConvergence: LoopConvergenceReport
   /** Which verdict caused which subsequent round. */
@@ -231,9 +231,22 @@ function totalReactionSignals(reactions: ReactionReport): number {
   return Object.values(reactions.signals).reduce((sum, count) => sum + count, 0)
 }
 
+/** How the selected spans group into sessions (`attributes.ts`). */
+interface SessionIdentity {
+  readonly identifiedSessionCount: number
+  readonly unassignedTraceCount: number
+  readonly conflicts: readonly SessionIdentityConflict[]
+}
+
+function sessionIdentityOf(spans: readonly OtlpSpan[]): SessionIdentity {
+  const { sessionByTrace, conflicts } = indexSessionIdsByTrace(spans)
+  const unassigned = new Set(spans.map((span) => span.trace_id).filter((traceId) => !sessionByTrace.has(traceId)))
+  return { identifiedSessionCount: new Set(sessionByTrace.values()).size, unassignedTraceCount: unassigned.size, conflicts }
+}
+
 function traceCoverageFinding(
   pipelines: PipelineReport,
-  adoption: AdoptionReport,
+  identity: SessionIdentity,
 ): AnalystFinding | undefined {
   const toolCalls = pipelines.toolUse.reduce((total, run) => total + run.totalCalls, 0)
   const capturedToolCalls = pipelines.toolUse.reduce(
@@ -242,12 +255,9 @@ function traceCoverageFinding(
   )
   const missingToolArgs = toolCalls - capturedToolCalls
   const traces = pipelines.toolUse.length
-  const missingSessionIds = adoption.unassignedTraceCount
-  const sessionIdentityConflicts = adoption.sessionIdentityConflicts
-  const unmeasurableSkillGroups = adoption.executionGroupCount - adoption.skillTelemetrySessions
-  if (missingToolArgs === 0 && missingSessionIds === 0 && unmeasurableSkillGroups === 0) {
-    return undefined
-  }
+  const missingSessionIds = identity.unassignedTraceCount
+  const sessionIdentityConflicts = identity.conflicts
+  if (missingToolArgs === 0 && missingSessionIds === 0) return undefined
 
   const parts: string[] = []
   const refs: AnalystFinding['evidence_refs'] = []
@@ -266,21 +276,13 @@ function traceCoverageFinding(
       sessionIdentityConflicts.map((conflict) => conflict.traceId).join(', '),
     ))
   }
-  if (unmeasurableSkillGroups > 0) {
-    parts.push(`${unmeasurableSkillGroups}/${adoption.executionGroupCount} execution group(s) lacked measurable skill events`)
-    refs.push(evidence(
-      'metric',
-      'coverage.skill_events',
-      `${adoption.skillTelemetrySessions}/${adoption.executionGroupCount} measurable`,
-    ))
-  }
 
   const argumentCoverage = toolCalls === 0 ? 1 : capturedToolCalls / toolCalls
   const sessionCoverage = traces === 0 ? 1 : (traces - missingSessionIds) / traces
   const severity: AnalystFinding['severity'] =
     argumentCoverage < 0.5 || sessionCoverage < 0.5
       ? 'high'
-      : argumentCoverage < 0.9 || sessionCoverage < 0.9 || unmeasurableSkillGroups > 0
+      : argumentCoverage < 0.9 || sessionCoverage < 0.9
         ? 'medium'
         : 'low'
   return makeFinding({
@@ -292,9 +294,9 @@ function traceCoverageFinding(
       'Missing identity or agent-profile evidence prevents reliable cross-run comparison and can hide tool, prompt, skill, or subagent failures.',
     evidence_refs: refs,
     recommended_action:
-      'Update the source telemetry bridge once: emit a stable session ID, complete canonical tool arguments, explicit argument-capture status, and dedicated skill/subagent events before optimizing the agent profile.',
+      'Update the source telemetry bridge once: emit a stable session ID, complete canonical tool arguments, and explicit argument-capture status before optimizing the agent profile.',
     validation_plan:
-      'Rerun the same source and require every trace to carry exactly one session identity, every tool call to declare and preserve its full arguments, and every supported execution group to expose skill events.',
+      'Rerun the same source and require every trace to carry exactly one session identity and every tool call to declare and preserve its full arguments.',
     confidence: 1,
     metadata: {
       source: 'traces.coverage',
@@ -303,8 +305,6 @@ function traceCoverageFinding(
       traces,
       missingSessionIds,
       sessionIdentityConflictCount: sessionIdentityConflicts.length,
-      skillTelemetryGroups: adoption.skillTelemetrySessions,
-      executionGroups: adoption.executionGroupCount,
     },
   })
 }
@@ -383,11 +383,11 @@ function toolErrorFinding(
 function deterministicFindings(
   pipelines: PipelineReport,
   reactions: ReactionReport,
-  adoption: AdoptionReport,
+  identity: SessionIdentity,
   spans: readonly OtlpSpan[],
 ): AnalystFinding[] {
   const findings: AnalystFinding[] = []
-  const coverage = traceCoverageFinding(pipelines, adoption)
+  const coverage = traceCoverageFinding(pipelines, identity)
   if (coverage) findings.push(coverage)
   const loops = pipelines.stuckLoops.findings
   if (loops.length > 0) {
@@ -477,23 +477,6 @@ function deterministicFindings(
       validation_plan: 'Rerun traces on fresh sessions and require corrective reaction signals per human reaction turn to decrease.',
       confidence: 0.85,
       metadata: { source: 'traces.reactions', correctiveSignals: corrective, totalSignals: totalReactionSignals(reactions) },
-    }))
-  }
-
-  const skillRuns = adoption.totalSkillInvocations + adoption.totalLoopDispatchedRuns
-  const allSessionsMeasurable = adoption.skillTelemetrySessions === adoption.executionGroupCount
-  if (allSessionsMeasurable && adoption.executionGroupCount > 0 && skillRuns === 0) {
-    findings.push(makeFinding({
-      analyst_id: 'traces-deterministic',
-      area: 'workflow',
-      claim: 'No skill usage was observed in the selected sessions',
-      severity: 'low',
-      rationale: 'Repeatable work without explicit skills is harder to improve because the trace has no reusable policy boundary to patch.',
-      evidence_refs: [evidence('metric', 'adoption.skill_runs', '0 explicit or loop-dispatched skill runs')],
-      recommended_action: 'Create or invoke a narrow skill for the repeated workflow, then let traces compare future sessions against this baseline.',
-      validation_plan: 'Rerun traces and require skill-run attribution to appear for repeated workflows.',
-      confidence: 0.75,
-      metadata: { source: 'traces.adoption', executionGroupCount: adoption.executionGroupCount },
     }))
   }
 
@@ -597,7 +580,7 @@ function renderInvestigationReport(
     `${renderPipelines(result.pipelines, unavailable)}\n` +
     `${renderLoopConvergence(result.loopConvergence, unavailable)}\n` +
     `${renderSteeringChain(result.steeringChain, unavailable)}\n` +
-    `${renderReactions(result.reactions)}\n${renderAdoption(result.adoption)}`
+    `${renderReactions(result.reactions)}\n${renderSessionIdentity(result)}`
   )
 }
 
@@ -655,13 +638,11 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
   if (opts.spans.length === 0) throw new Error('runTraceInvestigation: no spans to analyze')
   opts.signal?.throwIfAborted()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const [pipelines, reactions, adoption] = await Promise.all([
-    runPipelines(opts.spans, { minLoopOccurrences: opts.minLoopOccurrences }),
-    Promise.resolve(analyzeReactions(opts.spans)),
-    analyzeAdoption(opts.spans, { cwds: opts.cwds }),
-  ])
+  const pipelines = await runPipelines(opts.spans, { minLoopOccurrences: opts.minLoopOccurrences })
+  const reactions = analyzeReactions(opts.spans)
+  const identity = sessionIdentityOf(opts.spans)
   opts.signal?.throwIfAborted()
-  const deterministic = deterministicFindings(pipelines, reactions, adoption, opts.spans)
+  const deterministic = deterministicFindings(pipelines, reactions, identity, opts.spans)
   // A supplied registry owns its own composition. Only describe a route when
   // this package builds the maintained agent-eval suite itself.
   const agenticRoute = opts.engine && !opts.agenticRegistry
@@ -693,8 +674,8 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     kind: 'traces.investigation',
     generatedAt,
     harness: opts.harness,
-    sessionCount: adoption.identifiedSessionCount,
-    unassignedTraceCount: adoption.unassignedTraceCount,
+    sessionCount: identity.identifiedSessionCount,
+    unassignedTraceCount: identity.unassignedTraceCount,
     sources: opts.sources,
     workflow: opts.workflow,
     spanCount: opts.spans.length,
@@ -705,7 +686,7 @@ export async function runTraceInvestigation(opts: TraceInvestigationOptions): Pr
     findings,
     pipelines,
     reactions,
-    adoption,
+    sessionIdentityConflicts: identity.conflicts,
     loopConvergence: analyzeLoopConvergence(opts.spans),
     steeringChain: analyzeSteeringChain(opts.spans),
     ...(agenticRoute ? { agenticRoute } : {}),

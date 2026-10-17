@@ -24,9 +24,20 @@ interface Session {
   humanTurns: Fact<Array<{ at: string; text: string }>>
   subagents: Fact<Array<{ taskName: string | null }>>
   pullRequests: Fact<{ created: Array<{ identifier: string | null }>; merged: Array<{ identifier: string | null }> }>
+  measurements: {
+    skills: Record<string, unknown>
+    waste: {
+      failingStreaks: Fact<Array<{ command: string | null; runs: number }>>
+      rollbacks: Fact<number>
+      repeatedCommands: Fact<unknown>
+    }
+  }
 }
 
-/** The numbers S2 holds equal: tokens, cost, tool calls, human turns, subagents and pull requests. Span ids differ by reader. */
+/**
+ * The numbers S2 holds equal: tokens, cost, tool calls, human turns, subagents,
+ * pull requests, skills, rework, rollbacks and failing streaks. Span ids differ by reader.
+ */
 function numbers(session: Session) {
   const { spanIds: _ids, ...tokens } = session.tokens
   return {
@@ -42,6 +53,10 @@ function numbers(session: Session) {
       created: session.pullRequests.value.created.map((pr) => pr.identifier),
       merged: session.pullRequests.value.merged.map((pr) => pr.identifier),
     },
+    skills: session.measurements.skills,
+    rework: session.measurements.waste.repeatedCommands.value,
+    rollbacks: session.measurements.waste.rollbacks.value,
+    streaks: session.measurements.waste.failingStreaks.value?.map((streak) => [streak.command, streak.runs]) ?? null,
   }
 }
 
