@@ -667,10 +667,31 @@ function hasReadOnlyCurl(input: string): boolean {
   return !/(?:^|\s)-(?:d|F|T)(?:\S*|\s+\S+)|(?:^|\s)--(?:data(?:-ascii|-binary|-raw|-urlencode)?|form(?:-string)?|json|upload-file)(?:=|\s)/i.test(input)
 }
 
-function classifyNestedTool(name: string, input: string | undefined): string {
-  return name === 'exec_command' && input && (verificationCommand.test(input) || hasReadOnlyCurl(input))
-    ? 'exec_command.verify'
-    : name
+/**
+ * The command an `exec_command` runs: its `cmd` argument, or for an `exec`
+ * script the script with each `workdir` value removed. A directory named
+ * `vitest-…` or a justification that mentions `pnpm test` is not a check.
+ */
+function commandText(input: string): string {
+  try {
+    const args = JSON.parse(input) as unknown
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+      const { cmd, command } = args as Record<string, unknown>
+      const run = cmd ?? command
+      if (typeof run === 'string') return run
+      if (Array.isArray(run)) return run.filter((part) => typeof part === 'string').join(' ')
+    }
+  } catch {
+    // An exec script, not JSON arguments.
+  }
+  return input.replace(/["']?workdir["']?\s*:\s*(["'`])(?:\\.|(?!\1)[^\\])*\1/gu, '')
+}
+
+/** A Codex tool's name in spans: `exec_command.verify` for a command that checks work. Both Codex read paths name tools with it. */
+export function classifyNestedTool(name: string, input: string | undefined): string {
+  if (name !== 'exec_command' || !input) return name
+  const command = commandText(input)
+  return verificationCommand.test(command) || hasReadOnlyCurl(command) ? 'exec_command.verify' : name
 }
 
 function isExpectedBlockingTool(name: string, input: string | undefined): boolean {
