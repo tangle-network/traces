@@ -149,6 +149,21 @@ describe('traces ask: answers', () => {
     expect(report).toContain('Citations:** 1 of 1 resolve to a span in the trace')
   })
 
+  // DSPy previews an input longer than 1,000 characters as its first and last 500, so a rule past
+  // character 500 of the instructions never reaches the model. At 521 characters rule 6 was cut.
+  it('sends every rule, the answer-schema rule included, inside the first 500 characters of the instructions', async () => {
+    const file = join(dir, 'schema-question.json')
+    await writeFile(file, JSON.stringify([{ id: 'first', question: 'Which command failed first?', answerSchema: { type: 'string' } }]), 'utf8')
+    const run = await ask(['ask', session.path, '--questions', file, '--budget', '1', '--format', 'json'], {
+      bridge: [{ match: 'failed first', answer: `"bash" (${cite()})` }],
+    })
+    const [sent] = (await readFile(run.bridgeLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { instructions: string })
+    const rules = sent!.instructions.slice(0, sent!.instructions.indexOf('\n\n'))
+    expect(rules.split('\n').map((line) => line.split(' ')[0])).toEqual(['TRACES', '1.', '2.', '3.', '4.', '5.', '6.'])
+    expect(rules.length).toBeLessThanOrEqual(500)
+    expect(sent!.instructions.slice(0, 500)).toContain(rules)
+  })
+
   it('prints every answer as JSON, and keeps a small budget small', async () => {
     const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '1.5', '--format', 'json'])
     expect(run.code, run.stderr).toBe(0)

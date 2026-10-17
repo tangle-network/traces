@@ -1,0 +1,290 @@
+{
+  "window": {
+    "since": "2026-10-08T00:00:00.000Z",
+    "until": "2026-10-15T00:00:00.000Z"
+  },
+  "forks": [
+    {
+      "id": "voice-ledger-multi-extract",
+      "parser": "dotfiles claude/skills/voice-ledger/scripts/multi_extract.py (codex)",
+      "retiredBy": "U2 + U3 (1.0)",
+      "deletedIn": "step 23 (dotfiles)",
+      "unit": "window",
+      "old": [
+        "python3",
+        "-I",
+        "{DOTFILES}/claude/skills/voice-ledger/scripts/multi_extract.py",
+        "codex",
+        "parity"
+      ],
+      "new": [
+        "traces",
+        "facts",
+        "--since",
+        "{SINCE}",
+        "--until",
+        "{UNTIL}",
+        "--harness",
+        "codex",
+        "--format",
+        "jsonl"
+      ],
+      "read": {
+        "old": "multi-extract-turns",
+        "new": "facts-jsonl-turns"
+      },
+      "key": "(session id, turn time to the second) of each human or relay turn in the window",
+      "fields": {
+        "author": "turns[].author -> author"
+      },
+      "tolerance": 0.9
+    },
+    {
+      "id": "trace-mine-extract",
+      "parser": "tangle-tools trace-insights/mine/analyst/extract.mjs",
+      "retiredBy": "U3 (1.0)",
+      "deletedIn": "step 25 (tangle-tools)",
+      "unit": "window",
+      "old": [
+        "node",
+        "{TANGLE_TOOLS}/trace-insights/mine/analyst/extract.mjs",
+        "extract",
+        "--since",
+        "{SINCE}",
+        "--until",
+        "{UNTIL}"
+      ],
+      "new": [
+        "traces",
+        "facts",
+        "--since",
+        "{SINCE}",
+        "--until",
+        "{UNTIL}",
+        "--harness",
+        "claude-code",
+        "--format",
+        "jsonl"
+      ],
+      "read": {
+        "old": "trace-mine-turns",
+        "new": "facts-jsonl-turns"
+      },
+      "key": "(session id, turn time to the second) of each human turn in the window",
+      "fields": {
+        "author": "every turns[] row is human -> author"
+      },
+      "tolerance": 0.9
+    },
+    {
+      "id": "self-audit",
+      "parser": "dotfiles claude/skills/reflect/scripts/self-audit (repeat and rollback counts)",
+      "retiredBy": "U4 (1.0); its guardrail rules stay until U16 (1.1)",
+      "deletedIn": "step 23 (dotfiles), counting half",
+      "unit": "file",
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ],
+      "old": [
+        "node",
+        "{DOTFILES}/claude/skills/reflect/scripts/self-audit",
+        "{FILE}",
+        "--json"
+      ],
+      "new": [
+        "traces",
+        "facts",
+        "{FILE}",
+        "--format",
+        "json"
+      ],
+      "read": {
+        "old": "self-audit",
+        "new": "facts-waste"
+      },
+      "key": "session file",
+      "fields": {
+        "repeatedCommands": "rework.repeatedCommands -> sessions[0].measurements.waste.repeatedCommands.value.commands",
+        "extraRuns": "rework.extraRuns -> sessions[0].measurements.waste.repeatedCommands.value.extraRuns",
+        "rollbacks": "rework.rollbacks -> sessions[0].measurements.waste.rollbacks.value"
+      },
+      "tolerance": 0.9
+    },
+    {
+      "id": "halo-extract",
+      "parser": "dotfiles claude/tools/halo-extract.mjs (with halo-report.mjs and hooks/halo-profile.sh)",
+      "retiredBy": "U4 (1.0)",
+      "deletedIn": "step 23 (dotfiles)",
+      "unit": "file",
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ],
+      "old": [
+        "node",
+        "{DOTFILES}/claude/tools/halo-extract.mjs",
+        "{FILE}"
+      ],
+      "new": [
+        "traces",
+        "facts",
+        "{FILE}",
+        "--format",
+        "json"
+      ],
+      "read": {
+        "old": "halo",
+        "new": "facts-halo"
+      },
+      "key": "session file",
+      "fields": {
+        "toolCalls": "toolCalls -> sessions[0].toolCalls.value",
+        "humanTurns": "realUserTurns -> sessions[0].humanTurns.value | length",
+        "toolErrors": "toolErrors -> sum of sessions[0].measurements.tools[].outcomes.error"
+      },
+      "tolerance": 0.9
+    },
+    {
+      "id": "skill-ledger-prs",
+      "parser": "dotfiles claude/tools/skill_ledger/core.py _pr_events (scan_claude, scan_codex)",
+      "retiredBy": "U2 + U3 + U4 (1.0)",
+      "deletedIn": "step 23 (dotfiles)",
+      "unit": "file",
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ],
+      "old": [
+        "python3",
+        "-B",
+        "-c",
+        "import json,sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; from skill_ledger.core import scan_claude, scan_codex; events = (scan_codex if sys.argv[3] == 'codex' else scan_claude)(Path(sys.argv[2])); prs = [e.data for e in events if e.kind == 'pr']; print(json.dumps({'created': [p['number'] for p in prs if p.get('how') in ('pr-create', 'pr-link')], 'merged': [p['number'] for p in prs if p.get('how') == 'pr-merge']}))",
+        "{DOTFILES}/claude/tools",
+        "{FILE}",
+        "{HARNESS}"
+      ],
+      "new": [
+        "traces",
+        "facts",
+        "{FILE}",
+        "--format",
+        "json"
+      ],
+      "read": {
+        "old": "skill-ledger-prs",
+        "new": "facts-prs"
+      },
+      "key": "session file",
+      "fields": {
+        "created": "pr events how=pr-create|pr-link -> sessions[0].pullRequests.value.created[].number",
+        "merged": "pr events how=pr-merge -> sessions[0].pullRequests.value.merged[].number"
+      },
+      "tolerance": 0.9
+    },
+    {
+      "id": "recurrence-scan",
+      "parser": "tangle-tools fleet/recurrence.py scan() (its own token count)",
+      "retiredBy": "U2 + U3 (1.0)",
+      "deletedIn": "step 25 (tangle-tools)",
+      "unit": "file",
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ],
+      "old": [
+        "python3",
+        "-B",
+        "-c",
+        "import importlib.util,json,sys; from pathlib import Path; spec = importlib.util.spec_from_file_location('recurrence', sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(json.dumps({'tokens': m.scan(sys.argv[3], Path(sys.argv[2]), {})['tokens']}))",
+        "{TANGLE_TOOLS}/fleet/recurrence.py",
+        "{FILE}",
+        "{HARNESS}"
+      ],
+      "new": [
+        "traces",
+        "facts",
+        "{FILE}",
+        "--format",
+        "json"
+      ],
+      "read": {
+        "old": "json",
+        "new": "facts-tokens"
+      },
+      "key": "session file",
+      "fields": {
+        "tokens": "scan().tokens -> sessions[0].tokenTotal.value"
+      },
+      "tolerance": 0.9
+    },
+    {
+      "id": "trace-insights-adapters",
+      "parser": "tangle-tools trace-insights/trace_insights/{claude,codex}_adapter.py",
+      "retiredBy": "convert (1.0)",
+      "deletedIn": "step 25 (tangle-tools)",
+      "unit": "file",
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ],
+      "old": [
+        "python3",
+        "-B",
+        "-c",
+        "import json,sys; sys.path.insert(0, sys.argv[1]); from trace_insights.claude_adapter import parse_claude_session; from trace_insights.codex_adapter import parse_codex_session; built = (parse_codex_session if sys.argv[3] == 'codex' else parse_claude_session)(sys.argv[2]); print(json.dumps({'toolSpans': sum(1 for span in built.spans if span.kind == 'TOOL')}))",
+        "{TANGLE_TOOLS}/trace-insights",
+        "{FILE}",
+        "{HARNESS}"
+      ],
+      "new": [
+        "traces",
+        "convert",
+        "{FILE}",
+        "--out",
+        "{OUT_FILE}"
+      ],
+      "read": {
+        "old": "json",
+        "new": "otlp-file"
+      },
+      "key": "session file",
+      "fields": {
+        "toolSpans": "TOOL spans of the file -> TOOL spans of the named session (its first trace) that traces convert writes"
+      },
+      "tolerance": 0.9
+    },
+    {
+      "id": "trace-adapters-flatten",
+      "parser": "tangle-tools trace-adapters/flatten.py",
+      "retiredBy": "U10 (1.0)",
+      "deletedIn": "step 25 (tangle-tools)",
+      "unit": "spool",
+      "old": [
+        "python3",
+        "-B",
+        "-c",
+        "import json,sys; sys.path.insert(0, sys.argv[1]); from flatten import flatten; spans = set(); traces = set()\nfor line in open(sys.argv[2], errors='replace'):\n    for row in flatten(line):\n        spans.add((row['trace_id'], row['span_id'])); traces.add(row['trace_id'])\nprint(json.dumps({'distinctSpans': len(spans), 'traces': len(traces)}))",
+        "{TANGLE_TOOLS}/trace-adapters",
+        "{FILE}"
+      ],
+      "new": [
+        "traces",
+        "convert",
+        "{FILE}",
+        "--out",
+        "{OUT_FILE}"
+      ],
+      "read": {
+        "old": "json",
+        "new": "otlp-file"
+      },
+      "key": "collector file",
+      "fields": {
+        "distinctSpans": "distinct (trace_id, span_id) flatten writes -> distinct ones traces convert writes (flatten repeats a span the collector exported twice; traces keeps one)",
+        "traces": "distinct trace_id -> distinct trace_id"
+      },
+      "tolerance": 0.9
+    }
+  ]
+}

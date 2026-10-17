@@ -84,6 +84,8 @@ export interface PullRequestFact {
   readonly evidence: string
   /** The command span, plus any span whose output supplied the number. */
   readonly spanIds: readonly string[]
+  /** When the command ran (its tool call's start): the first run that succeeded, else the first run. */
+  readonly at: string
   /** Why `identifier` is null. Null when the pull request was identified. */
   readonly unavailable: string | null
 }
@@ -105,6 +107,7 @@ export interface PullRequestReading {
 
 interface CommandRecord {
   readonly spanId: string
+  readonly at: string
   readonly script: string
   readonly output: string
   /** Not known to have succeeded: a non-zero exit, or a code-mode script, whose status is the script's, not the command's. */
@@ -120,6 +123,8 @@ interface PullRequestEvent {
   command: string
   evidence: string
   spanIds: string[]
+  at: string
+  failed: boolean
   recordIndex: number
   outputTruncated: boolean
 }
@@ -170,6 +175,7 @@ function commandRecords(spans: readonly OtlpSpan[]): CommandRecord[] {
     const exitCode = typeof exit === 'number' ? exit : null
     records.push({
       spanId: span.span_id,
+      at: span.start_time,
       script,
       output: stringAttribute(span, 'output.value') ?? '',
       failed: codeMode.has(span) || (exitCode === null ? span.status.code === 'ERROR' : exitCode !== 0),
@@ -302,6 +308,8 @@ function createEvent(
     command: words.join(' '),
     evidence,
     spanIds: [record.spanId],
+    at: record.at,
+    failed: record.failed,
     recordIndex,
     outputTruncated: record.outputTruncated,
   }
@@ -335,6 +343,8 @@ function mergeEvent(
     command: words.join(' '),
     evidence,
     spanIds: [record.spanId],
+    at: record.at,
+    failed: record.failed,
     recordIndex,
     outputTruncated: record.outputTruncated,
   }
@@ -400,6 +410,7 @@ function identify(event: PullRequestEvent): PullRequestFact {
     command: event.command,
     evidence: event.evidence,
     spanIds: [...new Set(event.spanIds)],
+    at: event.at,
     unavailable:
       identifier === null
         ? 'the command named no pull-request number and no head branch, and no output that joins to it stated one'
@@ -407,18 +418,49 @@ function identify(event: PullRequestEvent): PullRequestFact {
   }
 }
 
-/** Keep one entry per identity; a failed create and its retry are one pull request. */
-function distinct(facts: readonly PullRequestFact[]): PullRequestFact[] {
-  const kept = new Map<string, PullRequestFact>()
-  for (const fact of facts) {
-    const key = fact.identifier ?? `command:${fact.command}`
-    const existing = kept.get(key)
-    kept.set(
-      key,
-      existing ? { ...existing, spanIds: [...new Set([...existing.spanIds, ...fact.spanIds])] } : fact,
-    )
+/**
+ * One entry per identity: a failed create and its retry, or a refused merge and
+ * the one that went through, are one pull request. Its command and time are the
+ * first run that succeeded, else the first run.
+ */
+function distinct(events: readonly PullRequestEvent[]): PullRequestFact[] {
+  const groups = new Map<string, PullRequestEvent[]>()
+  for (const event of events) {
+    const key = event.number ?? event.headBranch ?? `command:${event.command}`
+    groups.set(key, [...(groups.get(key) ?? []), event])
   }
-  return [...kept.values()]
+  return [...groups.values()].map((group) => {
+    const shown = group.find((event) => !event.failed) ?? group[0]!
+    return { ...identify(shown), spanIds: [...new Set(group.flatMap((event) => event.spanIds))] }
+  })
+}
+
+/** `exec_command` left a process running and named its session; a later `write_stdin` polls it. */
+const RUNNING_SESSION = /Process running with session ID (\d+)/
+
+/**
+ * The pull-request number a later poll of a backgrounded command printed. A
+ * `gh pr create` that is still running when its call returns prints no URL; the
+ * poll of the same process session that comes back with one names its number.
+ */
+function numberFromPoll(spans: readonly OtlpSpan[], record: CommandRecord): { number: string; spanId: string } | null {
+  const session = RUNNING_SESSION.exec(record.output)?.[1]
+  if (session === undefined) return null
+  for (const span of spans) {
+    if (span.start_time < record.at) continue
+    const input = stringAttribute(span, 'input.value')
+    if (input === null || !input.includes(session)) continue
+    let polled: unknown
+    try {
+      polled = (JSON.parse(input) as { session_id?: unknown }).session_id
+    } catch {
+      continue
+    }
+    if (String(polled) !== session) continue
+    const number = printedPullRequestNumbers(stringAttribute(span, 'output.value') ?? '')[0]
+    if (number !== undefined) return { number, spanId: span.span_id }
+  }
+  return null
 }
 
 /**
@@ -453,6 +495,14 @@ export function readPullRequests(spans: readonly OtlpSpan[]): PullRequestReading
   }
   let unjoinedTruncated = 0
   for (const event of events) {
+    if (event.number !== null || event.action !== 'create') continue
+    const polled = numberFromPoll(spans, records[event.recordIndex]!)
+    if (polled === null) continue
+    event.number = polled.number
+    event.spanIds.push(polled.spanId)
+    event.evidence = `the pull-request URL a later poll of this backgrounded command printed, in span ${polled.spanId}`
+  }
+  for (const event of events) {
     if (event.number !== null || event.headBranch === null) continue
     const sibling = numberByBranch.get(event.headBranch)
     if (sibling !== undefined) {
@@ -470,8 +520,8 @@ export function readPullRequests(spans: readonly OtlpSpan[]): PullRequestReading
     if (event.outputTruncated) unjoinedTruncated += 1
   }
 
-  const created = distinct(events.filter((event) => event.action === 'create').map(identify))
-  const merged = distinct(events.filter((event) => event.action === 'merge').map(identify))
+  const created = distinct(events.filter((event) => event.action === 'create'))
+  const merged = distinct(events.filter((event) => event.action === 'merge'))
   const truncatedCommands = records.filter((record) => record.inputTruncated && /\bpr\b/.test(record.script)).length
   const notes: string[] = []
   if (truncatedCommands > 0) {

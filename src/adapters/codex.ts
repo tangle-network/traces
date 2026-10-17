@@ -261,6 +261,16 @@ function isWaitAgentOperation(name: string): boolean {
   return name === 'wait_agent' || name.endsWith('__wait_agent')
 }
 
+/**
+ * Codex answers a multi-agent call it refused (`spawn_agent` at the agent thread
+ * limit) with `<operation> failed: <reason>` instead of the call's JSON result.
+ * That text is Codex's own status, not tool output. Both read paths apply it.
+ */
+export function agentOperationFailed(name: string, output: unknown): boolean {
+  const operation = multiAgentOperation(name)
+  return operation !== null && typeof output === 'string' && output.startsWith(`${operation} failed:`)
+}
+
 /** Only protocol-level status fields count; arbitrary tool output may itself contain code or logs mentioning errors. */
 function outputStatus(
   name: string,
@@ -272,6 +282,7 @@ function outputStatus(
   // inside arbitrary output remains domain data, not execution status.
   const sourceError = source.is_error === true || source.isError === true
     || (source.error !== undefined && source.error !== null && source.error !== false)
+    || agentOperationFailed(name, output)
   const outputError = explicitOutputError(output, !waitAgent)
   const error = sourceError || outputError === true
   const pollTimeout = !error && waitAgent && explicitTimeout(output)
@@ -667,10 +678,31 @@ function hasReadOnlyCurl(input: string): boolean {
   return !/(?:^|\s)-(?:d|F|T)(?:\S*|\s+\S+)|(?:^|\s)--(?:data(?:-ascii|-binary|-raw|-urlencode)?|form(?:-string)?|json|upload-file)(?:=|\s)/i.test(input)
 }
 
-function classifyNestedTool(name: string, input: string | undefined): string {
-  return name === 'exec_command' && input && (verificationCommand.test(input) || hasReadOnlyCurl(input))
-    ? 'exec_command.verify'
-    : name
+/**
+ * The command an `exec_command` runs: its `cmd` argument, or for an `exec`
+ * script the script with each `workdir` value removed. A directory named
+ * `vitest-…` or a justification that mentions `pnpm test` is not a check.
+ */
+function commandText(input: string): string {
+  try {
+    const args = JSON.parse(input) as unknown
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+      const { cmd, command } = args as Record<string, unknown>
+      const run = cmd ?? command
+      if (typeof run === 'string') return run
+      if (Array.isArray(run)) return run.filter((part) => typeof part === 'string').join(' ')
+    }
+  } catch {
+    // An exec script, not JSON arguments.
+  }
+  return input.replace(/["']?workdir["']?\s*:\s*(["'`])(?:\\.|(?!\1)[^\\])*\1/gu, '')
+}
+
+/** A Codex tool's name in spans: `exec_command.verify` for a command that checks work. Both Codex read paths name tools with it. */
+export function classifyNestedTool(name: string, input: string | undefined): string {
+  if (name !== 'exec_command' || !input) return name
+  const command = commandText(input)
+  return verificationCommand.test(command) || hasReadOnlyCurl(command) ? 'exec_command.verify' : name
 }
 
 function isExpectedBlockingTool(name: string, input: string | undefined): boolean {

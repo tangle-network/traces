@@ -3,10 +3,9 @@
 A public, dependency-free benchmark for one question: on a coding-agent session, does an
 audit arm answer factual questions correctly and cheaply?
 
-The point of comparison is a fleet of general subagents turned loose on the raw session
-files. That fleet is a real arm here, not a straw man, and it wins on some questions today.
-Every claim that `traces` beats it has to come from a scored run of both arms on this
-benchmark, with the costs reported.
+The point of comparison is an agent turned loose on the raw session files. That agent is a
+real arm here (`raw-files`), not a straw man. Every claim that `traces` beats it has to come
+from a scored run of both arms on this benchmark, with the costs reported.
 
 ## What is in here
 
@@ -16,7 +15,9 @@ benchmark, with the costs reported.
 | `questions.ts` | The questions, their held-out paraphrases, and one JSON answer schema each. |
 | `score.ts` | The exact-match scorer and the per-arm tally. |
 | `citations.ts` | Resolves an answer's citation to the source record it names. |
-| `cli.ts` | The runner: write fixtures, write gold, score an answers file. |
+| `cli.ts` | The runner: write fixtures, write gold, run an arm, score an answers file. |
+| `arms.ts` | The facts, raw-files and traces arms. |
+| `facts-score.json` | The facts arm's committed score; it may only rise. |
 
 Everything the fixtures contain is invented. No content from any real session appears in
 this directory, in its tests, or in anything it generates.
@@ -149,8 +150,8 @@ wordings is scored on those alone; the paraphrase tally is reported separately.
 
 ```json
 {
-  "arm": "subagent-fleet",
-  "notes": "5 general subagents, one per session, no traces CLI",
+  "arm": "raw-files",
+  "notes": "claude -p, model sonnet, $0.25 per question, no traces on PATH",
   "answers": [
     {
       "question": "op.status-polls",
@@ -171,28 +172,62 @@ none. `wall_ms`, `model_calls`, `tool_calls` and `cost_usd` are optional; leave 
 rather than guessing, because an omitted measure is reported as missing and a guessed one
 is reported as a number. `cost_basis` says whether `cost_usd` was observed or estimated.
 
-## What `pnpm test` covers, and what it does not
+## The three arms
 
-`pnpm test` runs the deterministic half:
+`pnpm bench:audit arm` answers every question with one arm and writes the answers file
+`score` reads. Each arm reads the same fixture tree (`--fixtures DIR`, or a fresh one).
 
-- `fixtures.test.ts` — the generator is byte-identical across runs, every planted fact is
-  present, and each re-derived answer above equals a re-derivation of the fixtures that
-  never touches the generator's bookkeeping or an adapter.
-- `score.test.ts` — the gold, submitted as an arm, scores every question correct through
-  the same path a real arm takes; and the scorer's leaf rules, citation resolution,
-  answers-file validation, tallies, and the runner end to end.
+| Arm | What answers | Cost |
+|---|---|---|
+| `facts` | `traces facts --format json` over the three sessions (and one `--match` search), mapped to each answer by fixed rules in `arms.ts`. A leaf the sheet has no field for is `null`. | $0, deterministic |
+| `raw-files` | One headless agent per question (`claude -p`), in a copy of the fixture tree, with no `traces` on PATH | the agent's own reported cost |
+| `traces` | The same agent, model, prompt and budget, with `traces` on PATH and one line telling it so | the agent's own reported cost |
 
-The model arms are **manual**, on purpose: they cost money, they are not deterministic, and
-CI must not depend on a model provider. Run them by hand and keep the answers files.
+```sh
+pnpm build
+pnpm bench:audit fixtures --out /tmp/audit-bench
+pnpm bench:audit arm --arm facts --variants all --fixtures /tmp/audit-bench --out /tmp/facts.json
+pnpm bench:audit arm --arm raw-files --model sonnet --budget-usd 0.25 --fixtures /tmp/audit-bench --out /tmp/raw.json
+pnpm bench:audit arm --arm traces --model sonnet --budget-usd 0.25 --fixtures /tmp/audit-bench --out /tmp/traces.json
+pnpm bench:audit score /tmp/raw.json --fixtures /tmp/audit-bench
+```
 
-Two arms are worth running against each other:
+The model arms run `claude -p --output-format stream-json` with `--max-budget-usd` per
+question, no session persistence, no user or project settings, hooks or MCP servers, and the
+tools `Bash`, `Read`, `Grep` and `Glob`. The traces arm's `traces` runs with HOME set to a
+store home over its fixture copy, so it reads the fixtures and never the machine's own
+sessions; a stub `traces` that exits 127 keeps any other `traces` on PATH out of the raw-files
+arm. Each answer records the harness's own cost, model calls (assistant messages) and tool
+calls; each question's transcript stays under `--work`. The notes line counts tool calls that
+named a session store outside the fixture copy or searched from `/`.
 
-1. **Subagent fleet.** Point a coding agent at the fixtures directory with no `traces` CLI
-   and let it spawn whatever subagents it wants. This is the baseline to beat.
-2. **traces.** The same coding agent, allowed to use the `traces` CLI over the same
-   fixtures directory.
+Citations: a span id from either read path resolves. traces' own readers attach each span's
+source records; `traces facts <file>` reads through the shared reader (harness-sessions),
+whose spans resolve through the span of traces' own reader that is the same event (the same
+readable call id, else the one span of that name starting at that time) until harness-sessions
+captures sources (U18).
 
-Give both arms the same prompts from `prompts.jsonl`, the same model, and the same fixture
-tree; record wall time, model calls, tool calls, and cost for each; then score both and
-report the two tallies together. A single paired run supports a claim about that run, not a
-general one — repeat before claiming an arm is better.
+## The decision rule (U11)
+
+- `pnpm test` runs the facts arm (`tests/bench-audit-facts.test.ts`) and fails when any question
+  `facts-score.json` lists as correct is not, or the canonical or held-out count falls below it.
+  The score may only rise; raise `facts-score.json` in the change that raises it.
+- Before a release tag, run the raw-files and traces arms once with the same agent, model,
+  prompts and budget, and score both. The tag waits until the traces arm answers at least as
+  many questions correctly as the raw-files arm, at lower total cost. A question the traces arm
+  loses is fixed in `traces facts` (or in its help), never in the arm.
+- The release notes print: facts X/19 at $0, raw-files Y/19 at $Z, traces W/19 at $V.
+
+## What `pnpm test` covers
+
+- `fixtures.test.ts`: the generator is byte-identical across runs, every planted fact is
+  present, and each re-derived answer above equals a re-derivation of the fixtures that never
+  touches the generator's bookkeeping or an adapter.
+- `score.test.ts`: the gold, submitted as an arm, scores every question correct through the
+  same path a real arm takes; and the scorer's leaf rules, citation resolution, answers-file
+  validation, tallies, and the runner end to end.
+- `tests/bench-audit-facts.test.ts`: the facts arm against `facts-score.json`.
+
+The model arms are not in `pnpm test`: they cost money, they are not deterministic, and CI
+must not depend on a model provider. A single paired run supports a claim about that run, not
+a general one; repeat before claiming an arm is better.

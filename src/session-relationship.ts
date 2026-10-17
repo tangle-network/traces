@@ -28,6 +28,8 @@ export interface SessionRelationship {
   readonly agentPath?: string
   readonly taskScope?: 'all' | 'latest' | 'turn' | 'fork-current'
   readonly turnId?: string
+  /** When the scoped task started, for a scope narrower than `all`: a forked child's own task, or the selected turn. */
+  readonly taskStartedAt?: string
 }
 
 export type SessionWorkflowErrorCode =
@@ -163,5 +165,6 @@ export function describeSessionRelationship(
     ...(agentPath ? { agentPath } : {}),
     ...(taskScope ? { taskScope } : {}),
     ...(turnId ? { turnId } : {}),
+    ...(taskScope && taskScope !== 'all' && root ? { taskStartedAt: root.start_time } : {}),
   }
 }

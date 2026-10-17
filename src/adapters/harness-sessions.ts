@@ -35,8 +35,9 @@ import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
 import { SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './provenance.js'
-import { CodexAdapter, spawnAgentPath } from './codex.js'
+import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath } from './codex.js'
 import { multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
+import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
 
 type SupportedHarness = 'claude-code' | 'codex' | 'opencode' | 'pi' | 'kimi-code' | 'factory-droids'
@@ -171,16 +172,20 @@ function decorateCodexTools(session: HarnessSession, spans: OtlpSpan[]): void {
     const call = byCallId.get(callId)
     if (!call) continue
     const nested = call.name === 'exec' ? nestedToolName(call.inputText) : null
-    const name = nested ?? call.name
-    if (nested) {
+    // The name traces' own Codex reader gives the same call, so both read paths count tools alike.
+    const named = classifyNestedTool(nested ?? call.name, call.inputText ?? undefined)
+    if (named !== call.name) {
       item.attributes['traces.codex.outer_tool_name'] = call.name
-      item.attributes['traces.codex.nested_tool_name'] = nested
-      item.attributes['tool.name'] = nested
-      item.name = `tool.${nested}`
+      item.attributes['tool.name'] = named
+      item.name = `tool.${named}`
     }
+    if (nested) item.attributes['traces.codex.nested_tool_name'] = nested
+    const name = nested ?? call.name
     const operation = multiAgentOperation(name)
     if (!operation) continue
     item.attributes['traces.codex.agent_operation'] = operation
+    const output = call.result?.output
+    if (agentOperationFailed(name, output)) item.status = { code: 'ERROR', message: String(output).slice(0, 500) }
     const children = session.children
       .filter((child) => child.toolCallId === callId)
       .map((child) => child.nativeSessionId)
@@ -240,7 +245,7 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
 }
 
 type CodexHead = { timestamp?: string; type?: string; payload?: {
-  type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string;
+  type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string; turn_id?: string;
   forked_from_id?: string; thread_source?: string; originator?: string; cwd?: string; model_provider?: string;
   agent_role?: string; agent_path?: string; parent_thread_id?: string;
   git?: { repository_url?: unknown }; source?: { subagent?: { thread_spawn?: {
@@ -255,6 +260,31 @@ async function codexMeta(path: string): Promise<NonNullable<CodexHead['payload']
     return head.find((row) => row.type === 'session_meta')?.payload
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+/**
+ * A Codex child that starts with its parent's history: its head starts a task
+ * before the child existed (the task's UUIDv7 turn id predates the child's id).
+ * Only such a child has records the shared reader would count as its own.
+ */
+function hasForkPrefix(head: readonly CodexHead[]): boolean {
+  const meta = head.find((row) => row.type === 'session_meta')?.payload
+  if (!meta?.id || !(meta.parent_thread_id || meta.source?.subagent?.thread_spawn?.parent_thread_id || meta.thread_source === 'subagent')) return false
+  const born = uuidV7TimestampMs(meta.id)
+  return born !== undefined && head.some((row) => {
+    if (row.type !== 'event_msg' || row.payload?.type !== 'task_started') return false
+    const started = uuidV7TimestampMs(row.payload.turn_id)
+    return started !== undefined && started < born
+  })
+}
+
+async function codexForkPrefix(path: string): Promise<boolean> {
+  try {
+    return hasForkPrefix(await takeJsonl<CodexHead>(path, 40, { mode: 'recover', onCorruption: () => {} }))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
     throw error
   }
 }
@@ -628,6 +658,12 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     if (this.scopedAdapter instanceof ClaudeAdapter && await isClaudeStreamJson(ref.path)) {
       return this.scopedAdapter.parse(ref, options)
     }
+    // A forked Codex child starts with its parent's history, rewritten to the fork time.
+    // The shared fold has no task scope yet (U18), so it would count that history as the
+    // child's own work; traces' own reader scopes a child to the task it was given.
+    if (this.scopedAdapter instanceof CodexAdapter && await codexForkPrefix(ref.path)) {
+      return this.scopedAdapter.parse(ref, options)
+    }
     options.signal?.throwIfAborted()
     let source = await this.resolveNativeRef(ref)
     if (!source && this.nativeHarness === 'opencode') {
@@ -782,7 +818,9 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     if (first === undefined) return true
     const records = first.filter((record): record is Record<string, unknown> => record !== null)
     if (this.nativeHarness === 'claude-code') return !records.some((record) => record.type === 'system' && record.subtype === 'init')
-    return records.some((record) => record.type === 'session_meta') && !records.slice(0, 40).some((record) => isLegacyPrompt(record as CodexHead))
+    // A forked child is read whole by traces' own reader (`parse`), so the index reads it whole too.
+    const head = records.slice(0, 40) as CodexHead[]
+    return records.some((record) => record.type === 'session_meta') && !hasForkPrefix(head) && !head.some((record) => isLegacyPrompt(record))
   }
 
   /**

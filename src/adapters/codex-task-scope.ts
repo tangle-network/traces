@@ -76,7 +76,7 @@ export class CodexTaskScopeError extends Error {
 const UUID_V7 =
   /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function uuidV7TimestampMs(value: string | undefined): number | undefined {
+export function uuidV7TimestampMs(value: string | undefined): number | undefined {
   const match = value?.match(UUID_V7)
   if (!match) return undefined
   const timestamp = Number.parseInt(`${match[1]}${match[2]}`, 16)

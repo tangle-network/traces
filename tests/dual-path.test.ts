@@ -81,19 +81,20 @@ function firstFailure(session: Session): Record<string, unknown> {
 const EXEC_FAILS_ID = '019a8c00-eeee-7eee-8eee-eeeeeeeeee01'
 
 /**
- * A Codex session whose `exec_command` exits 1 and whose next one exits 0. Codex
- * writes the exit code in a text header before `Output:`; the output body names
- * another code, which is not the status. The calls carry no `workdir`: traces'
- * own reader classifies the whole argument text, and the test temp root's name
- * (`traces-vitest-…`) would read as a verification command.
+ * A Codex session whose `exec_command` exits 1, whose next one exits 0, and whose
+ * `pnpm test` then exits 1. Codex writes the exit code in a text header before
+ * `Output:`; the output body names another code, which is not the status. Both
+ * read paths name a command that checks work `exec_command.verify`, from the
+ * command alone: the `ls` runs in a directory named `vitest-setup`, which is
+ * not a check.
  */
 async function makeExecFailsHome(): Promise<{ path: string; env: Record<string, string> }> {
   const root = await mkdtemp(join(tmpdir(), 'traces-exec-fails-'))
   const home = join(root, 'home')
   const cwd = join(home, 'w', 'widgets')
   const at = (second: number): string => `2026-10-17T10:00:${String(second).padStart(2, '0')}.000Z`
-  const exec = (second: number, call: string, cmd: string, code: number, body: string) => [
-    { timestamp: at(second), type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: call, arguments: JSON.stringify({ cmd }) } },
+  const exec = (second: number, call: string, cmd: string, code: number, body: string, workdir = cwd) => [
+    { timestamp: at(second), type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: call, arguments: JSON.stringify({ cmd, workdir }) } },
     {
       timestamp: at(second + 2),
       type: 'response_item',
@@ -106,9 +107,10 @@ async function makeExecFailsHome(): Promise<{ path: string; env: Record<string, 
     { timestamp: at(1), type: 'turn_context', payload: { cwd, model: 'gpt-6.1-sol' } },
     { timestamp: at(2), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Install the workspace.' }] } },
     ...exec(3, 'call-install', 'pnpm install --frozen-lockfile', 1, 'ERR_PNPM_OUTDATED_LOCKFILE (a postinstall exited with code 7)'),
-    ...exec(6, 'call-list', 'ls packages', 0, 'core'),
-    { timestamp: at(9), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The lockfile is out of date.' }] } },
-    { timestamp: at(10), type: 'event_msg', payload: { type: 'task_complete', turn_id: `${EXEC_FAILS_ID}-t1` } },
+    ...exec(6, 'call-list', 'ls packages', 0, 'core', join(cwd, 'vitest-setup')),
+    ...exec(9, 'call-test', 'pnpm test', 1, '1 failed'),
+    { timestamp: at(12), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The lockfile is out of date.' }] } },
+    { timestamp: at(13), type: 'event_msg', payload: { type: 'task_complete', turn_id: `${EXEC_FAILS_ID}-t1` } },
   ]
   const path = join(home, '.codex', 'sessions', '2026', '10', '17', `rollout-2026-10-17T10-00-00-${EXEC_FAILS_ID}.jsonl`)
   await mkdir(dirname(path), { recursive: true })
@@ -167,8 +169,17 @@ describe('both read paths state the same numbers', () => {
   // harness-sessions 0.1.6 read every Codex exec_command as completed, so the shared path found no failure.
   it('names the same first failure for a Codex exec_command that exits 1', async () => {
     const [[shared], [native]] = await Promise.all([facts([ex.path], ex.env), facts([ex.path, '--latest-turn'], ex.env)])
-    expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', name: 'tool.exec_command', laterCount: 0 })
+    expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', name: 'tool.exec_command', laterCount: 1 })
     expect(firstFailure(native!)).toEqual(firstFailure(shared!))
+  })
+
+  // The shared reader named every Codex command exec_command, and traces' own reader matched its
+  // check pattern against the whole argument JSON, so a workdir named vitest-… read as a check.
+  it('names a Codex command that checks work exec_command.verify on both paths, from the command alone', async () => {
+    const [[shared], [native]] = await Promise.all([facts([ex.path], ex.env), facts([ex.path, '--latest-turn'], ex.env)])
+    for (const session of [shared!, native!]) {
+      expect(session.toolCallsByName.value).toEqual({ exec_command: 2, 'exec_command.verify': 1 })
+    }
   })
 })
 

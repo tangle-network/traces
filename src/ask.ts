@@ -193,18 +193,19 @@ export interface TraceQuestionsArtifacts {
 }
 
 /** Bumped whenever the question layout or rules change. */
-const ASK_DEFINITION_VERSION = '1.0.0'
+const ASK_DEFINITION_VERSION = '1.1.0'
 
 /**
  * DSPy's RLM shows the model a preview of each input: a value longer than
  * 1,000 characters appears as its first and last 500 only. The question
- * therefore stays short and whole, and the rules sit in the first 500
- * characters of the instructions, which is all of them the preview keeps.
+ * therefore stays short and whole, and the rules, the answer-schema rule
+ * included, sit in the first 500 characters of the instructions, which is all
+ * of them the preview keeps (`tests/ask.test.ts` holds them to it).
  */
 const ASK_RULES = [
   'TRACES ASK RULES',
-  '1. Answer QUESTION only from trace tool results retrieved in this run.',
-  '2. PREPARED CONTEXT ends analyst_instructions: the trace list JSON, then a SESSION FACTS sheet. Parse both; copy IDs from them.',
+  '1. Answer QUESTION only from trace tool results of this run.',
+  '2. PREPARED CONTEXT ends analyst_instructions: the trace list JSON, then a SESSION FACTS sheet. Copy IDs from both.',
   // The rules must fit the DSPy preview head, so this one does not also legislate
   // formatting: `traceCitationsInText` reads a citation the model emphasised.
   '3. Cite each fact as trace://<trace_id>/span/<span_id>: span ids the sheet names, never the sheet.',
@@ -212,7 +213,7 @@ const ASK_RULES = [
   '5. If the trace does not record a fact, say "not in trace".',
 ].join('\n')
 
-const ANSWER_SCHEMA_RULE = '6. The answer is one JSON value matching ANSWER SCHEMA below, with no other text.'
+const ANSWER_SCHEMA_RULE = '6. Answer with one JSON value matching ANSWER SCHEMA below, nothing else.'
 
 /** Traces listed in the prepared context; the rest are counted, not dropped silently. */
 const MAX_CONTEXT_TRACES = 200
