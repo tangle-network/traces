@@ -72,9 +72,9 @@ async function factsNumbers(argv: readonly string[], env: Readonly<Record<string
   return (await facts(argv, env)).map(numbers)
 }
 
-/** The first failure without the span ids, which differ by reader. */
+/** The first failure without its span and trace ids, which differ by reader. */
 function firstFailure(session: Session): Record<string, unknown> {
-  const { spanId: _spanId, later: _later, ...rest } = session.firstFailure
+  const { spanId: _spanId, later: _later, traceId: _traceId, ...rest } = session.firstFailure
   return rest
 }
 
@@ -165,7 +165,7 @@ describe('both read paths state the same numbers', () => {
   // harness-sessions 0.1.6 read every Codex exec_command as completed, so the shared path found no failure.
   it('names the same first failure for a Codex exec_command that exits 1', async () => {
     const [[shared], [native]] = await Promise.all([facts([ex.path], ex.env), facts([ex.path, '--latest-turn'], ex.env)])
-    expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', laterCount: 0 })
+    expect(shared!.firstFailure).toMatchObject({ status: 'found', stage: 'error-span', name: 'tool.exec_command.verify', laterCount: 0 })
     expect(firstFailure(native!)).toEqual(firstFailure(shared!))
   })
 })
