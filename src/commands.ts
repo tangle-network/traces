@@ -534,6 +534,7 @@ export function renderGlobalHelp(): string {
   const formats = [...new Set(SPECS.flatMap((spec) => spec.formats ?? []))]
   return [
     'traces: what your agents did, where they wasted time, whether a run passes',
+    "Start here for one session: traces facts <ref> (25 lines); one field: add --format json | jq '<path>'",
     '',
     ...rows,
     '',
