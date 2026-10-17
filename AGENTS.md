@@ -10,7 +10,8 @@ content itself — see Ownership.
   [docs/sdk.md](docs/sdk.md). Both are curated: `traces --help` and [src/index.ts](src/index.ts) are the
   complete inventories. Do not duplicate command inventories here. [README.md](README.md) stays a short
   front page that links to one guide per task.
-- For the analyst engine (built-in vs `--llm`), read [docs/trace-analysts.md](docs/trace-analysts.md).
+- For the analyst engine (agent-eval's deterministic analyst, your own through `analyzeSpans({ registry })`,
+  and `traces ask`, the one command that calls a model), read [docs/trace-analysts.md](docs/trace-analysts.md).
 - Every 0.x command and flag that 1.0 removed is a row in [src/moved.ts](src/moved.ts): using it exits 2
   and prints the replacement (`traces help moved`). Remove a spelling only by adding its row.
 - Resolve current exports and signatures from [src/index.ts](src/index.ts) and the command table in
@@ -29,7 +30,7 @@ owns:
   suite (`analyzeSpans`, `runTraceInvestigation`, …), and the one redaction/share-safety core
   (`redactSpans`, `assessSpans`). `traces upload` and `traces mcp` call that core; they never carry a
   parallel credential-matching or PII implementation here.
-- `agent-runtime` owns execution and applying an approved improvement. `traces improve` writes a
+- `agent-runtime` owns execution and applying an approved improvement. `traces analyze --out DIR` writes a
   reviewable packet; it does not execute a candidate change.
 - This package's own job: adapt one more harness's on-disk format into spans (`src/adapters/`), read
   and validate OTLP from any producer, and render/report/gate over the result.

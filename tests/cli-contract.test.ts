@@ -143,14 +143,30 @@ const STEP_12: readonly MovedCase[] = [
   { argv: ['skills', '--since', '7d', '--store', 'skills.json', '--sweep', '5'], spelling: '--store', instead: 'traces skills --since 7d' },
 ]
 
-const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12]
+/** Step 13: analyze answers first, calls no model and loads no config. */
+const STEP_13: readonly MovedCase[] = [
+  { argv: ['improve', 'abc12345', '--dir', 'packet'], spelling: 'improve', instead: 'traces analyze abc12345 --out packet' },
+  { argv: ['improve', '--last', '5', '--out', 'packet'], spelling: 'improve', instead: 'traces analyze --last 5 --out packet' },
+  {
+    argv: ['analyze', 'abc12345', '--llm', '--budget', '0.5'],
+    spelling: '--llm',
+    instead: 'analyze calls no model: traces ask <ref> --question "…" --budget USD [--model ID]',
+  },
+  {
+    argv: ['analyze', 'abc12345', '--config', 'traces.config.mjs'],
+    spelling: '--config',
+    instead: 'removed: run your own analysts through the SDK, analyzeSpans(spans, { registry })',
+  },
+]
+
+const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13]
 
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
 const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   list: ['--last', '--since', '--cwd', '--harness', '--format'],
   facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--match', '--no-content', '--format', '--out'],
-  analyze: [...SELECT, '--out'],
+  analyze: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--format', '--out'],
   ask: [...SELECT, '--question', '--questions', '--budget', '--model'],
   check: ['--contract', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
   diff: ['--format'],
@@ -176,9 +192,8 @@ const OPTIONS = [
 ]
 
 /** 0.x spellings kept, hidden, until the step that moves each (spec §2.4). */
-const HIDDEN_COMMANDS = ['validate', 'verify-safe', 'stream', 'improve']
+const HIDDEN_COMMANDS = ['validate', 'verify-safe', 'stream']
 const HIDDEN_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  analyze: ['--llm', '--model', '--budget', '--config'],
   ask: ['--dir', '--question-budget', '--question-timeout', '--concurrency'],
   check: ['--junit', '--annotations', '--explain'],
   diff: ['--kind'],
@@ -231,6 +246,14 @@ describe('moved spellings', () => {
       expect(run.code).toBe(2)
       expect(run.stderr).toContain(instead)
     }
+  })
+
+  it('refuses --budget and --model on analyze only: ask keeps them', async () => {
+    const analyze = await runCli(['analyze', 'abc12345', '--model', 'm'], { env })
+    expect(analyze.code).toBe(2)
+    expect(analyze.stderr).toContain('--model was removed in traces 1.0. Instead: analyze calls no model: traces ask')
+    const ask = await runCli(['ask', 'missing.jsonl', '--question', 'q', '--budget', '1', '--model', 'm'], { env })
+    expect(ask.stderr).not.toContain('was removed in traces 1.0')
   })
 
   it('reads a question that names a removed flag as the question', async () => {
@@ -490,10 +513,6 @@ describe('hidden spellings', () => {
     const stream = await runCli(['stream', spans, '--mode', 'findings', '--no-spans'], { env })
     expect(stream.code).toBe(0)
     expect(lines(stream.stdout).map((line) => (JSON.parse(line) as { event: string }).event)).toContain('session')
-
-    const improvement = join(dir, 'improvement')
-    expect((await runCli(['improve', spans, '--dir', improvement], { env })).code).toBe(0)
-    expect(JSON.parse(await readFile(join(improvement, 'result.json'), 'utf8'))).toMatchObject({ spanCount: 2 })
   }, 120_000)
 })
 

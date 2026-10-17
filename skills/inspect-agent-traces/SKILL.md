@@ -61,14 +61,13 @@ Write normalized OpenInference spans for another tool:
 traces convert --current --latest-turn --out .traces/current.otlp.jsonl
 ```
 
-Write the complete deterministic review packet:
+Write the deterministic review as files:
 
 ```bash
-traces improve --current --latest-turn --dir .traces/improvement
+traces analyze --current --latest-turn --out .traces/analysis
 ```
 
-`improve` writes findings, evidence, a report, and spans.
-It edits no agent, repository, memory store, or knowledge base.
+It writes `report.md` and `findings.json`, and edits no agent, repository, memory store, or knowledge base.
 
 Preserve a session for later inspection:
 

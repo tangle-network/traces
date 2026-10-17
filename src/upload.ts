@@ -13,8 +13,6 @@
  * privacy options, checks, deduplicates, and sends or writes a dry-run preview.
  */
 
-import { stripSourceAttributes } from './source-location.js'
-
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { hostname } from 'node:os'
@@ -23,8 +21,8 @@ import { hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 import type { TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
 import { assessShareSafety, REDACTION_VERSION, redact, shareAllowed } from '@tangle-network/agent-eval/traces'
 import type { RedactionReport, ShareSafetyVerdict } from '@tangle-network/agent-eval/traces'
-import { normalizeToolIoAttributes, TOOL_IO_VALUE_KEYS } from './adapters/tool-io.js'
 import { ATTR, INGEST_SOURCE_CLI } from './attributes.js'
+import { metadataOnly } from './metadata-only.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
 import { redactSpans } from './redact.js'
@@ -209,18 +207,6 @@ export interface ExecuteOptions {
   log?: (msg: string) => void
 }
 
-/** Drop captured conversation and tool values from metadata-only uploads. */
-function stripSpanContent(spans: readonly OtlpSpan[]): OtlpSpan[] {
-  return spans.map((s) => {
-    const attributes = stripSourceAttributes(s.attributes)
-    delete attributes.content
-    for (const key of TOOL_IO_VALUE_KEYS) delete attributes[key]
-    normalizeToolIoAttributes(attributes)
-    const status = s.status.message ? { code: s.status.code } : s.status
-    return { ...s, attributes, status }
-  })
-}
-
 interface OutboundItem {
   item: UploadItem
   events: TraceSpanEvent[]
@@ -234,7 +220,7 @@ async function prepareOutbound(
 ): Promise<{ items: OutboundItem[]; skipped: number; refused: RefusedSession[] }> {
   let candidates = plan.items
   if (opts.stripContent) {
-    candidates = candidates.map((item) => ({ ...item, spans: stripSpanContent(item.spans) }))
+    candidates = candidates.map((item) => ({ ...item, spans: metadataOnly(item.spans) }))
   }
 
   const identity: UploadIdentity = {

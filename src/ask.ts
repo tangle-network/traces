@@ -35,11 +35,23 @@ import {
   totalFindingRejections,
 } from './finding-rejections.js'
 import { ASK_QUESTION_HEADER, MAX_TRACE_QUESTION_CHARS, QUESTION_LABEL } from './ask-defaults.js'
-import { isBridgeMismatchError } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
 import { sessionFactsContext } from './session-facts.js'
 
 export { MAX_TRACE_QUESTION_CHARS }
+
+/**
+ * Signatures of engine↔bridge version skew (or a missing bridge install) —
+ * the failures the reinstall hint actually fixes. Every bridge traceback
+ * names the `agent_eval_rpc` module path, so matching on the module name or
+ * a generic marker alone would point mid-analysis model errors at pip.
+ */
+const BRIDGE_MISMATCH_PATTERN = /must contain exactly|No module named ['"]?agent_eval_rpc|could not start/
+
+/** True when an engine error looks like bridge version skew or a missing bridge install. */
+export function isBridgeMismatchError(message: string): boolean {
+  return BRIDGE_MISMATCH_PATTERN.test(message)
+}
 
 /** One question to ask of the selected traces. */
 export interface TraceQuestion {

@@ -2,48 +2,62 @@
 
 [traces](../README.md#docs) › Analyze a session
 
-`traces analyze` reads sessions or OTLP spans and reports where the agent got stuck, burned tokens, or stopped checking its own work.
-
-The **deterministic pass** checks stuck loops, token growth, output decay, missing self-verification, tool failures, and human corrections.
-Each supported issue is returned as a finding with evidence, an action, confidence, and a validation plan.
-It needs no API key and costs nothing.
-
-Add `--llm` for the **agentic analysts**. `traces` first uses free local signals to choose the smallest useful set: a failure review always runs, while knowledge and edit reviews run only when failures, repeated calls, or corrective feedback support them. They call OpenAI and respect `--budget <usd>`.
-
-Every run also writes a **canonical OpenInference JSONL artifact**.
-To hand spans to another tool, write them with `traces convert <ref> --out <file>` and run the tool on that file.
-
-## What it finds
-
-The deterministic pass (free, no key) surfaces:
-
-| Finding | Meaning |
-|---|---|
-| **Stuck loops** | the same tool called N× with identical args and no state change |
-| **Monotonic input growth** | full history re-sent every step; context never compressed |
-| **Output-length decay** | planning/reasoning per step shrinking as context grows |
-| **No self-verification** | state-mutating actions never followed by an eval/inspect/check |
-| **Tool mix / retry / error rates** | repeated, retried, and failed tool calls |
-
-`--llm` adds agentic analysts that read the conversation and cluster higher-order failure and improvement signals. They receive the compact deterministic findings first, then share their earlier findings with later analysts. With `traces improve`, the selected analysts and reasons are saved in `result.json` and the report, so another agent can reuse the packet without rereading the raw trace.
-
-## Model-backed analysts
-
-Use the local checks by default.
-Add a model-backed engine only when the question needs semantic judgment.
+`traces analyze` says what went wrong in the selected sessions, ranked, for $0.
+It calls no model and needs no key: `traces ask` is the one command that spends.
 
 ```bash
-traces analyze --last 1
-traces analyze --last 1 --llm --budget 0.50
+traces analyze --current
+traces analyze 019a3c7e --out analysis      # report.md and findings.json
+traces analyze --since 1d --cwd .           # a table of the sessions with the most waste
 ```
 
-To ask your own question instead of the built-in kinds, use [`traces ask`](ask.md).
+## The text
 
-Read [Trace analysts](./trace-analysts.md) for the output contract and a minimal custom analyst ([`examples/custom-analyst.ts`](../examples/custom-analyst.ts)).
+At most 40 lines, in this order. A section with nothing to say is left out, and a fact the trace cannot support is never printed as 0.
 
-> The built-in agentic analysts (`--llm`) run on the Tangle router by default: set `TANGLE_API_KEY`.
-> `OPENAI_API_KEY` alone targets OpenAI instead, and `OPENAI_BASE_URL` overrides the endpoint for any other OpenAI-compatible gateway.
-> `--llm` also needs a Python interpreter with `agent-eval-rpc[dspy]` installed, because agent-eval's model-backed analysts run through the DSPy RLM engine out of process; set `TRACES_PYTHON` to choose the interpreter.
-> The bridge protocol is version-locked: install the exact version matching this package's `@tangle-network/agent-eval` dependency (`pip install "agent-eval-rpc[dspy]==$(npm view @tangle-network/traces dependencies.@tangle-network/agent-eval)"`) — a skewed bridge kills every agentic analyst at startup.
-> When `--llm` was requested and every agentic analyst fails, `analyze`/`improve` still write the deterministic report, then exit 1 with each analyst's underlying error.
-> Every deterministic command — `list`, `facts`, `analyze` without `--llm`, `convert`, `stream`, `watch`, and `analyze <run-dir>` — needs neither a key nor Python.
+1. Header: short id, harness, repo, the window and its length, active time, cost (list price, Router rates).
+2. What was asked: the first human turn, and how many followed.
+3. The first failure and its blame.
+4. Failing commands (a command that failed 3 or more times in a row) and rework (commands rerun, reverts).
+5. Tool-error clusters: the session's own failed calls, by tool and first line of error.
+6. Stalls of 10 minutes or more that no turn ended.
+7. Interrupts and rejections: turns typed after an interrupt, after a rejected tool call, or right after a completion claim, each quoted. Measured against labelled turns, a reply after a claim is a correction at about the base rate, so none of these is called a correction.
+8. Unverified completion claims: a claim made after an edit with no test, build, typecheck or lint since.
+9. Pull requests opened and merged.
+10. Findings, HIGH first, each with span ids.
+11. How many questions the trace cannot answer, and where the list is.
+
+Sections 3, 4, 6, 7 and 9 and the header are the facts sheet's numbers ([`traces facts`](facts.md)); analyze renders them and never counts them again.
+Several sessions put sections 2–9 in a table of the 15 with the most waste.
+
+## Findings
+
+| Finding | From | Severity |
+|---|---|---|
+| `same-failing-command` | a failing streak in the facts sheet | HIGH |
+| `verification-without-change` | one check command run 3 or more times with no edit between | MED (HIGH from 5) |
+| `high-tool-error-rate` | half or more of the session's own tool calls failed | MED (HIGH from 75%) |
+| `completion-claim-without-verification` | section 8 | LOW: 0 of 9 held on real sessions |
+| `terminal-failure` | the session's root span ended in an error | HIGH |
+| `monotonic-input-growth`, `output-length-decay` | agent-eval's behavioral analyst | HIGH, MED |
+| `single-tool-dependency` | agent-eval; a run of 10 or more calls of one non-shell tool | MED |
+| `no-self-verification` | agent-eval; 10 or more calls, none a check by name or by command | LOW: 0 of 1 held on real sessions |
+
+The first four are the rules `traces watch` runs on live sessions (`src/pipelines.ts`), so a finding means the same in both.
+
+## For programs
+
+`--format json` prints one object: `facts` (the facts sheet of every session), `packet` (the finding packet ADC's Intelligence API reads), `measures` (stuck loops, failure clusters, tool use and errors, failure follow-ups, unverified claims), `conformance`, and `cannotAnswer` (every question the trace cannot answer, with the reason).
+
+```bash
+traces analyze 019a3c7e --format json | jq '.packet.findings[] | {severity, subject, claim}'
+traces analyze 019a3c7e --format json | jq '.cannotAnswer[] | {analysis, reason}'
+```
+
+`--out DIR` writes exactly `report.md` (the text, every finding in full, and every cannot-answer reason) and `findings.json` (the packet). No span copy is written: `traces convert <ref> --out <file>` hands spans to another tool.
+
+A Runtime run directory as the ref reports its supervision tree; with `--out DIR` it is written to `DIR/report.md`.
+
+## Your own analysts
+
+Run your analysts through the SDK: `analyzeSpans(spans, { registry })` runs an agent-eval `AnalystRegistry` over the spans in memory ([`examples/custom-analyst.ts`](../examples/custom-analyst.ts)).

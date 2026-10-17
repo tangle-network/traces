@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { summarizeOtlpExecution, summarizeSpanExecution } from '../src/execution.js'
 import { serializeSpans, span } from '../src/otlp.js'
-import { renderExecution } from '../src/report.js'
 
 function measuredSpans() {
   return [
@@ -92,34 +91,5 @@ describe('execution accounting', () => {
       knownFraction: 1,
       lowerBound: { n: 0, floorUsd: 0 },
     })
-  })
-
-  it('renders complete measured facts without inventing task quality', () => {
-    const markdown = renderExecution(measuredExecution())
-
-    expect(markdown).toContain('**Sessions:** 1')
-    expect(markdown).toContain('**Sessions with execution errors:** 1/1 (100.00%)')
-    expect(markdown).toContain('**Terminal outcomes:** 1 succeeded  |  0 failed')
-    expect(markdown).toContain('**Task quality:** not measured')
-    // Tokens and cost are facts' numbers (`renderUsage`); no second count is printed here.
-    expect(markdown).not.toMatch(/Token category|Cost coverage|Aggregate cost/u)
-  })
-
-  it('keeps a failed terminal outcome separate from child execution errors', () => {
-    const markdown = renderExecution(summarizeSpanExecution([
-      span({
-        traceId: 'failed-run',
-        spanId: 'root',
-        name: 'session',
-        kind: 'AGENT',
-        startTime: '2026-01-01T00:00:00.000Z',
-        endTime: '2026-01-01T00:00:01.000Z',
-        status: 'ERROR',
-        statusMessage: 'process failed',
-      }),
-    ]))
-
-    expect(markdown).toContain('**Sessions with execution errors:** 0/1 (0.00%)')
-    expect(markdown).toContain('**Terminal outcomes:** 0 succeeded  |  1 failed')
   })
 })

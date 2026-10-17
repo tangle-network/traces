@@ -1,79 +1,50 @@
-import { access, mkdir, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
-import type { ExecutionReport } from '@tangle-network/agent-eval/contract'
-import {
-  type Analyst,
-  type AnalystFinding,
-  type AnalystRunResult,
-  type AnalystRunSummary,
-  AnalystRegistry,
-  buildDefaultAnalystRegistry,
-  makeFinding,
-} from '@tangle-network/agent-eval/analyst'
-import type { TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
-import { indexSessionIdsByTrace, type SessionIdentityConflict } from './attributes.js'
-import {
-  planTraceAgenticRoute,
-  traceAgenticKinds,
-  type TraceAgenticRoute,
-} from './agentic-routing.js'
-import { analyzeSpans } from './analyze.js'
-import type { TraceValidation } from '@tangle-network/agent-trace-contract'
-import { conformanceOfSpans, renderConformance, unavailableCapabilities } from './conformance.js'
-import {
-  analyzeLoopConvergence,
-  analyzeSteeringChain,
-  type LoopConvergenceReport,
-  type SteeringChainReport,
-} from './loop-analysis.js'
-import type {
-  OtlpFieldWithheld,
-  OtlpIngestIssue,
-  OtlpInputFile,
-  SkippedInputFile,
-  UnreadableSourceRows,
-} from './otlp-input.js'
-import { createFindingRejectionTally, type FindingRejectionCounts } from './finding-rejections.js'
-import { spanEvidenceUri } from './analyst-citations.js'
-import type { TraceLiveAnalyst } from './live.js'
-import { type OtlpSpan, writeOtlpFile } from './otlp.js'
-import { type PipelineReport, runPipelines } from './pipelines.js'
-import { analyzeReactions, type ReactionReport } from './reactions.js'
-import {
-  condenseAnalystError,
-  renderLoopConvergence,
-  renderPipelines,
-  renderReactions,
-  renderReport,
-  renderSessionIdentity,
-  renderSteeringChain,
-  type ReportSource,
-  summarizeDeterministicSignals,
-} from './report.js'
-import { totalUsage, type UsageTotal } from './execution.js'
-import { buildSessionFactsReport, priceReport } from './session-facts.js'
-import type { SessionWorkflowSummary } from './session-workflow.js'
+/**
+ * `traces analyze`, for $0: what went wrong in the selected sessions, ranked,
+ * and what their traces cannot answer.
+ *
+ * Every number comes from its one owner. The facts sheet (`session-facts.ts`)
+ * owns the session's turns, tokens, cost, first failure, failing streaks and
+ * stalls; `analyze` renders them and never counts them again. Findings come
+ * from the rule set `watch` shares (`pipelines.ts`), agent-eval's
+ * deterministic behavioral analyst (`analyze.ts`), and a run whose root span
+ * failed. No model is called: `traces ask` is the one command that spends.
+ */
 
-export interface TracesConfig {
-  readonly registry?: AnalystRegistry
-  readonly analysts?: readonly Analyst[]
-  readonly liveAnalysts?: readonly TraceLiveAnalyst[]
-}
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import type { TraceValidation } from '@tangle-network/agent-trace-contract'
+import { type AnalystFinding, type AnalystRegistry, makeFinding } from '@tangle-network/agent-eval/analyst'
+import { analyzeSpans } from './analyze.js'
+import { conformanceOfSpans, skippedAnalyses } from './conformance.js'
+import type { OtlpSpan } from './otlp.js'
+import {
+  ruleContext,
+  runPipelines,
+  runRules,
+  unverifiedClaims,
+  type PipelineReport,
+  type TraceLiveFinding,
+} from './pipelines.js'
+import {
+  createSessionFactsReportBuilder,
+  priceReport,
+  type SessionFacts,
+  type SessionFactsReport,
+  type SessionFactsReportOptions,
+  type UnreadSessionFact,
+} from './session-facts.js'
 
 export interface TraceInvestigationOptions {
   readonly spans: readonly OtlpSpan[]
+  /** The harness or input kind the spans were read from, named in the header. */
   readonly harness: string
-  readonly sources?: readonly ReportSource[]
-  readonly workflow?: SessionWorkflowSummary
-  readonly minLoopOccurrences?: number
-  readonly engine?: TraceAnalysisEngine
-  readonly model?: string
-  readonly budgetUsd?: number
+  /** Sessions the selection skipped because they could not be read: each is a question the trace cannot answer. */
+  readonly unread?: readonly UnreadSessionFact[]
+  /** Options of the facts sheet: the window, the agent identity lookup. */
+  readonly facts?: Pick<SessionFactsReportOptions, 'window' | 'agentIdentity' | 'includeContent'>
+  /** Your own analysts instead of agent-eval's built-in behavioral analyst (`analyzeSpans`). */
   readonly registry?: AnalystRegistry
-  /** Agentic registry override for custom trace-analysis agents. */
-  readonly agenticRegistry?: AnalystRegistry
+  readonly minLoopOccurrences?: number
   readonly generatedAt?: string
   /**
    * Conformance of the SOURCE the spans were read from. Supply it when the
@@ -81,87 +52,63 @@ export interface TraceInvestigationOptions {
    * wrote; omitted, it is computed from the spans themselves.
    */
   readonly conformance?: TraceValidation
-  /** What was validated, named in the conformance section (default: the harness). */
-  readonly conformanceSubject?: string
-  /** OTLP files read, when the spans came from `--otlp`. */
-  readonly conformanceFiles?: readonly OtlpInputFile[]
-  /** JSONL files that were not OTLP, when the spans came from `--otlp` on a directory. */
-  readonly conformanceSkipped?: readonly SkippedInputFile[]
-  /** Rows that never became spans, when the spans came from `--otlp`. */
-  readonly conformanceIssues?: readonly OtlpIngestIssue[]
-  /** Rows analysed with one field withheld, when the spans came from `--otlp`. */
-  readonly conformanceWithheld?: readonly OtlpFieldWithheld[]
-  /** Source rows absent from the file read, including any earlier export's. */
-  readonly conformanceUnreadable?: UnreadableSourceRows
   readonly signal?: AbortSignal
   readonly log?: (msg: string, fields?: Record<string, unknown>) => void
 }
 
-export interface TraceEvidenceRow {
-  readonly schemaVersion: 1
-  readonly kind: 'traces.improvement_evidence'
-  readonly findingId: string
-  readonly severity: AnalystFinding['severity']
-  readonly area: string
-  readonly claim: string
-  readonly evidence: AnalystFinding['evidence_refs'][number]
+/** One question the selected traces cannot answer, and the trace's own reason. */
+export interface CannotAnswer {
+  readonly analysis: string
+  readonly reason: string
+  /** The session it applies to; absent when it applies to the whole selection. */
+  readonly sessionId?: string
 }
 
-export interface TraceImprovementArtifacts {
-  readonly directory: string
-  readonly result: string
-  readonly evidence: string
-  readonly report: string
-  readonly traces: string
+/** A completion claim made after an edit with no check since it. */
+export interface UnverifiedClaim {
+  readonly sessionId: string
+  readonly at: string
+  readonly spanId: string
+  readonly text: string
+}
+
+/** Failed tool calls of one tool that ended with the same first line of error. */
+export interface ToolErrorCluster {
+  readonly tool: string
+  readonly error: string
+  readonly count: number
+  /** The first three. */
+  readonly spanIds: readonly string[]
+}
+
+/** One session's own tool calls, the failed ones, and their clusters, largest first. */
+export interface SessionToolErrors {
+  readonly sessionId: string
+  readonly calls: number
+  readonly errors: number
+  readonly clusters: readonly ToolErrorCluster[]
+}
+
+/** The deterministic measures beside the facts sheet: loops, failure clusters, tool use and errors, failure follow-ups, unverified claims. */
+export interface AnalysisMeasures extends PipelineReport {
+  readonly toolErrors: readonly SessionToolErrors[]
+  readonly unverifiedClaims: readonly UnverifiedClaim[]
 }
 
 export interface TraceInvestigationResult {
   readonly schemaVersion: 1
-  readonly kind: 'traces.investigation'
+  readonly kind: 'traces.analysis'
   readonly generatedAt: string
   readonly harness: string
-  /** Distinct stable session identities observed in the selected spans. */
-  readonly sessionCount: number
-  /** Traces without exactly one stable session identity. */
-  readonly unassignedTraceCount: number
-  readonly sources?: readonly ReportSource[]
-  readonly workflow?: SessionWorkflowSummary
-  readonly spanCount: number
-  /**
-   * What these spans can and cannot answer. Every report carries it: a thin
-   * report that does not explain its own thinness reads as "the agent did
-   * nothing" when the truth is "the trace never recorded it".
-   */
+  /** The facts sheet of every selected session, priced: the numbers `traces facts` prints. */
+  readonly facts: SessionFactsReport
+  /** The findings, ranked by severity, as the packet ADC's Intelligence API reads. */
+  readonly packet: TraceFindingPacket
+  readonly measures: AnalysisMeasures
+  /** What these spans can and cannot answer, by capability. */
   readonly conformance: TraceValidation
-  readonly execution: ExecutionReport
-  /** The sessions' tokens and cost, summed from their facts (`traces facts` owns both numbers). */
-  readonly usage: UsageTotal
-  readonly analystResult: AnalystRunResult
-  readonly findings: readonly AnalystFinding[]
-  readonly pipelines: PipelineReport
-  readonly reactions: ReactionReport
-  /** Traces left out of session grouping because their sources name different sessions. */
-  readonly sessionIdentityConflicts: readonly SessionIdentityConflict[]
-  /** Did round N+1 improve on round N, per loop. */
-  readonly loopConvergence: LoopConvergenceReport
-  /** Which verdict caused which subsequent round. */
-  readonly steeringChain: SteeringChainReport
-  /** Deterministic routing record for the agentic trace-analysis pass. */
-  readonly agenticRoute?: TraceAgenticRoute
-  /**
-   * Per-analyst summaries from the agentic pass alone. Present only when an
-   * agentic pass ran; failed entries carry the engine's error (bridge stderr
-   * included), so callers can fail loud instead of reporting the deterministic
-   * findings as if the requested LLM analysis had happened.
-   */
-  readonly agenticPerAnalyst?: readonly AnalystRunSummary[]
-  /**
-   * Findings the evidence gate refused, by analyst ID and reason. Present
-   * whenever an agentic pass ran, empty when nothing was refused, so a zero
-   * finding count can be told apart from "every finding was rejected".
-   */
-  readonly findingRejections?: FindingRejectionCounts
-  readonly report: string
+  /** Every question the selection cannot answer, with the reason; the text report prints only their count. */
+  readonly cannotAnswer: readonly CannotAnswer[]
 }
 
 export interface TraceFindingPacket {
@@ -180,31 +127,9 @@ export interface BuildTraceFindingPacketOptions {
   readonly title?: string
 }
 
-export interface TraceStoreInvestigationOptions {
-  readonly traceStore: TraceAnalysisStore
-  readonly registry?: AnalystRegistry
-  readonly engine?: TraceAnalysisEngine
-  readonly model?: string
-  readonly budgetUsd?: number
-  readonly runId?: string
-  readonly generatedAt?: string
-  readonly signal?: AbortSignal
-  readonly log?: (msg: string, fields?: Record<string, unknown>) => void
-}
-
-export interface TraceStoreInvestigationResult extends Omit<TraceFindingPacket, 'kind'> {
-  readonly kind: 'traces.store_investigation'
-  readonly analystResult: AnalystRunResult
-}
-
-export interface TraceImprovementResult extends Omit<TraceInvestigationResult, 'kind'> {
-  readonly kind: 'traces.improvement'
-  readonly artifacts?: TraceImprovementArtifacts
-}
-
-export interface TraceImprovementOptions extends TraceInvestigationOptions {
-  /** The artifact directory. Nothing is written outside it. */
-  readonly outDir: string
+/** The `trace://` URI that cites one span, the form agent-eval's evidence gate checks. */
+export function spanEvidenceUri(traceId: string, spanId: string): string {
+  return `trace://${encodeURIComponent(traceId)}/span/${encodeURIComponent(spanId)}`
 }
 
 const severityRank: Record<AnalystFinding['severity'], number> = {
@@ -215,285 +140,12 @@ const severityRank: Record<AnalystFinding['severity'], number> = {
   info: 4,
 }
 
-function json(value: unknown): string {
-  return `${JSON.stringify(value, null, 2)}\n`
-}
-
-function jsonl(rows: readonly unknown[]): string {
-  return rows.length === 0 ? '' : `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`
-}
-
-function evidence(kind: AnalystFinding['evidence_refs'][number]['kind'], uri: string, excerpt?: string): AnalystFinding['evidence_refs'][number] {
-  return excerpt ? { kind, uri, excerpt } : { kind, uri }
-}
-
-function totalReactionSignals(reactions: ReactionReport): number {
-  return Object.values(reactions.signals).reduce((sum, count) => sum + count, 0)
-}
-
-/** How the selected spans group into sessions (`attributes.ts`). */
-interface SessionIdentity {
-  readonly identifiedSessionCount: number
-  readonly unassignedTraceCount: number
-  readonly conflicts: readonly SessionIdentityConflict[]
-}
-
-function sessionIdentityOf(spans: readonly OtlpSpan[]): SessionIdentity {
-  const { sessionByTrace, conflicts } = indexSessionIdsByTrace(spans)
-  const unassigned = new Set(spans.map((span) => span.trace_id).filter((traceId) => !sessionByTrace.has(traceId)))
-  return { identifiedSessionCount: new Set(sessionByTrace.values()).size, unassignedTraceCount: unassigned.size, conflicts }
-}
-
-function traceCoverageFinding(
-  pipelines: PipelineReport,
-  identity: SessionIdentity,
-): AnalystFinding | undefined {
-  const toolCalls = pipelines.toolUse.reduce((total, run) => total + run.totalCalls, 0)
-  const capturedToolCalls = pipelines.toolUse.reduce(
-    (total, run) => total + run.callsWithCapturedArgs,
-    0,
-  )
-  const missingToolArgs = toolCalls - capturedToolCalls
-  const traces = pipelines.toolUse.length
-  const missingSessionIds = identity.unassignedTraceCount
-  const sessionIdentityConflicts = identity.conflicts
-  if (missingToolArgs === 0 && missingSessionIds === 0) return undefined
-
-  const parts: string[] = []
-  const refs: AnalystFinding['evidence_refs'] = []
-  if (missingToolArgs > 0) {
-    parts.push(`${missingToolArgs}/${toolCalls} tool call(s) lacked comparable arguments`)
-    refs.push(evidence('metric', 'coverage.tool_arguments', `${capturedToolCalls}/${toolCalls} captured`))
-  }
-  if (missingSessionIds > 0) {
-    parts.push(`${missingSessionIds}/${traces} trace(s) lacked a single stable session identity`)
-    refs.push(evidence('metric', 'coverage.session_identity', `${traces - missingSessionIds}/${traces} identified`))
-  }
-  if (sessionIdentityConflicts.length > 0) {
-    refs.push(evidence(
-      'span',
-      'coverage.session_identity_conflicts',
-      sessionIdentityConflicts.map((conflict) => conflict.traceId).join(', '),
-    ))
-  }
-
-  const argumentCoverage = toolCalls === 0 ? 1 : capturedToolCalls / toolCalls
-  const sessionCoverage = traces === 0 ? 1 : (traces - missingSessionIds) / traces
-  const severity: AnalystFinding['severity'] =
-    argumentCoverage < 0.5 || sessionCoverage < 0.5
-      ? 'high'
-      : argumentCoverage < 0.9 || sessionCoverage < 0.9
-        ? 'medium'
-        : 'low'
-  return makeFinding({
-    analyst_id: 'traces-deterministic',
-    area: 'instrumentation',
-    claim: `Trace capture is incomplete: ${parts.join('; ')}`,
-    severity,
-    rationale:
-      'Missing identity or agent-profile evidence prevents reliable cross-run comparison and can hide tool, prompt, skill, or subagent failures.',
-    evidence_refs: refs,
-    recommended_action:
-      'Update the source telemetry bridge once: emit a stable session ID, complete canonical tool arguments, and explicit argument-capture status before optimizing the agent profile.',
-    validation_plan:
-      'Rerun the same source and require every trace to carry exactly one session identity and every tool call to declare and preserve its full arguments.',
-    confidence: 1,
-    metadata: {
-      source: 'traces.coverage',
-      toolCalls,
-      capturedToolCalls,
-      traces,
-      missingSessionIds,
-      sessionIdentityConflictCount: sessionIdentityConflicts.length,
-    },
-  })
-}
-
-function sortedToolErrorSpans(spans: readonly OtlpSpan[]): OtlpSpan[] {
-  return spans
-    .filter((item) =>
-      item.attributes['openinference.span.kind'] === 'TOOL' &&
-      item.status.code === 'ERROR')
-    .sort((left, right) =>
-      left.start_time.localeCompare(right.start_time) ||
-      left.trace_id.localeCompare(right.trace_id) ||
-      left.span_id.localeCompare(right.span_id))
-}
-
-function toolErrorEvidence(item: OtlpSpan): AnalystFinding['evidence_refs'][number] {
-  return evidence(
-    'span',
-    spanEvidenceUri(item.trace_id, item.span_id),
-    `${String(item.attributes['tool.name'] ?? item.name)}: ${item.status.message ?? 'tool span ended with ERROR'}`.slice(0, 240),
-  )
-}
-
-function toolErrorFinding(
-  pipelines: PipelineReport,
-  spans: readonly OtlpSpan[],
-): AnalystFinding | undefined {
-  const terminalFailureTraceIds = new Set(
-    spans
-      .filter((item) => item.parent_span_id === null && item.status.code === 'ERROR')
-      .map((item) => item.trace_id),
-  )
-  const nonTerminalRuns = pipelines.toolUse.filter(
-    (run) => !terminalFailureTraceIds.has(run.runId),
-  )
-  const totalCalls = nonTerminalRuns.reduce((total, run) => total + run.totalCalls, 0)
-  const errorCount = nonTerminalRuns.reduce(
-    (total, run) => total + Object.values(run.byTool)
-      .reduce((runTotal, tool) => runTotal + tool.errors, 0),
-    0,
-  )
-  if (errorCount === 0) return undefined
-
-  const errorSpans = sortedToolErrorSpans(spans)
-    .filter((item) => !terminalFailureTraceIds.has(item.trace_id))
-  if (errorSpans.length === 0) return undefined
-
-  const affectedRuns = new Set(errorSpans.map((item) => item.trace_id)).size
-  const errorRate = errorCount / Math.max(1, totalCalls)
-  const citedSpans = errorSpans.slice(0, 3)
-
-  return makeFinding({
-    analyst_id: 'traces-deterministic',
-    area: 'tool-use',
-    subject: 'non-terminal-tool-errors',
-    claim: `${errorCount}/${totalCalls} tool call(s) ended in errors across ${affectedRuns} run(s) without a terminal failure`,
-    severity: errorRate >= 0.25 ? 'high' : 'medium',
-    rationale: 'Recovered tool errors still consume time and tokens, and repeated failures can hide brittle retry or recovery behavior.',
-    evidence_refs: citedSpans.map(toolErrorEvidence),
-    recommended_action: 'Inspect the most frequent failing tool and its cited inputs, then change the retry or recovery policy so a failure produces new state before another call.',
-    validation_plan: 'Rerun comparable sessions and require non-terminal tool errors to decrease without increasing terminal failures.',
-    confidence: 1,
-    metadata: {
-      source: 'agent-eval.computeToolUseMetrics',
-      errorCount,
-      totalCalls,
-      errorRate,
-      affectedRuns,
-      citedErrorSpans: citedSpans.length,
-      omittedErrorSpans: Math.max(0, errorSpans.length - citedSpans.length),
-    },
-    id_basis: 'non-terminal-tool-errors',
-  })
-}
-
-function deterministicFindings(
-  pipelines: PipelineReport,
-  reactions: ReactionReport,
-  identity: SessionIdentity,
-  spans: readonly OtlpSpan[],
-): AnalystFinding[] {
-  const findings: AnalystFinding[] = []
-  const coverage = traceCoverageFinding(pipelines, identity)
-  if (coverage) findings.push(coverage)
-  const loops = pipelines.stuckLoops.findings
-  if (loops.length > 0) {
-    const top = [...loops].sort((a, b) => b.occurrences - a.occurrences)[0]
-    findings.push(makeFinding({
-      analyst_id: 'traces-deterministic',
-      area: 'tool-use',
-      claim: `${loops.length} repeated tool-call loop(s) were observed`,
-      severity: loops.length >= 10 ? 'high' : 'medium',
-      rationale: 'Repeated identical tool calls usually mean the agent is retrying without new information or a stop rule.',
-      evidence_refs: [
-        evidence('metric', 'pipelines.stuck_loop_count', `${loops.length} loop(s)`),
-        ...(top ? [evidence('metric', `tool.${top.toolName}.repeated_calls`, `${top.toolName} repeated ${top.occurrences} time(s)`)] : []),
-      ],
-      recommended_action: 'Add a loop breaker: when the same tool and arguments fail or repeat, force a state check, alternate plan, or stop condition before retrying.',
-      validation_plan: 'Rerun traces over fresh sessions and require repeated-call loops to drop to zero or explain each remaining loop with changed state.',
-      confidence: 0.95,
-      metadata: { source: 'traces.pipeline.stuckLoopView', loopCount: loops.length },
-    }))
-  }
-
-  const toolErrors = toolErrorFinding(pipelines, spans)
-  if (toolErrors) findings.push(toolErrors)
-
-  const failedRuns = pipelines.failureClusters.totalFailures
-  if (failedRuns > 0) {
-    const top = pipelines.failureClusters.clusters[0]
-    const failureRate = failedRuns / Math.max(1, pipelines.failureClusters.totalRuns)
-    const exampleSpans = top?.exampleRunId
-      ? spans.filter((item) => item.trace_id === top.exampleRunId)
-      : []
-    const exampleRoot = exampleSpans.find((item) =>
-      item.parent_span_id === null && item.status.code === 'ERROR')
-    const exampleToolErrors = sortedToolErrorSpans(exampleSpans)
-    const citedToolErrors = exampleToolErrors.slice(0, 3)
-    findings.push(makeFinding({
-      analyst_id: 'traces-deterministic',
-      area: 'reliability',
-      claim: `${failedRuns}/${pipelines.failureClusters.totalRuns} run(s) had execution errors`,
-      severity: failureRate >= 0.1 ? 'high' : 'medium',
-      rationale: 'Execution errors consume time and tokens, and sparse error telemetry can hide whether the agent recovered or repeated the same failure.',
-      evidence_refs: [
-        ...(exampleRoot
-          ? [evidence(
-              'span',
-              spanEvidenceUri(exampleRoot.trace_id, exampleRoot.span_id),
-              `${exampleRoot.name}: ${exampleRoot.status.message ?? 'root span ended with ERROR'}`.slice(0, 240),
-            )]
-          : []),
-        ...citedToolErrors.map(toolErrorEvidence),
-        evidence(
-          'metric',
-          `pipelines.failure_cluster.${top?.failureClass ?? 'unknown'}`,
-          top
-            ? `${top.runCount} run(s); example: ${top.exampleError ?? 'error details not captured'}`
-            : `${failedRuns} failed run(s)`,
-        ),
-      ],
-      recommended_action: top?.failureClass === 'unknown'
-        ? 'Instrument the failing operation name and arguments, then start with the highest-frequency example error and verify the agent changes state before retrying.'
-        : 'Fix the highest-frequency failure cluster first, then require the agent to inspect the error and change state before retrying.',
-      validation_plan: 'Rerun a comparable trace window and require failed runs and repeated failures in the top cluster to decrease.',
-      confidence: 1,
-      metadata: {
-        source: 'agent-eval.failureClusterView',
-        failedRuns,
-        totalRuns: pipelines.failureClusters.totalRuns,
-        topFailureClass: top?.failureClass,
-        exampleRunId: top?.exampleRunId,
-        citedToolErrorSpans: citedToolErrors.length,
-        omittedToolErrorSpans: Math.max(0, exampleToolErrors.length - citedToolErrors.length),
-      },
-    }))
-  }
-
-  const corrective = reactions.signals.correction + reactions.signals.frustration + reactions.signals.jargon + reactions.signals.structure
-  if (corrective > 0) {
-    findings.push(makeFinding({
-      analyst_id: 'traces-deterministic',
-      area: 'communication',
-      claim: `${corrective} corrective human reaction signal(s) followed assistant turns`,
-      severity: corrective >= 10 ? 'high' : 'medium',
-      rationale: 'Human corrections are direct product feedback: the agent either missed the task, overexplained, used unclear language, or failed to adapt.',
-      evidence_refs: reactions.triggerPairs.slice(0, 3).map((pair, index) =>
-        evidence('event', `reaction.trigger_pair.${index + 1}`, `${pair.reactions.join(', ')}: ${pair.human.slice(0, 180)}`)),
-      recommended_action: 'Turn the top correction pattern into an agent profile rule or analyst skill, then rerun traces and check the corrective-to-positive ratio.',
-      validation_plan: 'Rerun traces on fresh sessions and require corrective reaction signals per human reaction turn to decrease.',
-      confidence: 0.85,
-      metadata: { source: 'traces.reactions', correctiveSignals: corrective, totalSignals: totalReactionSignals(reactions) },
-    }))
-  }
-
-  return findings
-}
-
-function buildEvidenceRows(findings: readonly AnalystFinding[]): TraceEvidenceRow[] {
-  return findings.flatMap((finding) =>
-    finding.evidence_refs.map((ref) => ({
-      schemaVersion: 1,
-      kind: 'traces.improvement_evidence' as const,
-      findingId: finding.finding_id,
-      severity: finding.severity,
-      area: finding.area,
-      claim: finding.claim,
-      evidence: ref,
-    })))
+/** Findings, most severe first; ties by area, then claim. */
+export function rankFindings(findings: readonly AnalystFinding[]): AnalystFinding[] {
+  return [...findings].sort((a, b) =>
+    severityRank[a.severity] - severityRank[b.severity] ||
+    a.area.localeCompare(b.area) ||
+    a.claim.localeCompare(b.claim))
 }
 
 function renderFindingPacket(packet: Omit<TraceFindingPacket, 'report'>, title = 'Trace finding packet'): string {
@@ -503,10 +155,7 @@ function renderFindingPacket(packet: Omit<TraceFindingPacket, 'report'>, title =
   if (packet.findings.length > 0) {
     lines.push('## findings')
     lines.push('')
-    for (const finding of [...packet.findings].sort((a, b) =>
-      severityRank[a.severity] - severityRank[b.severity] ||
-      a.area.localeCompare(b.area) ||
-      a.claim.localeCompare(b.claim))) {
+    for (const finding of rankFindings(packet.findings)) {
       lines.push(`### ${finding.severity.toUpperCase()} — ${finding.claim}`)
       lines.push('')
       lines.push(`- **Area:** ${finding.area}`)
@@ -534,295 +183,257 @@ export function buildTraceFindingPacket(opts: BuildTraceFindingPacketOptions): T
   return { ...packet, report: renderFindingPacket(packet, opts.title) }
 }
 
-function renderAgenticRoute(route: TraceAgenticRoute | undefined): string {
-  if (!route) return ''
-  const lines = ['## LLM trace analysis', '']
-  lines.push(`- **Selected analysts:** ${route.analystIds.map((id) => `\`${id}\``).join(', ')}`)
-  for (const reason of route.reasons) lines.push(`- **${reason.code}:** ${reason.detail}`)
-  lines.push('')
-  return lines.join('\n')
+/** Where each rule's findings belong. */
+const RULE_AREA: Readonly<Record<string, string>> = {
+  'same-failing-command': 'tool-use',
+  'verification-without-change': 'verification',
+  'completion-claim-without-verification': 'verification',
+  'high-tool-error-rate': 'tool-use',
 }
 
-function renderInvestigationReport(
-  result: TraceInvestigationResult,
-  analystResult: Awaited<ReturnType<typeof analyzeSpans>>['result'],
-  opts: TraceInvestigationOptions,
-): string {
-  // Conformance sits directly under the header, before any number it qualifies:
-  // reading a 0-token table first and its explanation last is how a measurement
-  // gap gets mistaken for a measurement. The same verdict is threaded into
-  // every section it gates, so the warning travels with the number.
-  const conformance = renderConformance(result.conformance, {
-    subject: opts.conformanceSubject ?? result.harness,
-    spans: opts.spans,
-    ...(opts.conformanceFiles ? { files: opts.conformanceFiles } : {}),
-    ...(opts.conformanceSkipped ? { skipped: opts.conformanceSkipped } : {}),
-    ...(opts.conformanceIssues ? { issues: opts.conformanceIssues } : {}),
-    ...(opts.conformanceWithheld ? { withheld: opts.conformanceWithheld } : {}),
-    ...(opts.conformanceUnreadable ? { unreadable: opts.conformanceUnreadable } : {}),
+/**
+ * agent-eval finding kinds whose precision, labelled by hand on 10 real
+ * sessions, fell below 0.8: each is shown one severity level lower (HIGH →
+ * MED, MED → LOW). The table is in traces 1.0 step 13's PR. A rule of this
+ * package carries its measured severity in its own definition (`pipelines.ts`).
+ */
+const DEMOTED: ReadonlySet<string> = new Set<string>(['no-self-verification'])
+
+const LOWER: Readonly<Record<AnalystFinding['severity'], AnalystFinding['severity']>> = {
+  critical: 'high',
+  high: 'medium',
+  medium: 'low',
+  low: 'low',
+  info: 'info',
+}
+
+function measuredSeverity(finding: AnalystFinding): AnalystFinding {
+  return finding.subject !== undefined && DEMOTED.has(finding.subject)
+    ? { ...finding, severity: LOWER[finding.severity] }
+    : finding
+}
+
+/** A rule's finding in the packet's vocabulary, citing at most three spans by `trace://` URI. */
+function ruleFinding(live: TraceLiveFinding, traceId: string): AnalystFinding {
+  const spanIds = [...new Set(live.evidence.flatMap((item) => item.spanIds ?? []))]
+  return makeFinding({
+    analyst_id: 'traces-rules',
+    area: RULE_AREA[live.ruleId] ?? 'tool-use',
+    subject: live.ruleId,
+    claim: live.claim,
+    severity: live.severity,
+    rationale: live.title,
+    evidence_refs: [
+      ...spanIds.slice(0, 3).map((spanId) => ({
+        kind: 'span' as const,
+        uri: spanEvidenceUri(traceId, spanId),
+        excerpt: live.evidence.find((item) => item.spanIds?.includes(spanId))?.value.slice(0, 240) ?? live.title,
+      })),
+      ...live.evidence.filter((item) => item.kind === 'metric').map((item) => ({
+        kind: 'metric' as const,
+        uri: `metric://trace/${encodeURIComponent(traceId)}/rules/${live.ruleId}/${item.label}`,
+        excerpt: item.value,
+      })),
+    ],
+    recommended_action: live.action,
+    validation_plan: live.check,
+    confidence: 1,
+    metadata: { source: 'traces.rules', ruleId: live.ruleId, sessionId: live.session.sessionId, traceId, spanIds },
+    id_basis: `${traceId}:${live.fingerprint}`,
   })
-  const unavailable = unavailableCapabilities(result.conformance)
-  return (
-    `${renderReport({ ...analystResult, findings: [...result.findings] }, {
-      harness: result.harness,
-      sessionCount: result.sessionCount,
-      unassignedTraceCount: result.unassignedTraceCount,
-      spanCount: result.spanCount,
-      execution: result.execution,
-      usage: result.usage,
-      deterministic: summarizeDeterministicSignals(result.pipelines, result.reactions),
-      sources: result.sources,
-      workflow: result.workflow,
-      conformance,
-      unavailableCapabilities: unavailable,
-      ...(result.findingRejections ? { findingRejections: result.findingRejections } : {}),
-    })}\n${renderAgenticRoute(result.agenticRoute)}` +
-    `${renderPipelines(result.pipelines, unavailable)}\n` +
-    `${renderLoopConvergence(result.loopConvergence, unavailable)}\n` +
-    `${renderSteeringChain(result.steeringChain, unavailable)}\n` +
-    `${renderReactions(result.reactions)}\n${renderSessionIdentity(result)}`
-  )
 }
 
-function registryFromConfig(config?: TracesConfig): AnalystRegistry | undefined {
-  if (!config) return undefined
-  if (config.registry) return config.registry
-  if (!config.analysts || config.analysts.length === 0) return undefined
-  const registry = new AnalystRegistry()
-  for (const analyst of config.analysts) registry.register(analyst)
-  return registry
+/** A run whose root span ended in ERROR: the session itself failed, not one call inside it. */
+function terminalFailureFinding(pipelines: PipelineReport, spans: readonly OtlpSpan[]): AnalystFinding | undefined {
+  const failedRuns = pipelines.failureClusters.totalFailures
+  if (failedRuns === 0) return undefined
+  const top = pipelines.failureClusters.clusters[0]
+  const root = spans.find((item) => item.parent_span_id === null && item.status.code === 'ERROR' && (!top?.exampleRunId || item.trace_id === top.exampleRunId))
+  return makeFinding({
+    analyst_id: 'traces-deterministic',
+    area: 'reliability',
+    subject: 'terminal-failure',
+    claim: `${failedRuns}/${pipelines.failureClusters.totalRuns} session(s) ended in an error`,
+    severity: 'high',
+    rationale: 'A session whose root span failed did not finish its work.',
+    evidence_refs: [
+      ...(root
+        ? [{ kind: 'span' as const, uri: spanEvidenceUri(root.trace_id, root.span_id), excerpt: `${root.name}: ${root.status.message ?? 'root span ended with ERROR'}`.slice(0, 240) }]
+        : []),
+      {
+        kind: 'metric' as const,
+        uri: `metric://pipelines/failure_cluster/${top?.failureClass ?? 'unknown'}`,
+        excerpt: top ? `${top.runCount} session(s); example: ${top.exampleError ?? 'error details not captured'}` : `${failedRuns} failed session(s)`,
+      },
+    ],
+    recommended_action: 'Read the error the session ended on and fix its cause before rerunning the task.',
+    validation_plan: 'Rerun the task and require the session to end without an error.',
+    confidence: 1,
+    metadata: { source: 'agent-eval.failureClusterView', failedRuns, totalRuns: pipelines.failureClusters.totalRuns, topFailureClass: top?.failureClass },
+  })
 }
 
-async function existingConfigPath(path?: string): Promise<string | undefined> {
-  const candidates = path ? [path] : ['traces.config.mjs', 'traces.config.js', 'traces.config.cjs']
-  for (const candidate of candidates) {
-    const resolved = resolve(candidate)
-    try {
-      await access(resolved)
-      return resolved
-    } catch (error) {
-      if (path) {
-        const code = (error as NodeJS.ErrnoException).code
-        if (code === 'ENOENT') throw new Error(`traces config not found: ${resolved}`)
-        throw error
-      }
-    }
+const ERROR_TEXT_CAP = 80
+const CLUSTERS_KEPT = 5
+
+/** The first line of what a failed call said: its status message, else its output. */
+function errorLine(span: OtlpSpan): string {
+  const output = span.attributes['output.value']
+  const text = span.status.message ?? (typeof output === 'string' ? output : '')
+  const line = text.split('\n').map((part) => part.replace(/\s+/gu, ' ').trim()).find((part) => part.length > 0) ?? 'no error text recorded'
+  return line.length > ERROR_TEXT_CAP ? `${line.slice(0, ERROR_TEXT_CAP - 1)}…` : line
+}
+
+function toolErrorsOf(sessionId: string, tools: readonly OtlpSpan[], errored: readonly OtlpSpan[]): SessionToolErrors {
+  const clusters = new Map<string, { tool: string; error: string; count: number; spanIds: string[] }>()
+  for (const span of errored) {
+    const tool = typeof span.attributes['tool.name'] === 'string' ? span.attributes['tool.name'] : span.name.replace(/^tool\./u, '')
+    const error = errorLine(span)
+    const key = `${tool}\0${error}`
+    const cluster = clusters.get(key) ?? { tool, error, count: 0, spanIds: [] }
+    cluster.count += 1
+    if (cluster.spanIds.length < 3) cluster.spanIds.push(span.span_id)
+    clusters.set(key, cluster)
   }
-  return undefined
-}
-
-export async function loadTracesConfig(path?: string): Promise<TracesConfig | undefined> {
-  const resolved = await existingConfigPath(path)
-  if (!resolved) return undefined
-  let mod: Record<string, unknown>
-  try {
-    mod = await import(pathToFileURL(resolved).href) as Record<string, unknown>
-  } catch (err) {
-    if (resolved.endsWith('.ts')) {
-      throw new Error(`traces config is TypeScript (${resolved}); use traces.config.mjs/js, or run the CLI through a TS loader`)
-    }
-    throw err
+  return {
+    sessionId,
+    calls: tools.length,
+    errors: errored.length,
+    clusters: [...clusters.values()].sort((a, b) => b.count - a.count || a.tool.localeCompare(b.tool)).slice(0, CLUSTERS_KEPT),
   }
-  const value = mod.default ?? mod.config
-  if (value === undefined) return undefined
-  if (!value || typeof value !== 'object') throw new Error(`${path} must export a config object`)
-  return value as TracesConfig
 }
 
-export function mergeTracesConfig(opts: TraceInvestigationOptions, config?: TracesConfig): TraceInvestigationOptions {
-  if (!config) return opts
-  return { ...opts, registry: opts.registry ?? registryFromConfig(config) }
+/** The spans of each trace, in the order traces first appear. */
+function byTrace(spans: readonly OtlpSpan[]): Map<string, OtlpSpan[]> {
+  const groups = new Map<string, OtlpSpan[]>()
+  for (const span of spans) {
+    const group = groups.get(span.trace_id)
+    if (group) group.push(span)
+    else groups.set(span.trace_id, [span])
+  }
+  return groups
+}
+
+const FACT_FIELDS = ['cwd', 'repo', 'toolCalls', 'subagents', 'pullRequests', 'humanTurns', 'finalMessages', 'changedFiles', 'firstRecordAt', 'lastRecordAt'] as const
+
+/** What each session's facts sheet could not state, from the null facts and their reasons. */
+function factsCannotAnswer(facts: SessionFacts): CannotAnswer[] {
+  const sessionId = facts.sessionId ?? facts.traceId
+  const out: CannotAnswer[] = []
+  for (const field of FACT_FIELDS) {
+    const fact = facts[field]
+    if (fact.value === null && fact.unavailable) out.push({ analysis: `facts.${field}`, reason: fact.unavailable, sessionId })
+  }
+  if (facts.tokens.input === null && facts.tokens.unavailable) out.push({ analysis: 'facts.tokens', reason: facts.tokens.unavailable, sessionId })
+  else if (facts.cost.usd === null && facts.cost.unavailable) out.push({ analysis: 'facts.cost', reason: facts.cost.unavailable, sessionId })
+  if (facts.firstFailure.status === 'unknown') out.push({ analysis: 'facts.firstFailure', reason: facts.firstFailure.reason, sessionId })
+  const waste = facts.measurements.waste
+  if (waste.minutes === null && waste.unavailable) out.push({ analysis: 'facts.measurements.waste', reason: waste.unavailable, sessionId })
+  return out
+}
+
+/** Tool calls whose arguments were not kept: loops, repeats and failing streaks cannot compare them. */
+function argumentsCannotAnswer(pipelines: PipelineReport): CannotAnswer[] {
+  const calls = pipelines.toolUse.reduce((total, run) => total + run.totalCalls, 0)
+  const captured = pipelines.toolUse.reduce((total, run) => total + run.callsWithCapturedArgs, 0)
+  if (calls === 0 || captured === calls) return []
+  return [{
+    analysis: 'argument comparisons: repeated commands, loops, blind retries and failing streaks',
+    reason: `${calls - captured}/${calls} tool call(s) kept no arguments, so whether two calls were the same cannot be compared`,
+  }]
 }
 
 export async function runTraceInvestigation(opts: TraceInvestigationOptions): Promise<TraceInvestigationResult> {
   if (opts.spans.length === 0) throw new Error('runTraceInvestigation: no spans to analyze')
   opts.signal?.throwIfAborted()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
+  const builder = createSessionFactsReportBuilder({ ...opts.facts, harness: opts.harness, generatedAt })
+  const groups = byTrace(opts.spans)
+  for (const spans of groups.values()) builder.add(spans)
+  for (const entry of opts.unread ?? []) builder.addUnread(entry)
+  const facts = await priceReport(builder.build())
+  opts.signal?.throwIfAborted()
+
   const pipelines = await runPipelines(opts.spans, { minLoopOccurrences: opts.minLoopOccurrences })
-  const reactions = analyzeReactions(opts.spans)
-  const identity = sessionIdentityOf(opts.spans)
   opts.signal?.throwIfAborted()
-  const deterministic = deterministicFindings(pipelines, reactions, identity, opts.spans)
-  // A supplied registry owns its own composition. Only describe a route when
-  // this package builds the maintained agent-eval suite itself.
-  const agenticRoute = opts.engine && !opts.agenticRegistry
-    ? planTraceAgenticRoute(pipelines, reactions)
-    : undefined
-  // The evidence gate reports each refused finding only as a log event.
-  // Counting here keeps those refusals in the report and the JSON result.
-  const rejections = createFindingRejectionTally()
-  const log = (msg: string, fields?: Record<string, unknown>): void => {
-    rejections.record(msg, fields)
-    opts.log?.(msg, fields)
+  const findings: AnalystFinding[] = []
+  const claims: UnverifiedClaim[] = []
+  const toolErrors: SessionToolErrors[] = []
+  for (const sheet of facts.sessions) {
+    const spans = groups.get(sheet.traceId)
+    if (!spans) continue
+    const sessionId = sheet.sessionId ?? sheet.traceId
+    const context = ruleContext(spans, {
+      session: { harness: sheet.harness ?? opts.harness, sessionId, cwd: sheet.cwd.value },
+      generatedAt,
+      facts: [sheet],
+    })
+    for (const live of runRules(context)) findings.push(ruleFinding(live, sheet.traceId))
+    toolErrors.push(toolErrorsOf(sessionId, context.tools, context.erroredTools))
+    for (const claim of unverifiedClaims(context.actions)) {
+      const text = typeof claim.span.attributes.content === 'string' ? claim.span.attributes.content : ''
+      claims.push({ sessionId, at: claim.span.start_time, spanId: claim.spanId, text: text.replace(/\s+/gu, ' ').trim().slice(0, 300) })
+    }
   }
+  const terminal = terminalFailureFinding(pipelines, opts.spans)
+  if (terminal) findings.push(terminal)
   const analysis = await analyzeSpans(opts.spans, {
-    engine: opts.engine,
-    model: opts.model,
-    budgetUsd: opts.budgetUsd,
-    registry: opts.registry,
-    agenticRegistry: opts.agenticRegistry,
-    agenticKinds: agenticRoute ? traceAgenticKinds(agenticRoute) : undefined,
-    agenticPriorFindings: deterministic,
-    runId: `traces-investigation-${Date.parse(generatedAt) || Date.now()}`,
-    signal: opts.signal,
-    log,
+    ...(opts.registry ? { registry: opts.registry } : {}),
+    runId: `traces-analysis-${Date.parse(generatedAt) || Date.now()}`,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(opts.log ? { log: opts.log } : {}),
   })
-  opts.signal?.throwIfAborted()
-  const findings = [...analysis.result.findings, ...deterministic]
-  const partial: Omit<TraceInvestigationResult, 'report'> = {
+  findings.push(...analysis.result.findings)
+  for (const summary of analysis.result.per_analyst) {
+    if (summary.status !== 'ok') opts.log?.(`[analyst] ${summary.status.toUpperCase()} ${summary.analyst_id}`, { error: summary.error?.message ?? summary.reason })
+  }
+
+  const conformance = opts.conformance ?? conformanceOfSpans(opts.spans)
+  const cannotAnswer: CannotAnswer[] = [
+    ...skippedAnalyses(conformance).map((skipped) => ({ analysis: `${skipped.capability}: ${skipped.analysis}`, reason: skipped.reason })),
+    ...argumentsCannotAnswer(pipelines),
+    ...analysis.result.per_analyst
+      .filter((summary) => summary.status !== 'ok')
+      .map((summary) => ({ analysis: `analyst ${summary.analyst_id}`, reason: summary.error?.message ?? summary.reason ?? summary.status })),
+    ...(facts.selection?.unreadSessions ?? []).map((entry) => ({
+      analysis: 'every question about this session',
+      reason: entry.reason,
+      sessionId: entry.sessionId ?? entry.traceId ?? entry.source ?? 'unknown',
+    })),
+    ...facts.sessions.flatMap(factsCannotAnswer),
+  ]
+  return {
     schemaVersion: 1,
-    kind: 'traces.investigation',
+    kind: 'traces.analysis',
     generatedAt,
     harness: opts.harness,
-    sessionCount: identity.identifiedSessionCount,
-    unassignedTraceCount: identity.unassignedTraceCount,
-    sources: opts.sources,
-    workflow: opts.workflow,
-    spanCount: opts.spans.length,
-    conformance: opts.conformance ?? conformanceOfSpans(opts.spans),
-    execution: analysis.execution,
-    usage: totalUsage((await priceReport(buildSessionFactsReport(opts.spans))).sessions),
-    analystResult: analysis.result,
-    findings,
-    pipelines,
-    reactions,
-    sessionIdentityConflicts: identity.conflicts,
-    loopConvergence: analyzeLoopConvergence(opts.spans),
-    steeringChain: analyzeSteeringChain(opts.spans),
-    ...(agenticRoute ? { agenticRoute } : {}),
-    ...(analysis.agenticPerAnalyst
-      ? { agenticPerAnalyst: analysis.agenticPerAnalyst, findingRejections: rejections.counts() }
-      : {}),
-  }
-  const result = { ...partial, report: '' }
-  return { ...result, report: renderInvestigationReport(result, analysis.result, opts) }
-}
-
-/** Cap for one analyst's reason inside the failure banner; the full error is
- * already on that analyst's `[analyst] FAIL` stderr line. */
-const AGENTIC_FAILURE_REASON_MAX_CHARS = 400
-
-/**
- * Signatures of engine↔bridge version skew (or a missing bridge install) —
- * the failures the reinstall hint actually fixes. Every bridge traceback
- * names the `agent_eval_rpc` module path, so matching on the module name or
- * a generic marker alone would point mid-analysis model errors at pip.
- */
-const BRIDGE_MISMATCH_PATTERN = /must contain exactly|No module named ['"]?agent_eval_rpc|could not start/
-
-/** True when an engine error looks like bridge version skew or a missing bridge install. */
-export function isBridgeMismatchError(message: string): boolean {
-  return BRIDGE_MISMATCH_PATTERN.test(message)
-}
-
-function condensedReason(summary: AnalystRunSummary): string {
-  const raw = summary.status === 'skipped'
-    ? `skipped — ${summary.reason ?? 'no reason recorded'}`
-    : summary.error
-      ? `${summary.error.class}: ${summary.error.message}`
-      : 'failed without an error message'
-  return condenseAnalystError(raw, AGENTIC_FAILURE_REASON_MAX_CHARS)
-}
-
-/**
- * Operator-facing message for a fully dead agentic pass: non-empty exactly
- * when an agentic pass ran and NO analyst in it succeeded — failed and
- * skipped both count as "produced nothing", so one skip cannot silence the
- * alarm. Partial success returns undefined: some agentic findings were
- * produced, and the per-analyst report table carries the individual reasons.
- */
-export function totalAgenticFailureMessage(
-  agenticPerAnalyst: readonly AnalystRunSummary[] | undefined,
-  opts: { requiredBridgeVersion?: string } = {},
-): string | undefined {
-  if (!agenticPerAnalyst || agenticPerAnalyst.length === 0) return undefined
-  if (agenticPerAnalyst.some((summary) => summary.status === 'ok')) return undefined
-  const lines = [
-    `LLM analysis produced nothing: none of the ${agenticPerAnalyst.length} agentic analyst(s) succeeded. ` +
-      'The reported findings are from the deterministic pass only.',
-    ...agenticPerAnalyst.map((summary) => `  ${summary.analyst_id}: ${condensedReason(summary)}`),
-  ]
-  if (
-    opts.requiredBridgeVersion &&
-    agenticPerAnalyst.some((summary) => isBridgeMismatchError(summary.error?.message ?? ''))
-  ) {
-    lines.push(
-      'hint: the DSPy bridge protocol is version-locked — the TRACES_PYTHON interpreter needs ' +
-        `agent-eval-rpc[dspy]==${opts.requiredBridgeVersion} (matching this package's @tangle-network/agent-eval).`,
-    )
-  }
-  return lines.join('\n')
-}
-
-export async function runTraceStoreInvestigation(opts: TraceStoreInvestigationOptions): Promise<TraceStoreInvestigationResult> {
-  opts.signal?.throwIfAborted()
-  const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const registry = opts.registry ?? buildDefaultAnalystRegistry({
-    ...(opts.engine ? { engine: opts.engine } : {}),
-    registry: { log: opts.log },
-  })
-  const runId = opts.runId ?? `traces-store-investigation-${Date.parse(generatedAt) || Date.now()}`
-  const analystResult = await registry.run(runId, { traceStore: opts.traceStore }, {
-    budget: opts.budgetUsd != null ? { totalUsd: opts.budgetUsd } : undefined,
-    chainFindings: true,
-    signal: opts.signal,
-  })
-  opts.signal?.throwIfAborted()
-  const packet = buildTraceFindingPacket({
-    findings: analystResult.findings,
-    generatedAt,
-    source: 'trace-store',
-    title: 'Trace store investigation',
-  })
-  return {
-    ...packet,
-    kind: 'traces.store_investigation',
-    analystResult,
+    facts,
+    packet: buildTraceFindingPacket({
+      findings: rankFindings(findings.map(measuredSeverity)),
+      generatedAt,
+      source: 'traces analyze',
+      title: 'traces analyze findings',
+    }),
+    measures: { ...pipelines, toolErrors, unverifiedClaims: claims },
+    conformance,
+    cannotAnswer,
   }
 }
 
-/** Write the result, its evidence rows, the report and the analyzed spans into `outDir`, and nowhere else. */
-export async function writeTraceImprovementArtifacts(
-  result: Omit<TraceImprovementResult, 'artifacts'>,
-  spans: readonly OtlpSpan[],
-  outDir: string,
-): Promise<TraceImprovementArtifacts> {
+export interface AnalysisArtifacts {
+  readonly directory: string
+  readonly report: string
+  readonly findings: string
+}
+
+/** `analyze --out DIR`: `report.md` (with every cannot-answer reason) and `findings.json` (the packet), and nothing else. */
+export async function writeAnalysisArtifacts(report: string, packet: TraceFindingPacket, outDir: string): Promise<AnalysisArtifacts> {
   const directory = resolve(outDir)
   await mkdir(directory, { recursive: true })
-  const paths: TraceImprovementArtifacts = {
-    directory,
-    result: join(directory, 'result.json'),
-    evidence: join(directory, 'evidence.jsonl'),
-    report: join(directory, 'report.md'),
-    traces: join(directory, 'traces.otlp.jsonl'),
-  }
-  const { report, ...machineResult } = result
+  const paths = { directory, report: join(directory, 'report.md'), findings: join(directory, 'findings.json') }
   await Promise.all([
-    writeFile(paths.result, json(machineResult), 'utf8'),
-    writeFile(paths.evidence, jsonl(buildEvidenceRows(result.findings)), 'utf8'),
     writeFile(paths.report, report, 'utf8'),
-    writeOtlpFile(spans, paths.traces),
+    writeFile(paths.findings, `${JSON.stringify(packet, null, 2)}\n`, 'utf8'),
   ])
   return paths
-}
-
-export async function runTraceImprovement(
-  opts: TraceImprovementOptions,
-): Promise<TraceImprovementResult> {
-  // Before the analysis: a directory that cannot be made must not cost the run.
-  await mkdir(resolve(opts.outDir), { recursive: true })
-  const investigation = await runTraceInvestigation(opts)
-  const result: Omit<TraceImprovementResult, 'artifacts'> = {
-    ...investigation,
-    kind: 'traces.improvement',
-  }
-  return {
-    ...result,
-    artifacts: await writeTraceImprovementArtifacts(result, opts.spans, opts.outDir),
-  }
-}
-
-export async function saveReport(path: string, report: string): Promise<void> {
-  await mkdir(dirname(resolve(path)), { recursive: true })
-  await writeFile(path, report, 'utf8')
 }

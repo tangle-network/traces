@@ -19,10 +19,8 @@ import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { findingRejectionDetail } from './finding-rejections.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
-import type { TraceInvestigationResult } from './improvement.js'
 import { shellWord } from './moved.js'
-import type { TraceLiveAnalyst, TraceLiveFinding } from './live.js'
-import type { TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
+import type { TraceLiveFinding } from './pipelines.js'
 import { DEFAULT_ANALYST_MODEL } from './ask-defaults.js'
 import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
@@ -286,16 +284,6 @@ function warnUnread(args: CliArgs, unread: readonly UnreadSessionFact[], command
   process.stderr.write(`${unread.length} unreadable: ${['traces', command, ...select].join(' ')} --format json | jq .selection\n`)
 }
 
-/**
- * `--llm` engine. It forwards the whole `--budget` as the per-analyst provider
- * ceiling: the registry already splits `--budget` across analysts, so this only
- * stops the engine's own $1 default from cutting runs short.
- */
-async function llmAnalysisEngine(args: CliArgs, model: string): Promise<TraceAnalysisEngine> {
-  const { analysisEngineFromEnv } = await import('./analyst-model-call.js')
-  return analysisEngineFromEnv({ model, maxCostUsd: args.budget, log: analystLog })
-}
-
 function analystModelFor(args: CliArgs): string {
   return args.model ?? process.env.TRACES_ANALYST_MODEL ?? DEFAULT_ANALYST_MODEL
 }
@@ -316,24 +304,6 @@ function requiredBridgeVersion(): string {
     throw new Error('package.json is missing the @tangle-network/agent-eval dependency')
   }
   return version
-}
-
-/**
- * `--llm` promises agentic findings. Delivering the deterministic report with
- * exit 0 when the requested analysis died reads as success, so the report is
- * written and the run then exits 1 with each reason. The bridge-version read
- * happens only once total agentic failure is established, so a package.json
- * problem can never turn a successful run into a failure.
- */
-async function failUnlessRequestedAnalysesRan(
-  args: CliArgs,
-  result: Pick<TraceInvestigationResult, 'agenticPerAnalyst'>,
-): Promise<void> {
-  const { totalAgenticFailureMessage } = await import('./improvement.js')
-  if (!args.llm || !totalAgenticFailureMessage(result.agenticPerAnalyst)) return
-  const message = totalAgenticFailureMessage(result.agenticPerAnalyst, { requiredBridgeVersion: requiredBridgeVersion() })
-  process.stderr.write(`error: ${message}\n`)
-  process.exitCode = 1
 }
 
 /** One `traces list` row: the facts a person picks a session by. */
@@ -593,7 +563,6 @@ async function collectSessionSpans(args: CliArgs): Promise<CollectedSpans> {
  * states its degradation per capability.
  */
 async function cmdValidate(args: CliArgs): Promise<void> {
-  const { saveReport } = await import('./improvement.js')
   const path = args.input!
   const input = await readOtlpInput(path)
   const report = renderValidation(input.validation, {
@@ -853,12 +822,7 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   if (args.noContent && (pattern !== undefined || format === 'jsonl')) {
     throw new UsageError(`${pattern ? '--match searches' : '--format jsonl rows carry'} turn text, which --no-content withholds; drop one of them`)
   }
-  const window = args.since !== undefined || args.until !== undefined
-    ? {
-        ...(args.since !== undefined ? { since: new Date(parseSince(args.since)).toISOString() } : {}),
-        ...(args.until !== undefined ? { until: new Date(parseTimeBound(args.until, '--until')).toISOString() } : {}),
-      }
-    : undefined
+  const window = factsWindow(args)
   // Rows need where each session was read from, which the facts do not carry.
   const sourceOf = new Map<string, string>()
   let readingFrom: string | null = null
@@ -974,6 +938,21 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   await writeOutput(args, rendered, summary)
 }
 
+/** The `--since`/`--until` window the facts sheet counts turns in, as ISO times; undefined with neither. */
+function factsWindow(args: CliArgs): SessionFactsWindow | undefined {
+  if (args.since === undefined && args.until === undefined) return undefined
+  return {
+    ...(args.since !== undefined ? { since: new Date(parseSince(args.since)).toISOString() } : {}),
+    ...(args.until !== undefined ? { until: new Date(parseTimeBound(args.until, '--until')).toISOString() } : {}),
+  }
+}
+
+/** Write a report file, making its directory first. */
+async function saveReport(path: string, report: string): Promise<void> {
+  await mkdir(dirname(resolve(path)), { recursive: true })
+  await writeFile(path, report, 'utf8')
+}
+
 /** `rendered` to `--out` with a one-line summary on stdout, or to stdout. */
 async function writeOutput(args: CliArgs, rendered: string, summary: string): Promise<void> {
   if (args.out) {
@@ -1070,25 +1049,49 @@ function renderMatches(pattern: string, sessions: number, matches: readonly Sess
   return `${lines.join('\n')}\n`
 }
 
+/**
+ * `traces analyze`: what went wrong, ranked, for $0. Text by default (at most
+ * 40 lines), `--format json` for the facts, the finding packet, the measures,
+ * conformance and every question the trace cannot answer, and `--out DIR` for
+ * `report.md` and `findings.json`.
+ */
 async function cmdAnalyze(args: CliArgs): Promise<void> {
-  const { saveReport } = await import('./improvement.js')
   // A Runtime run directory, or a directory of them, is a supervision tree.
   const runDir = args.selection?.spans.find((source) => source.kind === 'run-dir')
   if (runDir) {
     if (args.refs.length > 1) throw new UsageError(`analyze reports one supervision tree at a time; ${runDir.ref} is a run directory`)
     return cmdAnalyzeSupervisorRun(runDir.path, args)
   }
-  const result = await investigate(args)
+  const { runTraceInvestigation, writeAnalysisArtifacts } = await import('./improvement.js')
+  const { renderAnalysis, renderAnalysisReport } = await import('./report.js')
+  const collected = await collectSpans(args)
+  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  const result = await runTraceInvestigation({
+    spans: collected.spans,
+    harness: collected.harness,
+    ...(collected.unread ? { unread: collected.unread } : {}),
+    ...(collected.conformance ? { conformance: collected.conformance } : {}),
+    facts: {
+      window: factsWindow(args),
+      agentIdentity: sessionIdentityLookup(args.selection?.home ?? (process.env.HOME || homedir())),
+    },
+    log: analystLog,
+  })
   if (args.out) {
-    await saveReport(args.out, result.report)
+    const artifacts = await writeAnalysisArtifacts(renderAnalysisReport(result), result.packet, args.out)
     console.log(
-      `report → ${args.out}  (${result.findings.length} findings, ` +
-        `${result.pipelines.stuckLoops.findings.length} loops)`,
+      `analysis → ${artifacts.directory}  (report.md, findings.json: ${result.packet.findings.length} finding(s), ` +
+        `${result.cannotAnswer.length} question(s) it cannot answer, $0)`,
     )
-  } else {
-    console.log(result.report)
+    return
   }
-  await failUnlessRequestedAnalysesRan(args, result)
+  if (args.format === 'json') {
+    const { schemaVersion, kind, generatedAt, harness, facts, packet, measures, conformance, cannotAnswer } = result
+    process.stdout.write(`${JSON.stringify({ schemaVersion, kind, generatedAt, harness, facts, packet, measures, conformance, cannotAnswer })}\n`)
+    return
+  }
+  process.stdout.write(renderAnalysis(result))
 }
 
 /**
@@ -1102,7 +1105,6 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
 async function cmdAnalyzeSupervisorRun(runDir: string, args: CliArgs): Promise<void> {
   const { analyzeSupervisorRun, findSupervisorRunDirs, isRuntimeSupervisorRunDir, renderSupervisorRollupMarkdown, renderSupervisorRunMarkdown, rollupSupervisorRuns } = await import('@tangle-network/agent-eval/supervisor-run')
   const { fileRunContextSupervisorRunReader } = await import('./supervisor-run-context.js')
-  const { saveReport } = await import('./improvement.js')
   const single = await isRuntimeSupervisorRunDir(runDir)
   const runDirs = single ? [runDir] : await findSupervisorRunDirs(runDir)
   if (runDirs.length === 0) {
@@ -1118,8 +1120,9 @@ async function cmdAnalyzeSupervisorRun(runDir: string, args: CliArgs): Promise<v
     ? renderSupervisorRunMarkdown(reports[0]!)
     : renderSupervisorRollupMarkdown(rollupSupervisorRuns(reports), `Supervisor rollup — ${runDir}`)
   if (args.out) {
-    await saveReport(args.out, markdown)
-    console.log(`supervisor report → ${args.out}  (${runDirs.length === 1 ? '1 run' : `${runDirs.length} runs`})`)
+    const path = resolve(args.out, 'report.md')
+    await saveReport(path, markdown)
+    console.log(`supervisor report → ${path}  (${runDirs.length === 1 ? '1 run' : `${runDirs.length} runs`})`)
   } else {
     console.log(markdown)
   }
@@ -1181,73 +1184,6 @@ function analystLog(msg: string, fields?: Record<string, unknown>): void {
   process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
 }
 
-/** Conformance fields threaded from the source into the investigation options. */
-function conformanceOptions(collected: CollectedSpans) {
-  return {
-    ...(collected.conformance ? { conformance: collected.conformance } : {}),
-    ...(collected.conformanceSubject ? { conformanceSubject: collected.conformanceSubject } : {}),
-    ...(collected.conformanceFiles ? { conformanceFiles: collected.conformanceFiles } : {}),
-    ...(collected.conformanceSkipped ? { conformanceSkipped: collected.conformanceSkipped } : {}),
-    ...(collected.conformanceIssues ? { conformanceIssues: collected.conformanceIssues } : {}),
-    ...(collected.conformanceWithheld ? { conformanceWithheld: collected.conformanceWithheld } : {}),
-    ...(collected.conformanceUnreadable ? { conformanceUnreadable: collected.conformanceUnreadable } : {}),
-  }
-}
-
-/** The analyze run: a traces config is loaded only when `--config` names one. */
-async function investigate(args: CliArgs) {
-  const { loadTracesConfig, mergeTracesConfig, runTraceInvestigation } = await import('./improvement.js')
-  const collected = await collectSpans(args)
-  const { spans, harness, sources, workflow } = collected
-  if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const config = args.config !== undefined ? await loadTracesConfig(args.config) : undefined
-  const analystModel = analystModelFor(args)
-  const engine = args.llm ? await llmAnalysisEngine(args, analystModel) : undefined
-  return runTraceInvestigation(mergeTracesConfig({
-    spans,
-    harness,
-    sources,
-    workflow,
-    engine,
-    model: args.llm ? analystModel : args.model,
-    budgetUsd: args.budget,
-    log: analystLog,
-    ...conformanceOptions(collected),
-  }, config))
-}
-
-/** `traces improve` (hidden; `analyze --out DIR` in 1.0): the review packet, written to `--dir`. */
-async function cmdImprove(args: CliArgs): Promise<void> {
-  const { loadTracesConfig, mergeTracesConfig, runTraceImprovement } = await import('./improvement.js')
-  const { runTraceQuestions } = await import('./ask.js')
-  const outDir = args.dir ?? args.out
-  if (outDir === undefined) throw new UsageError('improve needs --dir DIR for its artifacts')
-  const collected = await collectSpans(args)
-  const { spans, harness, sources, workflow } = collected
-  if (spans.length === 0) throw new Error('no spans found for the given selection')
-  const config = await loadTracesConfig(args.config)
-  const analystModel = analystModelFor(args)
-  const engine = args.llm ? await llmAnalysisEngine(args, analystModel) : undefined
-  const result = await runTraceImprovement({
-    ...mergeTracesConfig({
-      spans,
-      harness,
-      sources,
-      workflow,
-      engine,
-      model: args.llm ? analystModel : args.model,
-      budgetUsd: args.budget,
-      log: analystLog,
-      ...conformanceOptions(collected),
-    }, config),
-    outDir,
-  })
-  const dir = result.artifacts?.directory
-  if (!dir) throw new Error('improve did not produce an artifact directory')
-  console.log(`improvement artifacts → ${dir}  (${result.findings.length} findings with actions and checks)`)
-  await failUnlessRequestedAnalysesRan(args, result)
-}
-
 /**
  * `traces ask`: free-form questions over the selected sessions. Every question
  * is its own recursive investigation; they run concurrently under one shared
@@ -1261,8 +1197,7 @@ async function cmdImprove(args: CliArgs): Promise<void> {
  */
 async function cmdAsk(args: CliArgs): Promise<void> {
   const { analysisEngineFromEnv, DEFAULT_QUESTION_MAX_COST_USD } = await import('./analyst-model-call.js')
-  const { isBridgeMismatchError } = await import('./improvement.js')
-  const { loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
+  const { isBridgeMismatchError, loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
   const questions: TraceQuestion[] = [
     ...(args.questionsFile ? await loadTraceQuestionsFile(args.questionsFile) : []),
     ...args.questions.map((question) => ({ question })),
@@ -1369,11 +1304,7 @@ function streamPreset(args: CliArgs): { mode: StreamMode; includeSpans: boolean;
   }
 }
 
-async function streamExplicitSession(
-  args: CliArgs,
-  extraAnalysts: readonly TraceLiveAnalyst[] | undefined,
-  { adapter, ref }: RefSelection['sessions'][number],
-): Promise<void> {
+async function streamExplicitSession(args: CliArgs, { adapter, ref }: RefSelection['sessions'][number]): Promise<void> {
   const { serializeTraceStreamEvent, traceStreamEventsFromSpans } = await import('./live.js')
   const preset = streamPreset(args)
   const spans = await parseSession(adapter, ref)
@@ -1381,7 +1312,6 @@ async function streamExplicitSession(
     ref,
     includeSpans: preset.includeSpans,
     includeFindings: preset.includeFindings,
-    extraAnalysts,
   })) {
     process.stdout.write(serializeTraceStreamEvent(event))
   }
@@ -1389,9 +1319,7 @@ async function streamExplicitSession(
 
 /** `traces stream` (hidden; `watch --format jsonl` in 1.0): live trace events as JSONL. */
 async function cmdStream(args: CliArgs): Promise<void> {
-  const { loadTracesConfig } = await import('./improvement.js')
   const { serializeTraceStreamEvent, streamSessions, traceStreamEventsFromSpans } = await import('./live.js')
-  const config = await loadTracesConfig(args.config)
   const preset = streamPreset(args)
   const named = args.selection
   if (named && named.sessions.length + named.spans.length > 1) throw new UsageError('stream reads one ref at a time')
@@ -1409,14 +1337,13 @@ async function cmdStream(args: CliArgs): Promise<void> {
       ref,
       includeSpans: preset.includeSpans,
       includeFindings: preset.includeFindings,
-      extraAnalysts: config?.liveAnalysts,
     })) {
       process.stdout.write(serializeTraceStreamEvent(event))
     }
     return
   }
   if (named?.sessions[0]) {
-    await streamExplicitSession(args, config?.liveAnalysts, named.sessions[0])
+    await streamExplicitSession(args, named.sessions[0])
     return
   }
 
@@ -1443,7 +1370,6 @@ async function cmdStream(args: CliArgs): Promise<void> {
     includeFindings: preset.includeFindings,
     includeBatches: preset.includeBatches,
     includeReports: preset.includeReports,
-    extraAnalysts: config?.liveAnalysts,
     signal: controller.signal,
     onEvent: (event) => {
       process.stdout.write(serializeTraceStreamEvent(event))
@@ -1735,5 +1661,4 @@ await runTraces(process.argv.slice(2), {
   validate: cmdValidate,
   'verify-safe': cmdVerifySafe,
   stream: reading(cmdStream),
-  improve: reading(cmdImprove),
 })

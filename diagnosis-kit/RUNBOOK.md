@@ -99,17 +99,16 @@ The redaction core alone does not catch names, addresses or account numbers in p
 ## Day 2 — the deterministic pass
 
 ```bash
-traces analyze "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --out "$ENGAGEMENT_DIR/work/analysis.md"
+traces analyze "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --out "$ENGAGEMENT_DIR/work/analysis"
 traces convert "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl" --out "$ENGAGEMENT_DIR/work/analysis.otlp.jsonl"
 ```
 
-Costs nothing and calls no model. It produces the conformance table, the capability
-matrix, an explicit "analyses skipped and why" section, execution facts, token usage and
-cost coverage. Read "skipped and why" first; it is the honest boundary of the diagnosis.
+Costs nothing and calls no model. `analysis/report.md` holds the ranked findings and every
+question the trace cannot answer, with the reason; `analysis/findings.json` holds the
+finding packet. Read the cannot-answer list first; it is the honest boundary of the diagnosis.
+`traces analyze … --format json` carries the same list as `cannotAnswer`, beside `conformance`.
 
 Keep every analysis artifact under `"$ENGAGEMENT_DIR/work"`.
-The standard deterministic pass does not call `traces improve`, which can load a local
-`traces.config.*` and invoke external analyzers.
 
 ## Day 3 — the measurable check
 
@@ -217,8 +216,8 @@ Check ownership and active processes before removing a legacy prompt copy.
 
 ## Known limits of this runbook
 
-- The `--llm` agentic analyst path needs `TANGLE_API_KEY` and the Python
-  `agent-eval-rpc[dspy]` extra. Unverified here. The deterministic pass needs neither
+- `traces ask`, the one model-backed command, needs `TANGLE_API_KEY` and the Python
+  `agent-eval-rpc[dspy]` extra. Unverified here. `traces analyze` needs neither
   and is what days 2 and 3 rely on.
 - Casework has never run a campaign, so the worked example in `examples/casework/`
   documents the seam rather than a completed run. See its README.

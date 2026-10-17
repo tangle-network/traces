@@ -48,7 +48,6 @@ export type {
 } from './session-measurements.js'
 export type { SkillUseCount } from './skill-usage.js'
 
-import type { TraceAnalystDefinition } from '@tangle-network/agent-eval/analyst'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
 import { authorOfTypedTurn, INTERRUPT_TEXT, isHarnessCommand } from './adapters/actor.js'
@@ -871,7 +870,7 @@ function clipAnswered(raw: string): string {
 }
 
 /** A message this session's own agent wrote, with text a person could have read. */
-function isOwnAgentMessage(span: OtlpSpan): boolean {
+export function isOwnAgentMessage(span: OtlpSpan): boolean {
   return (
     span.name === 'message.assistant' &&
     span.attributes[INHERITED_SPAN_ATTR] !== true &&
@@ -1527,19 +1526,19 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
 const SHEET_TEXT_CAP = 100
 
 /** One line of `text`, at most `cap` characters, with `…` where it was cut. */
-function sheetText(text: string, cap = SHEET_TEXT_CAP): string {
+export function sheetText(text: string, cap = SHEET_TEXT_CAP): string {
   const line = text.trim().split('\n', 1)[0]!.replace(/\s+/gu, ' ')
   return line.length > cap || text.trim().includes('\n') ? `${line.slice(0, cap - 1)}…` : line
 }
 
 /** `MM-DD HH:MM` in UTC; a time no reader can parse is printed as recorded. */
-function utcMinute(iso: string): string {
+export function utcMinute(iso: string): string {
   const ms = Date.parse(iso)
   return Number.isFinite(ms) ? new Date(ms).toISOString().slice(5, 16).replace('T', ' ') : iso
 }
 
 /** `18 s` under a minute, `42 min`, or `3.1 h` from an hour up. */
-function duration(minutes: number): string {
+export function minutesText(minutes: number): string {
   if (minutes > 0 && minutes < 1) return `${Math.round(minutes * 60)} s`
   return minutes < 60 ? `${Math.round(minutes)} min` : `${(minutes / 60).toFixed(1)} h`
 }
@@ -1549,7 +1548,7 @@ function plural(count: number, noun: string): string {
 }
 
 /** `name 3, other 1, …`: the largest counts first, at most `keep` of them. */
-function topCounts(counts: Readonly<Record<string, number>>, keep = 3): string {
+export function topCounts(counts: Readonly<Record<string, number>>, keep = 3): string {
   const rows = Object.entries(counts).sort(([leftName, left], [rightName, right]) => right - left || leftName.localeCompare(rightName))
   return rows.slice(0, keep).map(([name, count]) => `${name} ${count}`).join(', ') + (rows.length > keep ? ', …' : '')
 }
@@ -1619,7 +1618,7 @@ function sheetHeader(facts: SessionFacts): string {
     parts.push(`${from}→${from.slice(0, 5) === to.slice(0, 5) ? to.slice(6) : to} UTC`)
   }
   const active = facts.measurements.activeMinutes.value
-  if (active !== null) parts.push(`active ${duration(active)}`)
+  if (active !== null) parts.push(`active ${minutesText(active)}`)
   if (facts.parentSessionId) parts.push(`child of ${facts.parentSessionId.slice(0, 8)}`)
   return parts.join(' · ')
 }
@@ -1648,14 +1647,14 @@ function wasteLine(facts: SessionFacts): string {
   const worst = [...streaks].sort((left, right) => right.minutes - left.minutes || right.runs - left.runs)[0]
   if (worst) {
     const command = worst.command === null ? `a ${worst.tool} command` : `\`${sheetText(worst.command, 60)}\``
-    parts.push(`${command} failed ${worst.runs}× in a row (${duration(worst.minutes)})${streaks.length > 1 ? ` + ${plural(streaks.length - 1, 'more streak')}` : ''}`)
+    parts.push(`${command} failed ${worst.runs}× in a row (${minutesText(worst.minutes)})${streaks.length > 1 ? ` + ${plural(streaks.length - 1, 'more streak')}` : ''}`)
   }
   const stalls = waste.stalls.value ?? []
   if (stalls.length > 0) {
-    parts.push(`${plural(stalls.length, 'stall')} ≥ ${STALL_MINUTES} min (${duration(stalls.reduce((sum, stall) => sum + stall.minutes, 0))})`)
+    parts.push(`${plural(stalls.length, 'stall')} ≥ ${STALL_MINUTES} min (${minutesText(stalls.reduce((sum, stall) => sum + stall.minutes, 0))})`)
   }
   if ((waste.rollbacks.value ?? 0) > 0) parts.push(`reverts ${waste.rollbacks.value}`)
-  return `waste ${duration(waste.minutes)}${parts.length > 0 ? `: ${parts.join(' · ')}` : ''}`
+  return `waste ${minutesText(waste.minutes)}${parts.length > 0 ? `: ${parts.join(' · ')}` : ''}`
 }
 
 /** `PRs opened #11021 #11022 · merged #11006 · changed 23 files`. */
@@ -1841,7 +1840,7 @@ function renderAgent(agent: AgentIdentityFact): string {
   return `${[profile, agent.model, agent.directiveVariant].filter(Boolean).join(' · ')} (from ${agent.source})`
 }
 
-function renderFirstFailure(failure: SessionFirstFailure): string {
+export function renderFirstFailure(failure: SessionFirstFailure): string {
   if (failure.status === 'unknown') return `unknown: ${sheetText(failure.reason)}`
   if (failure.status === 'none') return `none: ${sheetText(failure.reason)}`
   if (failure.status === 'ambiguous') return `ambiguous ${failure.stage}: ${sheetText(failure.reason)} (spans ${failure.candidates.join(', ')})`
@@ -2105,40 +2104,4 @@ export function sessionFactsContext(
   })
   if (report.sessions.length === 0) return undefined
   return renderSessionFactsContext(report, options)
-}
-
-/**
- * Version suffix stamped on a definition that receives the sheet.
- *
- * `createTraceAnalyst` records `prepare_context: "version-bound"` in an
- * analyst's exact-run identity, which is a contract: a definition whose
- * prepared context changed is a different analyst. Wrapping therefore bumps the
- * version instead of quietly changing what the same version does.
- */
-export const SESSION_FACTS_VERSION_SUFFIX = 'session-facts.' + SESSION_FACTS_MEASUREMENT_VERSION
-
-/**
- * Supply the sheet to every definition as prepared context, before the model
- * runs. A definition that already prepares context keeps it; the sheet is
- * appended after it, bounded by its own ceiling, so the pair stays inside the
- * documented `perCallByteCeiling` of 150,000 bytes.
- *
- * The sheet is computed once for the whole set: it is deterministic, so every
- * definition receives the identical text.
- */
-export function withSessionFactsContext(
-  definitions: readonly TraceAnalystDefinition[],
-  spans: readonly OtlpSpan[],
-  options: { byteCeiling?: number } = {},
-): TraceAnalystDefinition[] {
-  const sheet = sessionFactsContext(spans, options)
-  if (sheet === undefined) return [...definitions]
-  return definitions.map((definition) => ({
-    ...definition,
-    version: `${definition.version}+${SESSION_FACTS_VERSION_SUFFIX}`,
-    prepareContext: async (store, context) => {
-      const own = await definition.prepareContext?.(store, context)
-      return own ? `${own}\n\n${sheet}` : sheet
-    },
-  }))
 }

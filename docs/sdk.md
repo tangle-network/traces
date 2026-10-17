@@ -11,20 +11,16 @@ The CLI is a thin consumer of these exports.
 | `readOtlpInput` | `(file\|dir) → { files, skipped, rows, spans, validation, issues }` | ingest OTLP from **any** system — no adapter; never throws on a foreign trace |
 | `validateTraceSpans` | `(spans) → { ok, findings, capabilities }` | the contract's conformance check, re-exported |
 | `conformanceOfSpans` | `(spans) → TraceValidation` | grade spans this package produced, on the artifact a consumer receives |
-| `renderValidation` / `renderConformance` | `(validation, opts) → string` | the `validate` report / the section embedded in an analysis report |
+| `renderValidation` / `renderConformance` | `(validation, opts) → string` | the `validate` report / its conformance section |
 | `skippedAnalyses` | `(validation) → SkippedAnalysis[]` | which analyses a missing capability empties, and why |
-| `unavailableCapabilities` / `incompleteInputsNote` | `(validation) → Map` / `(map, name) → string` | the gate: what the trace cannot support, and the marker each affected section carries |
 | `summarizeSpanStructure` | `(spans) → SpanStructure` | how much of the tree attaches: rootless, orphans, links |
 | `analyzeLoopConvergence` | `(spans) → LoopConvergenceReport` | per loop, the per-round outcome/score series and whether it improved, plateaued, regressed or fell back |
 | `analyzeSteeringChain` | `(spans) → SteeringChainReport` | which verdict span caused which subsequent round, following `links` |
 | `llmSpan` / `toolSpan` / `loopSpan` / `branchSpan` / `steeredBy` | contract builders, re-exported | emit conforming spans from your own system |
-| `analyzeSpans` | `(spans, { registry?, ai?, budgetUsd? }) → AnalyzeResult` | run built-in analysts, or **your own** via `registry` |
-| `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | typed findings with actions/checks, execution facts, and report |
-| `runTraceImprovement` | `(TraceImprovementOptions) → TraceImprovementResult` | writes the full findings, evidence, report, and trace artifact pack |
+| `analyzeSpans` | `(spans, { registry? }) → AnalyzeResult` | run agent-eval's deterministic behavioral analyst, or **your own** via `registry`; no model call |
+| `runTraceInvestigation` | `(TraceInvestigationOptions) → TraceInvestigationResult` | what `traces analyze <ref> --format json` prints: facts, finding packet, measures, conformance, `cannotAnswer` |
 | `runTraceQuestions` | `(TraceQuestionsOptions) → TraceQuestionsResult` | ask many free-form questions of one span list, concurrently, under one shared cost ledger; keeps each answer and checks its citations |
 | `buildTraceFindingPacket` | `({ findings }) → TraceFindingPacket` | render any `AnalystFinding[]` without changing its schema |
-| `runTraceStoreInvestigation` | `({ traceStore }) → TraceStoreInvestigationResult` | run the same packet layer over a hosted/custom `TraceAnalysisStore` |
-| `loadTracesConfig` | `(path?) → TracesConfig \| undefined` | load BYO analysts and live analysts |
 | `watchSessions` | `(ObserverOptions) → Promise<void>` | live observer; `onLoop` / `onReport` / `signal` / `adapters` |
 | `streamSessions` | `(TraceStreamOptions) → Promise<void>` | live JSONL-ready event stream over active sessions |
 | `traceStreamEventsFromSpans` | `(spans, opts?) → TraceStreamEvent[]` | replay an existing span list as stream events |

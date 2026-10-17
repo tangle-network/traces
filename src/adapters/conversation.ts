@@ -37,7 +37,7 @@ export function capText(raw: string): string {
  *   - `relay`          a person pasted another agent's output (`authorOfTypedTurn`)
  * Adapters assign the first five from the harness's own signals; `fleet` and
  * `relay` are org conventions the facts sheet applies to a turn an adapter
- * called human. Analysts that measure human reactions must filter to `human` only.
+ * called human. A measure of what people typed reads `human` only.
  */
 export type Actor = 'human' | 'agent' | 'subagent-spawn' | 'injected' | 'tool-result' | 'fleet' | 'relay'
 

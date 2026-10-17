@@ -62,22 +62,28 @@ async function facts(argv: readonly string[], env: Readonly<Record<string, strin
   return { ...(JSON.parse(run.stdout) as { sessions: Session[] }), bytes: Buffer.byteLength(run.stdout) }
 }
 
-/** The `- **Tokens:**` and `- **Cost:**` lines `traces analyze` prints, as numbers. */
+/**
+ * The tokens and cost `traces analyze` reports: the facts sheets in its JSON,
+ * summed, with the cost its text header prints for one session.
+ */
 async function analyzeUsage(argv: readonly string[], env: Readonly<Record<string, string>>) {
-  const run = await runCli(['analyze', ...argv], { env })
-  expect(run.code).toBe(0)
-  const number = (text: string) => Number(text.replaceAll(',', ''))
-  const tokens = /\*\*Tokens:\*\* in ([\d,]+) · out ([\d,]+) · cache read ([\d,]+) · cache write ([\d,]+) \(([\d,]+) model calls/u.exec(run.stdout)
-  const cost = /\*\*Cost:\*\* (?:\$([\d.]+) list price \(Router rates\)|unknown — (.+))/u.exec(run.stdout)
-  expect(tokens, run.stdout).not.toBeNull()
-  expect(cost, run.stdout).not.toBeNull()
+  const json = await runCli(['analyze', ...argv, '--format', 'json'], { env })
+  expect(json.code, json.stderr).toBe(0)
+  const sessions = (JSON.parse(json.stdout) as { facts: { sessions: Session[] } }).facts.sessions
+  const measured = sessions.filter((session) => session.tokens.input !== null)
+  const total = (read: (tokens: Tokens) => number | null) => measured.reduce((sum, session) => sum + (read(session.tokens) ?? 0), 0)
+  const usd = sessions.some((session) => session.cost.usd === null) ? null : sessions.reduce((sum, session) => sum + session.cost.usd!, 0)
+  if (sessions.length === 1) {
+    const header = (await runCli(['analyze', ...argv], { env })).stdout.split('\n')[0]!
+    expect(header).toContain(usd === null ? 'cost unknown: ' : `$${usd.toFixed(usd < 1 ? 4 : 2)} list price (Router rates)`)
+  }
   return {
-    input: number(tokens![1]!),
-    output: number(tokens![2]!),
-    cacheRead: number(tokens![3]!),
-    cacheWrite: number(tokens![4]!),
-    modelCalls: number(tokens![5]!),
-    usd: cost![1] === undefined ? null : Number(cost![1]),
+    input: total((tokens) => tokens.input),
+    output: total((tokens) => tokens.output),
+    cacheRead: total((tokens) => tokens.cacheRead),
+    cacheWrite: total((tokens) => tokens.cacheWrite),
+    modelCalls: sessions.reduce((sum, session) => sum + session.tokens.modelCalls, 0),
+    usd,
   }
 }
 

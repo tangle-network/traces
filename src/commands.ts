@@ -80,8 +80,6 @@ export interface Args {
   yes: boolean
   unused: boolean
   // Hidden spellings, kept until the step that moves each (spec §2.4).
-  llm: boolean
-  config?: string
   dir?: string
   questionBudget?: number
   /** Seconds. */
@@ -120,7 +118,6 @@ function emptyArgs(command: string): Args {
     dryRun: false,
     yes: false,
     unused: false,
-    llm: false,
     concurrency: 4,
     annotations: false,
     explain: false,
@@ -205,8 +202,6 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--dry-run': { help: 'redact and preview; send nothing', set: (a) => { a.dryRun = true } },
   '--yes': { help: 'skip the confirmation prompt', set: (a) => { a.yes = true } },
   '--unused': { help: 'only installed skills with no use in the window', set: (a) => { a.unused = true } },
-  '--llm': { help: 'add the agentic analysts (Python bridge, model spend)', set: (a) => { a.llm = true } },
-  '--config': { value: 'FILE', help: 'a JS config with analysts or liveAnalysts', set: (a, v) => { a.config = v } },
   '--dir': { value: 'DIR', help: 'write the artifacts to DIR', set: (a, v) => { a.dir = v } },
   '--question-budget': { value: 'USD', help: 'the provider ceiling for one question', set: (a, v) => { a.questionBudget = positiveNumber('--question-budget', v, 'USD') } },
   '--question-timeout': {
@@ -309,12 +304,22 @@ const COMMANDS = [
   {
     name: 'analyze',
     usage: 'analyze <ref…> | --current | --last N | --since T [flags]',
-    job: 'What went wrong, ranked, for $0: loops, failures, waste, and what the trace cannot answer.',
-    notes: ['A Runtime run directory as the ref reports its supervision tree.'],
-    flags: [...SELECT, { flag: '--out', help: 'write the report to PATH; stdout gets one summary line' }, hidden('--llm'), hidden('--model'), hidden('--budget'), hidden('--config')],
+    job: 'What went wrong, ranked, for $0: failing commands, stalls, interrupts, findings, and what the trace cannot answer.',
+    notes: ['At most 40 lines; several sessions get a table of the 15 with the most waste. A Runtime run dir reports its tree.'],
+    flags: [
+      ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3),
+      { flag: '--format', help: 'text (default, at most 40 lines) or json: facts, packet, measures, conformance, cannotAnswer' },
+      { flag: '--out', value: 'DIR', help: 'write report.md and findings.json under DIR; stdout gets one summary line' },
+    ],
+    formats: ['text', 'json'],
     refs: [0, MANY],
     select: 'required',
-    examples: ['traces analyze --current', 'traces analyze 019a3c7e --out report.md', 'traces analyze runs/my-run'],
+    jq: [
+      ['.packet.findings[] | {severity, subject, claim}', 'the findings, HIGH first'],
+      ['.cannotAnswer[] | {analysis, reason}', 'what the trace cannot answer, and why'],
+      ['.facts.sessions[0].measurements.waste', 'failing streaks, stalls, reverts'],
+    ],
+    examples: ['traces analyze --current', 'traces analyze 019a3c7e --out analysis', 'traces analyze --since 1d --cwd .'],
     overview: ['Where did it waste time or get interrupted? $0', 'traces analyze <ref>'],
   },
   {
@@ -478,7 +483,7 @@ const COMMANDS = [
     examples: ['traces mcp spans.otlp.jsonl', 'traces mcp --last 5', 'claude mcp add traces -- traces mcp spans.otlp.jsonl'],
     overview: ['Serve span tools over MCP', 'traces mcp <ref>|--last N'],
   },
-  // Hidden until their step (spec §2.4): validate and verify-safe (15), stream (14), improve (13).
+  // Hidden until their step (spec §2.4): validate and verify-safe (15), stream (14).
   {
     name: 'validate',
     usage: 'validate <file|dir> [--out FILE]',
@@ -502,19 +507,9 @@ const COMMANDS = [
     name: 'stream',
     usage: 'stream [<ref>] [flags]',
     job: 'Live trace events as JSONL.',
-    flags: ['--current', '--last', '--cwd', '--harness', '--config', '--mode', '--replay', '--once', '--no-spans', '--no-findings', '--window', '--interval'],
+    flags: ['--current', '--last', '--cwd', '--harness', '--mode', '--replay', '--once', '--no-spans', '--no-findings', '--window', '--interval'],
     refs: [0, 1],
     examples: ['traces stream --mode findings'],
-    hidden: true,
-  },
-  {
-    name: 'improve',
-    usage: 'improve <ref…> | --current | --last N | --since T --dir DIR',
-    job: 'Write findings, evidence, a report and spans to a directory.',
-    flags: [...SELECT, '--dir', '--out', '--llm', '--model', '--budget', '--config'],
-    refs: [0, MANY],
-    select: 'required',
-    examples: ['traces improve --current --dir .traces/improvement'],
     hidden: true,
   },
 ] as const satisfies readonly CommandSpec[]

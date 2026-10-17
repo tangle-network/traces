@@ -79,8 +79,7 @@ That matters for three reasons.
 
 - **Cost.** Each cost carries its provenance: `observed` from a provider receipt, `estimated` from token counts, or `uncaptured`. An uncaptured cost stays null; it never becomes zero.
 
-`ask` uses the same engine and credentials as `--llm`, so it needs `TANGLE_API_KEY` and a Python interpreter with `agent-eval-rpc[dspy]`.
-Do not pass `--llm`; the command is model-backed by definition.
+`ask` is the one command that calls a model: it needs `TANGLE_API_KEY` and a Python interpreter with `agent-eval-rpc[dspy]`.
 
 ## Budget under concurrency
 

@@ -1,738 +1,167 @@
-import { createHash } from 'node:crypto'
-import type { AnalystRunResult } from '@tangle-network/agent-eval/analyst'
-import { summarizeExecution } from '@tangle-network/agent-eval/contract'
-import { describe, expect, it } from 'vitest'
-import type { PipelineReport } from '../src/pipelines.js'
-import type { ReactionReport } from '../src/reactions.js'
-import type { UnavailableCapabilities } from '../src/conformance.js'
-import type { LoopConvergenceReport } from '../src/loop-analysis.js'
-import {
-  analystRunDetail,
-  renderLoopConvergence,
-  renderPipelines,
-  renderReport,
-  summarizeDeterministicSignals,
-} from '../src/report.js'
+/**
+ * `traces analyze` text, through the built CLI: at most 40 lines, answer
+ * first, in the spec's fixed order (§2.2), every number the facts sheet's. The
+ * false positives 0.23.1 printed are planted and must not come back: a HIGH
+ * "session identity" finding on traces' own reads, corrections built from
+ * injected turns, one-tool and no-check findings on short runs, durations in
+ * milliseconds, the `@otlp` model suffix, and a `gh`-only review called a
+ * repeated verification.
+ */
+import { beforeAll, describe, expect, it } from 'vitest'
+import { makeAnalyzeHome, REVIEW_ID, toolRunSession, WORKER_ID, type AnalyzeHome } from './fixtures/analyze.js'
+import { runCli } from './run-cli.js'
 
-const EMPTY_EXECUTION = summarizeExecution({ runs: [] })
-
-function emptyResult(): AnalystRunResult {
-  return {
-    run_id: 'run-report-test',
-    correlation_id: 'corr-report-test',
-    started_at: '2026-07-03T00:00:00.000Z',
-    ended_at: '2026-07-03T00:00:01.000Z',
-    findings: [],
-    per_analyst: [
-      {
-        analyst_id: 'efficiency-behavioral',
-        status: 'ok',
-        findings_count: 0,
-        latency_ms: 347,
-        usage: {
-          calls: 0,
-          tokens: { input: 0, output: 0 },
-          cost: { kind: 'observed', usd: 0 },
-        },
-      },
-    ],
-    total_cost_usd: 0,
-    total_cost_provenance: { kind: 'observed', usd: 0 },
-  }
+interface Finding {
+  severity: string
+  subject?: string
+  claim: string
+  area: string
+  metadata?: { spanIds?: string[] }
 }
 
-describe('renderReport', () => {
-  it('does not claim a clean run when deterministic checks found issues', () => {
-    const report = renderReport(emptyResult(), {
-      harness: 'claude-code',
-      sessionCount: 5,
-      spanCount: 17470,
-      execution: EMPTY_EXECUTION,
-      deterministic: {
-        stuckLoops: 12,
-        reactionSignals: 61,
-        failedRuns: 4,
-        totalSignals: 77,
-      },
-    })
+interface Analysis {
+  packet: { findings: Finding[] }
+  cannotAnswer: Array<{ analysis: string; reason: string }>
+}
 
-    expect(report).toContain('5 session(s), 17470 spans')
-    expect(report).toContain('**0 findings; 77 raw deterministic signals**')
-    expect(report).toContain(
-      '_No analyst findings. Deterministic checks found 12 stuck loop(s), 61 human reaction signal(s) and 4 failed run(s); see sections below._',
-    )
-    expect(report).not.toContain('No findings')
+let fx: AnalyzeHome
+beforeAll(async () => {
+  fx = await makeAnalyzeHome()
+})
+
+async function analyze(argv: readonly string[]): Promise<string> {
+  const run = await runCli(['analyze', ...argv], { env: fx.env })
+  expect(run.stderr).toBe('')
+  expect(run.code).toBe(0)
+  return run.stdout
+}
+
+async function analysis(argv: readonly string[]): Promise<Analysis> {
+  return JSON.parse(await analyze([...argv, '--format', 'json'])) as Analysis
+}
+
+const subjects = (result: Analysis) => result.packet.findings.map((finding) => finding.subject)
+
+describe('one session, answer first', () => {
+  it('fits 40 lines, in the fixed order, with every section the session supports', async () => {
+    const text = await analyze([fx.worker])
+    const lines = text.trimEnd().split('\n')
+    expect(lines.length).toBeLessThanOrEqual(40)
+    expect(lines[0]).toMatch(/^a11a1a11 claude-code · analyzed-repo · 10-14 10:00→10-16 10:29 UTC, 48h 29m · active /u)
+    expect(lines[0]).toMatch(/ · \$[\d.]+ list price \(Router rates\)$/u)
+    const order = [
+      'asked "Fix the failing parser test." (+2 more human turns)',
+      'first failure ',
+      'failing commands 1: `pnpm test` 3× in a row (5 min, 10:01, span ',
+      'tool errors 3/',
+      'stalls 1 ≥ 10 min',
+      'Interrupts and rejections: 1 turn after an interrupt',
+      '  10:09 after an interrupt: "stop, run the tests before you say done"',
+      'unverified claims 1: 10:08 "Done: the parser is fixed."',
+      'PRs opened 1 (#12)',
+      'findings ',
+      'cannot answer ',
+    ]
+    let previous = -1
+    for (const line of order) {
+      const index = text.indexOf(line)
+      expect(index, line).toBeGreaterThan(previous)
+      previous = index
+    }
   })
 
-  it('keeps the clean-run message when no analyst findings or deterministic signals exist', () => {
-    const report = renderReport(emptyResult(), {
-      harness: 'codex',
-      sessionCount: 1,
-      spanCount: 10,
-      execution: EMPTY_EXECUTION,
-      deterministic: {
-        stuckLoops: 0,
-        reactionSignals: 0,
-        failedRuns: 0,
-        totalSignals: 0,
-      },
-    })
-
-    expect(report).toContain('1 session(s), 10 spans')
-    expect(report).toContain('**0 findings**')
-    expect(report).toContain('No supported behavioral findings in the captured fields.')
+  it('prints nothing it cannot support: no "unavailable", no milliseconds, no @otlp, no zero for an unknown', async () => {
+    const text = await analyze([fx.worker])
+    const json = await analyze([fx.worker, '--format', 'json'])
+    expect(text).not.toContain('unavailable')
+    expect(text).not.toMatch(/\d ?ms\b/u)
+    expect(`${text}${json}`).not.toContain('@otlp')
   })
 
-  it('labels a known subtotal when analyst cost was not fully captured', () => {
-    const result = emptyResult()
-    result.total_cost_usd = 0.25
-    result.total_cost_provenance = { kind: 'uncaptured', usd: null }
-
-    const report = renderReport(result, {
-      harness: 'codex',
-      sessionCount: 1,
-      spanCount: 10,
-      execution: EMPTY_EXECUTION,
-    })
-
-    expect(report).toContain('Known analysis cost: $0.2500; additional cost was not captured.')
-    expect(report).not.toContain('Analysis cost: $0.2500.')
+  it('calls the turns after an interrupt, a rejected tool or a claim what they are, never corrections', async () => {
+    const text = await analyze([fx.worker])
+    expect(text).toContain('Interrupts and rejections: ')
+    expect(text).not.toMatch(/correct/iu)
+    // The background notice says "no, stop, that is wrong": it is harness text, not a person.
+    expect(text).not.toContain('that is wrong')
+    expect(JSON.stringify((await analysis([fx.worker])).packet)).not.toMatch(/correct|reaction/iu)
   })
 
-  it('shows the exact selected child session and its operator provenance', () => {
-    const report = renderReport(emptyResult(), {
-      harness: 'codex',
-      sessionCount: 1,
-      spanCount: 817,
-      execution: EMPTY_EXECUTION,
-      sources: [{
-        sessionId: '019f5aea-d6b4-7451-a3eb-60289875a357',
-        parentSessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
-        role: 'child',
-        integrity: 'complete',
-        path: '/home/drew/.codex/sessions/2026/07/13/rollout-child.jsonl',
-        subject: 'Own direct-streaming conversion for the remaining JSONL adapters.',
-      }],
-    })
-
-    expect(report).toContain('## Selected sessions')
-    expect(report).toContain('019f5aea-d6b4-7451-a3eb-60289875a357')
-    expect(report).toContain('019f24d6-b5ec-7173-acc1-f957de216ee5')
-    expect(report).toContain('Own direct-streaming conversion')
-    expect(report).toContain('/home/drew/.codex/sessions/2026/07/13/rollout-child.jsonl')
-    expect(report).toContain('| child |')
-    expect(report).toContain('Counts below describe only the selected files, not their parent operator sessions.')
-  })
-
-  it('shows incomplete workflow relationships and worker identity fields', () => {
-    const report = renderReport(emptyResult(), {
-      harness: 'codex',
-      sessionCount: 2,
-      spanCount: 20,
-      execution: EMPTY_EXECUTION,
-      workflow: {
-        seedSessionIds: ['root'],
-        complete: false,
-        issues: [{
-          kind: 'missing-session',
-          sessionId: 'missing-child',
-          referencedBySessionId: 'root',
-          relation: 'child',
-        }],
-      },
-      sources: [{
-        sessionId: 'root',
-        role: 'operator',
-        childSessionIds: ['worker'],
-        path: '/sessions/root.jsonl',
-        subject: 'Coordinate the work.',
-      }, {
-        sessionId: 'worker',
-        role: 'child',
-        parentSessionId: 'root',
-        childSessionIds: [],
-        depth: 1,
-        agentNickname: 'Tesla',
-        agentRole: 'researcher',
-        path: '/sessions/worker.jsonl',
-        subject: 'Research one track.',
-      }],
-    })
-
-    expect(report).toContain('Session workflow: 1 seed session, 2 resolved sessions, 1 relationship issue.')
-    expect(report).toContain('Missing session `missing-child`, referenced as child by `root`')
-    expect(report).toContain('| child | 1 | Tesla / researcher | - | `worker` | `root` | 0 |')
-    expect(report).not.toContain('Counts below describe only the selected files')
-  })
-
-  it('names unjoined children on the headline instead of a clean-looking issue count', () => {
-    // Measured 2026-09-01: this exact case printed "1 seed session, 1 resolved session,
-    // 0 relationship issues" with three spawned children sitting in the same directory.
-    const report = renderReport(emptyResult(), {
-      harness: 'codex',
-      sessionCount: 1,
-      spanCount: 20,
-      execution: EMPTY_EXECUTION,
-      workflow: {
-        seedSessionIds: ['root'],
-        complete: false,
-        issues: [
-          { kind: 'unjoined-child', parentSessionId: 'root', agentPath: '/root/c1_b_grid', reason: 'not-found' },
-          { kind: 'unjoined-child', parentSessionId: 'root', agentPath: '/root/c2_s_constb', reason: 'not-found' },
-          {
-            kind: 'unjoined-child',
-            parentSessionId: 'root',
-            agentPath: '/root/c3_mitigation',
-            reason: 'ambiguous',
-            candidates: ['a', 'b'],
-          },
-        ],
-      },
-      sources: [{
-        sessionId: 'root',
-        role: 'operator',
-        childSessionIds: [],
-        path: '/sessions/root.jsonl',
-        subject: 'Coordinate the work.',
-      }],
-    })
-
-    expect(report).toContain(
-      'Session workflow: 1 seed session, 1 resolved session, 3 relationship issues, 3 unjoined child sessions.',
-    )
-    expect(report).not.toContain('0 relationship issues')
-    expect(report).toContain('Unjoined child `/root/c1_b_grid` spawned by `root`: not-found')
-    expect(report).toContain('Unjoined child `/root/c3_mitigation` spawned by `root`: ambiguous; candidates: `a`, `b`')
-  })
-
-  it('shows degraded source provenance without exposing malformed content', () => {
-    const rawSecret = 'secret-malformed-record'
-    const sha256 = createHash('sha256').update(rawSecret).digest('hex')
-    const sourcePath = '/home/drew/.codex/sessions/operator.jsonl'
-    const report = renderReport(emptyResult(), {
-      harness: 'codex',
-      sessionCount: 1,
-      spanCount: 76_400,
-      execution: EMPTY_EXECUTION,
-      sources: [{
-        sessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
-        role: 'operator',
-        integrity: 'degraded_not_lossless',
-        corruptionCount: 130,
-        corruptionDigest: `sha256:${'1'.repeat(64)}`,
-        path: sourcePath,
-        subject: 'Operator task',
-        corruptions: [{
-          receiptVersion: 1,
-          kind: 'jsonl_corruption',
-          status: 'degraded_not_lossless',
-          harness: 'codex',
-          sessionId: '019f24d6-b5ec-7173-acc1-f957de216ee5',
-          sourcePath,
-          lineNumber: 8558,
-          byteOffset: 22_424_907,
-          byteLength: Buffer.byteLength(rawSecret),
-          sha256,
-          rawBytes: 'local_source_only',
-        }],
-      }],
-    })
-
-    expect(report).toContain('degraded, not lossless (130 corrupt records)')
-    expect(report).toContain('## Source corruption receipts')
-    expect(report).toContain(`130 receipts, digest \`sha256:${'1'.repeat(64)}\``)
-    expect(report).toContain('| 8558 | 22424907 |')
-    expect(report).toContain('129 additional receipts omitted from this report')
-    expect(report).toContain('all receipts remain in `source.corruption.receipt` child spans')
-    expect(report).toContain(sha256)
-    expect(report).toContain('exact bytes are retrievable only while the local source file still contains that byte range')
-    expect(report).not.toContain(rawSecret)
-  })
-
-  it('bounds selected-session evidence without dropping the total', () => {
-    const report = renderReport(emptyResult(), {
-      harness: 'openinference',
-      sessionCount: 25,
-      spanCount: 25,
-      execution: EMPTY_EXECUTION,
-      sources: Array.from({ length: 25 }, (_, index) => ({
-        sessionId: `session-${index}`,
-        role: 'unknown' as const,
-        integrity: 'complete' as const,
-        path: '/tmp/spans.jsonl',
-        subject: '',
-      })),
-    })
-
-    expect(report).toContain('25 session(s), 25 spans')
-    expect(report).toContain('5 additional sessions omitted')
-    expect(report).toContain('session-19')
-    expect(report).not.toContain('session-20')
-  })
-
-  it('keeps traces without session identity out of the session count', () => {
-    const report = renderReport(emptyResult(), {
-      harness: 'openinference',
-      sessionCount: 2,
-      unassignedTraceCount: 13,
-      spanCount: 2880,
-      execution: EMPTY_EXECUTION,
-    })
-
-    expect(report).toContain(
-      '2 identified session(s) + 13 traces without a single stable session identity, 2880 spans',
-    )
-    expect(report).toContain('Their spans were analyzed but were not relabeled as sessions.')
+  it('ranks findings HIGH first, with the span ids facts names, and no session-identity finding on its own reads', async () => {
+    const result = await analysis([fx.worker])
+    const facts = JSON.parse((await runCli(['facts', fx.worker, '--format', 'json'], { env: fx.env })).stdout) as {
+      sessions: Array<{ measurements: { waste: { failingStreaks: { value: Array<{ spanIds: string[] }> } } } }>
+    }
+    const streak = facts.sessions[0]!.measurements.waste.failingStreaks.value[0]!
+    const [first] = result.packet.findings
+    expect(first).toMatchObject({ severity: 'high', subject: 'same-failing-command' })
+    expect(first!.metadata?.spanIds).toEqual(streak.spanIds)
+    expect(subjects(result)).toContain('verification-without-change')
+    // Measured on real sessions at 0 of 9: shown, as LOW.
+    expect(result.packet.findings.find((finding) => finding.subject === 'completion-claim-without-verification')?.severity).toBe('low')
+    expect(result.packet.findings.map((finding) => finding.area)).not.toContain('instrumentation')
+    expect(JSON.stringify(result)).not.toContain('stable session identity')
+    const text = await analyze([fx.worker])
+    expect(text).toContain(`  HIGH same-failing-command: \`pnpm test\` failed 3× in a row (5 min). (spans ${streak.spanIds.slice(0, 2).join(', ')}, …)`)
   })
 })
 
-describe('latency gating', () => {
-  const LATENCY_UNAVAILABLE: UnavailableCapabilities = new Map([
-    ['latency-analysis', '1 spans end before they start'],
-  ])
-
-  function toolPipelines(): PipelineReport {
-    return {
-      stuckLoops: { findings: [], affectedRunRatio: 0, totalRuns: 1 },
-      failureClusters: { clusters: [], totalFailures: 0, totalRuns: 1 },
-      toolUse: [{
-        runId: 'run-latency-test',
-        totalCalls: 10,
-        callsWithCapturedArgs: 10,
-        byTool: {
-          bash: { calls: 10, callsWithCapturedArgs: 10, errors: 0, duplicates: 0, avgLatencyMs: 5 },
-        },
-        duplicateRate: 0,
-        errorRate: 0,
-        retryRate: 0,
-      }],
-    }
-  }
-
-  // The tool table and the round table both print a duration, and neither was
-  // gated on `latency-analysis` — so a report could say "latency-analysis
-  // unavailable" at the top and then print a mean latency and a 279,042,860ms
-  // round duration with no marker on either.
-  it('marks the tool table and withholds its latency column', () => {
-    const report = renderPipelines(toolPipelines(), LATENCY_UNAVAILABLE)
-
-    expect(report).toContain('`latency-analysis` unavailable')
-    expect(report).toContain('| `bash` | 10 | 10/10 | 0/10 | 0/10 | not measurable |')
-    expect(report).not.toContain('5.0ms')
+describe('watch and analyze share one rule set', () => {
+  it('stream replays the findings analyze ranks, with the same spans', async () => {
+    const run = await runCli(['stream', fx.worker, '--mode', 'findings'], { env: fx.env })
+    expect(run.code).toBe(0)
+    const live = run.stdout.trim().split('\n').map((line) => JSON.parse(line) as { event: string; finding?: { ruleId: string; evidence: Array<{ spanIds?: string[] }> } })
+      .flatMap((event) => (event.finding ? [event.finding] : []))
+    const ranked = (await analysis([fx.worker])).packet.findings.filter((finding) => finding.metadata?.spanIds !== undefined)
+    expect(live.map((finding) => finding.ruleId).sort()).toEqual(ranked.map((finding) => finding.subject).sort())
+    const streak = live.find((finding) => finding.ruleId === 'same-failing-command')!
+    expect(streak.evidence[0]!.spanIds).toEqual(ranked.find((finding) => finding.subject === 'same-failing-command')!.metadata!.spanIds)
   })
 
-  it('prints the latency column when latency IS available', () => {
-    const report = renderPipelines(toolPipelines(), new Map([['token-accounting', 'no token attrs']]))
-
-    expect(report).not.toContain('`latency-analysis` unavailable')
-    expect(report).toContain('| `bash` | 10 | 10/10 | 0/10 | 0/10 | 5.0ms |')
-  })
-
-  const LOOP_CONVERGENCE_UNAVAILABLE: UnavailableCapabilities = new Map([
-    ['loop-convergence', 'agent.loop.iteration is present on 2 spans and always has the value 1'],
-  ])
-
-  it('marks the round table and withholds its duration column', () => {
-    const convergence: LoopConvergenceReport = {
-      iterationSpans: 2,
-      loops: [{
-        loopId: 'loop-a',
-        traceId: 'trace-a',
-        trend: 'improved',
-        basis: 'score',
-        detail: 'score 0.4 → 0.9',
-        iterations: [
-          {
-            iteration: 1,
-            spanId: 'round-1',
-            name: 'round 1',
-            outcome: 'fail',
-            score: 0.4,
-            verdictSpanId: 'verdict-1',
-            startTime: '2026-01-01T00:00:00.000Z',
-            durationMs: 279042860,
-          },
-        ],
-      }],
-    }
-    const report = renderLoopConvergence(convergence, LATENCY_UNAVAILABLE)
-
-    expect(report).toContain('`latency-analysis` unavailable')
-    expect(report).toContain('| 1 | `round-1` | fail | 0.4 | `verdict-1` | not measurable |')
-    expect(report).not.toContain('279,042,860ms')
-  })
-
-  it('withholds the trend verdict when loop-convergence is unavailable', () => {
-    // Every span declaring `agent.loop.iteration: 1` is one round: a trend
-    // across it compares a series to itself. The marker at the top of the
-    // section is not enough — a reader takes the word in the Trend column.
-    const convergence: LoopConvergenceReport = {
-      iterationSpans: 2,
-      loops: [{
-        loopId: 'loop-a',
-        traceId: 'trace-a',
-        trend: 'improved',
-        basis: 'score',
-        detail: 'score 0.4 → 0.9 across 2 graded round(s) (round 1 → 1)',
-        iterations: [
-          {
-            iteration: 1,
-            spanId: 'round-1',
-            name: 'round 1',
-            outcome: 'fail',
-            score: 0.4,
-            verdictSpanId: 'verdict-1',
-            startTime: '2026-01-01T00:00:00.000Z',
-            durationMs: 12,
-          },
-          {
-            iteration: 1,
-            spanId: 'round-2',
-            name: 'round 2',
-            outcome: 'pass',
-            score: 0.9,
-            verdictSpanId: 'verdict-2',
-            startTime: '2026-01-01T00:00:01.000Z',
-            durationMs: 12,
-          },
-        ],
-      }],
-    }
-    const report = renderLoopConvergence(convergence, LOOP_CONVERGENCE_UNAVAILABLE)
-
-    expect(report).toContain('`loop-convergence` unavailable')
-    expect(report).not.toContain('improved')
-    expect(report).not.toContain('score 0.4 → 0.9')
-    expect(report).not.toContain('1 improved')
-    expect(report).toContain('not measurable')
-    // The rounds themselves are still facts read from the trace.
-    expect(report).toContain('| 1 | `round-1` | fail | 0.4 | `verdict-1` | 12ms |')
-  })
-
-  it('prints the trend verdict when loop-convergence is available', () => {
-    const convergence: LoopConvergenceReport = {
-      iterationSpans: 2,
-      loops: [{
-        loopId: 'loop-a',
-        traceId: 'trace-a',
-        trend: 'improved',
-        basis: 'score',
-        detail: 'score 0.4 → 0.9',
-        iterations: [
-          {
-            iteration: 1,
-            spanId: 'round-1',
-            name: 'round 1',
-            outcome: 'fail',
-            score: 0.4,
-            verdictSpanId: 'verdict-1',
-            startTime: '2026-01-01T00:00:00.000Z',
-            durationMs: 12,
-          },
-          {
-            iteration: 2,
-            spanId: 'round-2',
-            name: 'round 2',
-            outcome: 'pass',
-            score: 0.9,
-            verdictSpanId: 'verdict-2',
-            startTime: '2026-01-01T00:00:01.000Z',
-            durationMs: 12,
-          },
-        ],
-      }],
-    }
-    const report = renderLoopConvergence(convergence, new Map())
-
-    expect(report).toContain('1 improved')
-    expect(report).toContain('score 0.4 → 0.9')
+  it('a command that failed twice is no streak and no finding: one definition, facts\' 3 in a row', async () => {
+    const twice = (await import('./fixtures/analyze.js')).workerSession().filter((row) => !JSON.stringify(row).includes('"t3"'))
+    const result = await analysis([await fx.file(`${WORKER_ID}.jsonl`, twice)])
+    expect(subjects(result)).not.toContain('same-failing-command')
   })
 })
 
-describe('renderPipelines', () => {
-  it('labels retries as a fraction of failed calls and prints raw counts', () => {
-    const report = renderPipelines({
-      stuckLoops: { findings: [], affectedRunRatio: 0, totalRuns: 1 },
-      failureClusters: { clusters: [], totalFailures: 0, totalRuns: 1 },
-      toolUse: [{
-        runId: 'run-report-test',
-        totalCalls: 358,
-        callsWithCapturedArgs: 300,
-        byTool: {
-          bash: {
-            calls: 358,
-            callsWithCapturedArgs: 300,
-            errors: 53,
-            duplicates: 36,
-            avgLatencyMs: 5,
-          },
-        },
-        duplicateRate: 36 / 358,
-        errorRate: 53 / 358,
-        retryRate: 52 / 53,
-      }],
-    })
-
-    expect(report).toContain('300/358 arguments captured')
-    expect(report).toContain('36/300 captured calls repeated exactly')
-    expect(report).toContain('53/358 failed')
-    expect(report).toContain('52/53 failed calls followed by another same-tool call (98%)')
-    expect(report).toContain('| `bash` | 358 | 300/358 | 36/300 | 53/358 | 5.0ms |')
-    expect(report).not.toContain('98% retry')
-    expect(report).not.toContain('failed calls retried')
+describe('false positives 0.23.1 printed', () => {
+  it('a gh-only pull-request review is not a repeated verification', async () => {
+    const result = await analysis([fx.review])
+    expect(subjects(result)).not.toContain('verification-without-change')
+    expect(subjects(result)).not.toContain('completion-claim-without-verification')
   })
 
-  it('aggregates tool metrics instead of printing one line per trace', () => {
-    const report = renderPipelines({
-      stuckLoops: { findings: [], affectedRunRatio: 0, totalRuns: 3 },
-      failureClusters: { clusters: [], totalFailures: 0, totalRuns: 3 },
-      toolUse: [
-        {
-          runId: 'a',
-          totalCalls: 10,
-          callsWithCapturedArgs: 8,
-          byTool: {
-            bash: {
-              calls: 10,
-              callsWithCapturedArgs: 8,
-              errors: 2,
-              duplicates: 3,
-              avgLatencyMs: 5,
-            },
-          },
-          duplicateRate: 0.3,
-          errorRate: 0.2,
-          retryRate: 0.5,
-        },
-        {
-          runId: 'b',
-          totalCalls: 5,
-          callsWithCapturedArgs: 5,
-          byTool: {
-            read: {
-              calls: 5,
-              callsWithCapturedArgs: 5,
-              errors: 0,
-              duplicates: 1,
-              avgLatencyMs: 2,
-            },
-          },
-          duplicateRate: 0.2,
-          errorRate: 0,
-          retryRate: 0,
-        },
-        {
-          runId: 'c',
-          totalCalls: 0,
-          callsWithCapturedArgs: 0,
-          byTool: {},
-          duplicateRate: 0,
-          errorRate: 0,
-          retryRate: 0,
-        },
-      ],
-    })
+  it('no one-tool or no-check finding on a run under 10 tool calls', async () => {
+    const result = await analysis([await fx.file('c0ffee01-0000-4000-8000-000000000001.jsonl', toolRunSession('c0ffee01-0000-4000-8000-000000000001', 'Bash', 5, false))])
+    expect(subjects(result)).not.toContain('single-tool-dependency')
+    expect(subjects(result)).not.toContain('no-self-verification')
+  })
 
-    expect(report).toContain('15 calls across 2/3 traces')
-    expect(report).toContain('13/15 arguments captured')
-    expect(report).toContain('4/13 captured calls repeated exactly')
-    expect(report).toContain('2/15 failed; 1/2 failed calls followed by another same-tool call (50%)')
-    expect(report).toContain('| `bash` | 10 | 8/10 | 3/8 | 2/10 | 5.0ms |')
-    expect(report).toContain('| `read` | 5 | 5/5 | 1/5 | 0/5 | 2.0ms |')
-    expect(report.match(/\*\*Tool use:\*\*/g)).toHaveLength(1)
+  it('no one-tool finding on a shell, and no no-check finding on a run whose commands ran a check', async () => {
+    const result = await analysis([await fx.file('c0ffee02-0000-4000-8000-000000000002.jsonl', toolRunSession('c0ffee02-0000-4000-8000-000000000002', 'Bash', 12, true))])
+    expect(subjects(result)).not.toContain('single-tool-dependency')
+    expect(subjects(result)).not.toContain('no-self-verification')
+  })
+
+  it('still names a 12-call run of one non-shell tool with no check; the no-check finding at its measured LOW', async () => {
+    const result = await analysis([await fx.file('c0ffee03-0000-4000-8000-000000000003.jsonl', toolRunSession('c0ffee03-0000-4000-8000-000000000003', 'WebFetch', 12, false))])
+    const bySubject = new Map(result.packet.findings.map((finding) => [finding.subject, finding.severity]))
+    expect(bySubject.get('single-tool-dependency')).toBe('medium')
+    expect(bySubject.get('no-self-verification')).toBe('low')
   })
 })
 
-describe('summarizeDeterministicSignals', () => {
-  it('summarizes deterministic loop, reaction, and failed-run signals for the report headline', () => {
-    const pipelines = {
-      stuckLoops: {
-        findings: [
-          { runId: 'r1', toolName: 'Read', argHash: 'a', occurrences: 3, spanIds: [], windowMs: 10 },
-          { runId: 'r2', toolName: 'ToolSearch', argHash: 'b', occurrences: 3, spanIds: [], windowMs: 10 },
-        ],
-        affectedRunRatio: 2 / 3,
-        totalRuns: 3,
-      },
-      failureClusters: { clusters: [], totalFailures: 2, totalRuns: 3 },
-      toolUse: [],
-    } satisfies PipelineReport
-    const reactions = {
-      signals: { correction: 3, frustration: 2, jargon: 1, structure: 0, praise: 1 },
-    } as ReactionReport
-
-    expect(summarizeDeterministicSignals(pipelines, reactions)).toEqual({
-      stuckLoops: 2,
-      reactionSignals: 7,
-      failedRuns: 2,
-      totalSignals: 11,
-    })
-  })
-})
-
-describe('analystRunDetail', () => {
-  const usage = {
-    calls: 0,
-    tokens: { input: 0, output: 0 },
-    cost: { kind: 'observed', usd: 0 },
-  } as const
-
-  it('carries the engine error for a failed analyst into the report table', () => {
-    const bridgeError =
-      "DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly ['controlAdapter', 'instructions', 'limits', 'modelProxy', 'operation', 'question', 'toolCallback', 'toolSpecs'] stdout="
-    const result = emptyResult()
-    result.per_analyst.push({
-      analyst_id: 'failure-mode',
-      status: 'failed',
-      findings_count: 0,
-      latency_ms: 141,
-      usage,
-      error: { class: 'Error', message: bridgeError },
-    })
-
-    const report = renderReport(result, {
-      harness: 'claude-code',
-      sessionCount: 1,
-      spanCount: 10,
-      execution: EMPTY_EXECUTION,
-    })
-    expect(report).toContain('| Analyst | Status | Findings | Latency | Detail |')
-    expect(report).toContain('DSPY-BRIDGE-FAILURE: ValueError: analyze input must contain exactly')
-    expect(report).toContain('| `efficiency-behavioral` | ok | 0 | 347ms | — |')
-  })
-
-  it('condenses a markerless bridge traceback while keeping the terminal exception', () => {
-    // The pinned agent-eval-rpc release emits no DSPY-BRIDGE-FAILURE marker;
-    // its failures are raw tracebacks whose actionable line is the LAST one.
-    const detail = analystRunDetail({
-      analyst_id: 'failure-mode',
-      status: 'failed',
-      findings_count: 0,
-      latency_ms: 1,
-      usage,
-      error: {
-        class: 'Error',
-        message:
-          'DSPy RLM trace analysis exited 1. stderr=Traceback (most recent call last):\n' +
-          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 210, in _main\n' +
-          '    output = _analyze(validated)\n'.repeat(30) +
-          '  File "/venv/lib/python3.12/site-packages/agent_eval_rpc/dspy_rlm_bridge.py", line 547, in _parse_findings_json\n' +
-          'ValueError: DSPy RLM findings_json must be valid JSON stdout=',
-      },
-    })
-    expect(detail).toContain('Error: DSPy RLM trace analysis exited 1.')
-    expect(detail).toContain(' … ')
-    expect(detail).toContain('ValueError: DSPy RLM findings_json must be valid JSON')
-    expect(detail).not.toContain('\n')
-    expect(detail.length).toBeLessThanOrEqual(243)
-  })
-
-  it('never splits a surrogate pair at a truncation boundary', () => {
-    // Emoji land exactly around both slice points of the head+tail split.
-    const detail = analystRunDetail({
-      analyst_id: 'failure-mode',
-      status: 'failed',
-      findings_count: 0,
-      latency_ms: 1,
-      usage,
-      // The composed 'Error: ' prefix is 7 UTF-16 units, so every emoji sits
-      // at an odd offset and a code-unit slice must cut through a pair.
-      error: { class: 'Error', message: '💥'.repeat(400) },
-    })
-    // A /u regex can only match \p{Surrogate} against a LONE surrogate; a
-    // correctly paired emoji decodes to one code point and never matches.
-    expect(/\p{Surrogate}/u.test(detail)).toBe(false)
-    expect(detail).toContain(' … ')
-  })
-
-  it('keeps the cell inside its length budget when a rejection summary shares it', () => {
-    const detail = analystRunDetail({
-      analyst_id: 'failure-mode',
-      status: 'failed',
-      findings_count: 0,
-      latency_ms: 1,
-      usage,
-      error: { class: 'Error', message: 'DSPy RLM trace analysis exited 1. stderr='.repeat(20) },
-    }, { [`the cited span holds no text matching the excerpt ${'x'.repeat(400)}`]: 3 })
-    // Both parts survive, and the cell keeps the same bound a lone condensed
-    // error keeps: ANALYST_DETAIL_MAX_CHARS plus the ' … ' join.
-    expect(detail).toContain('DSPy RLM trace analysis exited 1.')
-    expect(detail).toContain('3 finding(s) rejected:')
-    expect([...detail].length).toBeLessThanOrEqual(243)
-  })
-
-  it('renders a whitespace-only error as the empty-cell dash', () => {
-    expect(analystRunDetail({
-      analyst_id: 'failure-mode',
-      status: 'failed',
-      findings_count: 0,
-      latency_ms: 1,
-      usage,
-      error: { class: '', message: ' \n\t ' },
-    })).toBe('—')
-  })
-
-  it('extracts the DSPY-BRIDGE-FAILURE line and drops the trailing traceback', () => {
-    const detail = analystRunDetail({
-      analyst_id: 'failure-mode',
-      status: 'failed',
-      findings_count: 0,
-      latency_ms: 141,
-      usage,
-      error: {
-        class: 'Error',
-        message:
-          'DSPy RLM trace analysis exited 1. stderr=DSPY-BRIDGE-FAILURE: ValueError: bad input ' +
-          'Traceback (most recent call last): File "bridge.py", line 1, in main stdout=',
-      },
-    })
-    expect(detail).toBe('DSPY-BRIDGE-FAILURE: ValueError: bad input')
-  })
-
-  it('reports the skip reason and stays silent for clean rows', () => {
-    const skipped = analystRunDetail({
-      analyst_id: 'knowledge-gap',
-      status: 'skipped',
-      reason: 'missing input: traceStore',
-      findings_count: 0,
-      latency_ms: 0,
-      usage,
-    })
-    expect(skipped).toBe('missing input: traceStore')
-    expect(analystRunDetail({
-      analyst_id: 'efficiency-behavioral',
-      status: 'ok',
-      findings_count: 2,
-      latency_ms: 5,
-      usage,
-    })).toBe('—')
-  })
-
-  it('names the evidence gate\'s rejection reasons for an analyst that returned no findings', () => {
-    const summary = {
-      analyst_id: 'failure-mode',
-      status: 'ok',
-      findings_count: 0,
-      latency_ms: 5,
-      usage,
-    } as const
-    expect(analystRunDetail(summary, {
-      'excerpt is not present in the cited span content': 2,
-      'trace span does not exist': 3,
-    })).toBe(
-      '5 finding(s) rejected: trace span does not exist ×3; excerpt is not present in the cited span content ×2',
-    )
-    expect(analystRunDetail(summary, {})).toBe('—')
-
-    const result = emptyResult()
-    result.per_analyst.push(summary)
-    const report = renderReport(result, {
-      harness: 'codex',
-      sessionCount: 1,
-      spanCount: 10,
-      execution: EMPTY_EXECUTION,
-      findingRejections: { 'failure-mode': { 'insufficient evidence citations': 1 } },
-    })
-    expect(report).toContain('| `failure-mode` | ok | 0 | 5ms | 1 finding(s) rejected: insufficient evidence citations ×1 |')
+describe('several sessions', () => {
+  it('a window prints the fleet header and a table of the sessions with the most waste', async () => {
+    const text = await analyze(['--since', '2026-10-01T00:00:00Z'])
+    const lines = text.trimEnd().split('\n')
+    expect(lines.length).toBeLessThanOrEqual(40)
+    expect(lines[0]).toMatch(/^2 sessions \(claude-code 2\) · 10-14 10:00→10-16 10:29 UTC, 48h 29m · \$[\d.]+ list price \(Router rates\) · waste 0\.\d h · 1 interrupt$/u)
+    expect(lines[1]).toMatch(/^session +harness +repo +active +cost +waste +streaks +stalls +signals +PRs +asked$/u)
+    // The worker wasted more: it is first.
+    expect(lines[2]).toMatch(new RegExp(`^${WORKER_ID.slice(0, 8)} claude-code`, 'u'))
+    expect(lines[3]).toMatch(new RegExp(`^${REVIEW_ID.slice(0, 8)} claude-code`, 'u'))
+    expect(text).toMatch(new RegExp(`^ {2}HIGH ${WORKER_ID.slice(0, 8)} same-failing-command: `, 'mu'))
   })
 })

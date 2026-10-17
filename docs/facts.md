@@ -166,7 +166,7 @@ share-safety certificate.
 ## Prepared context for analysts
 
 The same sheet is supplied to the model-backed analysts before their first model call, through `TraceAnalystDefinition.prepareContext`.
-It reaches the built-in kinds run by `analyze --llm` and `improve`, and it reaches every `traces ask` question inside `PREPARED CONTEXT:`.
+It reaches every `traces ask` question inside `PREPARED CONTEXT:`.
 
 - The sheet is bounded at `PREPARED_CONTEXT_BYTE_CEILING` (30,000 bytes), a fifth of the `perCallByteCeiling` of 150,000 the trace tools work to, so the rest of the budget stays available for the tool calls the model still makes.
 - When the sheet does not fit, fields are shed from the largest downward and the shed is listed in `omitted_fields`. The tool-call counts are the last facts to go.

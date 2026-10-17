@@ -70,11 +70,11 @@ describe('supervisor reports', () => {
     expect(rollup.stdout).toContain('Steers across all cells: 1')
     expect(rollup.stdout).toContain('| sup-1 | ARM |')
 
-    const out = join(root, 'supervisor.md')
+    const out = join(root, 'supervisor')
     const written = await run(['analyze', dir, '--out', out])
-    expect(written.stdout).toContain(`supervisor report → ${out}`)
+    expect(written.stdout).toContain(`supervisor report → ${join(out, 'report.md')}`)
     const withoutGeneratedTime = (text: string) => text.replace(/^- Generated: .+$/m, '').trimEnd()
-    expect(withoutGeneratedTime(await readFile(out, 'utf8'))).toBe(withoutGeneratedTime(single.stdout))
+    expect(withoutGeneratedTime(await readFile(join(out, 'report.md'), 'utf8'))).toBe(withoutGeneratedTime(single.stdout))
   }, 120_000)
 
   it('reports a Runtime failure before the first spawn instead of rejecting the directory', async () => {

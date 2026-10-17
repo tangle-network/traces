@@ -13,44 +13,19 @@ It emits newline-delimited JSON events that a dashboard, art visualizer, local w
 ```bash
 traces stream
 traces stream --mode findings
-traces stream --mode agent --config traces.config.mjs
+traces stream --mode agent
 traces stream spans.openinference.jsonl --no-spans
 ```
 
 Live streaming emits `session`, `span`, `analysis_batch`, `finding`, and `tick` events; `--mode agent` also emits `report` events.
-The semantic findings currently cover repeated failing commands, verification churn without code/config changes, completion claims without later verification, and high tool-error rates.
+The findings are the rules `traces analyze` ranks (`src/pipelines.ts`): a command that failed 3 or more times in a row, a check rerun 3 or more times with no edit between, a completion claim after an edit with no check since, and high tool-error rates.
 Use `--mode findings` when you want the low-volume meaning layer; keep `visualizer` for real-time views that need motion, timing, and tool-call texture.
 Use `--mode agent` when another agent needs deterministic loop/tool-use reports alongside the findings.
 The same JSONL shape is used for live sessions and replayed trace files:
 
 ![traces stream findings mode terminal capture](./stream-findings.svg)
 
-Custom online analysts use the same config file as `analyze --config` and `improve`:
-
-```js
-export default {
-  liveAnalysts: [{
-    id: 'my-live-rule',
-    analyze(context) {
-      return context.actions.some((action) => action.kind === 'claim') ? [{
-        schemaVersion: 1,
-        kind: 'traces.live_finding',
-        id: `live.my-live-rule.${context.session.sessionId}`,
-        ruleId: 'my-live-rule',
-        fingerprint: `my-live-rule.${context.session.sessionId}`,
-        severity: 'info',
-        title: 'Completion claim seen',
-        claim: 'A claim-like assistant message appeared in the live trace.',
-        action: 'Require the next stream batch to include a verification action.',
-        check: 'A later finding or batch should show a test/build/typecheck action.',
-        evidence: [{ kind: 'metric', label: 'actions', value: String(context.actions.length) }],
-        session: context.session,
-        observedAt: context.generatedAt,
-      }] : []
-    },
-  }],
-}
-```
+Custom live analysts go through the SDK: `streamSessions({ extraAnalysts })` runs them after the built-in rules, on the same classified actions.
 
 ## Watch a run tree
 

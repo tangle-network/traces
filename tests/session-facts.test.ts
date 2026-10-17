@@ -17,25 +17,14 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_TRACE_ANALYST_KINDS,
-  defineTraceAnalyst,
-  type TraceAnalysisEngine,
-  type TraceAnalysisEngineRequest,
-  type TraceAnalystDefinition,
-} from '@tangle-network/agent-eval/analyst'
-import type { TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
-import {
   buildSessionFactsReport,
   computeSessionFacts,
   PREPARED_CONTEXT_BYTE_CEILING,
   renderSessionFacts,
   renderSessionFactsContext,
-  SESSION_FACTS_VERSION_SUFFIX,
   sessionFactsContext,
-  withSessionFactsContext,
 } from '../src/session-facts.js'
 import { SYNTHESIZED_SPAN_ATTR } from '../src/adapters/provenance.js'
-import { analyzeSpans } from '../src/analyze.js'
 import { serializeSpans } from '../src/otlp.js'
 import {
   FIXTURE_AGENT_PATH,
@@ -227,62 +216,8 @@ describe('session facts as prepared context', () => {
     expect(context).toContain('no model call')
   })
 
-  it('supplies the sheet to a built-in kind without dropping its own context', async () => {
-    const spans = await fixtureSpans()
-    const base: TraceAnalystDefinition = defineTraceAnalyst({
-      id: 'fixture-kind',
-      description: 'a kind that already prepares context',
-      area: 'fixture',
-      version: '2.0.0',
-      instructions: 'Investigate.',
-      toolGroup: 'all',
-      prepareContext: () => 'OWN CONTEXT',
-    })
-    const [wrapped] = withSessionFactsContext([base], spans)
-    expect(wrapped!.version).toBe(`2.0.0+${SESSION_FACTS_VERSION_SUFFIX}`)
-    const prepared = await wrapped!.prepareContext!({} as TraceAnalysisStore, { runId: 'r', correlationId: 'r:1' })
-    expect(prepared!.startsWith('OWN CONTEXT\n\n')).toBe(true)
-    expect(prepared).toContain('SESSION FACTS')
-    expect(Buffer.byteLength(prepared!)).toBeLessThanOrEqual(
-      PREPARED_CONTEXT_BYTE_CEILING + Buffer.byteLength('OWN CONTEXT\n\n'),
-    )
-  })
-
   it('prepares nothing when there are no spans', () => {
     expect(sessionFactsContext([])).toBeUndefined()
-  })
-})
-
-describe('analyzeSpans', () => {
-  it('hands the sheet to the built-in kinds, and can be run without it', async () => {
-    const spans = await fixtureSpans()
-    const requests: TraceAnalysisEngineRequest[] = []
-    const engine: TraceAnalysisEngine = {
-      id: 'session-facts-test-engine',
-      description: 'records the instructions it is given instead of calling a model',
-      model: 'test-model',
-      version: '1.0.0',
-      executionConfig: {},
-      async analyze(request) {
-        requests.push(request)
-        return { answer: 'noted', findings: [], trajectory: [], modelCalls: 1, toolCalls: 0, runtime: {} }
-      },
-    }
-
-    await analyzeSpans(spans, { engine, agenticKinds: DEFAULT_TRACE_ANALYST_KINDS.slice(0, 1) })
-    expect(requests).toHaveLength(1)
-    const prepared = requests[0]!.instructions.split('PREPARED CONTEXT:\n')[1]!
-    expect(prepared).toContain('SESSION FACTS')
-    expect(JSON.parse(prepared.slice(prepared.indexOf('\n') + 1).split('\n\n')[0]!))
-      .toMatchObject({ sessions: [{ tool_calls: { count: 4, synthesized_excluded: 0 } }] })
-
-    requests.length = 0
-    await analyzeSpans(spans, {
-      engine,
-      agenticKinds: DEFAULT_TRACE_ANALYST_KINDS.slice(0, 1),
-      sessionFactsContext: false,
-    })
-    expect(requests[0]!.instructions).not.toContain('SESSION FACTS')
   })
 })
 
