@@ -1,730 +1,240 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+/**
+ * `traces ask` through the built CLI (spec U12). The only fakes are process
+ * boundaries: the model endpoint (an HTTP server) and the DSPy bridge (a stub
+ * child process named by TRACES_PYTHON, or run as `uvx`). The engine, its
+ * model proxy, Runtime's router transport, the shared ledger, the retry and
+ * the citation check are the shipped code.
+ */
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { setTimeout as sleep } from 'node:timers/promises'
-import type {
-  TraceAnalysisEngine,
-  TraceAnalysisEngineRequest,
-  TraceAnalysisEngineResult,
-} from '@tangle-network/agent-eval/analyst'
-import { describe, expect, it } from 'vitest'
-import {
-  loadTraceQuestionsFile,
-  MAX_TRACE_QUESTION_CHARS,
-  normalizeTraceQuestions,
-  renderTraceQuestionInstructions,
-  runTraceQuestions,
-  TRACE_QUESTION_PREVIEW_HEAD_CHARS,
-  traceCitationsInText,
-  writeTraceQuestionsArtifacts,
-} from '../src/ask.js'
-import { answerSchemaErrors, assertAnswerSchema, parseJsonAnswer } from '../src/answer-schema.js'
-import { type OtlpSpan, span } from '../src/otlp.js'
+import { dirname, join } from 'node:path'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { ASK_KEY, type BridgeScript, type EndpointReply, type FakeEndpoint, startEndpoint, writeAskSession, writeStubBridge } from './fixtures/ask.js'
+import { CLI, type CliRun, runCli } from './run-cli.js'
 
-const TRACE = 'trace-ask'
-const COMMAND = 'git status --short && pnpm test'
+const AGENT_EVAL = (JSON.parse(await readFile(join(dirname(CLI), '..', 'package.json'), 'utf8')) as {
+  dependencies: Record<string, string>
+}).dependencies['@tangle-network/agent-eval']!
 
-/** A small synthetic session: one prompt, one shell command, one reply. */
-function fixtureSpans(): OtlpSpan[] {
-  const base = Date.parse('2026-02-01T10:00:00.000Z')
-  const at = (seconds: number) => new Date(base + seconds * 1000).toISOString()
-  return [
-    span({
-      traceId: TRACE,
-      spanId: 'root',
-      name: 'session',
-      kind: 'AGENT',
-      startTime: at(0),
-      endTime: at(30),
-      service: 'synthetic',
-      extra: { 'session.id': 'session-ask' },
-    }),
-    span({
-      traceId: TRACE,
-      spanId: 'prompt-1',
-      parentSpanId: 'root',
-      name: 'user.prompt',
-      kind: 'CHAIN',
-      startTime: at(1),
-      service: 'synthetic',
-      content: 'Run the unit tests and tell me whether they pass.',
-    }),
-    span({
-      traceId: TRACE,
-      spanId: 'tool-1',
-      parentSpanId: 'root',
-      name: 'tool.exec_command',
-      kind: 'TOOL',
-      startTime: at(5),
-      endTime: at(9),
-      service: 'synthetic',
-      tool: 'exec_command',
-      extra: { 'input.value': JSON.stringify({ cmd: COMMAND }), 'output.value': '12 passed' },
-    }),
-    span({
-      traceId: TRACE,
-      spanId: 'reply-1',
-      parentSpanId: 'root',
-      name: 'llm.turn',
-      kind: 'LLM',
-      startTime: at(10),
-      service: 'synthetic',
-      content: 'All 12 unit tests passed.',
-    }),
-  ]
+interface Answers {
+  ok: boolean
+  budgetUsd: number
+  questionBudgetUsd: number
+  questionTimeoutMs: number
+  concurrency: number
+  engine: { model: string }
+  questions: Array<{
+    id: string
+    status: string
+    answer: string | null
+    failure?: { kind: string; message: string }
+    citations: Array<{ uri: string; resolved: boolean }>
+    parsedAnswer?: unknown
+  }>
 }
 
-type Script = (request: TraceAnalysisEngineRequest) => Promise<Partial<TraceAnalysisEngineResult>>
+let dir: string
+let session: Awaited<ReturnType<typeof writeAskSession>>
+let endpoint: FakeEndpoint | undefined
+beforeAll(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'traces-ask-'))
+  session = await writeAskSession(dir)
+})
+afterEach(async () => {
+  await endpoint?.close()
+  endpoint = undefined
+})
 
-/** A fake engine that runs a script per request and records every request. */
-function scriptedEngine(script: Script, executionConfig: Record<string, unknown> = {}) {
-  const requests: TraceAnalysisEngineRequest[] = []
-  const engine: TraceAnalysisEngine = {
-    id: 'scripted-test-engine',
-    description: 'Runs a test script instead of a model.',
-    model: 'test-model',
-    version: '1.0.0',
-    executionConfig,
-    async analyze(request) {
-      requests.push(request)
-      const result = await script(request)
-      return {
-        answer: '',
-        findings: [],
-        trajectory: [],
-        modelCalls: 1,
-        toolCalls: 0,
-        runtime: {},
-        ...result,
-      }
+const cite = () => `trace://${session.traceId}/span/${session.toolSpanId}`
+
+/** A run against a fresh endpoint and stub bridge, in a fresh home. */
+async function ask(
+  argv: readonly string[],
+  opts: { replies?: readonly EndpointReply[]; bridge?: readonly BridgeScript[]; env?: Record<string, string> } = {},
+): Promise<CliRun & { endpoint: FakeEndpoint; bridgeLog: string }> {
+  const run = await mkdtemp(join(dir, 'run-'))
+  endpoint = await startEndpoint(opts.replies ?? ['ok'])
+  const bridge = await writeStubBridge(join(run, 'bridge'), opts.bridge ?? [{ match: '', answer: `It failed at ${cite()}.` }])
+  const result = await runCli(argv, {
+    env: {
+      HOME: join(run, 'home'),
+      XDG_STATE_HOME: join(run, 'state'),
+      TANGLE_API_KEY: ASK_KEY,
+      OPENAI_BASE_URL: endpoint.baseUrl,
+      TRACES_PYTHON: bridge.path,
+      ...opts.env,
     },
-  }
-  return { engine, requests }
-}
-
-function tool(request: TraceAnalysisEngineRequest, name: string) {
-  const found = request.tools.find((candidate) => candidate.name === name)
-  if (!found) throw new Error(`tool ${name} was not offered`)
-  return found
-}
-
-function questionId(request: TraceAnalysisEngineRequest): string {
-  return request.analystId.replace(/^ask\./, '')
-}
-
-function deferred() {
-  let resolve!: () => void
-  const promise = new Promise<void>((done) => { resolve = done })
-  return { promise, resolve }
-}
-
-async function until(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error('condition not reached')
-    await sleep(5)
-  }
-}
-
-describe('runTraceQuestions', () => {
-  it('keeps each answer verbatim, verifies its citations, and writes both artifacts', async () => {
-    const { engine } = scriptedEngine(async (request) => {
-      // The engine reads through the real tool handler it was given.
-      const viewed = await tool(request, 'viewSpans').handler({ trace_id: TRACE, span_ids: ['tool-1'] }) as {
-        spans: Array<{ span_id: string }>
-      }
-      expect(viewed.spans.map((entry) => entry.span_id)).toEqual(['tool-1'])
-      return {
-        answer: `The session ran \`${COMMAND}\` once (trace://${TRACE}/span/tool-1).`,
-        findings: [{
-          severity: 'info',
-          claim: 'The unit tests ran once.',
-          confidence: 0.9,
-          evidence: [{ uri: `trace://${TRACE}/span/tool-1`, excerpt: 'git status --short' }],
-        }],
-        toolCalls: 1,
-      }
-    })
-    const dir = await mkdtemp(join(tmpdir(), 'traces-ask-test-'))
-    const result = await runTraceQuestions({
-      questions: [{ id: 'commands', question: 'Which shell commands ran?' }],
-      spans: fixtureSpans(),
-      engine,
-      harness: 'synthetic',
-    })
-
-    expect(result.ok).toBe(true)
-    const [answer] = result.questions
-    expect(answer!.status).toBe('answered')
-    expect(answer!.answer).toBe(`The session ran \`${COMMAND}\` once (trace://${TRACE}/span/tool-1).`)
-    expect(answer!.citations).toEqual([{ uri: `trace://${TRACE}/span/tool-1`, traceId: TRACE, spanId: 'tool-1', resolved: true }])
-    expect(answer!.findings).toHaveLength(1)
-    expect(answer!.modelCalls).toBe(1)
-    expect(answer!.toolCalls).toBe(1)
-    expect(answer!.model).toBe('test-model')
-    expect(result.traces).toEqual([expect.objectContaining({ traceId: TRACE, sessionId: 'session-ask', spanCount: 4 })])
-
-    const artifacts = await writeTraceQuestionsArtifacts(result, dir)
-    const saved = JSON.parse(await readFile(artifacts.result, 'utf8')) as typeof result
-    expect(saved.questions[0]!.answer).toBe(answer!.answer)
-    expect(saved).not.toHaveProperty('report')
-    expect(await readFile(artifacts.report, 'utf8')).toContain(answer!.answer!)
+    timeoutMs: 120_000,
   })
+  return { ...result, endpoint, bridgeLog: bridge.log }
+}
 
-  it('never runs more questions at once than the concurrency limit', async () => {
-    const gates = new Map<string, ReturnType<typeof deferred>>()
-    const started: string[] = []
-    let running = 0
-    let peak = 0
-    const { engine } = scriptedEngine(async (request) => {
-      const id = questionId(request)
-      started.push(id)
-      running += 1
-      peak = Math.max(peak, running)
-      const gate = deferred()
-      gates.set(id, gate)
-      await gate.promise
-      running -= 1
-      return { answer: `answer ${id}` }
-    })
-    const run = runTraceQuestions({
-      questions: ['one', 'two', 'three', 'four', 'five'].map((question) => ({ question: `Question ${question}?` })),
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 3,
-    })
+const errorOf = (stderr: string): { error: string; code: string } => JSON.parse(stderr.trim().split('\n').at(-1)!) as { error: string; code: string }
 
-    await until(() => started.length === 3)
-    await sleep(50)
-    // Two questions wait until a running one finishes.
-    expect(started).toEqual(['q1', 'q2', 'q3'])
-    gates.get('q2')!.resolve()
-    await until(() => started.length === 4)
-    await sleep(50)
-    expect(started).toHaveLength(4)
-    for (const id of ['q1', 'q3']) gates.get(id)!.resolve()
-    await until(() => started.length === 5)
-    for (const id of ['q4', 'q5']) gates.get(id)!.resolve()
+describe('traces ask: before it spends', () => {
+  it('needs --budget, a question and well-formed questions, and spends nothing without them', async () => {
+    const noBudget = await ask(['ask', session.path, '--question', 'Which command failed first?'])
+    expect(noBudget.code).toBe(2)
+    expect(noBudget.stderr).toContain('ask needs --budget USD, the most the run may spend')
+    expect(noBudget.stderr).toContain(`traces ask ${session.path} --question 'Which command failed first?' --budget 1`)
 
-    const result = await run
-    expect(peak).toBe(3)
-    expect(result.totals.peakConcurrency).toBe(3)
-    expect(result.questions.map((answer) => answer.answer)).toEqual(['q1', 'q2', 'q3', 'q4', 'q5'].map((id) => `answer ${id}`))
-  })
+    const noQuestion = await ask(['ask', session.path, '--budget', '1', '--format', 'json'])
+    expect(noQuestion.code).toBe(2)
+    expect(errorOf(noQuestion.stderr)).toMatchObject({ code: 'usage', error: expect.stringContaining('ask needs --question') })
 
-  it('overlaps questions, so wall time stays well below the sum of question times', async () => {
-    const { engine } = scriptedEngine(async (request) => {
-      await sleep(200)
-      return { answer: `answer ${questionId(request)}` }
-    })
-    const result = await runTraceQuestions({
-      questions: Array.from({ length: 6 }, (_, index) => ({ question: `Question ${index + 1}?` })),
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 6,
-    })
-    expect(result.ok).toBe(true)
-    // Six 200 ms questions: serial would take 1.2 s or more.
-    expect(result.totals.questionTimeMs).toBeGreaterThanOrEqual(1_200)
-    expect(result.totals.wallTimeMs).toBeLessThan(result.totals.questionTimeMs / 2)
-    expect(result.totals.peakConcurrency).toBe(6)
-    expect(result.report).toMatch(
-      /Wall time \d+\.\d s \(\d+\.\d s of it building the trace store\) against \d+\.\d s of question time \(peak 6 at once\)/,
-    )
-    expect(result.totals.setupTimeMs).toBeLessThanOrEqual(result.totals.wallTimeMs)
-  })
+    const file = join(dir, 'typo.json')
+    await writeFile(file, JSON.stringify([{ question: 'Anything?', schema: { type: 'string' } }]), 'utf8')
+    const typo = await ask(['ask', session.path, '--questions', file, '--budget', '1', '--format', 'json'])
+    expect(errorOf(typo.stderr)).toMatchObject({ code: 'usage', error: expect.stringContaining('entry 1 has unknown key "schema"') })
 
-  it('reports questions the shared ledger refused while the others keep their answers', async () => {
-    const { engine } = scriptedEngine(async (request) => {
-      // One metered call per question: reserve $0.40, settle at $0.30.
-      const paid = await request.costLedger.runPaidCall({
-        channel: 'analyst',
-        phase: request.costPhase,
-        actor: request.analystId,
-        ...(request.costTags ? { tags: request.costTags } : {}),
-        maximumCharge: { externallyEnforcedMaximumUsd: 0.4 },
-        execute: async () => {
-          await sleep(20)
-          return 'ok'
-        },
-        receipt: () => ({ model: 'test-model', inputTokens: 100, outputTokens: 50, actualCostUsd: 0.3 }),
-      })
-      if (!paid.succeeded) throw paid.error
-      return { answer: `answer ${questionId(request)}` }
-    })
-    const result = await runTraceQuestions({
-      questions: Array.from({ length: 5 }, (_, index) => ({ question: `Question ${index + 1}?` })),
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 5,
-      budgetUsd: 1,
-    })
+    const long = await ask(['ask', session.path, '--question', 'x'.repeat(2_000), '--budget', '1'])
+    expect(long.code).toBe(2)
+    expect(long.stderr).toMatch(/the limit is \d+ so the model sees it whole/u)
 
-    // $1 admits three $0.30 calls; after them, $0.10 is left and a $0.40 reservation is refused.
-    const answered = result.questions.filter((answer) => answer.status === 'answered')
-    const refused = result.questions.filter((answer) => answer.failure?.kind === 'budget-refused')
-    expect(answered).toHaveLength(3)
-    expect(refused).toHaveLength(2)
-    for (const answer of refused) {
-      expect(answer.failure!.message).toContain('would exceed ceiling 1')
-      expect(answer.answer).toBeNull()
+    for (const run of [noBudget, noQuestion, typo, long]) {
+      expect(run.stdout).toBe('')
+      expect(run.endpoint.requests).toHaveLength(0)
+      expect(existsSync(run.bridgeLog)).toBe(false)
     }
-    for (const answer of answered) expect(answer.usage?.cost).toEqual({ kind: 'observed', usd: 0.3 })
-    expect(result.ok).toBe(false)
-    expect(result.totals.cost.usd).toBeCloseTo(0.9, 10)
-    expect(result.totals.cost.usd!).toBeLessThanOrEqual(1)
-    expect(result.report).toContain('failed: budget-refused')
   })
 
-  it('refuses to start when the budget cannot cover one model call', async () => {
-    const { engine, requests } = scriptedEngine(async () => ({ answer: 'never' }), {
-      pricing: { inputUsdPerMillion: 1.25, outputUsdPerMillion: 10 },
-      max_output_tokens: 8_192,
-      max_reasoning_tokens: 32_768,
-    })
-    await expect(runTraceQuestions({
-      questions: [{ question: 'Anything?' }],
-      spans: fixtureSpans(),
-      engine,
-      budgetUsd: 0.1,
-    })).rejects.toThrow(/below one model call's reservation of at least \$0\.41/)
-    expect(requests).toHaveLength(0)
+  it('refuses a model it cannot price, since it could not bound the spend', async () => {
+    const run = await ask(['ask', session.path, '--question', 'q', '--model', 'no-such-model-s18', '--budget', '1', '--format', 'json'])
+    expect(run.code).toBe(2)
+    expect(errorOf(run.stderr)).toMatchObject({ code: 'model', error: expect.stringContaining('ask cannot price --model no-such-model-s18') })
+    expect(run.endpoint.requests).toHaveLength(0)
+    expect(existsSync(run.bridgeLog)).toBe(false)
   })
 
-  it('warns when the budget serializes concurrent questions', async () => {
-    const { engine } = scriptedEngine(async () => ({ answer: 'fine' }), {
-      pricing: { inputUsdPerMillion: 1.25, outputUsdPerMillion: 10 },
-      max_output_tokens: 8_192,
-      max_reasoning_tokens: 32_768,
+  it('names every missing requirement, the key and the Python bridge, before any spend', async () => {
+    const out = join(dir, 'never-written')
+    const run = await ask(['ask', session.path, '--question', 'q', '--budget', '0.1', '--out', out, '--format', 'json'], {
+      env: { TANGLE_API_KEY: '', TRACES_PYTHON: '', PATH: join(dir, 'empty-bin') },
     })
-    const result = await runTraceQuestions({
-      questions: Array.from({ length: 4 }, (_, index) => ({ question: `Question ${index + 1}?` })),
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 4,
-      budgetUsd: 1,
+    expect(run.code).toBe(2)
+    expect(run.stdout).toBe('')
+    const error = errorOf(run.stderr)
+    expect(error.code).toBe('setup')
+    expect(error.error).toContain('TANGLE_API_KEY')
+    expect(error.error).toContain('install uv')
+    expect(error.error).toContain(`TRACES_PYTHON to a Python with agent-eval-rpc[dspy]==${AGENT_EVAL}`)
+    expect(error.error).toContain('Nothing was spent')
+    expect(run.endpoint.requests).toHaveLength(0)
+    expect(existsSync(out)).toBe(false)
+  })
+})
+
+describe('traces ask: answers', () => {
+  it('answers through the bridge, checks each citation, and writes answers.json and report.md under --out', async () => {
+    const out = join(dir, 'answered')
+    const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '5', '--out', out], {
+      bridge: [{ match: 'failed first', answer: `# Bash\n\nThe bash call failed first (**${cite()}**).` }],
     })
-    expect(result.warnings).toEqual([expect.stringContaining('covers at most 2 concurrent model call(s)')])
-    expect(result.report).toContain('> Warning: budget $1.00 covers at most 2')
+    expect(run.code, run.stderr).toBe(0)
+    expect(run.stdout).toMatch(new RegExp(`^answers → ${out} {2}\\(answers\\.json, report\\.md: 1/1 answered, \\$0\\.00040, \\d+\\.\\d s\\)\\n$`, 'u'))
+    expect(run.endpoint.requests).toEqual([{ model: 'gpt-5.6-luna', authorized: true }])
+    // The bridge's DSPy refuses an OpenAI reasoning model whose completion cap is below 16,000.
+    const [bridged] = (await readFile(run.bridgeLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { modelProxy: { model: string; maxOutputTokens: number } })
+    expect(bridged!.modelProxy.model).toBe('gpt-5.6-luna')
+    expect(bridged!.modelProxy.maxOutputTokens).toBeGreaterThanOrEqual(16_000)
+
+    const answers = JSON.parse(await readFile(join(out, 'answers.json'), 'utf8')) as Answers
+    // Discovery's per-question values are the defaults: min(budget, $2), 1800 s, 4 at once.
+    expect(answers).toMatchObject({ ok: true, budgetUsd: 5, questionBudgetUsd: 2, questionTimeoutMs: 1_800_000, concurrency: 4 })
+    expect(answers.questions[0]).toMatchObject({ id: 'q1', status: 'answered', citations: [{ uri: cite(), resolved: true }] })
+    const report = await readFile(join(out, 'report.md'), 'utf8')
+    // The answer's own heading sits under its question's section.
+    expect(report).toContain('## q1: Which command failed first?\n\n### Bash')
+    expect(report).toContain('Citations:** 1 of 1 resolve to a span in the trace')
   })
 
-  it('keeps the other answers when one engine call throws, and marks the run failed', async () => {
-    const { engine } = scriptedEngine(async (request) => {
-      if (questionId(request) === 'q3') throw new Error('synthetic engine failure')
-      return { answer: `answer ${questionId(request)}` }
-    })
-    const result = await runTraceQuestions({
-      questions: Array.from({ length: 5 }, (_, index) => ({ question: `Question ${index + 1}?` })),
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 2,
-    })
-    expect(result.ok).toBe(false)
-    expect(result.totals).toMatchObject({ answered: 4, failed: 1, modelCalls: null })
-    const failed = result.questions.find((answer) => answer.id === 'q3')!
-    expect(failed.failure).toEqual({ kind: 'error', message: 'Error: synthetic engine failure' })
-    expect(failed.modelCalls).toBeNull()
-    expect(result.questions.filter((answer) => answer.id !== 'q3').map((answer) => answer.answer))
-      .toEqual(['answer q1', 'answer q2', 'answer q4', 'answer q5'])
+  it('prints every answer as JSON, and keeps a small budget small', async () => {
+    const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '1.5', '--format', 'json'])
+    expect(run.code, run.stderr).toBe(0)
+    const answers = JSON.parse(run.stdout) as Answers & { report?: string }
+    expect(answers).not.toHaveProperty('report')
+    expect(answers).toMatchObject({ ok: true, budgetUsd: 1.5, questionBudgetUsd: 1.5 })
+    expect(answers.questions[0]!.citations).toEqual([expect.objectContaining({ uri: cite(), resolved: true })])
   })
 
-  it('keeps an answer bought before an abort, and writes both artifacts', async () => {
-    const controller = new AbortController()
-    let aborted = false
-    const { engine } = scriptedEngine(async () => {
-      // Ctrl-C lands once the first answer is back, before the next question starts.
-      if (!aborted) {
-        aborted = true
-        queueMicrotask(() => controller.abort(new Error('ctrl-c')))
-      }
-      return { answer: `The command ran (trace://${TRACE}/span/tool-1).` }
+  it('runs the pinned bridge with uv when TRACES_PYTHON is unset', async () => {
+    const bin = join(dir, 'uv-bin')
+    await mkdir(bin, { recursive: true })
+    const uvx = await writeStubBridge(join(bin, 'uvx'), [{ match: '', answer: `It failed at ${cite()}.` }])
+    const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '1'], {
+      env: { TRACES_PYTHON: '', PATH: bin },
     })
-    const dir = await mkdtemp(join(tmpdir(), 'traces-ask-abort-'))
-    const result = await runTraceQuestions({
-      questions: [{ question: 'Which commands ran?' }, { question: 'Which failed?' }, { question: 'What was last?' }],
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 1,
-      signal: controller.signal,
-    })
+    expect(run.code, run.stderr).toBe(0)
+    const [call] = (await readFile(uvx.log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { argv: string[] })
+    expect(call!.argv.slice(0, 6)).toEqual(['--from', `agent-eval-rpc[dspy]==${AGENT_EVAL}`, 'python', '-m', 'agent_eval_rpc.dspy_rlm_bridge', '--max-input-bytes'])
+  })
 
-    // The citation check must not carry the run signal: it is an in-memory
-    // lookup, and throwing there would discard an answer already paid for.
-    expect(result.questions.map((answer) => [answer.id, answer.status, answer.failure?.kind ?? null])).toEqual([
+  it('exits 2 with code partial when only some questions are answered, and still writes every answer', async () => {
+    const out = join(dir, 'partial')
+    const missing = `trace://${session.traceId}/span/00000000deadbeef`
+    const run = await ask([
+      'ask', session.path, '--budget', '3', '--out', out, '--format', 'json',
+      '--question', 'Which command failed first?',
+      '--question', 'Which file changed?',
+      '--question', 'What did the bridge say?',
+    ], {
+      bridge: [
+        { match: 'failed first', answer: `The bash call (${cite()}).` },
+        { match: 'file changed', answer: `None changed (${missing}).` },
+        { match: 'bridge say', modelCalls: 0, fail: "DSPY-BRIDGE-FAILURE: ModuleNotFoundError: No module named 'agent_eval_rpc'" },
+      ],
+    })
+    expect(run.code).toBe(2)
+    expect(JSON.parse(run.stdout)).toMatchObject({ out, answered: 1, questions: 3 })
+    const error = errorOf(run.stderr)
+    expect(error.code).toBe('partial')
+    expect(error.error).toContain('2 of 3 question(s) unanswered (q2: unresolved-citations, q3: error)')
+    // A bridge that is missing or the wrong version gets the line that fixes it.
+    expect(error.error).toContain(`agent-eval-rpc[dspy]==${AGENT_EVAL}, or unset it to let uv run that version`)
+    const answers = JSON.parse(await readFile(join(out, 'answers.json'), 'utf8')) as Answers
+    expect(answers.questions.map((answer) => [answer.id, answer.status, answer.failure?.kind ?? null])).toEqual([
       ['q1', 'answered', null],
-      ['q2', 'failed', 'aborted'],
-      ['q3', 'failed', 'aborted'],
+      ['q2', 'failed', 'unresolved-citations'],
+      ['q3', 'failed', 'error'],
     ])
-    expect(result.questions[0]!.citations).toEqual([
-      { uri: `trace://${TRACE}/span/tool-1`, traceId: TRACE, spanId: 'tool-1', resolved: true },
-    ])
-    expect(result.ok).toBe(false)
-
-    const artifacts = await writeTraceQuestionsArtifacts(result, dir)
-    const saved = JSON.parse(await readFile(artifacts.result, 'utf8')) as typeof result
-    expect(saved.questions.map((answer) => answer.status)).toEqual(['answered', 'failed', 'failed'])
-    expect(await readFile(artifacts.report, 'utf8')).toContain(result.questions[0]!.answer!)
-  })
-
-  it('names an exhausted shared budget from the ledger when the failure text does not', async () => {
-    const { engine } = scriptedEngine(async (request) => {
-      if (questionId(request) === 'q1') {
-        const paid = await request.costLedger.runPaidCall({
-          channel: 'analyst',
-          phase: request.costPhase,
-          actor: request.analystId,
-          ...(request.costTags ? { tags: request.costTags } : {}),
-          maximumCharge: { externallyEnforcedMaximumUsd: 0.7 },
-          execute: async () => 'ok',
-          receipt: () => ({ model: 'test-model', inputTokens: 100, outputTokens: 50, actualCostUsd: 0.7 }),
-        })
-        if (!paid.succeeded) throw paid.error
-        return { answer: 'answer q1' }
-      }
-      // The bridge's own HTTP error handling replaces the Node error text, so
-      // nothing in the message names the ceiling that actually stopped the call.
-      throw new Error('DSPY-BRIDGE-FAILURE: HTTPError: 500 Server Error for url: http://127.0.0.1/call')
-    }, {
-      pricing: { inputUsdPerMillion: 1.25, outputUsdPerMillion: 10 },
-      max_output_tokens: 8_192,
-      max_reasoning_tokens: 32_768,
-    })
-    const result = await runTraceQuestions({
-      questions: [{ question: 'Which commands ran?' }, { question: 'Which failed?' }],
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 1,
-      budgetUsd: 1,
-    })
-
-    // $0.70 settled leaves $0.30, below the $0.41 one call reserves.
-    expect(result.questions[0]!.status).toBe('answered')
-    expect(result.questions[1]!.failure).toEqual({
-      kind: 'budget-refused',
-      message: expect.stringContaining('500 Server Error'),
-    })
-    expect(result.report).toContain('failed: budget-refused')
-  })
-
-  it('keeps a failure that names its own cause out of the budget reconciliation', async () => {
-    const bridge = 'DSPY-BRIDGE-FAILURE: RuntimeError: could not start the bridge'
-    const { engine } = scriptedEngine(async (request) => {
-      if (questionId(request) === 'q1') {
-        const paid = await request.costLedger.runPaidCall({
-          channel: 'analyst',
-          phase: request.costPhase,
-          actor: request.analystId,
-          ...(request.costTags ? { tags: request.costTags } : {}),
-          maximumCharge: { externallyEnforcedMaximumUsd: 0.7 },
-          execute: async () => 'ok',
-          receipt: () => ({ model: 'test-model', inputTokens: 100, outputTokens: 50, actualCostUsd: 0.7 }),
-        })
-        if (!paid.succeeded) throw paid.error
-        return { answer: 'answer q1' }
-      }
-      if (questionId(request) === 'q2') throw new Error(bridge)
-      throw new Error('DSPy RLM bridge returned no answer')
-    }, {
-      pricing: { inputUsdPerMillion: 1.25, outputUsdPerMillion: 10 },
-      max_output_tokens: 8_192,
-      max_reasoning_tokens: 32_768,
-    })
-    const result = await runTraceQuestions({
-      questions: ['Which commands ran?', 'Which failed?', 'What was asked?'].map((question) => ({ question })),
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 1,
-      budgetUsd: 1,
-    })
-
-    // The ledger is exhausted for both failures ($0.70 settled against a $0.41
-    // reservation), but each failure names its own cause, so neither is
-    // relabelled: the bridge one keeps the kind the CLI's reinstall hint reads.
-    expect(result.questions.map((answer) => answer.failure?.kind)).toEqual([undefined, 'error', 'no-answer'])
-    expect(result.questions[1]!.failure?.message).toContain('could not start')
-  })
-
-  it('nests an answer\'s own headings under its question section, leaving fenced text alone', async () => {
-    const answer = [
-      '# traces ask',
-      '',
-      '| command | exit |',
-      '| --- | --- |',
-      '| pnpm test | 0 |',
-      '',
-      '```sh',
-      '# not a heading',
-      '```',
-    ].join('\n')
-    const { engine } = scriptedEngine(async () => ({ answer }))
-    const result = await runTraceQuestions({
-      questions: [{ id: 'commands', question: 'Which commands ran?' }],
-      spans: fixtureSpans(),
-      engine,
-    })
-    // The model's own `#` heading would otherwise close the question's section
-    // and pull the rest of the report under the answer's outline.
-    expect(result.report).toContain('## commands: Which commands ran?')
-    expect(result.report).toContain('### traces ask')
-    expect(result.report).not.toContain('\n# traces ask\n\n| command | exit |')
-    expect(result.report).toContain('```sh\n# not a heading\n```')
-  })
-
-  it('keeps a multi-line question on one heading line', async () => {
-    const question = 'Which shell commands ran?\nName each one and its exit code.'
-    const { engine } = scriptedEngine(async () => ({ answer: 'one command ran' }))
-    const result = await runTraceQuestions({
-      questions: [{ id: 'commands', question }],
-      spans: fixtureSpans(),
-      engine,
-    })
-    // A heading is one line; the answers file keeps the question verbatim.
-    expect(result.report).toContain('## commands: Which shell commands ran? Name each one and its exit code.\n')
-    expect(result.questions[0]!.question).toBe(question)
-  })
-
-  it('reports the effective concurrency next to the requested one', async () => {
-    const { engine } = scriptedEngine(async () => ({ answer: 'one worker was enough' }))
-    const result = await runTraceQuestions({
-      questions: [{ question: 'Which commands ran?' }],
-      spans: fixtureSpans(),
-      engine,
-      concurrency: 8,
-    })
-    expect(result.concurrency).toBe(8)
-    expect(result.effectiveConcurrency).toBe(1)
-    expect(result.report).toContain('concurrency 8 (1 effective)')
-  })
-
-  it('fails an answer that cites a span the trace does not hold', async () => {
-    const { engine } = scriptedEngine(async () => ({
-      answer: `Tests ran at trace://${TRACE}/span/tool-1 and trace://${TRACE}/span/invented-span.`,
-    }))
-    const result = await runTraceQuestions({
-      questions: [{ question: 'When did the tests run?' }],
-      spans: fixtureSpans(),
-      engine,
-    })
-    const [answer] = result.questions
-    expect(answer!.status).toBe('failed')
-    expect(answer!.failure?.kind).toBe('unresolved-citations')
-    expect(answer!.answer).toContain('invented-span')
-    expect(answer!.citations.map((citation) => [citation.spanId, citation.resolved])).toEqual([
-      ['tool-1', true],
-      ['invented-span', false],
-    ])
-    expect(result.report).toContain(`**Unresolved:** trace://${TRACE}/span/invented-span`)
-  })
-
-  it('answers a question whose citation the model wrote in bold', async () => {
-    const { engine } = scriptedEngine(async () => ({
-      answer: `The session ran one command (**trace://${TRACE}/span/tool-1**).`,
-    }))
-    const result = await runTraceQuestions({
-      questions: [{ id: 'commands', question: 'Which shell commands ran?' }],
-      spans: fixtureSpans(),
-      engine,
-    })
-    const [answer] = result.questions
-    expect(answer!.citations).toEqual([
-      { uri: `trace://${TRACE}/span/tool-1`, traceId: TRACE, spanId: 'tool-1', resolved: true },
-    ])
-    expect(answer!.failure).toBeUndefined()
-    expect(answer!.status).toBe('answered')
-    // The exit code follows `ok`, so the formatting must not decide it.
-    expect(result.ok).toBe(true)
-  })
-
-  it('fails an empty answer', async () => {
-    const { engine } = scriptedEngine(async () => ({ answer: '   ' }))
-    const result = await runTraceQuestions({ questions: [{ question: 'Anything?' }], spans: fixtureSpans(), engine })
-    expect(result.questions[0]!.failure?.kind).toBe('no-answer')
-    expect(result.questions[0]!.answer).toBeNull()
-  })
-
-  it('shows the evidence gate\'s rejection reasons for each question', async () => {
-    const { engine } = scriptedEngine(async () => ({
-      answer: `One command ran (trace://${TRACE}/span/tool-1).`,
-      findings: [{
-        severity: 'low',
-        claim: 'The session deleted the build directory.',
-        confidence: 0.8,
-        evidence: [{ uri: `trace://${TRACE}/span/tool-1`, excerpt: 'rm -rf build directory' }],
-      }],
-    }))
-    const result = await runTraceQuestions({ questions: [{ question: 'What ran?' }], spans: fixtureSpans(), engine })
-    const [answer] = result.questions
-    expect(answer!.status).toBe('answered')
-    expect(answer!.findings).toHaveLength(0)
-    expect(answer!.rejectedFindings).toEqual({ 'excerpt is not present in the cited span content': 1 })
-    expect(result.report).toContain(
-      '**Rejected by the evidence gate:** 1 finding(s) rejected: excerpt is not present in the cited span content ×1',
-    )
-  })
-
-  it('parses a schema-bound answer and fails one that breaks the schema', async () => {
-    const schema = {
-      type: 'object',
-      properties: { commands: { type: 'integer' }, first: { type: 'string' } },
-      required: ['commands', 'first'],
-      additionalProperties: false,
-    }
-    const { engine } = scriptedEngine(async (request) => ({
-      answer: questionId(request) === 'good'
-        ? '```json\n{"commands": 1, "first": "git status --short"}\n```'
-        : '{"commands": "one"}',
-    }))
-    const result = await runTraceQuestions({
-      questions: [
-        { id: 'good', question: 'How many commands ran, and which was first?', answerSchema: schema },
-        { id: 'bad', question: 'How many commands ran, and which was first?', answerSchema: schema },
-      ],
-      spans: fixtureSpans(),
-      engine,
-    })
-    const [good, bad] = result.questions
-    expect(good!.status).toBe('answered')
-    expect(good!.parsedAnswer).toEqual({ commands: 1, first: 'git status --short' })
-    expect(bad!.failure?.kind).toBe('invalid-answer')
-    expect(bad!.failure?.message).toBe('$.first: required property is missing; $.commands: expected integer, got string')
+    expect(answers.questions[1]!.citations).toEqual([expect.objectContaining({ uri: missing, resolved: false })])
+    expect(await readFile(join(out, 'report.md'), 'utf8')).toContain(`**Unresolved:** ${missing}`)
   })
 })
 
-describe('question layout for the DSPy preview', () => {
-  it('keeps the question whole and the rules inside the first 500 characters of the instructions', async () => {
-    const longest = 'x'.repeat(MAX_TRACE_QUESTION_CHARS)
-    const { engine, requests } = scriptedEngine(async () => ({ answer: 'noted' }))
-    await runTraceQuestions({
-      questions: [
-        { id: 'plain', question: longest },
-        {
-          id: 'typed',
-          question: 'How many commands ran?',
-          instructions: 'Count only shell commands.',
-          answerSchema: { type: 'object', properties: { count: { type: 'integer' } } },
-        },
-      ],
-      spans: fixtureSpans(),
-      engine,
+describe('traces ask: a model endpoint that refuses', () => {
+  it('retries a busy endpoint inside the call: a billing outage costs a wait, not the question', async () => {
+    const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '1'], {
+      replies: ['billing', 'billing', 'ok'],
     })
-    expect(requests).toHaveLength(2)
-    for (const request of requests) {
-      expect(request.question.length).toBeLessThanOrEqual(1_000)
-      const head = request.instructions.slice(0, TRACE_QUESTION_PREVIEW_HEAD_CHARS)
-      expect(head).toContain('TRACES ASK RULES')
-      expect(head).toContain('5. If the trace does not record a fact, say "not in trace".')
-      // The trace list reaches the model after the rules, as parseable JSON.
-      const context = request.instructions.split('PREPARED CONTEXT:\n')[1]!.split('\n\n')[0]!
-      expect(JSON.parse(context)).toMatchObject({ traces: [{ trace_id: TRACE, session_id: 'session-ask', spans: 4 }], omitted_traces: 0 })
-    }
-    const plain = requests.find((request) => request.analystId === 'ask.plain')!
-    expect(plain.question.endsWith(`QUESTION: ${longest}`)).toBe(true)
-    const typed = requests.find((request) => request.analystId === 'ask.typed')!
-    expect(typed.instructions.slice(0, TRACE_QUESTION_PREVIEW_HEAD_CHARS)).toContain('6. The answer is one JSON value matching ANSWER SCHEMA')
-    expect(typed.instructions).toContain('QUESTION GUIDANCE:\nCount only shell commands.')
-    expect(renderTraceQuestionInstructions({})).not.toContain('ANSWER SCHEMA')
-  })
+    expect(run.code, run.stderr).toBe(0)
+    expect(run.endpoint.requests).toHaveLength(3)
+    expect(run.stderr).toContain('[analyst] WARN model call failed (503: Billing is temporarily unavailable. Retry shortly.); attempt 2 of 10 in')
+    expect(run.stdout).toContain('**1 answered, 0 failed.**')
+  }, 60_000)
 
-  it('rejects a question the preview would cut, before any engine call', () => {
-    expect(() => normalizeTraceQuestions([{ question: 'y'.repeat(MAX_TRACE_QUESTION_CHARS + 1) }]))
-      .toThrow(/the limit is \d+ so the model sees it whole/)
-  })
-})
-
-describe('question input', () => {
-  it('reads strings and objects from a questions file and rejects unknown keys', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-ask-questions-'))
-    const good = join(dir, 'questions.json')
-    await writeFile(good, JSON.stringify({
-      questions: [
-        'Which commands failed?',
-        { id: 'last-turn', question: 'What was the last human turn?', answerSchema: { type: 'string' } },
-      ],
-    }), 'utf8')
-    expect(await loadTraceQuestionsFile(good)).toEqual([
-      { question: 'Which commands failed?' },
-      { id: 'last-turn', question: 'What was the last human turn?', answerSchema: { type: 'string' } },
-    ])
-
-    const typo = join(dir, 'typo.json')
-    await writeFile(typo, JSON.stringify([{ question: 'Anything?', schema: { type: 'string' } }]), 'utf8')
-    await expect(loadTraceQuestionsFile(typo)).rejects.toThrow('entry 1 has unknown key "schema"')
-  })
-
-  it('assigns default IDs and rejects duplicates', () => {
-    expect(normalizeTraceQuestions([{ question: ' a? ' }, { question: 'b?' }]).map((entry) => [entry.id, entry.question]))
-      .toEqual([['q1', 'a?'], ['q2', 'b?']])
-    // A file entry named q2 and a positional question must not both claim q2.
-    expect(normalizeTraceQuestions([{ id: 'q2', question: 'a?' }, { question: 'b?' }]).map((entry) => entry.id))
-      .toEqual(['q2', 'q3'])
-    expect(normalizeTraceQuestions([{ question: 'a?' }, { id: 'q1', question: 'b?' }]).map((entry) => entry.id))
-      .toEqual(['q2', 'q1'])
-    expect(() => normalizeTraceQuestions([{ id: 'x', question: 'a?' }, { id: 'x', question: 'b?' }]))
-      .toThrow('duplicate question ID "x"')
-    expect(() => normalizeTraceQuestions([])).toThrow('at least one question')
-  })
-
-  it('extracts trace citations without trailing punctuation', () => {
-    expect(traceCitationsInText('See trace://t%2F1/span/abc. Also (trace://t2/span/def), trace://t2/span/def.'))
-      .toEqual([
-        { uri: 'trace://t%2F1/span/abc', traceId: 't/1', spanId: 'abc' },
-        { uri: 'trace://t2/span/def', traceId: 't2', spanId: 'def' },
-      ])
-  })
-
-  it('extracts a citation the model wrapped in Markdown emphasis', () => {
-    // A model emphasises a citation as readily as it writes one bare; keeping
-    // the closing delimiters in the span ID fails a correct answer.
-    expect(traceCitationsInText('**trace://t/span/abc**, _trace://t/span/def_, ~~trace://t/span/ghi~~.'))
-      .toEqual([
-        { uri: 'trace://t/span/abc', traceId: 't', spanId: 'abc' },
-        { uri: 'trace://t/span/def', traceId: 't', spanId: 'def' },
-        { uri: 'trace://t/span/ghi', traceId: 't', spanId: 'ghi' },
-      ])
-    // Emphasis and sentence punctuation in either order.
-    expect(traceCitationsInText('ran it (**trace://t/span/abc**). Then **trace://t/span/def.**'))
-      .toEqual([
-        { uri: 'trace://t/span/abc', traceId: 't', spanId: 'abc' },
-        { uri: 'trace://t/span/def', traceId: 't', spanId: 'def' },
-      ])
-  })
-})
-
-describe('answer schemas', () => {
-  it('rejects keywords it cannot check instead of ignoring them', () => {
-    expect(() => assertAnswerSchema({ type: 'string', pattern: '^PR' })).toThrow('unsupported JSON Schema keyword "pattern"')
-    expect(() => assertAnswerSchema({ type: 'object', properties: { n: { minimum: 1 } } }))
-      .toThrow('answerSchema.properties.n: unsupported JSON Schema keyword "minimum"')
-  })
-
-  it('rejects a type-specific keyword whose type is not declared', () => {
-    // Without "type": "object" the constraint is skipped for every non-object
-    // answer, so `5` would pass a schema that demands a property.
-    expect(() => assertAnswerSchema({ required: ['a'] }))
-      .toThrow('answerSchema: "required" is checked only for an object; declare "type": "object" alongside it')
-    expect(() => assertAnswerSchema({ type: 'array', items: { properties: { a: { type: 'string' } } } }))
-      .toThrow('answerSchema.items: "properties" is checked only for an object')
-    expect(() => assertAnswerSchema({ items: { type: 'string' } }))
-      .toThrow('answerSchema: "items" is checked only for an array; declare "type": "array" alongside it')
-    // A nullable object still declares the type it constrains.
-    expect(() => assertAnswerSchema({ type: ['object', 'null'], required: ['a'] })).not.toThrow()
-  })
-
-  it('checks types, required properties, enums, and array items', () => {
-    const schema = {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: { pr: { type: 'integer' }, state: { enum: ['merged', 'closed'] } },
-        required: ['pr'],
-      },
-    }
-    expect(answerSchemaErrors([{ pr: 3, state: 'merged' }], schema)).toEqual([])
-    expect(answerSchemaErrors([{ pr: 3.5 }, { state: 'open' }], schema)).toEqual([
-      '$[0].pr: expected integer, got number',
-      '$[1].pr: required property is missing',
-      '$[1].state: expected one of "merged", "closed"',
-    ])
-    expect(parseJsonAnswer('The answer is 3')).toEqual({ ok: false, error: 'answer is not one JSON value' })
-  })
+  it.each([
+    ['a key that cannot pay', 'payment', 'gpt-5.6-luna', 'auth', 'the model endpoint refused the key (402: Inference requires verified paid access.'],
+    ['a model the key cannot use, refused with a 503', 'pricing', 'gpt-6-luna', 'model', 'cannot serve --model gpt-6-luna (503: Trusted pricing is unavailable'],
+    ['a completion from another model', 'substituted', 'glm-5.3', 'model', 'the endpoint served "accounts/fireworks/models/glm-5p3" for --model "glm-5.3"'],
+  ] as const)('stops every question at the first refused call on %s: exit 2 with its code, nothing retried', async (_case, reply, model, code, says) => {
+    const out = join(dir, `refused-${reply}`)
+    const questions = ['first', 'second', 'third', 'fourth', 'fifth'].flatMap((word) => ['--question', `Which command ran ${word}?`])
+    const run = await ask(['ask', session.path, ...questions, '--model', model, '--budget', '2', '--out', out, '--format', 'json'], {
+      replies: [reply],
+    })
+    expect(run.code).toBe(2)
+    expect(run.stdout).toBe('')
+    const error = errorOf(run.stderr)
+    expect(error.code).toBe(code)
+    expect(error.error).toContain(says)
+    expect(error.error).toContain('ask stopped every question at the first refused call')
+    // Four questions start at once; each reaches the endpoint at most once, and the fifth never starts.
+    expect(run.endpoint.requests.length).toBeGreaterThanOrEqual(1)
+    expect(run.endpoint.requests.length).toBeLessThanOrEqual(4)
+    const answers = JSON.parse(await readFile(join(out, 'answers.json'), 'utf8')) as Answers
+    expect(answers.questions.every((answer) => answer.status === 'failed')).toBe(true)
+    expect(answers.questions[4]!.failure?.kind).toBe('aborted')
+  }, 60_000)
 })

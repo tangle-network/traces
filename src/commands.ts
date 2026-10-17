@@ -7,9 +7,8 @@
  * <command> --help` are rendered from these rows, so help cannot list a flag
  * the parser refuses or miss one it takes.
  *
- * A hidden flag is a 0.x spelling whose replacement lands in a later step
- * (spec §2.4): it is parsed and run, and absent from help. When its
- * replacement works, the spelling leaves this table for `moved.ts`.
+ * A 0.x spelling is not in this table: `moved.ts` refuses it with its
+ * replacement before anything here runs.
  *
  * Exit codes, on every command: 0 yes, 1 no, 2 could not answer. A usage
  * error, an unreadable or ambiguous input, a rule that could not decide, runs
@@ -19,15 +18,35 @@
  */
 
 import { resolve } from 'node:path'
-import { DEFAULT_ANALYST_MODEL, MAX_TRACE_QUESTION_CHARS } from './ask-defaults.js'
+import {
+  DEFAULT_ANALYST_MODEL,
+  DEFAULT_ASK_CONCURRENCY,
+  DEFAULT_QUESTION_MAX_COST_USD,
+  DEFAULT_QUESTION_TIMEOUT_MS,
+  MAX_TRACE_QUESTION_CHARS,
+} from './ask-defaults.js'
 import { findMoved, movedMessage, renderMovedTable, tracesCommand } from './moved.js'
 import { RefError } from './refs.js'
 import { knownHarnesses, resolveAdapter } from './registry.js'
 import { parseTimeBound } from './time.js'
 import { tracesCommit, tracesVersion } from './version.js'
 
-/** Why a command could not answer (spec §2.1), the `code` of its JSON error. */
-export type ErrorCode = 'usage' | 'unreadable' | 'ambiguous' | 'unknown-verdict' | 'no-outcome' | 'partial'
+/**
+ * Why a command could not answer (spec §2.1), the `code` of its JSON error.
+ * `ask` adds three that a caller fixes before it runs again: `setup` (no model
+ * key or no Python bridge; nothing was spent), `auth` (the model endpoint
+ * refused the key) and `model` (the endpoint cannot serve or price the model).
+ */
+export type ErrorCode =
+  | 'usage'
+  | 'unreadable'
+  | 'ambiguous'
+  | 'unknown-verdict'
+  | 'no-outcome'
+  | 'partial'
+  | 'setup'
+  | 'auth'
+  | 'model'
 
 /** A command that could not answer: exit 2, with the reason as `code`. */
 export class CliError extends Error {
@@ -82,12 +101,6 @@ export interface Args {
   dryRun: boolean
   yes: boolean
   unused: boolean
-  // Hidden spellings, kept until the step that moves each (spec §2.4).
-  dir?: string
-  questionBudget?: number
-  /** Seconds. */
-  questionTimeout?: number
-  concurrency: number
   knownSecretEnvs: string[]
 }
 
@@ -108,7 +121,6 @@ function emptyArgs(command: string): Args {
     dryRun: false,
     yes: false,
     unused: false,
-    concurrency: 4,
     knownSecretEnvs: [],
   }
 }
@@ -176,7 +188,7 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   },
   '--question': { value: 'TEXT', help: `a question (repeatable, at most ${MAX_TRACE_QUESTION_CHARS} characters)`, freeText: true, set: (a, v) => { a.questions.push(v) } },
   '--questions': { value: 'FILE', help: 'a JSON array of questions: strings or {id?, question, answerSchema?}', set: (a, v) => { a.questionsFile = v } },
-  '--budget': { value: 'USD', help: 'one spending ceiling shared by every question', set: (a, v) => { a.budget = positiveNumber('--budget', v, 'USD') } },
+  '--budget': { value: 'USD', help: 'required: the most the run may spend, shared by every question', set: (a, v) => { a.budget = positiveNumber('--budget', v, 'USD') } },
   '--model': { value: 'ID', help: `the analyst model (default ${DEFAULT_ANALYST_MODEL})`, set: (a, v) => { a.model = v } },
   '--contract': { value: 'FILE|conformance', help: 'gate on a trace contract file, or on conformance (repeatable)', set: (a, v) => { a.contracts.push(v) } },
   '--share-safe': {
@@ -187,18 +199,6 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--dry-run': { help: 'redact and preview; send nothing', set: (a) => { a.dryRun = true } },
   '--yes': { help: 'skip the confirmation prompt', set: (a) => { a.yes = true } },
   '--unused': { help: 'only installed skills with no use in the window', set: (a) => { a.unused = true } },
-  '--dir': { value: 'DIR', help: 'write the artifacts to DIR', set: (a, v) => { a.dir = v } },
-  '--question-budget': { value: 'USD', help: 'the provider ceiling for one question', set: (a, v) => { a.questionBudget = positiveNumber('--question-budget', v, 'USD') } },
-  '--question-timeout': {
-    value: 'S',
-    help: "one question's deadline in seconds",
-    set: (a, v) => {
-      const ms = Math.round(Number(v) * 1000)
-      if (!Number.isSafeInteger(ms) || ms < 1000) throw new UsageError('--question-timeout must be a number of seconds, at least 1')
-      a.questionTimeout = Number(v)
-    },
-  },
-  '--concurrency': { value: 'N', help: 'questions running at once (default 4)', set: (a, v) => { a.concurrency = positiveInteger('--concurrency', v) } },
   '--known-secret-env': {
     value: 'NAME',
     help: 'with --share-safe: an environment variable whose value must appear nowhere (repeatable)',
@@ -208,8 +208,8 @@ const FLAGS: Readonly<Record<string, Flag>> = {
 
 const ALIASES: Readonly<Record<string, string>> = { '-y': '--yes' }
 
-/** A flag a command takes: its name, optionally with the command's own help line, or hidden until its step. */
-type FlagUse = string | { readonly flag: string; readonly value?: string; readonly help?: string; readonly hidden?: true }
+/** A flag a command takes: its name, optionally with the command's own help line. */
+type FlagUse = string | { readonly flag: string; readonly value?: string; readonly help?: string }
 
 interface CommandSpec {
   readonly name: string
@@ -233,7 +233,6 @@ interface CommandSpec {
 }
 
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn'] as const
-const hidden = (flag: string): FlagUse => ({ flag, hidden: true })
 const MANY = Number.POSITIVE_INFINITY
 
 const COMMANDS = [
@@ -302,17 +301,23 @@ const COMMANDS = [
     name: 'ask',
     usage: 'ask <ref…> | --current | --last N | --since T --question TEXT [flags]',
     job: 'A question facts cannot answer, with checked trace:// citations: the only command that calls a model.',
-    notes: ['Needs TANGLE_API_KEY and Python with agent-eval-rpc[dspy] (TRACES_PYTHON names it).'],
+    notes: [
+      `Each question spends at most min(--budget, $${DEFAULT_QUESTION_MAX_COST_USD}) within ${DEFAULT_QUESTION_TIMEOUT_MS / 1000} s; ${DEFAULT_ASK_CONCURRENCY} run at once. Some unanswered: exit 2.`,
+      'Needs TANGLE_API_KEY (or OPENAI_API_KEY) and uv, or TRACES_PYTHON naming a Python with agent-eval-rpc[dspy].',
+    ],
     flags: [
       ...SELECT, '--question', '--questions', '--budget', '--model',
-      hidden('--dir'), hidden('--question-budget'), hidden('--question-timeout'), hidden('--concurrency'),
+      { flag: '--format', help: 'text (default): the report; json: each answer, its citations, failure and cost' },
+      { flag: '--out', value: 'DIR', help: 'write answers.json and report.md under DIR; stdout gets one summary line' },
     ],
+    formats: ['text', 'json'],
     refs: [0, MANY],
     select: 'required',
+    jq: [['.questions[] | {id, status, answer, failure}', 'each answer, or why it has none']],
     examples: [
       'traces ask --current --question "Which command failed first?" --budget 1',
-      'traces ask 019a3c7e --questions questions.json --budget 5',
-      'traces ask --last 3 --question "Did it verify the fix?" --budget 2',
+      'traces ask 019a3c7e --questions questions.json --budget 5 --out answers',
+      "traces ask --last 3 --question \"Did it verify the fix?\" --budget 2 --format json | jq '.questions[0].answer'",
     ],
     overview: [["A question facts can't answer (model, $)", 'traces ask <ref> --question "…" --budget 1']],
   },
@@ -509,11 +514,9 @@ function commandAt(argv: readonly string[]): CommandSpec | undefined {
   return SPECS.find((spec) => spec.name === argv[0])
 }
 
-/** The commands that take `flag`: the ones that show it, else the ones that hide it. */
+/** The commands that take `flag`. */
 function appliesTo(flag: string): string[] {
-  const shown = SPECS.filter((spec) => usesOf(spec).some((use) => use.flag === flag && !use.hidden))
-  const any = shown.length > 0 ? shown : SPECS.filter((spec) => usesOf(spec).some((use) => use.flag === flag))
-  return any.map((spec) => spec.name)
+  return SPECS.filter((spec) => usesOf(spec).some((use) => use.flag === flag)).map((spec) => spec.name)
 }
 
 function formatHelp(formats: readonly string[]): string {
@@ -544,7 +547,7 @@ const FLAG_COLUMN = 20
 
 /** `traces <command> --help`: usage, the job, its flags, jq paths and examples. At most 25 lines. */
 export function renderCommandHelp(spec: CommandSpec): string {
-  const flagLines = usesOf(spec).filter((use) => !use.hidden).map((use) => {
+  const flagLines = usesOf(spec).map((use) => {
     const flag = FLAGS[use.flag]!
     const value = use.flag === '--format' && spec.formats ? spec.formats.join('|') : use.value ?? flag.value
     const left = value ? `${use.flag} ${value}` : use.flag
@@ -664,6 +667,10 @@ function checkArgs(spec: CommandSpec, args: Args, argv: readonly string[]): void
       `${spec.name} needs ${choice}` +
         `${flags.has('--cwd') ? '; --cwd and --harness only narrow' : ''}. traces list finds a session`,
     )
+  }
+  // `ask` is the one command that spends, so the caller names the most it may.
+  if (spec.name === 'ask' && args.budget === undefined) {
+    throw new UsageError(`ask needs --budget USD, the most the run may spend: ${tracesCommand([...argv, '--budget', '1'])} (each question spends at most min(USD, $${DEFAULT_QUESTION_MAX_COST_USD}))`)
   }
 }
 

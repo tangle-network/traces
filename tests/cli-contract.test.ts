@@ -8,9 +8,8 @@
  *
  * The command table: `traces --help` fits 40 lines, each command's help fits
  * 25 and lists exactly the flags it takes, a flag a command does not take
- * exits 2 naming where it applies, a hidden 0.x spelling still runs and is
- * absent from help, and a usage error under `--format json` is one JSON
- * object on stderr with stdout empty.
+ * exits 2 naming where it applies, and a usage error under `--format json` is
+ * one JSON object on stderr with stdout empty.
  */
 import { cp, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -199,7 +198,31 @@ const STEP_17: readonly MovedCase[] = [
   { argv: ['diff', 'a.sdk-events.jsonl', 'b.sdk-events.jsonl', '--kind', 'TOOL'], spelling: '--kind', instead: 'traces diff a.sdk-events.jsonl b.sdk-events.jsonl' },
 ]
 
-const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13, ...STEP_14, ...STEP_15, ...STEP_17]
+/** Step 18: ask writes under --out, needs --budget, and keeps Discovery's per-question values as defaults. */
+const STEP_18: readonly MovedCase[] = [
+  // Discovery's 0.21.1 argv (runner/trace-review.mjs).
+  {
+    argv: [
+      'ask', '--otlp', 'D/otlp', '--questions', 'Q.json', '--model', 'zai/glm-5.3', '--budget', '18.5',
+      '--question-budget', '2', '--question-timeout', '1800', '--concurrency', '4', '--dir', 'D',
+    ],
+    spelling: '--otlp',
+    instead: 'traces ask D/otlp --questions Q.json --model zai/glm-5.3 --budget 18.5 --out D',
+  },
+  { argv: ['ask', 'abc12345', '--question', 'q', '--budget', '1', '--dir', 'answers'], spelling: '--dir', instead: 'traces ask abc12345 --question q --budget 1 --out answers' },
+  {
+    argv: ['ask', 'abc12345', '--question', 'q', '--budget', '1', '--concurrency', '6', '--question-timeout', '600'],
+    spelling: '--question-timeout',
+    instead: 'traces ask abc12345 --question q --budget 1',
+  },
+  {
+    argv: ['ask', 'abc12345', '--question', 'q', '--budget', '1', '--question-budget', '0.5'],
+    spelling: '--question-budget',
+    instead: 'traces ask abc12345 --question q --budget 1',
+  },
+]
+
+const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13, ...STEP_14, ...STEP_15, ...STEP_17, ...STEP_18]
 
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
@@ -207,7 +230,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   list: ['--last', '--since', '--cwd', '--harness', '--format'],
   facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--match', '--no-content', '--format', '--out'],
   analyze: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--format', '--out'],
-  ask: [...SELECT, '--question', '--questions', '--budget', '--model'],
+  ask: [...SELECT, '--question', '--questions', '--budget', '--model', '--format', '--out'],
   check: ['--contract', '--share-safe', '--known-secret-env', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
   diff: ['--format'],
   watch: ['--since', '--cwd', '--harness', '--once', '--format'],
@@ -226,11 +249,6 @@ const OPTIONS = [
   '--question', '--questions', '--budget', '--model',
   '--contract', '--share-safe', '--known-secret-env', '--once', '--dry-run', '--yes', '--unused',
 ]
-
-/** 0.x flags kept, hidden, until the step that moves each (spec §2.4). */
-const HIDDEN_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  ask: ['--dir', '--question-budget', '--question-timeout', '--concurrency'],
-}
 
 let dir: string
 let env: Record<string, string>
@@ -311,6 +329,7 @@ describe('traces help moved', () => {
     expect(run.stdout).toContain('--harness default claude-code')
     expect(run.stdout).toContain('upload with no selection')
     expect(run.stdout).toContain('facts JSON by default')
+    expect(run.stdout).toContain('ask without --budget')
   })
 
   it('is named by the global help, which advertises no moved spelling', async () => {
@@ -496,49 +515,6 @@ describe('exit codes: 0 yes, 1 no, 2 could not answer, with the reason as code',
     expect(text.code).toBe(2)
     expect(text.stderr).toContain('no outcome to call agreement on')
   }, 60_000)
-})
-
-describe('hidden spellings', () => {
-  it('are absent from help', async () => {
-    const global = (await runCli(['--help'], { env })).stdout
-    for (const [command, flags] of Object.entries(HIDDEN_FLAGS)) {
-      const help = (await runCli([command, '--help'], { env })).stdout
-      for (const flag of flags) expect(help, `${command} --help lists ${flag}`).not.toContain(flag)
-    }
-    const shown = new Set(Object.values(COMMAND_FLAGS).flat())
-    for (const flag of Object.values(HIDDEN_FLAGS).flat().filter((flag) => !shown.has(flag))) expect(global).not.toContain(flag)
-  })
-
-  it('still run until their step moves them', async () => {
-    const trace = deriveHexId('cli-contract-trace', 16)
-    const spans = join(dir, 'hidden.otlp.jsonl')
-    await writeFile(spans, `${[
-      llmSpan({
-        traceId: trace,
-        spanId: deriveHexId('llm', 8),
-        parentSpanId: null,
-        name: 'turn',
-        model: 'glm-5.2',
-        inputTokens: 10,
-        outputTokens: 2,
-        startTime: '2026-01-01T00:00:00.000Z',
-        endTime: '2026-01-01T00:00:01.000Z',
-      }),
-      toolSpan({
-        traceId: trace,
-        spanId: deriveHexId('tool', 8),
-        parentSpanId: null,
-        name: 'bash',
-        toolName: 'bash',
-        startTime: '2026-01-01T00:00:01.000Z',
-        endTime: '2026-01-01T00:00:02.000Z',
-      }),
-    ].map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
-
-    const watched = await runCli(['watch', spans, '--once', '--format', 'jsonl'], { env })
-    expect(watched.code).toBe(0)
-    expect(lines(watched.stdout).map((line) => (JSON.parse(line) as { event: string }).event)).toEqual(['session', 'tick'])
-  }, 120_000)
 })
 
 describe('traces --version', () => {

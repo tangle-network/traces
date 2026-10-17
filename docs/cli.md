@@ -52,18 +52,14 @@ traces help moved                                  # every 0.x command and flag 
 | `--cwd <dir>` | Sessions recorded in `<dir>` or under it on a path boundary, in a live worktree of its repository, or in a removed worktree whose recorded repository (Codex) is its |
 | `--since <t>` | `30m`/`2h`/`7d` before now, or an ISO date. Commands that select sessions read those modified at or after it; `upload`: its window; `facts`: opens a time window, see [Session facts](facts.md) |
 | `--until <t>` | `facts`: closes the time window (exclusive), same forms as `--since` |
-| `--out <path>` | Write the output to a file; stdout gets one summary line. `convert`: the OTLP file; `upload --dry-run`: the redacted preview (nothing is written without it); `check`: a directory for the evidence of each trace that did not pass; `analyze`: a directory for `report.md` and `findings.json` |
-| `--dir <path>` | `ask`: write `answers.json` + `report.md` there (without it, the report goes to stdout only) |
+| `--out <path>` | Write the output to a file; stdout gets one summary line. `convert`: the OTLP file; `upload --dry-run`: the redacted preview (nothing is written without it); `check`: a directory for the evidence of each trace that did not pass; `analyze`: a directory for `report.md` and `findings.json`; `ask`: a directory for `answers.json` and `report.md` |
 | `--contract <file>` | `check`: gate on a declarative trace contract (JSON), or on `conformance`; repeatable |
 | `--share-safe` | `check`: gate on whether each path is safe to share, read as bytes |
 | `--known-secret-env <name>` | `check --share-safe`: also fail on this variable's value, in any encoding; repeatable |
-| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `check`, `diff`, `bundle verify` and `skills`, and on `convert`'s `--out` summary line; `check` also takes `junit` and `github`. The input is sniffed |
-| `--budget <usd>` | `ask`: one ceiling shared by every question. `analyze` calls no model |
+| `--format <kind>` | Output: `text` or `json` on `list`, `facts`, `analyze`, `ask`, `check`, `diff`, `bundle verify` and `skills`, and on `convert`'s `--out` summary line; `check` also takes `junit` and `github`. The input is sniffed |
+| `--budget <usd>` | `ask`, required: the most the run may spend, shared by every question; each question spends at most the smaller of it and $2, within 1,800 s, 4 at once. `analyze` calls no model |
 | `--question <text>` | `ask`: one question, repeatable. Kept short so the engine sees it whole |
 | `--questions <file>` | `ask`: JSON array of questions: strings, or `{ id?, question, instructions?, answerSchema? }` |
-| `--question-budget <usd>` | `ask`: provider ceiling for ONE question; `--budget` is the ceiling shared by all of them |
-| `--question-timeout <seconds>` | `ask`: wall-clock deadline for ONE question's investigation (default 600); raise it for questions over many large sessions |
-| `--concurrency <n>` | `ask`: questions running at once (default 4) |
 | `--once` | `watch`: one pass (or one run-tree snapshot), then exit |
 | `--no-content` | One metadata-only rule (`src/metadata-only.ts`): `facts` omits conversation, commands, paths and assignment text; `convert` and `upload` drop prompts, replies, tool input and output, error text, working directories, branch names and subagent briefs from every span |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |

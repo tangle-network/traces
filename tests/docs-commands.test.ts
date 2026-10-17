@@ -17,11 +17,6 @@ import { CLI, runCli } from './run-cli.js'
 
 const ROOT = join(dirname(CLI), '..')
 
-/** Spellings kept, hidden from help, until the step that moves each (spec §2.4); value-taking ones say so. */
-const HIDDEN_FLAGS: Readonly<Record<string, Readonly<Record<string, boolean>>>> = {
-  ask: { '--dir': true, '--question-budget': true, '--question-timeout': true, '--concurrency': true },
-}
-
 /** Commands that read sessions and need a selection (spec §2.1), with the flags that select. */
 const SELECTORS: Readonly<Record<string, readonly string[]>> = {
   facts: ['--current', '--last', '--since'],
@@ -183,7 +178,6 @@ async function flagsOf(command: string): Promise<Map<string, boolean> | undefine
   const flags = new Map<string, boolean>([['--help', false], ['-h', false]])
   for (const [, flag, value] of help.stdout.matchAll(/^ {2}(--[a-z][a-z-]*)(?: (\S+))? +\S/gmu)) flags.set(flag!, value !== undefined)
   if (flags.has('--yes')) flags.set('-y', false)
-  for (const [flag, takesValue] of Object.entries(HIDDEN_FLAGS[command] ?? {})) flags.set(flag, takesValue)
   return flags
 }
 

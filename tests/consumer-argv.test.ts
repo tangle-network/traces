@@ -4,7 +4,9 @@
  *
  * Discovery (discovery-lab `runner/trace-review.mjs`) converts every Sandbox
  * live stream that carries a `"backend":"codex"` envelope with `--harness
- * codex-exec`, and every other sandbox recording as sandbox events.
+ * codex-exec`, and every other sandbox recording as sandbox events, then asks
+ * its question bank of the converted directory and reads `answers.json`
+ * whatever the exit code.
  *
  * tangle-tools `fleet/recurrence.py` reads one session's facts as JSON from
  * stdout (`facts P --harness H --format json`); `tests/facts-json-contract.test.ts`
@@ -13,11 +15,12 @@
  * Each consumer's pinned 0.x argv exits 2 and prints its 1.0 spelling, which
  * is the edit the consumer makes when it bumps.
  */
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { ASK_KEY, startEndpoint, writeAskSession, writeStubBridge } from './fixtures/ask.js'
 import { IDS, makeFixtureHome } from './fixtures/home.js'
 import { runCli } from './run-cli.js'
 
@@ -76,6 +79,51 @@ describe('Discovery convert argv', () => {
     expect((await spans(events)).length).toBeGreaterThanOrEqual(1)
     expect(await toolSpans(live)).toBeGreaterThanOrEqual(1)
   })
+})
+
+describe('Discovery ask argv', () => {
+  it('asks its question bank of the converted directory and writes answers.json and report.md under --out', async () => {
+    const D = join(dir, 'review')
+    const session = await writeAskSession(join(D, 'otlp'), 'node-1')
+    const Q = join(dir, 'questions.json')
+    await writeFile(Q, JSON.stringify([
+      { id: 'dsc.E3', question: 'Which command failed first?', answerSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+      { id: 'dsc.F1', question: 'Did the run verify its result?' },
+    ]), 'utf8')
+    const bridge = await writeStubBridge(join(dir, 'bridge'), [
+      { match: 'failed first', answer: '{"command": "bash"}' },
+      { match: 'verify', answer: `No: the bash call failed (trace://${session.traceId}/span/${session.toolSpanId}).` },
+    ])
+    const endpoint = await startEndpoint(['ok'])
+    try {
+      const askEnv = { ...env, TANGLE_API_KEY: ASK_KEY, OPENAI_BASE_URL: endpoint.baseUrl, TRACES_PYTHON: bridge.path }
+      const argv = ['ask', join(D, 'otlp'), '--questions', Q, '--model', 'zai/glm-5.3', '--budget', '18.5', '--out', D]
+      const run = await runCli(argv, { env: askEnv, timeoutMs: 120_000 })
+      expect(run.code, run.stderr).toBe(0)
+      const answers = JSON.parse(await readFile(join(D, 'answers.json'), 'utf8')) as {
+        engine: { model: string }
+        questionBudgetUsd: number
+        questionTimeoutMs: number
+        concurrency: number
+        questions: Array<{ id: string; status: string; parsedAnswer?: unknown }>
+      }
+      expect(answers).toMatchObject({ engine: { model: 'zai/glm-5.3' }, questionBudgetUsd: 2, questionTimeoutMs: 1_800_000, concurrency: 4 })
+      expect(answers.questions.map((answer) => [answer.id, answer.status])).toEqual([['dsc.E3', 'answered'], ['dsc.F1', 'answered']])
+      expect(answers.questions[0]!.parsedAnswer).toEqual({ command: 'bash' })
+      expect(await readFile(join(D, 'report.md'), 'utf8')).toContain('## dsc.F1: Did the run verify its result?')
+
+      // The 0.21.1 argv names the 1.0 argv, whose removed flags are its defaults.
+      const old = await runCli([
+        'ask', '--otlp', join(D, 'otlp'), '--questions', Q, '--model', 'zai/glm-5.3', '--budget', '18.5',
+        '--question-budget', '2', '--question-timeout', '1800', '--concurrency', '4', '--dir', D,
+      ], { env: askEnv })
+      expect(old.code).toBe(2)
+      expect(old.stdout).toBe('')
+      expect(old.stderr).toContain(`Instead: traces ${argv.join(' ')}`)
+    } finally {
+      await endpoint.close()
+    }
+  }, 120_000)
 })
 
 describe('recurrence facts argv', () => {
