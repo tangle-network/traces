@@ -1663,8 +1663,12 @@ function pullRequestLine(facts: SessionFacts): string {
   const files = facts.changedFiles.value === null ? '' : ` · changed ${plural(facts.changedFiles.value.length, 'file')}`
   const prs = facts.pullRequests.value
   if (prs === null) return `PRs unknown: ${facts.pullRequests.unavailable}${files}`
-  const named = (entries: readonly { readonly identifier: string | null }[]): string =>
-    entries.length === 0 ? 'none' : entries.map((entry) => entry.identifier === null ? '?' : /^\d+$/u.test(entry.identifier) ? `#${entry.identifier}` : entry.identifier).join(' ')
+  const named = (entries: readonly { readonly identifier: string | null }[]): string => {
+    const ids = entries.flatMap((entry) => entry.identifier === null ? [] : [/^\d+$/u.test(entry.identifier) ? `#${entry.identifier}` : entry.identifier])
+    const unnumbered = entries.length - ids.length
+    if (entries.length === 0) return 'none'
+    return [...ids, ...(unnumbered > 0 ? [`${ids.length > 0 ? '+ ' : ''}${unnumbered} unnumbered`] : [])].join(' ')
+  }
   return `PRs opened ${named(prs.created)} · merged ${named(prs.merged)}${files}`
 }
 

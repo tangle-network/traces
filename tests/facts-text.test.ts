@@ -47,7 +47,7 @@ describe('the facts text sheet', () => {
     expect(session!.find((line) => line.startsWith('tokens '))).toMatch(/^tokens in \S+ · out \S+ · cache read \S+ · cache write \S+ · \$\d+\.\d+ list price \(Router rates\)$/u)
     expect(session).toContain('waste 0 min')
     expect(session).toContain('PRs opened #12 · merged none · changed 0 files')
-    expect(session!.find((line) => line.startsWith('first failure '))).toMatch(/^first failure none: /u)
+    expect(session!.find((line) => line.startsWith('first failure '))).toMatch(/^first failure 11:00 \S+: .+ \(blame \w+, span [0-9a-f]+\)$/u)
     expect(session!.at(-1)).toBe('final "Opened PR #12."')
   })
 
@@ -55,7 +55,8 @@ describe('the facts text sheet', () => {
     const [session] = blocks(await sheet([th.codex], th.env))
     expectTemplate(session!)
     expect(session![0]).toMatch(new RegExp(`^${TOKEN_IDS.codex.slice(0, 8)} codex · widgets · 10-14 11:00→11:00 UTC · active \\d+ s$`, 'u'))
-    expect(session).toContain('PRs opened #13 · merged none · changed 0 files')
+    // The shared reader records the pull request without its number.
+    expect(session).toContain('PRs opened 1 unnumbered · merged none · changed 0 files')
     expect(session!.at(-1)).toBe('final "Opened PR #13."')
   })
 
@@ -65,7 +66,7 @@ describe('the facts text sheet', () => {
     expect(sessions).toHaveLength(3)
     for (const session of sessions) expectTemplate(session)
     expect(sessions[0]![0]).toMatch(/^0199f6c0 codex · agent-dev-container(?: \(\S+\))? · /u)
-    expect(sessions[0]).toContain('PRs opened #7 · merged none · changed 0 files')
+    expect(sessions[0]).toContain('PRs opened 1 unnumbered · merged none · changed 0 files')
     for (const child of sessions.slice(1)) expect(child[0]).toMatch(/ · child of 0199f6c0$/u)
   })
 

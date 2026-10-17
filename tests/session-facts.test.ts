@@ -177,11 +177,10 @@ describe('session facts', () => {
     expect(JSON.parse(JSON.stringify(report))).toMatchObject({ schemaVersion: 1, harness: 'codex' })
 
     const text = renderSessionFacts(report)
-    expect(text).toContain('tool calls: 4 (0 synthesized span(s) excluded)')
-    expect(text).toContain(`subagents: 1: ${FIXTURE_AGENT_PATH}`)
-    expect(text).toContain('human turns: 2')
-    expect(text).toContain('tokens: in 900 · out 80 · cost unknown (not priced yet')
-    expect(text).toContain('pull requests: 0 created, 0 merged')
+    expect(text).toContain(`\ntools 4 (apply_patch 1, exec_command 1, exec_command.verify 1, …) · subagents 1 (${FIXTURE_AGENT_PATH})\n`)
+    expect(text).toContain('\nhuman turns 2 · interrupts 0\n')
+    expect(text).toContain('\ntokens in 900 · out 80 · cost unknown (not priced yet')
+    expect(text).toContain('\nPRs opened none · merged none · changed 2 files\n')
   })
 })
 

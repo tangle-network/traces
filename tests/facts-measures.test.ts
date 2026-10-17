@@ -158,10 +158,11 @@ function cappedMinutes(rows: readonly Row[]): number {
 }
 
 describe('facts waste measures', () => {
-  it.each([['the shared reader', []], ["traces' own reader", ['--latest-turn']]] as const)(
-    'reads streaks, rollbacks, stalls and active minutes from a Claude Code session (%s)',
-    async (_reader, extra) => {
-      const { waste, activeMinutes } = (await measured([claudeFile, ...extra])).measurements
+  // Both read paths are held equal on single-turn sessions in dual-path.test.ts; this one has
+  // several turns, so `--latest-turn` would read only the last.
+  it('reads streaks, rollbacks, stalls and active minutes from a Claude Code session',
+    async () => {
+      const { waste, activeMinutes } = (await measured([claudeFile])).measurements
       expect(waste.failingStreaks.value!.map(({ command, tool, runs, minutes }) => ({ command, tool, runs, minutes }))).toEqual([
         { command: 'pnpm test', tool: 'Bash', runs: 3, minutes: 6 },
       ])
