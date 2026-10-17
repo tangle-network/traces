@@ -50,6 +50,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "bench:audit": "tsx bench/audit/cli.ts",
+    "bench:corrections": "tsx bench/corrections/score.ts",
     "build": "tsup",
     "check:package": "node scripts/check-package-bin.mjs",
     "check:source": "node scripts/check-source-text.mjs",

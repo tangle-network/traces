@@ -305,7 +305,7 @@ const COMMANDS = [
     refs: [0, MANY],
     select: 'required',
     jq: [
-      ['.sessions[0].humanTurns.value[] | {text, reply, signals}', 'each ask, its reply, correction signals'],
+      ['.sessions[0].humanTurns.value[] | {text, reply, signals}', 'each ask, its reply, its signals'],
       ['.sessions[0].agent.value', 'who acted: profile, model, directive'],
       ['.sessions[0].firstFailure', 'the first failure and its blame'],
       ['.matches[] | {sessionId, kind, text}', 'with --match: each hit'],
