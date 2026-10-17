@@ -26,7 +26,7 @@ It runs over every span attribute, including the captured prompt/response text.
 
 It does **not** catch names, postal addresses or account numbers written in prose. Those need a context-aware model. Three postures, strongest first:
 
-1. **`--no-content`**: upload metadata only (tool calls, tokens, timing, loop signal); no prose leaves the machine.
+1. **`--no-content`**: upload metadata only (tool calls, tokens, timing, loop signal); no prose, command, error text, working directory or branch name leaves the machine. It is the same rule as `traces convert <ref> --no-content`, so `traces convert <ref> --no-content --out f --format json` lists the attribute keys it drops.
 2. **Your own scrubber on a file**: `traces convert <ref> --out spans.jsonl`, run an ML PII scrubber (e.g. [`openai/privacy-filter`](https://github.com/openai/privacy-filter)) on `spans.jsonl`, then `traces upload spans.jsonl`. Upload still applies the redaction core and the share-safety check to that file.
 3. Default: the redaction core.
 

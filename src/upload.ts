@@ -19,10 +19,10 @@ import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
 import { hostedClientFromEnv } from '@tangle-network/agent-eval/hosted'
 import type { TraceSpanEvent } from '@tangle-network/agent-eval/hosted'
-import { assessShareSafety, REDACTION_VERSION, redact, shareAllowed } from '@tangle-network/agent-eval/traces'
+import { assessShareSafety, combineVerdicts, REDACTION_VERSION, redact, shareAllowed } from '@tangle-network/agent-eval/traces'
 import type { RedactionReport, ShareSafetyVerdict } from '@tangle-network/agent-eval/traces'
 import { ATTR, INGEST_SOURCE_CLI } from './attributes.js'
-import { metadataOnly } from './metadata-only.js'
+import { isMetadataAttribute, metadataOnly } from './metadata-only.js'
 import type { OtlpSpan } from './otlp.js'
 import { writeOtlpFile } from './otlp.js'
 import { redactSpans } from './redact.js'
@@ -173,6 +173,8 @@ export interface UploadResult {
   otlpPath?: string
   /** Sessions whose final events were UNSAFE or UNKNOWN. None of them was sent. */
   refused: RefusedSession[]
+  /** The share verdict of every session checked, sent or refused, combined; absent when none was new. */
+  verdict?: ShareSafetyVerdict
 }
 
 /** A trace sink. The hosted client satisfies this; pass your own to route
@@ -217,10 +219,10 @@ async function prepareOutbound(
   plan: UploadPlan,
   opts: ExecuteOptions,
   uploadedAt: string,
-): Promise<{ items: OutboundItem[]; skipped: number; refused: RefusedSession[] }> {
+): Promise<{ items: OutboundItem[]; skipped: number; refused: RefusedSession[]; verdict?: ShareSafetyVerdict }> {
   let candidates = plan.items
   if (opts.stripContent) {
-    candidates = candidates.map((item) => ({ ...item, spans: metadataOnly(item.spans) }))
+    candidates = candidates.map((item) => ({ ...item, spans: metadataOnly(item.spans).spans }))
   }
 
   const identity: UploadIdentity = {
@@ -230,10 +232,13 @@ async function prepareOutbound(
   }
   const items: OutboundItem[] = []
   const refused: RefusedSession[] = []
+  const verdicts: ShareSafetyVerdict[] = []
   for (const item of candidates) {
     const key = uploadKey(item.ref.harness, item.ref.sessionId)
     const previous = plan.state[key]
     const meta = await sessionMeta(item)
+    // The metadata-only rule covers what this metadata adds too: no cwd, branch or file name.
+    if (opts.stripContent) for (const [key, value] of Object.entries(meta)) if (!isMetadataAttribute(key, value)) delete meta[key]
     const eventsAt = (timestamp: string) =>
       toTraceSpanEvents(item.spans, { ...meta, [ATTR.UPLOADED_AT]: timestamp })
 
@@ -250,19 +255,25 @@ async function prepareOutbound(
     // The check reads exactly what would be sent: redacted spans after privacy
     // mode, plus the session metadata added above.
     const verdict = assessShareSafety(events)
+    verdicts.push(verdict)
     if (!shareAllowed(verdict)) {
       refused.push({ harness: item.ref.harness, sessionId: item.ref.sessionId, verdict })
       continue
     }
     items.push({ item, events, hash })
   }
-  return { items, skipped: plan.items.length - items.length - refused.length, refused }
+  return {
+    items,
+    skipped: plan.items.length - items.length - refused.length,
+    refused,
+    ...(verdicts.length > 0 ? { verdict: combineVerdicts('default', verdicts) } : {}),
+  }
 }
 
 /** Send the final, new outbound items, or on a dry run write their OTLP to `otlpOut` when it is given. */
 export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {}): Promise<UploadResult> {
   const uploadedAt = new Date().toISOString()
-  const { items, skipped, refused } = await prepareOutbound(plan, opts, uploadedAt)
+  const { items, skipped, refused, verdict } = await prepareOutbound(plan, opts, uploadedAt)
   const redactionCount = items.reduce((n, { item }) => n + item.redaction.redactionCount, 0)
 
   if (opts.dryRun) {
@@ -277,6 +288,7 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
       dryRun: true,
       ...(path === undefined ? {} : { otlpPath: path }),
       refused,
+      ...(verdict ? { verdict } : {}),
     }
   }
 
@@ -288,6 +300,7 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
       redactionCount,
       dryRun: false,
       refused,
+      ...(verdict ? { verdict } : {}),
     }
   }
 
@@ -331,5 +344,6 @@ export async function executeUpload(plan: UploadPlan, opts: ExecuteOptions = {})
     redactionCount,
     dryRun: false,
     refused,
+    ...(verdict ? { verdict } : {}),
   }
 }

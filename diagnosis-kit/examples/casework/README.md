@@ -3,7 +3,10 @@
 ## What this is, and what it is not
 
 The kit was run end to end against a real agent session on this machine, producing
-`sample-checks-output.json`. That file is a genuine `run-checks.ts` result, not a mock.
+`sample-checks-output.json`. That file is a genuine `run-checks.ts` result, not a mock,
+from the 0.x kit, which read the spans itself; today's `run-checks.ts` prints the same
+coverage in `templates/findings.schema.json`'s field names (`coverage.capabilities`,
+`coverage.skipped`, `findings`).
 
 It is **not** a Casework run. Casework has never executed an evaluation campaign:
 `docs/eval-proof.json` in the legal-underwriting-agent repository reads
@@ -39,9 +42,8 @@ their next move: instrument the missing attributes, then come back.
 ## Reproducing it
 
 ```bash
-cd /home/drew/code/traces
-./node_modules/.bin/tsx src/cli.ts convert --harness codex --last 1 --out /tmp/real.otlp.jsonl
-./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts /tmp/real.otlp.jsonl
+traces convert --harness codex --last 1 --no-content --out real.otlp.jsonl --format json
+./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts real.otlp.jsonl   # from a built traces checkout
 ```
 
 Substitute any harness the adapters cover. `traces list` shows what is on the box, across every harness.
@@ -57,7 +59,7 @@ The traces package reads that shape directly (it sniffs sandbox events), convert
 each event to a span (`src/file-export.ts`). So the sequence once a campaign has run is:
 
 ```bash
-traces convert <runDir>/<cellId>/sandbox-events.json --out casework.otlp.jsonl
+traces convert <runDir>/<cellId>/sandbox-events.json --no-content --out casework.otlp.jsonl
 ./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts casework.otlp.jsonl
 ```
 

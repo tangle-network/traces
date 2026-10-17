@@ -65,7 +65,7 @@ traces help moved                                  # every 0.x command and flag 
 | `--question-timeout <seconds>` | `ask`: wall-clock deadline for ONE question's investigation (default 600); raise it for questions over many large sessions |
 | `--concurrency <n>` | `ask`: questions running at once (default 4) |
 | `--once` | `watch`: one pass (or one run-tree snapshot), then exit |
-| `--no-content` | `facts`: omit conversation, commands, paths and assignment text; `upload`: send metadata only |
+| `--no-content` | One metadata-only rule (`src/metadata-only.ts`): `facts` omits conversation, commands, paths and assignment text; `convert` and `upload` drop prompts, replies, tool input and output, error text, working directories, branch names and subagent briefs from every span |
 | `--dry-run` / `--yes` | `upload`: preview without sending / skip the confirm prompt |
 
 Every command exits 0 yes, 1 no (fail, diverged, unsafe), or 2 could not answer. With `--format json`, the reason is one JSON object `{error, code}` on stderr.

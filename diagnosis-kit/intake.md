@@ -48,7 +48,9 @@ and you keep it.
 
 Default is **metadata only**: timings, token counts, costs, tool names, model ids, error
 statuses, and the shape of each run. No prompt or response content leaves your control.
-Run the supplied metadata-only export step on your machine before sending any trace.
+Run the metadata-only export on your machine before sending any trace:
+`traces convert raw.otlp.jsonl --no-content --out metadata-only.otlp.jsonl`, then
+`traces check metadata-only.otlp.jsonl --share-safe` (the public `@tangle-network/traces` package).
 Keep the raw trace with you; send only the exported file.
 
 **Does your agent handle regulated, privileged or personal data?**

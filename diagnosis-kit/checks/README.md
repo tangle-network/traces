@@ -1,15 +1,20 @@
 # Checks
 
-`run-checks.ts` is the deterministic measurement pass. It drops content-bearing
-attributes, redacts structured secrets, turns spans into runs and scores them.
+The kit runs the public `traces` CLI; nothing here reads spans itself.
 
 ```bash
-# On the customer's machine, from the merged traces checkout with locked dependencies installed:
-./node_modules/.bin/tsx diagnosis-kit/checks/scrub-export.ts raw.otlp.jsonl metadata-only.otlp.jsonl
-# On the operator host, after receiving that export inside the engagement:
+# On the customer's machine (npm install -g @tangle-network/traces):
+traces convert raw.otlp.jsonl --no-content --out metadata-only.otlp.jsonl --format json
+traces check metadata-only.otlp.jsonl --share-safe
+# On the operator host, from this checkout after `pnpm build`, inside the engagement:
 ./node_modules/.bin/tsx diagnosis-kit/checks/prepare-bundle.ts "$ENGAGEMENT_DIR"
 ./node_modules/.bin/tsx diagnosis-kit/checks/run-checks.ts "$ENGAGEMENT_DIR/bundle/spans.flat.jsonl"
 ```
+
+`prepare-bundle.ts` gates the received file with `traces check <file> --share-safe` and writes the bundle with
+`traces convert <file> --no-content`, refusing a file that still carried content. `run-checks.ts` maps
+`traces analyze <bundle> --format json` onto `templates/findings.schema.json`: capabilities, what the trace
+cannot answer, and the measured findings with their span ids.
 
 Add one check per symptom the customer named in intake section 2, so every complaint
 they raised has a number attached to it in the report. A finding with no number is
