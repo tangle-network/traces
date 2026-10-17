@@ -74,6 +74,19 @@ export const ATTR = {
  */
 export const SESSION_CWD_ATTR = 'traces.session.cwd'
 
+/**
+ * A harness's cumulative token counter, copied verbatim by its reader onto the
+ * session's root span (Codex's `total_token_usage`). Input is the whole prompt
+ * in the shared vocabulary: fresh input plus cache reads plus cache writes.
+ * `execution.ts` reads these before any per-call sum.
+ */
+export const SESSION_TOTAL_TOKENS_ATTR = 'traces.session.total_tokens'
+export const SESSION_TOTAL_INPUT_ATTR = 'traces.session.total_input_tokens'
+export const SESSION_TOTAL_OUTPUT_ATTR = 'traces.session.total_output_tokens'
+export const SESSION_TOTAL_CACHED_INPUT_ATTR = 'traces.session.total_cached_input_tokens'
+export const SESSION_TOTAL_CACHE_WRITE_ATTR = 'traces.session.total_cache_write_input_tokens'
+export const SESSION_TOTAL_REASONING_ATTR = 'traces.session.total_reasoning_tokens'
+
 /** `tangle.ingest_source` value for CLI-uploaded traces. Wire contract. */
 export const INGEST_SOURCE_CLI = 'cli'
 

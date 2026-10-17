@@ -38,6 +38,7 @@ import { readOtlpInput } from './otlp-input.js'
 import {
   createSessionFactsReportBuilder,
   matchRows,
+  priceReport,
   renderSessionFacts,
   sessionMatches,
   type SessionFactsReport,
@@ -970,11 +971,13 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   }
   let rendered: string
   let summary: string
+  // Rows and matches carry no cost, so only the sheet is priced.
+  if (format !== 'jsonl') report = await priceReport(report)
   if (format === 'jsonl') {
     rendered = rows.map((row) => `${JSON.stringify(row)}\n`).join('')
     summary = `turns → ${args.out}  (${rows.length} typed turn(s) in ${report.sessions.length} session(s), $0, no model call)`
   } else {
-    rendered = format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderSessionFacts(report)
+    rendered = format === 'json' ? `${JSON.stringify(report)}\n` : renderSessionFacts(report)
     summary = `session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`
   }
   await writeOutput(args, rendered, summary)

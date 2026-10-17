@@ -106,12 +106,19 @@ const SESSION_TOTAL_INPUT_TOKENS = 'traces.session.total_input_tokens'
 const SESSION_TOTAL_OUTPUT_TOKENS = 'traces.session.total_output_tokens'
 const SESSION_TOTAL_REASONING_TOKENS = 'traces.session.total_reasoning_tokens'
 const SESSION_TOTAL_CACHED_INPUT_TOKENS = 'traces.session.total_cached_input_tokens'
+const SESSION_TOTAL_CACHE_WRITE_TOKENS = 'traces.session.total_cache_write_input_tokens'
 const SESSION_TOTAL_TOKENS_SOURCE = 'traces.session.total_tokens_source'
 const CODEX_TOTAL_TOKENS_SOURCE = 'codex.token_count.info.total_token_usage'
 
 /** Carry a reported counter only when it is a usable non-negative number. */
 function reportedCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** `input_tokens` less the cached tokens Codex counts inside it, or null when it reports none. */
+function freshInputTokens(usage: CodexTokenUsage): number | null {
+  const input = reportedCount(usage.input_tokens)
+  return input === undefined ? null : Math.max(0, input - (reportedCount(usage.cached_input_tokens) ?? 0))
 }
 
 function nonEmpty(value: unknown): string | undefined {
@@ -1277,10 +1284,13 @@ export class CodexAdapter implements HarnessTraceAdapter {
             service: SERVICE,
             agent: SERVICE,
             model,
-            inputTokens: u.input_tokens ?? null,
+            // Codex counts cached tokens inside `input_tokens`; the shared
+            // vocabulary's prompt categories are exclusive (see `execution.ts`).
+            inputTokens: freshInputTokens(u),
             outputTokens: u.output_tokens ?? null,
             reasoningTokens: u.reasoning_output_tokens ?? null,
             cachedInputTokens: u.cached_input_tokens ?? null,
+            cacheWriteInputTokens: u.cache_write_input_tokens ?? null,
             step,
           })
           spans.push(llm)
@@ -1564,14 +1574,18 @@ export class CodexAdapter implements HarnessTraceAdapter {
         root.attributes[SESSION_TOTAL_TOKENS] = total
         root.attributes[SESSION_TOTAL_TOKENS_SOURCE] = CODEX_TOTAL_TOKENS_SOURCE
         // The rest of the same snapshot, so the parts and the total agree.
-        const input = reportedCount(sessionTotalUsage.input_tokens)
+        // The whole prompt in the shared vocabulary: fresh input, cache
+        // reads and cache writes, as harness-sessions normalizes the same snapshot.
+        const fresh = freshInputTokens(sessionTotalUsage)
         const output = reportedCount(sessionTotalUsage.output_tokens)
         const reasoning = reportedCount(sessionTotalUsage.reasoning_output_tokens)
         const cached = reportedCount(sessionTotalUsage.cached_input_tokens)
-        if (input !== undefined) root.attributes[SESSION_TOTAL_INPUT_TOKENS] = input
+        const cacheWrite = reportedCount(sessionTotalUsage.cache_write_input_tokens)
+        if (fresh !== null) root.attributes[SESSION_TOTAL_INPUT_TOKENS] = fresh + (cached ?? 0) + (cacheWrite ?? 0)
         if (output !== undefined) root.attributes[SESSION_TOTAL_OUTPUT_TOKENS] = output
         if (reasoning !== undefined) root.attributes[SESSION_TOTAL_REASONING_TOKENS] = reasoning
         if (cached !== undefined) root.attributes[SESSION_TOTAL_CACHED_INPUT_TOKENS] = cached
+        if (cacheWrite !== undefined) root.attributes[SESSION_TOTAL_CACHE_WRITE_TOKENS] = cacheWrite
       }
     }
     if (inheritedSpansEmitted > 0) root.attributes[INHERITED_SPAN_COUNT_ATTR] = inheritedSpansEmitted

@@ -295,7 +295,7 @@ const COMMANDS = [
   {
     name: 'facts',
     usage: 'facts <ref…> | --current | --last N | --since T [flags]',
-    job: 'What happened, exactly, for $0: who acted, tools, subagents, human turns, PRs, first failure.',
+    job: 'What happened, exactly, for $0: who acted, tools, subagents, human turns, PRs, first failure, tokens and cost.',
     flags: [
       ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--match', '--no-content',
       { flag: '--format', help: 'json (default), text, or jsonl: one row per typed turn' },
@@ -307,11 +307,11 @@ const COMMANDS = [
     jq: [
       ['.sessions[0].humanTurns.value[] | {text, reply, signals}', 'each ask, its reply, its signals'],
       ['.sessions[0].agent.value', 'who acted: profile, model, directive'],
-      ['.sessions[0].firstFailure', 'the first failure and its blame'],
+      ['.sessions[0] | {firstFailure, tokens, cost}', 'first failure, tokens, list-price cost'],
       ['.matches[] | {sessionId, kind, text}', 'with --match: each hit'],
     ],
     examples: ['traces facts --current', 'traces facts 019a3c7e --format jsonl', "traces facts --since 30d --match '^gh pr merge'"],
-    overview: ['What happened (turns, PRs, failure)? $0', 'traces facts <ref> | --current | --since 1d'],
+    overview: ['What happened (turns, PRs, failure, cost)? $0', 'traces facts <ref> | --current | --since 1d'],
   },
   {
     name: 'analyze',

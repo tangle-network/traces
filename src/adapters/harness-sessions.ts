@@ -21,11 +21,20 @@ import {
 } from '@tangle-network/harness-sessions'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
-import { SESSION_CWD_ATTR } from '../attributes.js'
+import {
+  SESSION_CWD_ATTR,
+  SESSION_TOTAL_CACHE_WRITE_ATTR,
+  SESSION_TOTAL_CACHED_INPUT_ATTR,
+  SESSION_TOTAL_INPUT_ATTR,
+  SESSION_TOTAL_OUTPUT_ATTR,
+  SESSION_TOTAL_REASONING_ATTR,
+  SESSION_TOTAL_TOKENS_ATTR,
+} from '../attributes.js'
 import type { OtlpSpan } from '../otlp.js'
 import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
-import { ClaudeAdapter } from './claude.js'
+import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
+import { SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './provenance.js'
 import { CodexAdapter, spawnAgentPath } from './codex.js'
 import { multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { OpencodeAdapter } from './opencode.js'
@@ -185,6 +194,19 @@ function decorateCodexTools(session: HarnessSession, spans: OtlpSpan[]): void {
     // the join key when the spawn returned no child id.
     const path = spawnAgentPath(call.input) ?? spawnAgentPath(call.inputText) ?? spawnAgentPath(call.result?.output)
     if (path) item.attributes['traces.codex.spawn_agent_path'] = path
+  }
+}
+
+/** A Claude Code tool call that names an agent to run spawned a subagent: the rule traces' own Claude reader applies. */
+function decorateClaudeSpawns(session: HarnessSession, spans: OtlpSpan[]): void {
+  const byCallId = new Map(session.toolCalls.map((call) => [call.id, call]))
+  for (const item of spans) {
+    if (item.attributes['openinference.span.kind'] !== 'TOOL') continue
+    const call = byCallId.get(String(item.attributes['gen_ai.tool.call.id']))
+    if (!call || !spawnsSubagent(call.input)) continue
+    item.attributes[SUBAGENT_SPAWN_ATTR] = true
+    const task = spawnTaskName(call.input)
+    if (task) item.attributes[SUBAGENT_SPAWN_TASK_ATTR] = task
   }
 }
 
@@ -711,12 +733,17 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       root.attributes['traces.source.unreadable_rows'] = session.integrity.unparsedRecords
     }
     // The session-total counter is distinct from a sum of individual calls.
-    if ((session.harness === 'codex' || session.harness === 'factory-droids')
-      && session.usage?.input != null && session.usage.output != null) {
-      root.attributes['traces.session.total_tokens'] = session.usage.input + session.usage.output
-        + (session.usage.cacheRead ?? 0) + (session.usage.cacheWrite ?? 0)
-      root.attributes['traces.session.total_input_tokens'] = session.usage.input
-      root.attributes['traces.session.total_output_tokens'] = session.usage.output
+    // The shared reader's input excludes the cache; the counter's input is the
+    // whole prompt, as traces' own Codex reader and `execution.ts` read it.
+    const usage = session.usage
+    if ((session.harness === 'codex' || session.harness === 'factory-droids') && usage?.input != null && usage.output != null) {
+      const input = usage.input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
+      root.attributes[SESSION_TOTAL_TOKENS_ATTR] = input + usage.output
+      root.attributes[SESSION_TOTAL_INPUT_ATTR] = input
+      root.attributes[SESSION_TOTAL_OUTPUT_ATTR] = usage.output
+      if (usage.cacheRead != null) root.attributes[SESSION_TOTAL_CACHED_INPUT_ATTR] = usage.cacheRead
+      if (usage.cacheWrite != null) root.attributes[SESSION_TOTAL_CACHE_WRITE_ATTR] = usage.cacheWrite
+      if (usage.reasoning != null) root.attributes[SESSION_TOTAL_REASONING_ATTR] = usage.reasoning
       root.attributes['traces.session.total_tokens_source'] = '@tangle-network/harness-sessions'
     }
     spans.push(...presentationSpans(session, root))
@@ -726,6 +753,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       promptSeen = await decorateCodexMeta(codex, root, spans)
       if (codex.legacyHead) addLegacyPrompts(codex.legacyHead, session, root, spans)
     }
+    if (session.harness === 'claude-code') decorateClaudeSpawns(session, spans)
     stampNativeProvenance(session, spans)
     spans.push(...lifecycleSpans(session, root, spans))
     return { spans, root, promptSeen }

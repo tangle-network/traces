@@ -396,14 +396,14 @@ describe('traces analyze <otlp file>', () => {
     const result = await runCli(['analyze', path, '--out', report])
     expect(result.code).toBe(0)
     const written = await readFile(report, 'utf8')
-    expect(written).toContain('### Direct model usage — inputs incomplete')
-    expect(written).toContain('### Cost coverage — inputs incomplete')
+    expect(written).toContain('### Tokens and cost — inputs incomplete')
     expect(written).toContain('⚠️ **Inputs incomplete — `token-accounting` unavailable:**')
-    expect(written).toContain('⚠️ **Inputs incomplete — `cost-attribution` unavailable:**')
     expect(written).toContain('⚠️ **Inputs incomplete — `tool-usage` unavailable:**')
-    // The marker sits above the token table, not forty lines away from it.
+    // No session reports usage: unknown with the reason, never a zero.
+    expect(written).toContain('- **Tokens:** unknown — ')
+    // The marker sits above the token line, not forty lines away from it.
     const marker = written.indexOf('`token-accounting` unavailable')
-    const table = written.indexOf('| Token category | Total |')
+    const table = written.indexOf('- **Tokens:**')
     expect(marker).toBeGreaterThan(-1)
     expect(table - marker).toBeGreaterThan(0)
     expect(table - marker).toBeLessThan(600)

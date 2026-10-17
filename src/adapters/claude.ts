@@ -590,7 +590,7 @@ function recordedOrigin(origin: { kind?: unknown } | undefined): string | null {
 }
 
 /** The task name a spawn call gave its child, when the call named one. */
-function spawnTaskName(input: unknown): string | null {
+export function spawnTaskName(input: unknown): string | null {
   if (input === null || typeof input !== 'object') return null
   const record = input as Record<string, unknown>
   const described = record[SPAWN_DESCRIPTION_KEY]
@@ -600,7 +600,7 @@ function spawnTaskName(input: unknown): string | null {
 }
 
 /** Whether a tool call selected an agent to run, i.e. spawned a subagent. */
-function spawnsSubagent(input: unknown): boolean {
+export function spawnsSubagent(input: unknown): boolean {
   if (input === null || typeof input !== 'object') return false
   const type = (input as Record<string, unknown>)[SPAWN_TYPE_KEY]
   return typeof type === 'string' && type.trim().length > 0

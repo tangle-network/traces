@@ -31,7 +31,6 @@ import {
   renderSessionFacts,
   renderSessionFactsContext,
   SESSION_FACTS_VERSION_SUFFIX,
-  SESSION_TOKEN_TOTAL_ATTR,
   sessionFactsContext,
   withSessionFactsContext,
 } from '../src/session-facts.js'
@@ -47,7 +46,6 @@ import {
   FIXTURE_HUMAN_TURNS,
   FIXTURE_LAST_RECORD_AT,
   FIXTURE_SESSION_ID,
-  FIXTURE_TOKEN_TOTAL,
   fixtureRecords,
   fixtureSpans,
 } from './session-facts-fixture.js'
@@ -121,36 +119,6 @@ describe('session facts', () => {
     for (const spanId of cited) expect(known.has(spanId)).toBe(true)
   })
 
-  it('says why a fact the spans cannot support is null, instead of guessing', async () => {
-    const spans = await fixtureSpans()
-    // A trace from an adapter that does not record the harness's cumulative
-    // total. Summing the per-turn deltas would answer a different question, so
-    // the sheet says so rather than reporting the smaller number.
-    for (const span of spans) delete span.attributes[SESSION_TOKEN_TOTAL_ATTR]
-    const [facts] = computeSessionFacts(spans)
-    expect(facts!.tokenTotal.value).toBeNull()
-    expect(facts!.tokenTotal.unavailable).toContain(SESSION_TOKEN_TOTAL_ATTR)
-    expect(facts!.tokenTotal.spanIds).toEqual([])
-  })
-
-  it('reports the harness token total the adapter recorded', async () => {
-    const spans = await fixtureSpans()
-    const [facts] = computeSessionFacts(spans)
-    expect(facts!.tokenTotal.value).toBe(FIXTURE_TOKEN_TOTAL)
-    expect(facts!.tokenTotal.unavailable).toBeNull()
-    expect(facts!.tokenTotal.spanIds).toHaveLength(1)
-  })
-
-  it('reports the harness token total once a span carries it', async () => {
-    const spans = await fixtureSpans()
-    const root = spans.find((span) => span.parent_span_id === null)!
-    root.attributes[SESSION_TOKEN_TOTAL_ATTR] = 17_025_686
-    const [facts] = computeSessionFacts(spans)
-    expect(facts!.tokenTotal.value).toBe(17_025_686)
-    expect(facts!.tokenTotal.unavailable).toBeNull()
-    expect(facts!.tokenTotal.spanIds).toEqual([root.span_id])
-  })
-
   it('does not let a synthesized subagent span inflate the tool count', async () => {
     const spans = await fixtureSpans()
     // The adapter now marks a subagent's lifecycle span as synthesized and
@@ -212,7 +180,7 @@ describe('session facts', () => {
     expect(text).toContain('tool calls: 4 (0 synthesized span(s) excluded)')
     expect(text).toContain(`subagents: 1: ${FIXTURE_AGENT_PATH}`)
     expect(text).toContain('human turns: 2')
-    expect(text).toContain(`token total: ${FIXTURE_TOKEN_TOTAL}`)
+    expect(text).toContain('tokens: in 900 · out 80 · cost unknown (not priced yet')
     expect(text).toContain('pull requests: 0 created, 0 merged')
   })
 })

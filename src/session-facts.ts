@@ -59,6 +59,7 @@ import {
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
 import { indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
+import { needsPrice, routerPrices, sessionCost, sessionTokens, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
 import {
@@ -71,16 +72,8 @@ import {
 import { commandLines, commandTextFromInput } from './shell-commands.js'
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
-/**
- * The cumulative harness token total for a whole session, when the adapter
- * records one. Codex's `token_count` events carry
- * `info.total_token_usage.total_tokens`; the adapter uses that object only as a
- * de-duplication signature today, so no span carries the value and
- * {@link SessionFacts.tokenTotal} states that rather than summing the per-turn
- * deltas, which is a different (and smaller) number.
- */
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '5'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '6'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
@@ -111,8 +104,6 @@ export interface SessionFactsOptions {
    */
   readonly agentIdentity?: AgentIdentityLookup
 }
-
-export const SESSION_TOKEN_TOTAL_ATTR = 'traces.session.total_tokens'
 
 /**
  * The first marker an adapter used for a span it created to describe a
@@ -324,7 +315,18 @@ export interface SessionFacts {
   readonly firstRecordAt: SessionFact<string>
   /** Latest span end among this session's own records. */
   readonly lastRecordAt: SessionFact<string>
-  /** The harness's own cumulative token total, when a span carries it. */
+  /**
+   * The session's own agent's tokens (`execution.ts`): `input` is the whole
+   * prompt, cache reads and writes included, on every harness. A subagent
+   * folded into the trace is not counted, as `subagentToolSpans` says of tools.
+   */
+  readonly tokens: SessionTokens
+  /**
+   * What the Router would charge for `tokens`, labelled `list price (Router rates)`,
+   * or null with the reason. `priceReport` fills it; the sheet alone loads no price table.
+   */
+  readonly cost: SessionCost
+  /** `tokens.input + tokens.output`, the one total every harness reports the same way. */
   readonly tokenTotal: SessionFact<number>
   /**
    * The session's first failure by agent-eval's fixed precedence: the innermost
@@ -1179,7 +1181,7 @@ function readSession(
     null,
   )
 
-  const tokenSpan = spans.find((span) => typeof span.attributes[SESSION_TOKEN_TOTAL_ATTR] === 'number')
+  const tokens = sessionTokens(ownSpans)
   const receipts = spans.filter((span) => span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] !== undefined)
   const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
@@ -1274,19 +1276,12 @@ function readSession(
       ownSpans.length === 0
         ? { status: 'unknown', traceId, unsetCount: 0, reason: "no span of this session's own records" }
         : rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans),
-    tokenTotal: tokenSpan
-      ? {
-          value: tokenSpan.attributes[SESSION_TOKEN_TOTAL_ATTR] as number,
-          spanIds: [tokenSpan.span_id],
-          unavailable: null,
-        }
-      : {
-          value: null,
-          spanIds: [],
-          unavailable:
-            `no span carries ${SESSION_TOKEN_TOTAL_ATTR}; the per-turn llm.turn deltas in this trace ` +
-            'are a different quantity and summing them would not be the harness total',
-        },
+    tokens,
+    // Priced by `priceReport`, which loads the price table only when a session needs it.
+    cost: sessionCost(tokens, undefined),
+    tokenTotal: tokens.input === null
+      ? { value: null, spanIds: [], unavailable: tokens.unavailable }
+      : { value: tokens.input + (tokens.output ?? 0), spanIds: tokens.spanIds, unavailable: null },
     agent,
   }
   if (options.includeContent !== false) return { facts, spans, turns: typedTurns }
@@ -1351,6 +1346,17 @@ export type SessionFactsReportOptions = SessionFactsOptions & {
   nameUnread?: boolean
   /** Called with each session the report selects, as it is read: its facts, spans and typed turns. */
   onSession?: (reading: SessionReading) => void
+}
+
+/**
+ * The report with each session's `cost` priced from agent-runtime's price
+ * table. The table is imported only when some session has tokens to price, so
+ * a report with none, and every command that prints no cost, never loads it.
+ */
+export async function priceReport(report: SessionFactsReport): Promise<SessionFactsReport> {
+  if (!report.sessions.some((session) => needsPrice(session.tokens))) return report
+  const price = await routerPrices()
+  return { ...report, sessions: report.sessions.map((session) => ({ ...session, cost: sessionCost(session.tokens, price) })) }
 }
 
 /** The facts sheet for a set of spans, as one report. */
@@ -1554,7 +1560,7 @@ export function renderSessionFacts(report: SessionFactsReport): string {
     lines.push(factLine('last record', facts.lastRecordAt, String(facts.lastRecordAt.value)))
     lines.push(factLine('compactions', facts.measurements.compactions, String(facts.measurements.compactions.value?.length ?? 0)))
     lines.push('  skills: ' + facts.measurements.adoption.totalSkillInvocations + ' recorded invocation(s), ' + facts.measurements.adoption.totalSkillDocumentReads + ' document read(s); telemetry ' + facts.measurements.adoption.skillTelemetryStatus)
-    lines.push(factLine('token total', facts.tokenTotal, String(facts.tokenTotal.value)))
+    lines.push(`  tokens: ${renderTokens(facts.tokens, facts.cost)}`)
     lines.push(`  first failure: ${renderFirstFailure(facts.firstFailure)}`)
     if ((facts.unreadRecords.value ?? 0) > 0) {
       lines.push(`  unread records: ${facts.unreadRecords.value} (the facts above are computed from the rest)`)
@@ -1710,6 +1716,22 @@ export function readSessionIndex(
     rows: sessionRows(ordered, typed.turns),
     state: typed.state,
   }
+}
+
+/** `in 2.1M · out 310k · cache read 88M · $38.20 list price (Router rates)`, or why a part is unknown. */
+function renderTokens(tokens: SessionTokens, cost: SessionCost): string {
+  if (tokens.input === null) return `unavailable — ${tokens.unavailable}`
+  const parts = [`in ${tokenCount(tokens.input)}`, `out ${tokenCount(tokens.output ?? 0)}`]
+  if ((tokens.cacheRead ?? 0) > 0) parts.push(`cache read ${tokenCount(tokens.cacheRead!)}`)
+  if ((tokens.cacheWrite ?? 0) > 0) parts.push(`cache write ${tokenCount(tokens.cacheWrite!)}`)
+  parts.push(cost.usd === null ? `cost unknown (${cost.unavailable})` : `$${cost.usd.toFixed(cost.usd < 1 ? 4 : 2)} ${cost.label}`)
+  return parts.join(' · ')
+}
+
+function tokenCount(value: number): string {
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`
+  if (value >= 1e3) return `${Math.round(value / 1e3)}k`
+  return String(value)
 }
 
 /** The `who:` line: profile and digest, model, directive variant. */
