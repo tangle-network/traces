@@ -18,19 +18,13 @@ const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
 /** The DSPy bridge module agent-eval's engine runs (`python -m <module>`). */
 const BRIDGE_MODULE = 'agent_eval_rpc.dspy_rlm_bridge'
 
-export const ANALYST_MAX_OUTPUT_TOKENS = 16_384
-export const GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS = 8_192
-
 /**
- * Keep the wider window for model families that need it.
- * GPT-5.6 emits complete findings within 8,192 tokens; reserving twice that
- * amount on every recursive step makes the cost ledger reject later calls.
+ * The completion cap of every analyst call, for every model. The bridge's DSPy
+ * refuses an OpenAI reasoning model (gpt-5 and o-series names) whose cap is
+ * below 16,000 before any call, so a smaller cap for one family fails every
+ * question that asks with it.
  */
-export function analystMaxOutputTokens(model: string): number {
-  return /(?:^|\/)gpt-5\.6-(?:luna|terra|sol)(?:$|[-:])/iu.test(model)
-    ? GPT_5_6_ANALYST_MAX_OUTPUT_TOKENS
-    : ANALYST_MAX_OUTPUT_TOKENS
-}
+export const ANALYST_MAX_OUTPUT_TOKENS = 16_384
 
 /**
  * The PyPI version of `agent-eval-rpc`, the Python bridge, that speaks this
@@ -128,9 +122,12 @@ const TRANSIENT_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504, 520, 522,
  */
 const UNSERVABLE_MODEL = /model_not_allowed|model_not_found|provider_pricing_unavailable|not in this key's allow-list|unknown model/iu
 
-/** The endpoint's own words from a `router <status>: <body>` failure. */
+/**
+ * The endpoint's own words from a `router <status>: <body>` failure. Runtime
+ * cuts the body at 200 characters, so the message may have no closing quote.
+ */
 function endpointWords(body: string): string {
-  const message = /"message":"((?:[^"\\]|\\.)*)"/u.exec(body)?.[1]
+  const message = /"message":"((?:[^"\\]|\\.)*)/u.exec(body)?.[1]
   return (message ?? body).replace(/\\"/gu, '"').slice(0, 240)
 }
 
@@ -243,7 +240,6 @@ export function createAnalystModelOwner(opts: {
   model: string
   provider: string
 }) {
-  const maxOutputTokens = analystMaxOutputTokens(opts.model)
   const profile = {
     name: 'traces-analyst',
     harness: 'cli-base',
@@ -251,7 +247,7 @@ export function createAnalystModelOwner(opts: {
       provider: opts.provider,
       default: opts.model,
       reasoningEffort: 'none',
-      maxVisibleOutputTokens: maxOutputTokens,
+      maxVisibleOutputTokens: ANALYST_MAX_OUTPUT_TOKENS,
       metadata: {
         // Stream every analyst call. The Tangle Router bounds a buffered request by a deadline that
         // ends when response headers are sent, and a thinking model's long recursive step outlives
@@ -353,11 +349,7 @@ export function analysisEngineFromEnv(opts: AnalysisEngineFromEnvOptions): Trace
         )
       },
       model: opts.model,
-      // Model-aware, not defaulted: GPT-5.6 needs less output room than models
-      // such as GLM, and every recursive call reserves this full amount before
-      // execution. An oversized reservation can reject useful later calls even
-      // when the run's measured spend remains well below its limit.
-      maxOutputTokens: analystMaxOutputTokens(opts.model),
+      maxOutputTokens: ANALYST_MAX_OUTPUT_TOKENS,
       // The engine's own default ceiling is $1 per investigation, a proxy-side
       // ceiling separate from any shared ledger; the caller's allocation wins.
       ...(opts.maxCostUsd !== undefined && Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0

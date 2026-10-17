@@ -134,6 +134,10 @@ describe('traces ask: answers', () => {
     expect(run.code, run.stderr).toBe(0)
     expect(run.stdout).toMatch(new RegExp(`^answers → ${out} {2}\\(answers\\.json, report\\.md: 1/1 answered, \\$0\\.00040, \\d+\\.\\d s\\)\\n$`, 'u'))
     expect(run.endpoint.requests).toEqual([{ model: 'gpt-5.6-luna', authorized: true }])
+    // The bridge's DSPy refuses an OpenAI reasoning model whose completion cap is below 16,000.
+    const [bridged] = (await readFile(run.bridgeLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { modelProxy: { model: string; maxOutputTokens: number } })
+    expect(bridged!.modelProxy.model).toBe('gpt-5.6-luna')
+    expect(bridged!.modelProxy.maxOutputTokens).toBeGreaterThanOrEqual(16_000)
 
     const answers = JSON.parse(await readFile(join(out, 'answers.json'), 'utf8')) as Answers
     // Discovery's per-question values are the defaults: min(budget, $2), 1800 s, 4 at once.
@@ -146,11 +150,11 @@ describe('traces ask: answers', () => {
   })
 
   it('prints every answer as JSON, and keeps a small budget small', async () => {
-    const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '0.5', '--format', 'json'])
+    const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '1.5', '--format', 'json'])
     expect(run.code, run.stderr).toBe(0)
     const answers = JSON.parse(run.stdout) as Answers & { report?: string }
     expect(answers).not.toHaveProperty('report')
-    expect(answers).toMatchObject({ ok: true, budgetUsd: 0.5, questionBudgetUsd: 0.5 })
+    expect(answers).toMatchObject({ ok: true, budgetUsd: 1.5, questionBudgetUsd: 1.5 })
     expect(answers.questions[0]!.citations).toEqual([expect.objectContaining({ uri: cite(), resolved: true })])
   })
 
