@@ -83,7 +83,9 @@ const EXEC_FAILS_ID = '019a8c00-eeee-7eee-8eee-eeeeeeeeee01'
 /**
  * A Codex session whose `exec_command` exits 1 and whose next one exits 0. Codex
  * writes the exit code in a text header before `Output:`; the output body names
- * another code, which is not the status.
+ * another code, which is not the status. The calls carry no `workdir`: traces'
+ * own reader classifies the whole argument text, and the test temp root's name
+ * (`traces-vitest-…`) would read as a verification command.
  */
 async function makeExecFailsHome(): Promise<{ path: string; env: Record<string, string> }> {
   const root = await mkdtemp(join(tmpdir(), 'traces-exec-fails-'))
@@ -91,7 +93,7 @@ async function makeExecFailsHome(): Promise<{ path: string; env: Record<string, 
   const cwd = join(home, 'w', 'widgets')
   const at = (second: number): string => `2026-10-17T10:00:${String(second).padStart(2, '0')}.000Z`
   const exec = (second: number, call: string, cmd: string, code: number, body: string) => [
-    { timestamp: at(second), type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: call, arguments: JSON.stringify({ cmd, workdir: cwd }) } },
+    { timestamp: at(second), type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: call, arguments: JSON.stringify({ cmd }) } },
     {
       timestamp: at(second + 2),
       type: 'response_item',
