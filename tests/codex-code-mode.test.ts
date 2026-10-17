@@ -168,3 +168,83 @@ describe('pull requests a Codex code-mode script created', () => {
     }
   })
 })
+
+/**
+ * Processes a code-mode script started in a loop, the way current Codex
+ * records one: an `exec` call whose JavaScript runs `tools.exec_command` once
+ * per element of an array literal, with the command a template literal over
+ * the loop variable, and a receipt holding only what the script printed. Next
+ * to it, the same program run straight from `exec_command`, whose output names
+ * its exit code. facts counts each run by program, and the search lists each
+ * command the loop ran, not the template.
+ */
+const LOOP_ID = '0199c0de-0000-7000-8000-0000000100f0'
+const direct = (t: number, id: string, cmd: string, exitCode: number, output: string): Row[] => [
+  { t, type: 'response_item', payload: { type: 'function_call', name: 'exec_command', arguments: JSON.stringify({ cmd, workdir: '/workspace/demo', yield_time_ms: 10000 }), call_id: id } },
+  {
+    t: t + 0.5,
+    type: 'response_item',
+    payload: { type: 'function_call_output', call_id: id, output: `Chunk ID: 8518b0\nWall time: 1.0 seconds\nProcess exited with code ${exitCode}\nOriginal token count: 9\nOutput:\n${output}\n` },
+  },
+]
+
+function codeModeLoop(): Row[] {
+  return [
+    { t: 0, type: 'session_meta', payload: { id: LOOP_ID, cwd: '/workspace/demo' } },
+    { t: 0.5, type: 'turn_context', payload: { cwd: '/workspace/demo', model: 'gpt-fixture' } },
+    task(1, 'task_started', 'turn-1'),
+    userItem(2, [{ type: 'input_text', text: 'Start the probe runs.' }]),
+    userEvent(2.001, 'Start the probe runs.'),
+    ...direct(3, 'call-v1', 'labctl run beta-probe --variant v1', 0, 'started run b-01 (spec beta-probe, variant v1)'),
+    ...direct(5, 'call-g', 'labctl run gamma-grid', 1, 'error: config gamma-grid.yaml: missing required field seed'),
+    script(7, 'call-loop', 'for (const variant of ["v3", "v4"]) {\n  const run = await tools.exec_command({ cmd: `labctl run beta-probe --variant ${variant}` })\n  text(run.output)\n}'),
+    scriptOutput(8, 'call-loop', `${COMPLETED}started run b-03 (spec beta-probe, variant v3)\nstarted run b-04 (spec beta-probe, variant v4)\n`),
+    ...direct(9, 'call-c', 'cd /workspace/demo && labctl cancel b-9', 2, 'error: no such run: b-9'),
+    task(11, 'task_complete', 'turn-1'),
+  ]
+}
+
+describe('processes a Codex code-mode script started in a loop', () => {
+  let loopEnv: Record<string, string>
+  let loopRollout: string
+  beforeAll(async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-code-mode-loop-'))
+    const sessions = join(dir, 'home', '.codex', 'sessions', '2026', '09', '08')
+    await mkdir(sessions, { recursive: true })
+    loopRollout = join(sessions, `rollout-2026-09-08T10-00-00-${LOOP_ID}.jsonl`)
+    await writeFile(loopRollout, `${codeModeLoop().map(({ t, ...row }) => JSON.stringify({ timestamp: at(t), ...row })).join('\n')}\n`)
+    loopEnv = { HOME: join(dir, 'home'), XDG_STATE_HOME: join(dir, 'state') }
+  })
+
+  it('count once per element, by program, with the failures their own exit codes show, on both read paths', async () => {
+    for (const argv of [[loopRollout], [loopRollout, '--latest-turn']]) {
+      const run = await runCli(['facts', ...argv, '--format', 'json'], { env: loopEnv })
+      expect(run.stderr).toBe('')
+      expect(run.code).toBe(0)
+      const { commands } = (JSON.parse(run.stdout) as { sessions: Array<{ commands: { value: Array<Record<string, unknown>> } }> }).sessions[0]!
+      expect(commands.value.map(({ command, runs, failed, inScripts }) => ({ command, runs, failed, inScripts }))).toEqual([
+        { command: 'labctl run', runs: 4, failed: 1, inScripts: 2 },
+        { command: 'labctl cancel', runs: 1, failed: 1, inScripts: 0 },
+      ])
+    }
+  })
+
+  it('are search rows, one per command the loop ran', async () => {
+    const run = await runCli(['facts', loopRollout, '--match', '^labctl run', '--format', 'json'], { env: loopEnv })
+    expect(run.code).toBe(0)
+    expect((JSON.parse(run.stdout) as { matches: Array<{ text: string }> }).matches.map((match) => match.text)).toEqual([
+      'labctl run beta-probe --variant v1',
+      'labctl run gamma-grid',
+      'labctl run beta-probe --variant v3',
+      'labctl run beta-probe --variant v4',
+    ])
+  })
+
+  it('are withheld with the conversation under --no-content', async () => {
+    const run = await runCli(['facts', loopRollout, '--no-content', '--format', 'json'], { env: loopEnv })
+    expect(run.code).toBe(0)
+    expect((JSON.parse(run.stdout) as { sessions: Array<{ commands: unknown }> }).sessions[0]!.commands).toEqual({
+      value: null, spanIds: [], unavailable: 'Content was not requested.',
+    })
+  })
+})

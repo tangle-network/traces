@@ -39,6 +39,7 @@ Three rules hold for every field. Every fact is about this session's own agent: 
 |---|---|
 | `toolCalls`, `toolCallsByName` | tool calls this session's agent made, by name. A Codex command that checks work is `exec_command.verify` |
 | `subagents` | every subagent-spawning call, with its task name; a refused Codex spawn is `ERROR` |
+| `commands` | the programs the session's commands ran (`labctl run`, `git push`, `pnpm test`), most runs first: `runs`; `failed`, runs that were their call's only command (a `cd` aside) and ended in error; and `inScripts`, runs inside a Codex code-mode script, which records no exit code of its own. A code-mode loop over literals counts once per element |
 | `pullRequests` | pull requests created and merged, by number or head branch, with when the command ran and the span that named it |
 | `humanTurns` | turns a person typed, each with `author`, `answered`, `reply`, `interrupted` and `signals` (`interrupt`, `rejected-tool`, `after-claim`) |
 | `excludedTurns`, `turnsByActor` | every left-out turn, by reason and author, so the filter is checkable |
@@ -65,6 +66,7 @@ A pull request is named by its number when the command or an output that joins t
 A create whose call returned while it still ran takes the number a later poll of that process printed.
 In a Codex code-mode script, each tool result the script printed is decoded (`exit_code` or `session_id`, and the command's output), and a later script's `write_stdin` poll of the session counts as that poll.
 A create counts only where an output shows `gh` answered: a script that completed says nothing about its commands.
+A script's `tools.exec_command` call inside `for (const x of [...])` (an array literal, inline or bound by name) ran once per element, with `${x}` in its template, or `{cmd: x}`, taking each value; inside any other loop it is read once, as written.
 
 ## `--no-content`, windows and exit status
 

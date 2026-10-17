@@ -102,6 +102,7 @@ interface Sheet {
   pullRequests: Fact<{ created: PullRequest[]; merged: PullRequest[] }>
   humanTurns: Fact<Array<{ at: string; text: string; spanId: string; signals: string[] }>>
   changedFiles: Fact<Array<{ path: string }>>
+  commands: Fact<Array<{ command: string; runs: number; failed: number; inScripts: number }>>
   firstRecordAt: Fact<string>
   lastRecordAt: Fact<string>
   firstFailure: { status: string; name?: string; message?: string; spanId?: string }
@@ -132,7 +133,7 @@ async function readFacts(options: ArmOptions): Promise<FactsReading> {
     sheets.set(session.id, (await facts([pathOf(session.id)]) as { sessions: Sheet[] }).sessions[0]!)
   }
   const searches = new Map<string, Match[]>()
-  const patterns: Array<[BenchSessionId, string]> = [['codex-operator', '^labctl status\\b']]
+  const patterns: Array<[BenchSessionId, string]> = [['codex-operator', '^labctl status\\b'], ['codex-operator', '^labctl run\\b']]
   for (const [session, pattern] of patterns) {
     const { matches } = await facts([pathOf(session), '--match', pattern]) as { matches: Match[] }
     searches.set(`${session}\0${pattern}`, matches.filter((match) => match.kind === 'command'))
@@ -148,6 +149,11 @@ const tool = (sheet: Sheet, name: string): ToolRow | undefined => sheet.measurem
 const execRows = (sheet: Sheet): ToolRow[] => sheet.measurements.tools.filter((row) => row.name === 'exec_command' || row.name === 'exec_command.verify')
 const sum = (rows: readonly ToolRow[], read: (row: ToolRow) => number): number => rows.reduce((total, row) => total + read(row), 0)
 const quote = (text: string | undefined, spanId: string | undefined) => (text !== undefined && spanId ? { text, cite: spanId } : null)
+/** Runs of one program not known to have failed: a run inside a code-mode script has no exit code of its own. */
+const succeeded = (sheet: Sheet, command: string): number | null => {
+  const row = sheet.commands.value?.find((entry) => entry.command === command)
+  return sheet.commands.value === null ? null : row ? row.runs - row.failed : 0
+}
 
 /**
  * Each question's answer from the sheets alone. A leaf the sheet has no field
@@ -173,7 +179,17 @@ const FACTS_ANSWERS: Readonly<Record<string, (facts: FactsReading) => Record<str
       })),
     }
   },
-  'op.runs': () => ({ launched: null, failed_launches: null, cancelled: null, specs: null, beta_probe_variants: null }),
+  'op.runs': (facts) => {
+    const sheet = facts.sheet('codex-operator')
+    const runs = facts.commands('codex-operator', '^labctl run\\b').map((match) => match.text.split(' '))
+    return {
+      launched: succeeded(sheet, 'labctl run'),
+      failed_launches: sheet.commands.value?.find((entry) => entry.command === 'labctl run')?.failed ?? null,
+      cancelled: succeeded(sheet, 'labctl cancel'),
+      specs: [...new Set(runs.map((words) => words[2]!))],
+      beta_probe_variants: [...new Set(runs.filter((words) => words[2] === 'beta-probe' && words.includes('--variant')).map((words) => words[words.indexOf('--variant') + 1]!))],
+    }
+  },
   'op.last-human-turn': (facts) => {
     const turns = facts.sheet('codex-operator').humanTurns.value ?? []
     const [previous, last] = turns.slice(-2)
@@ -185,7 +201,7 @@ const FACTS_ANSWERS: Readonly<Record<string, (facts: FactsReading) => Record<str
     return {
       role: merged === null ? null : merged > 0 ? 'operator' : 'observer',
       merged_prs: merged,
-      launched_runs: null,
+      launched_runs: succeeded(sheet, 'labctl run'),
       spawn_calls: sheet.subagents.value?.length ?? null,
     }
   },
