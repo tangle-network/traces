@@ -52,7 +52,7 @@ The full table: [docs/migrate-1.0.md](migrate-1.0.md), or `traces help moved`.
 
 The rule is **not met**: the traces arm answered one question fewer, at 36% more cost. The question it loses is `op.role` in all three runs: it counts runs a `labctl run` inside a code-mode script loop started, which no facts field records. Where the agent loaded the skill and ran `traces facts`, the answer cost more than a targeted `grep` on these small files: the operator session's JSON sheet is about 60 KB. A first traces run with Claude Code's 19 bundled skills also listed in the Skill tool scored 15 / 3 / 1 at $1.1506; the arm now turns them off (`bench/audit/README.md`).
 
-**The facts arm** (`traces facts <ref> --format json` mapped by fixed rules, $0, in `pnpm test`): 10 of 19 on the canonical wordings and 10 of 19 held out, as in step 20 (5 of 19 before step 20's fixes).
+**The facts arm** (`traces facts <ref> --format json` mapped by fixed rules, $0, in `pnpm test`): 12 of 19 on the canonical wordings and 12 of 19 held out since #215, which answers `op.runs` and `op.role` (10 of 19 at step 21, 5 before step 20's fixes).
 
 **The large-session arm** (reported apart; it does not decide the rule): one synthetic Codex session of 50,124 spans (27 MB), four questions, one run per arm.
 
@@ -61,6 +61,20 @@ The rule is **not met**: the traces arm answered one question fewer, at 36% more
 | facts | 4 / 0 / 0 | $0 | 8 s on a laptop |
 | raw-files | 3 / 1 / 0 | $0.1225 | counted `write_stdin` poll exits as command exits (5,252 against 4,297) |
 | traces | 3 / 1 / 0 | $0.1522 | never loaded the skill; ran `traces --help` once; the same miss |
+
+**U11 round (2026-10-17, after #215: code-mode processes by program, the `commands` sheet line, the facts-first skill).** The same questions, model and budget; at most 2 `claude -p` at a time on this Mac, each started at load1 ≤ 20 and free memory ≥ 30%.
+
+| Run | raw-files correct / partial / wrong | cost | traces correct / partial / wrong | cost | traces arm: skill loaded / ran traces / only `--help` / no traces |
+|---|---|---|---|---|---|
+| 1, step 21's arm settings, before #215's two leak fixes | 17 / 1 / 1 | $0.6847 | 19 / 0 / 0 | $0.9958 | 14 / 15 / 1 / 3 |
+| 1, account skills off | 17 / 1 / 1 | $0.6317 | 17 / 1 / 1 | $0.7530 | 15 / 15 / 0 / 4 |
+| 2, account skills off | 14 / 4 / 1 | $0.6228 | 18 / 1 / 0 | $0.6707 | 15 / 15 / 0 / 4 |
+| 3, account skills off | 17 / 2 / 0 | $0.6615 | 19 / 0 / 0 | $0.6826 | 16 / 16 / 0 / 3 |
+| **Total, account skills off** | **48 / 57** | **$1.9160** | **54 / 57** | **$2.1063** | 46 / 46 / 0 / 11 of 57 |
+
+The rule is **not met**: the traces arm answers six more questions correctly, but at 9.9% more cost. Under step 21's settings, Claude Code loaded the login account's claude.ai skills into the traces arm's Skill tool after the first request (24 `commands_changed` events in 19 questions), so each question's second turn rewrote the prompt cache: `op.tokens`, the same two calls in both arms, cost $0.0171 in raw-files and $0.0310 in traces. The arm now sets `syncClaudeAiSkills: false`: 0 such events in 57 questions, and the traces arm's median second-turn cache write fell from 4,037 to about 1,378 tokens (raw-files about 585; the rest is the skill's own text). What still costs more: `claude.bash` (+$0.097 over three runs; facts counts only the main session's Bash calls), `op.runs` (+$0.090; `--match` rows carry no exit status, so agents read the raw records), and `claude.tasks` (+$0.053; no facts field holds `subagent_type`).
+
+Large session, account skills off, three paired runs: traces 12 / 12 at $0.3579 (4 / 4 each run), raw-files 9 / 12 at $0.5494 (3 / 4 each run, counting `write_stdin` poll exits as command exits, 5,252 against 4,297); facts 4 / 4 at $0.
 
 ## Fork parity (step 20, this Mac, 2026-10-08 to 2026-10-14)
 
