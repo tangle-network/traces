@@ -33,10 +33,11 @@ import {
 import type { OtlpSpan } from '../otlp.js'
 import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
+import { codexActor } from './actor.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
 import { SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './provenance.js'
-import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath } from './codex.js'
-import { multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
+import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath, userTurnKey } from './codex.js'
+import { codexCompletedItem, type CodexLine, contentTextBlocks, multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
 
@@ -246,6 +247,7 @@ function lifecycleSpans(session: HarnessSession, root: OtlpSpan, spans: readonly
 
 type CodexHead = { timestamp?: string; type?: string; payload?: {
   type?: string; role?: string; content?: unknown; id?: string; agent_nickname?: string; turn_id?: string;
+  internal_chat_message_metadata_passthrough?: { content_item_kinds?: readonly unknown[] };
   forked_from_id?: string; thread_source?: string; originator?: string; cwd?: string; model_provider?: string;
   agent_role?: string; agent_path?: string; parent_thread_id?: string;
   git?: { repository_url?: unknown }; source?: { subagent?: { thread_spawn?: {
@@ -298,20 +300,135 @@ function isCodexUserMessage(row: CodexHead): boolean {
   return row.type === 'response_item' && row.payload?.type === 'message' && row.payload.role === 'user'
 }
 
-/** When each user-role message a rollout records was written: the turns typed into it. */
-async function codexUserMessageTimes(path: string): Promise<Set<number>> {
-  const times = new Set<number>()
+/** A user-role message of a rollout: when, its turn key, its task, and whether Codex's labels call it the person's. */
+interface CodexTypedItem { readonly time: number; readonly key: string; readonly task: number; readonly person: boolean }
+
+/** A turn Codex reports as submitted: an `item_completed` UserMessage, or the older `user_message` event. */
+interface CodexTypedEvent { readonly at: string; readonly id: string; readonly text: string; readonly key: string; readonly task: number }
+
+/** What a rollout's own records say about the turns typed into it. */
+interface CodexTypedTimes {
+  /** When each user-role message was written. */
+  readonly all: ReadonlySet<number>
+  readonly items: readonly CodexTypedItem[]
+  readonly events: readonly CodexTypedEvent[]
+}
+
+/** A bounded pairing key: equal turns give equal keys, and a long injected block cannot grow the fold. */
+const boundedKey = (text: string): string => {
+  const key = userTurnKey(text)
+  return `${key.length}:${key.slice(0, 512)}`
+}
+
+/** Fold a rollout's records, one at a time, into {@link CodexTypedTimes}; a task starts at each `task_started`. */
+function typedTimesFold(): { add(row: CodexHead): void; result(): CodexTypedTimes } {
+  const all = new Set<number>()
+  const items: CodexTypedItem[] = []
+  const events: CodexTypedEvent[] = []
+  let task = 0
+  return {
+    add(row) {
+      if (!row.timestamp) return
+      if (row.type === 'event_msg' && row.payload?.type === 'task_started') task += 1
+      if (row.type === 'event_msg' && row.payload?.type === 'user_message') {
+        const text = (row.payload as { message?: unknown }).message
+        if (typeof text === 'string' && text.trim()) events.push({ at: row.timestamp, id: row.timestamp, text, key: boundedKey(text), task })
+        return
+      }
+      if (row.type === 'event_msg' && row.payload?.type === 'item_completed') {
+        const completed = codexCompletedItem(row as CodexLine)
+        if (completed?.type === 'UserMessage') {
+          const { itemId, text } = completed.userMessage
+          events.push({ at: row.timestamp, id: itemId, text, key: boundedKey(text), task })
+        }
+        return
+      }
+      if (!isCodexUserMessage(row)) return
+      const time = Date.parse(row.timestamp)
+      all.add(time)
+      const blocks = contentTextBlocks(row.payload?.content)
+      const kinds = row.payload?.internal_chat_message_metadata_passthrough?.content_item_kinds
+      items.push({ time, key: boundedKey(blocks.join('\n')), task, person: codexActor({ text: blocks.join('\n'), blocks, kinds }) === 'human' })
+    },
+    result: () => ({ all, items, events }),
+  }
+}
+
+/** The records {@link typedTimesFold} reads, found without parsing every line. */
+const TYPED_RECORD = /"task_started"|"user_message"|"UserMessage"|"response_item"[^\n]*"user"|"user"[^\n]*"response_item"/
+
+/** {@link CodexTypedTimes} for a whole rollout. */
+async function codexUserMessageTimes(path: string): Promise<CodexTypedTimes> {
+  const fold = typedTimesFold()
   const lines = createInterface({ input: createReadStream(path, 'utf8'), crlfDelay: Infinity })
   for await (const line of lines) {
-    if (!line.includes('"response_item"') || !line.includes('"user"')) continue
+    if (!TYPED_RECORD.test(line)) continue
     try {
-      const row = JSON.parse(line) as CodexHead
-      if (isCodexUserMessage(row) && row.timestamp) times.add(Date.parse(row.timestamp))
+      fold.add(JSON.parse(line) as CodexHead)
     } catch {
       // A torn line is the shared reader's integrity decision.
     }
   }
-  return times
+  return fold.result()
+}
+
+/**
+ * A turn the person typed that opens with a tag: an answer to Codex's question
+ * tool (`<send_user_message_question_reply>`), or a turn with an attached image
+ * (`<image name=…>`). The shared reader (harness-sessions 0.1.7) calls every
+ * user message that opens with a tag injected. This reads them as traces' own
+ * Codex reader does:
+ *
+ *   - In a task where Codex reported its submitted turns, a user message is the
+ *     person's when one of those reports pairs with it (the same turn key) and
+ *     Codex's labels (`content_item_kinds`, read by `codexActor`) say so.
+ *   - A report that pairs with no message, because the message carries markup
+ *     the report does not (an image's `<image …>` wrapper), is the turn itself,
+ *     with the report's text and time; the message stays injected.
+ *   - In a task without reports, Codex's labels decide alone.
+ *
+ * The rollout is read only when a turn called injected reads as typed by its
+ * text. A spawned child's messages stay as they are.
+ */
+async function relabelTaggedTurns(typedTimes: () => Promise<CodexTypedTimes>, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
+  if (root.attributes['traces.session.role'] === 'child') return
+  const candidates = spans.filter((item) => item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'injected'
+    && typeof item.attributes.content === 'string' && codexActor({ text: item.attributes.content }) === 'human')
+  if (candidates.length === 0) return
+  const typed = await typedTimes()
+  const reportedTasks = new Set(typed.events.map((event) => event.task))
+  const paired = new Set<CodexTypedEvent>()
+  const pairs = new Map<CodexTypedItem, CodexTypedEvent>()
+  for (const item of typed.items) {
+    const event = typed.events.find((candidate) => !paired.has(candidate) && candidate.task === item.task && candidate.key === item.key)
+    if (!event) continue
+    paired.add(event)
+    pairs.set(item, event)
+  }
+  for (const span of candidates) {
+    const time = Date.parse(span.start_time)
+    const item = typed.items.find((candidate) => candidate.time === time && !candidate.key.startsWith('0:'))
+    if (!item?.person) continue
+    if (!reportedTasks.has(item.task) || pairs.has(item)) {
+      span.attributes['tangle.actor'] = 'human'
+      continue
+    }
+    // The report of this turn: unpaired, in the same task, at or just after the message.
+    const report = typed.events.find((event) => !paired.has(event) && event.task === item.task
+      && Date.parse(event.at) >= time && Date.parse(event.at) - time <= 2_000)
+    if (!report) continue
+    paired.add(report)
+    spans.push(asTracesSpan(contractSpan({
+      traceId: root.trace_id,
+      spanId: deriveHexId(`codex:${root.trace_id}:user-message:${report.id}`, 8),
+      parentSpanId: root.span_id,
+      name: 'user.prompt',
+      kind: 'CHAIN',
+      startTime: report.at,
+      endTime: report.at,
+      attributes: { 'service.name': 'codex', 'tangle.actor': codexActor({ text: report.text }), content: report.text },
+    })))
+  }
 }
 
 /**
@@ -322,12 +439,12 @@ async function codexUserMessageTimes(path: string): Promise<Set<number>> {
  * person's does not. Its user-role messages are the person's again, and the
  * session is an operator's. Messages another agent sent stay as they are.
  */
-async function relabelUserFork(typedTimes: () => Promise<Set<number>>, meta: NonNullable<CodexHead['payload']>, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
+async function relabelUserFork(typedTimes: () => Promise<CodexTypedTimes>, meta: NonNullable<CodexHead['payload']>, root: OtlpSpan, spans: OtlpSpan[]): Promise<void> {
   if (typeof meta.forked_from_id !== 'string' || meta.thread_source === 'subagent' || meta.source?.subagent !== undefined) return
   root.attributes['traces.session.role'] = 'operator'
   const typed = await typedTimes()
   for (const item of spans) {
-    if (item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'subagent-spawn' && typed.has(Date.parse(item.start_time))) {
+    if (item.name === 'user.prompt' && item.attributes['tangle.actor'] === 'subagent-spawn' && typed.all.has(Date.parse(item.start_time))) {
       item.attributes['tangle.actor'] = 'human'
     }
   }
@@ -356,8 +473,8 @@ function relabelLaunched(meta: NonNullable<CodexHead['payload']>, spans: OtlpSpa
 /** What a Codex session's own records say about it, beside what the shared reader reads. */
 interface CodexDecoration {
   readonly meta: NonNullable<CodexHead['payload']> | undefined
-  /** When each user-role message of the session was written. */
-  readonly typedTimes: () => Promise<Set<number>>
+  /** When each user-role message of the session was written, and which are the person's. */
+  readonly typedTimes: () => Promise<CodexTypedTimes>
   readonly promptSeen?: boolean
   /** The head of the file, read whole: its older plain-string prompts. */
   readonly legacyHead?: readonly CodexHead[]
@@ -483,10 +600,11 @@ function codexScan(records: readonly PieceRecord[], carry: PieceCarry): { cut: n
 async function decorateCodexMeta(decoration: CodexDecoration, root: OtlpSpan, spans: OtlpSpan[]): Promise<boolean> {
   const { meta } = decoration
   let promptSeen = decoration.promptSeen ?? false
-  if (meta) {
-    await relabelUserFork(decoration.typedTimes, meta, root, spans)
-    promptSeen = relabelLaunched(meta, spans, promptSeen)
-  }
+  let typed: Promise<CodexTypedTimes> | undefined
+  const typedTimes = (): Promise<CodexTypedTimes> => (typed ??= decoration.typedTimes())
+  if (meta) await relabelUserFork(typedTimes, meta, root, spans)
+  await relabelTaggedTurns(typedTimes, root, spans)
+  if (meta) promptSeen = relabelLaunched(meta, spans, promptSeen)
   const spawn = meta?.source?.subagent?.thread_spawn
   if (typeof spawn?.depth === 'number') root.attributes['traces.codex.agent_depth'] = spawn.depth
   const nickname = meta?.agent_nickname ?? spawn?.agent_nickname
@@ -866,9 +984,9 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     let spans: OtlpSpan[] = []
     let promptSeen = carry.promptSeen
     if (session.startedAt) {
-      const typed = new Set(present
-        .filter((record) => isCodexUserMessage(record as CodexHead) && typeof record.timestamp === 'string')
-        .map((record) => Date.parse(record.timestamp as string)))
+      const fold = typedTimesFold()
+      for (const record of present) fold.add(record as CodexHead)
+      const typed = fold.result()
       const projected = await this.project(session, this.nativeHarness === 'codex'
         ? { meta: meta ?? undefined, typedTimes: async () => typed, promptSeen }
         : undefined)
