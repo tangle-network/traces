@@ -17,7 +17,6 @@ import { homedir, hostname } from 'node:os'
 import { basename, dirname, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
-import { routerPrices } from './execution.js'
 import { findingRejectionDetail } from './finding-rejections.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
 import type { TraceInvestigationResult } from './improvement.js'
@@ -39,6 +38,7 @@ import { readOtlpInput } from './otlp-input.js'
 import {
   createSessionFactsReportBuilder,
   matchRows,
+  priceReport,
   renderSessionFacts,
   sessionMatches,
   type SessionFactsReport,
@@ -904,8 +904,6 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   const builder = createSessionFactsReportBuilder({
     includeContent: !args.noContent,
     window,
-    // Rows and matches carry no cost, so they never load the price table.
-    ...(pattern === undefined && format !== 'jsonl' ? { price: await routerPrices() } : {}),
     nameUnread: named === 0,
     agentIdentity: sessionIdentityLookup(args.selection?.home ?? (process.env.HOME || homedir())),
     onSession,
@@ -973,6 +971,8 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   }
   let rendered: string
   let summary: string
+  // Rows and matches carry no cost, so only the sheet is priced.
+  if (format !== 'jsonl') report = await priceReport(report)
   if (format === 'jsonl') {
     rendered = rows.map((row) => `${JSON.stringify(row)}\n`).join('')
     summary = `turns → ${args.out}  (${rows.length} typed turn(s) in ${report.sessions.length} session(s), $0, no model call)`

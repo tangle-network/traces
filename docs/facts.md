@@ -148,7 +148,7 @@ console.log(renderSessionFacts(buildSessionFactsReport(spans)))
 ```
 
 SDK consumers use `buildSessionFactsReport(spans, { includeContent: false })`.
-Pass `price: await routerPrices()` (agent-runtime's `priceTokens`, loaded on first use) for `cost`; without it `cost.usd` is null with that reason.
+`await priceReport(report)` fills each session's `cost` from agent-runtime's `priceTokens`. It loads that price table only when a session has tokens to price; an unpriced report says `not priced yet` in `cost.unavailable`.
 Pass `window: { since, until }` (ISO bounds) for the windowed report `facts --since/--until` prints, and use
 `createSessionFactsReportBuilder(options)` (`add(spans)`, `addUnread(...)`, `build()`) to build it one session at a time.
 Cache by `measurementVersion` and `sourceDigest`; `evidenceThrough` is the latest

@@ -130,8 +130,10 @@ let routerPricer: Promise<TokenPricer> | undefined
 
 /**
  * agent-runtime's `priceTokens`, the one price table (generated from the
- * Router's catalog). Loaded on first use: its package root costs about half a
- * second to import, which `list` and `--match` never pay.
+ * Router's catalog). Its package root loads agent-core, agent-knowledge and
+ * sandbox, 0.3 s or more, so it is imported only when a session has tokens to
+ * price (`priceReport`); `list`, `--match`, jsonl rows and a session with no
+ * usage never load it.
  */
 export function routerPrices(): Promise<TokenPricer> {
   routerPricer ??= import('@tangle-network/agent-runtime').then((runtime) => runtime.priceTokens)
@@ -260,6 +262,11 @@ export function sessionTokens(own: readonly OtlpSpan[]): SessionTokens {
   }
 }
 
+/** True when `sessionCost` needs the price table for these tokens: they are known, non-zero and name a model. */
+export function needsPrice(tokens: SessionTokens): boolean {
+  return tokens.input !== null && tokens.input + (tokens.output ?? 0) > 0 && tokens.byModel.length > 0
+}
+
 /** USD to the micro-dollar, so a sum of float products prints the same on every run. */
 function roundUsd(usd: number): number {
   return Math.round(usd * 1e6) / 1e6
@@ -269,11 +276,11 @@ function roundUsd(usd: number): number {
 export function sessionCost(tokens: SessionTokens, price: TokenPricer | undefined): SessionCost {
   const unknown = (reason: string): SessionCost => ({ usd: null, label: COST_LABEL, unavailable: reason })
   if (tokens.input === null) return unknown(`no token counts: ${tokens.unavailable}`)
-  if (price === undefined) return unknown('no price table was supplied (the SDK takes `price: await routerPrices()`)')
   if (tokens.input + (tokens.output ?? 0) === 0) return { usd: 0, label: COST_LABEL, unavailable: null }
   if (tokens.byModel.length === 0) {
     return unknown('no model call of the session records its model, or several models share a cumulative counter the calls do not add up to')
   }
+  if (price === undefined) return unknown('not priced yet: `await priceReport(report)` loads the price table and fills it')
   const unpriced = tokens.byModel.filter((entry) => entry.model === UNRECORDED_MODEL
     || price({ model: entry.model, inputTokens: entry.input, outputTokens: entry.output, cacheReadTokens: entry.cacheRead, cacheWriteTokens: entry.cacheWrite }) === undefined)
   if (unpriced.length > 0) {

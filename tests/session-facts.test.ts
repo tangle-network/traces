@@ -180,7 +180,7 @@ describe('session facts', () => {
     expect(text).toContain('tool calls: 4 (0 synthesized span(s) excluded)')
     expect(text).toContain(`subagents: 1: ${FIXTURE_AGENT_PATH}`)
     expect(text).toContain('human turns: 2')
-    expect(text).toContain('tokens: in 900 · out 80 · cost unknown (no price table was supplied')
+    expect(text).toContain('tokens: in 900 · out 80 · cost unknown (not priced yet')
     expect(text).toContain('pull requests: 0 created, 0 merged')
   })
 })

@@ -5,9 +5,10 @@
  * one price table. `analyze` renders the same numbers.
  */
 import { execFile } from 'node:child_process'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { priceTokens } from '@tangle-network/agent-runtime'
 import { beforeAll, describe, expect, it } from 'vitest'
@@ -181,5 +182,31 @@ describe('compact JSON', () => {
     expect(report.spanCount).toBe(13)
     expect(Buffer.byteLength(run.stdout)).toBeLessThanOrEqual(6_000)
     expect(run.stdout).not.toMatch(/"p50"|"p95"|"durationMs"/u)
+  })
+})
+
+/**
+ * agent-runtime's package root, where `priceTokens` lives, loads about 700
+ * modules (0.3 s or more). Only a sheet with tokens to price may load it; the
+ * preload `fixtures/import-log.mjs` records every module the spawned CLI resolves.
+ */
+describe('the price table loads only to price a sheet', () => {
+  const hook = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'import-log.mjs')).href
+
+  async function loadsPrices(argv: readonly string[], env: Readonly<Record<string, string>>): Promise<boolean> {
+    const log = join(await mkdtemp(join(tmpdir(), 'traces-imports-')), 'imports.log')
+    const run = await runCli(argv, { env: { ...env, TRACES_IMPORT_LOG: log, NODE_OPTIONS: `--import ${hook}` } })
+    expect(run.code, run.stderr).toBe(0)
+    const urls = (await readFile(log, 'utf8')).split('\n')
+    expect(urls.length).toBeGreaterThan(100)
+    return urls.some((url) => url.endsWith('/agent-runtime/dist/index.js'))
+  }
+
+  it('never for list, --match, jsonl rows or a session with no usage; for a sheet with tokens to price', async () => {
+    expect(await loadsPrices(['list', '--last', '50', '--format', 'json'], fx.env)).toBe(false)
+    expect(await loadsPrices(['facts', '--since', '2026-10-01T00:00:00Z', '--match', 'build', '--format', 'json'], fx.env)).toBe(false)
+    expect(await loadsPrices(['facts', IDS.claude, '--format', 'jsonl'], fx.env)).toBe(false)
+    expect(await loadsPrices(['facts', IDS.codex, '--format', 'json'], fx.env)).toBe(false)
+    expect(await loadsPrices(['facts', IDS.claude, '--format', 'json'], fx.env)).toBe(true)
   })
 })

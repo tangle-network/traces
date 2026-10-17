@@ -23,8 +23,7 @@ import { cp, copyFile, lstat, mkdir, readdir, readFile, stat, writeFile } from '
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { isMissingPathError } from './json.js'
 import { writeOtlpFile } from './otlp.js'
-import { routerPrices } from './execution.js'
-import { buildSessionFactsReport } from './session-facts.js'
+import { buildSessionFactsReport, priceReport } from './session-facts.js'
 import { collectSessionSelection, fileSha256 } from './session-selection.js'
 import { sourceFileId } from './source-location.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -210,7 +209,7 @@ export async function assembleSessionBundle(opts: AssembleSessionBundleOptions):
 
   // spans.otlp.jsonl and facts.json — what every command reads, computed once.
   await writeOtlpFile(spans, join(outDir, 'spans.otlp.jsonl'))
-  const facts = buildSessionFactsReport(spans, { harness: ref.harness, generatedAt, price: await routerPrices() })
+  const facts = await priceReport(buildSessionFactsReport(spans, { harness: ref.harness, generatedAt }))
   await writeFile(join(outDir, 'facts.json'), `${JSON.stringify(facts, null, 2)}\n`, 'utf8')
 
   const own = facts.sessions.find((session) => session.sessionId === ref.sessionId) ?? facts.sessions[0]

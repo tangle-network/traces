@@ -93,8 +93,8 @@ export * from './agentic-routing.js' // planTraceAgenticRoute(): deterministic L
 export * from './runtime-store.js' // toRuntimeStore() — feed agent-eval pipelines
 export * from './analyze.js' // analyzeSpans({ registry? }) — run YOUR analysts
 export * from './analyst-citations.js' // normalizeAnalystCitations() — model citations the evidence gate can check
-// Shared execution accounting over normalized spans; `routerPrices()` is the price table `facts` costs tokens with.
-export { routerPrices, summarizeOtlpExecution, summarizeSpanExecution } from './execution.js'
+// Shared execution accounting over normalized spans. `priceReport` (session-facts) prices a sheet's tokens.
+export { summarizeOtlpExecution, summarizeSpanExecution } from './execution.js'
 export type { ModelTokens, SessionCost, SessionTokens, TokenPricer, TraceExecutionOptions, UsageTotal } from './execution.js'
 export * from './bundle.js' // assembleSessionBundle() — one session's durable evidence dir
 export * from './diff.js' // diffRuns() — two runs paired step by step, first divergence marked

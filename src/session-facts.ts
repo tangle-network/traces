@@ -59,7 +59,7 @@ import {
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
 import { indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
-import { sessionCost, sessionTokens, type SessionCost, type SessionTokens, type TokenPricer } from './execution.js'
+import { needsPrice, routerPrices, sessionCost, sessionTokens, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
 import {
@@ -103,11 +103,6 @@ export interface SessionFactsOptions {
    * `agent` fact reads the spans alone.
    */
   readonly agentIdentity?: AgentIdentityLookup
-  /**
-   * The price table `cost` is computed with: agent-runtime's `priceTokens`,
-   * loaded by `routerPrices()`. Without it `cost` is null with that reason.
-   */
-  readonly price?: TokenPricer
 }
 
 /**
@@ -326,7 +321,10 @@ export interface SessionFacts {
    * folded into the trace is not counted, as `subagentToolSpans` says of tools.
    */
   readonly tokens: SessionTokens
-  /** What the Router would charge for `tokens`, labelled `list price (Router rates)`, or null with the reason. */
+  /**
+   * What the Router would charge for `tokens`, labelled `list price (Router rates)`,
+   * or null with the reason. `priceReport` fills it; the sheet alone loads no price table.
+   */
   readonly cost: SessionCost
   /** `tokens.input + tokens.output`, the one total every harness reports the same way. */
   readonly tokenTotal: SessionFact<number>
@@ -1279,7 +1277,8 @@ function readSession(
         ? { status: 'unknown', traceId, unsetCount: 0, reason: "no span of this session's own records" }
         : rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans),
     tokens,
-    cost: sessionCost(tokens, options.price),
+    // Priced by `priceReport`, which loads the price table only when a session needs it.
+    cost: sessionCost(tokens, undefined),
     tokenTotal: tokens.input === null
       ? { value: null, spanIds: [], unavailable: tokens.unavailable }
       : { value: tokens.input + (tokens.output ?? 0), spanIds: tokens.spanIds, unavailable: null },
@@ -1347,6 +1346,17 @@ export type SessionFactsReportOptions = SessionFactsOptions & {
   nameUnread?: boolean
   /** Called with each session the report selects, as it is read: its facts, spans and typed turns. */
   onSession?: (reading: SessionReading) => void
+}
+
+/**
+ * The report with each session's `cost` priced from agent-runtime's price
+ * table. The table is imported only when some session has tokens to price, so
+ * a report with none, and every command that prints no cost, never loads it.
+ */
+export async function priceReport(report: SessionFactsReport): Promise<SessionFactsReport> {
+  if (!report.sessions.some((session) => needsPrice(session.tokens))) return report
+  const price = await routerPrices()
+  return { ...report, sessions: report.sessions.map((session) => ({ ...session, cost: sessionCost(session.tokens, price) })) }
 }
 
 /** The facts sheet for a set of spans, as one report. */
