@@ -206,7 +206,11 @@ export interface ScoreOptions {
   readonly spool: readonly string[]
 }
 
-/** Session files under the home, per harness: at most `limit`, each 1 KB to 40 MB, modified in the window, in path order. */
+/**
+ * Session files under the home, per harness: a Claude Code `<uuid>.jsonl` or a
+ * Codex `rollout-*.jsonl`, 1 KB to 40 MB, modified in the window; `limit` of
+ * them spread evenly over the path order, so one project cannot fill the sample.
+ */
 async function sessionFiles(options: ScoreOptions, harness: string, limit: number): Promise<string[]> {
   const root = harness === 'codex' ? join(options.home, '.codex', 'sessions') : join(options.home, '.claude', 'projects')
   const found: string[] = []
@@ -220,19 +224,24 @@ async function sessionFiles(options: ScoreOptions, harness: string, limit: numbe
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       const full = join(dir, entry.name)
       if (entry.isDirectory() && depth > 0 && entry.name !== 'subagents') await walk(full, depth - 1)
-      else if (entry.name.endsWith('.jsonl')) found.push(full)
+      else if (SESSION_FILE[harness === 'codex' ? 'codex' : 'claude'].test(entry.name)) found.push(full)
     }
   }
   await walk(root, harness === 'codex' ? 3 : 1)
-  const picked: string[] = []
+  const eligible: string[] = []
   for (const file of found) {
     const info = await stat(file)
     if (info.size < 1024 || info.size > 40 * 1024 * 1024) continue
     if (info.mtimeMs < Date.parse(options.since) || info.mtimeMs >= Date.parse(options.until)) continue
-    picked.push(file)
-    if (picked.length >= limit) break
+    eligible.push(file)
   }
-  return picked
+  if (eligible.length <= limit) return eligible
+  return Array.from({ length: limit }, (_, index) => eligible[Math.floor((index * eligible.length) / limit)]!)
+}
+
+const SESSION_FILE = {
+  claude: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/u,
+  codex: /^rollout-.+\.jsonl$/u,
 }
 
 function fill(argv: readonly string[], values: Record<string, string>, traces: string): string[] {

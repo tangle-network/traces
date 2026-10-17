@@ -16,8 +16,9 @@ pnpm bench:parity --home <store home> --dotfiles <dotfiles checkout> --tangle-to
   traces reads it the same way. Stage the window's session files there (APFS clones or hard
   links) to bound what both sides read.
 - A `window` fork runs once over `--since`/`--until`. A `file` fork runs on up to `--files`
-  session files per harness under `--home` (1 KB to 40 MB, modified in the window, in path
-  order). A `spool` fork reads the `--spool` collector files.
+  session files per harness under `--home` (a Claude Code `<uuid>.jsonl` or a Codex
+  `rollout-*.jsonl`, 1 KB to 40 MB, modified in the window, spread evenly over the path order).
+  A `spool` fork reads the `--spool` collector files.
 - Agreement: for the keys (turns, files) the share found by both sides, and for each mapped
   field the share of shared keys whose values are equal. A row's agreement is the lowest of
   these; it passes at or above its tolerance.
