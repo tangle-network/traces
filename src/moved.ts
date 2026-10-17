@@ -292,6 +292,14 @@ export const MOVED: readonly MovedRow[] = [
     },
   },
   { was: [], label: 'check exit 3 (unreadable) and 4 (ambiguous)', now: 'exit 2, with code unreadable or ambiguous in the JSON error on stderr' },
+  {
+    was: ['--kind'],
+    commands: ['diff'],
+    label: 'diff --kind',
+    now: 'removed: diff compares tool calls only, by tool, status and argument; model calls and events are never steps',
+    rewrite: (argv) => dropFlag(argv, '--kind', true),
+  },
+  { was: [], label: 'diff exit 2 (unreadable) and 3 (no outcome)', now: 'exit 2, with code unreadable or no-outcome in the JSON error on stderr' },
 ]
 
 /** `--window M` (minutes) as `--since Mm`; `undefined` when M is not a whole number of minutes. */

@@ -194,7 +194,12 @@ const STEP_15: readonly MovedCase[] = [
   { argv: ['check', 'spans.jsonl', '--contract', 'c.json', '--explain'], spelling: '--explain', instead: 'traces check --contract c.json' },
 ]
 
-const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13, ...STEP_14, ...STEP_15]
+/** Step 17: diff compares tool calls only. */
+const STEP_17: readonly MovedCase[] = [
+  { argv: ['diff', 'a.sdk-events.jsonl', 'b.sdk-events.jsonl', '--kind', 'TOOL'], spelling: '--kind', instead: 'traces diff a.sdk-events.jsonl b.sdk-events.jsonl' },
+]
+
+const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_13, ...STEP_14, ...STEP_15, ...STEP_17]
 
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
@@ -225,7 +230,6 @@ const OPTIONS = [
 /** 0.x flags kept, hidden, until the step that moves each (spec §2.4). */
 const HIDDEN_FLAGS: Readonly<Record<string, readonly string[]>> = {
   ask: ['--dir', '--question-budget', '--question-timeout', '--concurrency'],
-  diff: ['--kind'],
 }
 
 let dir: string
@@ -490,7 +494,7 @@ describe('exit codes: 0 yes, 1 no, 2 could not answer, with the reason as code',
     expect(errorOf(json.stderr)).toMatchObject({ code: 'no-outcome' })
     const text = await runCli(['diff', unrecorded, unrecorded], { env })
     expect(text.code).toBe(2)
-    expect(text.stderr).toContain('no recorded outcome to call agreement on')
+    expect(text.stderr).toContain('no outcome to call agreement on')
   }, 60_000)
 })
 
@@ -530,10 +534,6 @@ describe('hidden spellings', () => {
         endTime: '2026-01-01T00:00:02.000Z',
       }),
     ].map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
-
-    const diff = await runCli(['diff', spans, spans, '--kind', 'TOOL', '--format', 'json'], { env })
-    expect(diff.code).toBe(2)
-    expect((JSON.parse(diff.stderr) as { code: string }).code).toBe('no-outcome')
 
     const watched = await runCli(['watch', spans, '--once', '--format', 'jsonl'], { env })
     expect(watched.code).toBe(0)
