@@ -26,10 +26,11 @@
  * store keeps events after a harness deletes old transcripts.
  */
 
-import { mkdir, open, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { STORES } from '@tangle-network/harness-sessions/catalog'
+import { readCompleteLines, resumeOffset } from './turn-index.js'
 
 export type SkillUsageHarness = 'claude-code' | 'codex' | 'kimi-code'
 export type SkillUsageKind = 'model' | 'slash' | 'read'
@@ -91,7 +92,6 @@ interface StoreV1 {
   events: StoredEvent[]
 }
 
-const CHUNK_BYTES = 8 * 1024 * 1024
 const NEWLINE = 0x0a
 /** A slash command's expansion is its next record; attachments can sit between. */
 const SLASH_LOOKAHEAD_LINES = 8
@@ -225,40 +225,21 @@ export class SkillUsageStore {
       throw error
     }
     const previous = this.files[path]
-    if (previous && previous.ino === info.ino && previous.size === info.size) return null
-    // A replaced or truncated file is read again from the start; record IDs keep the count exact.
-    const cursor: FileCursor = previous && previous.ino === info.ino && previous.offset <= info.size
-      ? { ...previous }
-      : { ino: info.ino, size: 0, offset: 0 }
+    // The cursor the turn index keeps too: a replaced or truncated file is read
+    // again from the start, and record IDs keep the count exact.
+    const from = resumeOffset(previous, info)
+    if (from === null) return null
+    const cursor: FileCursor = previous && from === previous.offset ? { ...previous } : { ino: info.ino, size: 0, offset: 0 }
     const session = sessionFromPath(path)
     let events = 0
-    let bytes = 0
-    const handle = await open(path, 'r')
-    try {
-      let carry = Buffer.alloc(0)
-      let position = cursor.offset
-      const chunk = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, Math.max(0, info.size - position)))
-      while (position < info.size) {
-        const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, info.size - position), position)
-        if (bytesRead === 0) break
-        position += bytesRead
-        bytes += bytesRead
-        const buffer = carry.length > 0 ? Buffer.concat([carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead)
-        const end = buffer.lastIndexOf(NEWLINE) + 1
-        if (end > 0) {
-          const complete = buffer.subarray(0, end)
-          events += harness === 'claude-code'
-            ? this.scanClaude(complete, cursor, session)
-            : harness === 'codex'
-              ? this.scanCodex(complete, session)
-              : this.scanKimi(complete, cursor, kimiSessionFromPath(path))
-          cursor.offset += end
-        }
-        carry = Buffer.from(buffer.subarray(end))
-      }
-    } finally {
-      await handle.close()
-    }
+    const { bytes, end } = await readCompleteLines(path, from, info.size, (complete) => {
+      events += harness === 'claude-code'
+        ? this.scanClaude(complete, cursor, session)
+        : harness === 'codex'
+          ? this.scanCodex(complete, session)
+          : this.scanKimi(complete, cursor, kimiSessionFromPath(path))
+    })
+    cursor.offset = end
     cursor.ino = info.ino
     cursor.size = info.size
     if (cursor.pending?.length === 0) delete cursor.pending

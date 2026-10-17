@@ -6,8 +6,9 @@ import {
 import { profileOptimizerModelCall } from '@tangle-network/agent-runtime/kernel'
 import { createDspyRlmTraceEngine, type TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 
-/** Model the CLI's recursive analysts use when neither `--model` nor TRACES_ANALYST_MODEL names one. */
-export const DEFAULT_ANALYST_MODEL = 'gpt-5.6-luna'
+import { DEFAULT_ANALYST_MODEL } from './ask-defaults.js'
+
+export { DEFAULT_ANALYST_MODEL }
 
 /**
  * Provider ceiling for one `ask` question when neither `--question-budget` nor

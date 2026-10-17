@@ -22,7 +22,6 @@ import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { CODEX_HOME_RULE, STORES, codexHomes, isCodexHome } from '@tangle-network/harness-sessions'
-import { findSupervisorRunDirs, isRuntimeSupervisorRunDir } from '@tangle-network/agent-eval/supervisor-run'
 import { ATTR } from '@tangle-network/agent-trace-contract'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
@@ -265,6 +264,8 @@ async function directoryRef(path: string, ref: string): Promise<ResolvedRef> {
     }
     throw new RefError(`${ref} has a manifest.json but no spans.otlp.jsonl; it is not a traces bundle`, 'unreadable')
   }
+  // The run-tree reader is loaded only for a directory ref, so other commands never load it.
+  const { findSupervisorRunDirs, isRuntimeSupervisorRunDir } = await import('@tangle-network/agent-eval/supervisor-run')
   if (await isRuntimeSupervisorRunDir(path)) return { kind: 'run-dir', ref, path }
   if (await isStoreRoot(path)) return { kind: 'store-root', ref, path: resolve(path) }
   if ((await findSupervisorRunDirs(path)).length > 0) return { kind: 'run-dir', ref, path }
