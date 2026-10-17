@@ -781,9 +781,9 @@ const HARNESS_COMMAND_REASON =
  * Only the opening sentence is read, with markdown marks removed, and a denial
  * or a question there is no claim. A status report that names a merged PR in
  * its fourth paragraph does not claim the work is done. Matching the word
- * anywhere flagged 58% of the turns people typed, and on a blind sample of 80
- * flagged agent messages 44% were claims; reading the opening sentence flags
- * 16%, and 73% of those are claims (`bench/corrections/README.md`).
+ * anywhere put the signal on 57% of the Claude Code turns people typed, and on
+ * a blind sample of flagged agent messages 44% were claims; reading the
+ * opening sentence puts it on 17%, and 73% are claims (`bench/corrections/README.md`).
  */
 const CLAIM_WORD =
   /\b(?:done|fixed|complete|completed|finished|implemented|merged|shipped|landed|resolved|verified|all green|tests pass(?:ed)?|ready|works now)\b/i
