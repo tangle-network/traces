@@ -83,7 +83,9 @@ const jsonl = (text: string): unknown[] => text.split('\n').filter((line) => lin
 const json = (text: string): unknown => JSON.parse(text.slice(text.indexOf('{')))
 const path = (value: unknown, dotted: string): unknown =>
   dotted.split('.').reduce<unknown>((at, key) => (at && typeof at === 'object' ? (at as Record<string, unknown>)[key] : undefined), value)
-const numbers = (values: unknown): string => [...new Set((Array.isArray(values) ? values : []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b).join(',')
+/** A set of pull-request numbers as one comparable string; an entry with no number is left out, not read as 0. */
+const numbers = (values: unknown): string =>
+  [...new Set((Array.isArray(values) ? values : []).filter((value) => value !== null && value !== undefined && value !== '').map(Number).filter(Number.isFinite))].sort((a, b) => a - b).join(',')
 
 interface ReadContext { readonly key: string; readonly since: number; readonly until: number }
 type Reader = (stdout: string, context: ReadContext) => Rows
