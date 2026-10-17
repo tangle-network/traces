@@ -3,7 +3,6 @@ import type { OtlpSpan } from '../otlp.js'
 import { sourceAttributes, SOURCE_ATTRIBUTE_PREFIX, type SourceReferences } from '../source-location.js'
 
 export const TOOL_IO_VALUE_MAX_BYTES = 16 * 1024
-export const TOOL_IO_VALUE_KEYS = ['input.value', 'output.value'] as const
 
 /**
  * Marks work recorded inside a model-issued tool call, such as each command a

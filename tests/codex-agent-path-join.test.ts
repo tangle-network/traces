@@ -16,8 +16,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CodexAdapter } from '../src/adapters/codex.js'
-import { collectSessionWorkflow, describeSessionRelationship } from '../src/index.js'
 import type { SessionRef } from '../src/index.js'
+import { describeSessionRelationship } from '../src/session-relationship.js'
+import { collectSessionWorkflow } from '../src/session-workflow.js'
 
 const PARENT_ID = '01a05e99-3b2e-7023-91e4-0b43ce7d5477'
 const CHILD_IDS = [

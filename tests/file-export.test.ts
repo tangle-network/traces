@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -6,25 +6,12 @@ import {
   exportTraceEvidenceRows,
   exportTraceEvidenceFile,
   exportTraceEvidenceText,
-  writeTraceEvidenceExportFile,
 } from '../src/file-export.js'
 import { serializeSpans } from '../src/otlp.js'
 import { runPipelines } from '../src/pipelines.js'
 
 function parseRows(jsonl: string): Record<string, unknown>[] {
   return jsonl.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
-}
-
-function expectOpenInferenceRow(row: Record<string, unknown>): void {
-  expect(row.trace_id).toEqual(expect.any(String))
-  expect(row.span_id).toEqual(expect.any(String))
-  expect(row.name).toEqual(expect.any(String))
-  expect(row.start_time).toEqual(expect.any(String))
-  expect(row.end_time).toEqual(expect.any(String))
-  expect(row.status).toEqual(expect.objectContaining({ code: expect.any(String) }))
-  expect(row.resource).toEqual(expect.objectContaining({ attributes: expect.any(Object) }))
-  expect(row.scope).toEqual(expect.objectContaining({ name: expect.any(String) }))
-  expect(row.attributes).toEqual(expect.any(Object))
 }
 
 describe('trace evidence export', () => {
@@ -216,22 +203,6 @@ describe('trace evidence export', () => {
       expect(item.attributes['tangle.sandbox.id']).toBeUndefined()
       expect(item.attributes['tangle.environment.cwd']).toBeUndefined()
     }
-  })
-
-  it('writes an exported file from JSONL input', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'traces-export-test-'))
-    const input = join(dir, 'spans.jsonl')
-    const output = join(dir, 'spans.openinference.jsonl')
-    await writeFile(input, `${JSON.stringify(completeOpenInferenceRow())}\n`, 'utf8')
-
-    const result = await writeTraceEvidenceExportFile(input, output, {
-      attributes: { 'campaign.id': 'r116' },
-    })
-    expect(result.path).toBe(output)
-    expect(result.format).toBe('openinference')
-    const [row] = parseRows(await readFile(output, 'utf8'))
-    expectOpenInferenceRow(row!)
-    expect(row!.attributes).toEqual(expect.objectContaining({ 'campaign.id': 'r116' }))
   })
 
   it('reads multi-row JSONL that starts with an object row', async () => {

@@ -122,7 +122,7 @@ The message itself is kept verbatim on the answer.
 ## SDK
 
 ```ts
-import { analysisEngineFromEnv, runTraceQuestions, writeTraceQuestionsArtifacts } from '@tangle-network/traces'
+import { analysisEngineFromEnv, runTraceQuestions } from '@tangle-network/traces'
 
 const result = await runTraceQuestions({
   questions: [
@@ -134,7 +134,6 @@ const result = await runTraceQuestions({
   concurrency: 4,
   budgetUsd: 2,
 })
-await writeTraceQuestionsArtifacts(result, '.traces/ask')
 if (!result.ok) process.exitCode = 2
 ```
 

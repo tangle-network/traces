@@ -2,13 +2,9 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import {
-  collectSessionSelection,
-  span,
-  type HarnessTraceAdapter,
-  type OtlpSpan,
-  type SessionRef,
-} from '../src/index.js'
+import type { HarnessTraceAdapter, OtlpSpan, SessionRef } from '../src/index.js'
+import { span } from '../src/otlp.js'
+import { collectSessionSelection } from '../src/session-selection.js'
 
 function ref(id: string, path: string): SessionRef {
   return {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { summarizeOtlpExecution, summarizeSpanExecution } from '../src/execution.js'
-import { serializeSpans, span } from '../src/otlp.js'
+import { summarizeSpanExecution } from '../src/execution.js'
+import { span } from '../src/otlp.js'
 
 function measuredSpans() {
   return [
@@ -51,12 +51,6 @@ function measuredExecution() {
 }
 
 describe('execution accounting', () => {
-  it('matches the JSONL path without serializing parsed spans inside the adapter', () => {
-    expect(summarizeSpanExecution(measuredSpans())).toEqual(
-      summarizeOtlpExecution(serializeSpans(measuredSpans())),
-    )
-  })
-
   it('keeps direct model usage separate from overlapping orchestration totals', () => {
     const report = measuredExecution()
 

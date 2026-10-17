@@ -75,9 +75,9 @@ Start with deterministic logic when the trace contains enough facts.
 ```ts
 import {
   buildDefaultAnalystRegistry,
+  defineTraceAnalyst,
   makeFinding,
-} from '@tangle-network/traces'
-import { defineTraceAnalyst } from '@tangle-network/agent-eval/analyst'
+} from '@tangle-network/agent-eval/analyst'
 
 const failedTools = defineTraceAnalyst({
   id: 'failed-tools',

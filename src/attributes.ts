@@ -158,9 +158,6 @@ export function environmentFromSpanAttributes(
   }
 }
 
-/** Harness used when none is specified on a single-harness command. */
-export const DEFAULT_HARNESS = 'claude-code'
-
 const SESSION_ID_ATTRIBUTE_KEYS = [ATTR.SESSION_ID, 'session.id', 'traces.session.id'] as const
 
 export function sessionIdFromAttributes(
