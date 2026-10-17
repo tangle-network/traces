@@ -657,10 +657,6 @@ function checkArgs(spec: CommandSpec, args: Args, argv: readonly string[]): void
     throw new UsageError(`upload with no selection was removed in traces 1.0. Instead: ${tracesCommand([...argv, '--since', '24h'])}`)
   }
   if (spec.name === 'check') checkGates(args)
-  // `ask` is the one command that spends, so the caller names the most it may.
-  if (spec.name === 'ask' && args.budget === undefined) {
-    throw new UsageError(`ask needs --budget USD, the most the run may spend: ${tracesCommand([...argv, '--budget', '1'])} (each question spends at most min(USD, $${DEFAULT_QUESTION_MAX_COST_USD}))`)
-  }
   // `check --contract F` with nothing selected explains F and reads no trace.
   const explains = spec.name === 'check' && !selected
   if (spec.select === 'required' && !selected && !explains) {
@@ -671,6 +667,10 @@ function checkArgs(spec: CommandSpec, args: Args, argv: readonly string[]): void
       `${spec.name} needs ${choice}` +
         `${flags.has('--cwd') ? '; --cwd and --harness only narrow' : ''}. traces list finds a session`,
     )
+  }
+  // `ask` is the one command that spends, so the caller names the most it may.
+  if (spec.name === 'ask' && args.budget === undefined) {
+    throw new UsageError(`ask needs --budget USD, the most the run may spend: ${tracesCommand([...argv, '--budget', '1'])} (each question spends at most min(USD, $${DEFAULT_QUESTION_MAX_COST_USD}))`)
   }
 }
 
