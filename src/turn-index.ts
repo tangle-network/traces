@@ -117,8 +117,8 @@ export interface IndexedSession {
   readonly firstPrompt: string | null
 }
 
-/** A row on disk: kind, start, span id, its place among the span's rows of that kind, text. */
-type StoredRow = [SessionMatchKind, string, string, number, string]
+/** A row on disk: kind, start, span id, its place among the span's rows of that kind, text, and a command row's `failed`. */
+type StoredRow = [SessionMatchKind, string, string, number, string, (boolean | null)?]
 
 /** One session file (or one session of a shared store), keyed by harness, path and session id. */
 interface FileEntry {
@@ -146,9 +146,9 @@ interface FileEntry {
  * The index format. A store of another version is rebuilt from the sessions,
  * so a change to what a row holds bumps it. 2: command rows include the
  * commands a Codex code-mode script ran. 3: a code-mode loop over literals
- * gives one row per element.
+ * gives one row per element. 4: a command row says whether it failed.
  */
-const INDEX_VERSION = 3
+const INDEX_VERSION = 4
 
 interface Store {
   version: typeof INDEX_VERSION
@@ -223,7 +223,7 @@ function storedRows(rows: readonly SessionRow[]): StoredRow[] {
     const key = `${row.kind}\0${row.spanId}`
     const n = seen.get(key) ?? 0
     seen.set(key, n + 1)
-    return [row.kind, row.at, row.spanId, n, row.text]
+    return row.kind === 'command' ? [row.kind, row.at, row.spanId, n, row.text, row.failed ?? null] : [row.kind, row.at, row.spanId, n, row.text]
   })
 }
 
@@ -591,11 +591,11 @@ export class TurnIndex {
     const seen = new Set<string>()
     const human: SessionRow[] = []
     const other: SessionRow[] = []
-    const take = ([kind, at, spanId, n, body]: StoredRow): void => {
+    const take = ([kind, at, spanId, n, body, failed]: StoredRow): void => {
       const key = `${kind}\0${spanId}\0${n}`
       if (seen.has(key)) return
       seen.add(key)
-      ;(kind === 'human' ? human : other).push({ kind, at, spanId, text: body })
+      ;(kind === 'human' ? human : other).push({ kind, at, spanId, text: body, ...(kind === 'command' ? { failed: failed ?? null } : {}) })
     }
     let start = 0
     while (start < text.length) {

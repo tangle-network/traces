@@ -175,7 +175,7 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   '--no-content': { help: 'omit conversation, commands, paths and assignments', set: (a) => { a.noContent = true } },
   '--match': {
     value: 'RE',
-    help: 'one row per human turn, agent message or shell command matching RE',
+    help: 'one row per human turn, agent message or shell command matching RE (a command: ok, failed or ?)',
     freeText: true,
     set: (a, v) => {
       try {

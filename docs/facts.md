@@ -34,12 +34,12 @@ A fact the spans cannot support reads `unknown` with the reason. A selection of 
 
 ## What it states
 
-Three rules hold for every field. Every fact is about this session's own agent: a subagent's work is named in `subagents` and counted in `subagentToolSpans`, never added to the parent's totals. Every fact names its `spanIds`. A fact the spans cannot support is `null` with its reason, never a guess and never a silent zero; `partial` marks a value known to be incomplete.
+Three rules hold for every field. Every fact is about this session's own agent: a subagent's work is named in `subagents` and counted in `subagentTools` (by tool name, with failures), never added to the parent's totals. Every fact names its `spanIds`. A fact the spans cannot support is `null` with its reason, never a guess and never a silent zero; `partial` marks a value known to be incomplete.
 
 | Fact | What it is |
 |---|---|
 | `toolCalls`, `toolCallsByName` | tool calls this session's agent made, by name. A Codex command that checks work is `exec_command.verify` |
-| `subagents` | every subagent-spawning call, with its task name; a refused Codex spawn is `ERROR` |
+| `subagents` | every subagent-spawning call, with its task name and `agentType` (Claude Code's `subagent_type`); a refused Codex spawn is `ERROR`. On the sheet, `subagent tools` counts their calls |
 | `commands` | the programs the session's commands ran (`labctl run`, `git push`, `pnpm test`), most runs first: `runs`; `failed`, runs that were their call's only command (a `cd` aside) and ended in error; and `inScripts`, runs inside a Codex code-mode script, which records no exit code of its own. Rows name no span ids; `--match` gives each run's. A code-mode `tools.exec_command` call inside `for (const x of [...])` counts once per element, `${x}` or `{cmd: x}` taking each value; inside any other loop, once as written. On the sheet, a tool's `(31 failed)` counts its calls that ended in error |
 | `pullRequests` | pull requests created and merged, by number or head branch, with when the command ran and the span that named it |
 | `humanTurns` | turns a person typed, each with `author`, `answered`, `reply`, `interrupted` and `signals` (`interrupt`, `rejected-tool`, `after-claim`) |
@@ -57,7 +57,7 @@ A turn is one a person typed into this session. History a fork or a compaction r
 For Codex, the harness's own labels (`content_item_kinds`) decide: a message is the person's when every item is a `user.` kind. An answer to Codex's question tool (`<send_user_message_question_reply>`) is a turn, and so is a turn with an attached image, whose text is the report Codex wrote of it, without the `<image>` wrapper.
 
 `--format jsonl` prints one row per typed turn: `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals` and `spanId`.
-`--match RE` prints one row per matching human turn, agent message or shell command (`sessionId`, `kind`, `at`, `spanId`, `source`, text clipped to 300 characters). Commands match one simple command at a time, so `^traces ` matches `cd x && traces facts …` and never `tangle traces list`. Over a window it reads the turn index under `$XDG_STATE_HOME/traces/turn-index`, which reads only bytes appended since the last search.
+`--match RE` prints one row per matching human turn, agent message or shell command (`sessionId`, `kind`, `at`, `spanId`, `source`, text clipped to 300 characters). A command row's `failed` follows the `commands` rule; it is `null`, `?` in text, when its call's status is not its own. Commands match one simple command at a time, so `^traces ` matches `cd x && traces facts …` and never `tangle traces list`. Over a window it reads the turn index under `$XDG_STATE_HOME/traces/turn-index`, which reads only bytes appended since the last search.
 
 ## Pull requests
 
@@ -96,7 +96,7 @@ What happened, exactly, for $0: who acted, turns, tools, commands, PRs, first fa
   --cwd DIR           sessions recorded in DIR or under it, or in a worktree of its repo
   --harness ID        read only this harness; with a file ref, force its reader
   --latest-turn       only the latest task turn of a resumed Codex or Claude Code session
-  --match RE          one row per human turn, agent message or shell command matching RE
+  --match RE          one row per human turn, agent message or shell command matching RE (a command: ok, failed or ?)
   --no-content        omit conversation, commands, paths and assignments
   --format text|json|jsonl text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn
   --out PATH          write the sheet to PATH; stdout gets one summary line
