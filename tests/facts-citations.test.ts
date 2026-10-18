@@ -120,6 +120,22 @@ describe('facts cites each fact by the record it came from', () => {
     expect(text.stdout).toContain(`  ${cited(answer).file}:${cited(answer).line}  last: ${answer.text}`)
   })
 
+  it('cites an OTLP export of a session by the export\'s own lines', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'traces-facts-otlp-')))
+    const otlp = join(dir, 'claude.otlp.jsonl')
+    const convert = await runCli(['convert', paths['claude']!, '--out', otlp], { env: env() })
+    expect(convert.code, convert.stderr).toBe(0)
+    const run = await runCli(['facts', otlp, '--format', 'json'], { env: env() })
+    expect(run.code, run.stderr).toBe(0)
+    const sheet = (JSON.parse(run.stdout) as { sessions: Array<Facts & { sessionId: string | null; traceId: string }> }).sessions[0]!
+    // The export keeps the session's own id; its source is keyed by the trace id, which differs.
+    expect(sheet.sessionId).not.toBeNull()
+    expect(sheet.sessionId).not.toBe(sheet.traceId)
+    expect(sheet.recordFile).toBe(otlp)
+    expect(sheet.firstFailure.record).not.toBeNull()
+    expect(await recordText(absolute(sheet, sheet.firstFailure.record)!)).toContain(sheet.firstFailure.spanId!)
+  })
+
   it('cites nothing under --no-content', async () => {
     const run = await runCli(['facts', paths['codex-operator']!, '--format', 'json', '--no-content'], { env: env() })
     expect(run.code, run.stderr).toBe(0)

@@ -41,8 +41,12 @@ export interface RecordLines {
   turn(at: string, text: string): RecordLine | null
 }
 
-/** Codex `call_id`, Claude Code `tool_use_id`, and a Claude `tool_use` block's own `id`. */
-const CALL_ID = /"(?:call_id|tool_use_id)":"([^"]+)"|"id":"(toolu_[^"]+)"/gu
+/**
+ * Codex `call_id`, Claude Code `tool_use_id`, a Claude `tool_use` block's own `id`, and an OTLP
+ * span's `gen_ai.tool.call.id`, as a flat contract row's attribute or an OTLP/JSON key-value pair.
+ */
+const CALL_ID =
+  /"(?:call_id|tool_use_id)":"([^"]+)"|"id":"(toolu_[^"]+)"|"gen_ai\.tool\.call\.id":\s*"([^"]+)"|"key":\s*"gen_ai\.tool\.call\.id",\s*"value":\s*\{\s*"stringValue":\s*"([^"]+)"/gu
 /** A Codex `*_output` item or a Claude `tool_result` block: the record holding a call's result. */
 const OUTPUT_RECORD = /"type":"(?:[a-z_]+_output|tool_result)"/u
 const TIMESTAMP = /"timestamp":"([^"]+)"/u
@@ -116,7 +120,7 @@ export async function readRecordLines(files: readonly string[], query: RecordLin
         }
         const isOutput = OUTPUT_RECORD.test(raw)
         for (const match of raw.matchAll(CALL_ID)) {
-          const id = match[1] ?? match[2]!
+          const id = match[1] ?? match[2] ?? match[3] ?? match[4]!
           if (!query.callIds.has(id)) continue
           if (!isOutput) {
             if (!calls.has(id)) calls.set(id, here)
@@ -220,11 +224,14 @@ export async function citeFacts<M extends SessionMatch>(
     const commands = facts.commands.value ?? []
     const files = facts.changedFiles.value ?? []
     const outputTextFor = new Set(wanted(own.map((match) => match.spanId)))
+    // A native `file.change` span comes first in a changed file's spanIds but is no tool call; cite the first call.
+    const firstCall = (file: { readonly spanIds: readonly string[] }): string | undefined =>
+      file.spanIds.find((spanId) => citing.callIds.has(spanId))
     const lines = await readRecordLines(await sessionRecordFiles(citing.path), {
       callIds: new Set([
         ...wanted([failure.spanId]),
         ...wanted(commands.flatMap((row) => [row.lastSpanId, ...row.nonZeroExits.map((exit) => exit.spanId)])),
-        ...wanted(files.map((file) => file.spanIds[0])),
+        ...wanted(files.map(firstCall)),
         ...outputTextFor,
       ]),
       outputTextFor,
@@ -255,7 +262,7 @@ export async function citeFacts<M extends SessionMatch>(
         : { ...facts.humanTurns, value: facts.humanTurns.value.map((turn) => ({ ...turn, record: short(lines.turn(turn.at, turn.text)) })) },
       changedFiles: facts.changedFiles.value === null
         ? facts.changedFiles
-        : { ...facts.changedFiles, value: files.map((file) => ({ ...file, record: short(call(file.spanIds[0])) })) },
+        : { ...facts.changedFiles, value: files.map((file) => ({ ...file, record: short(call(firstCall(file))) })) },
       commands: facts.commands.value === null
         ? facts.commands
         : {

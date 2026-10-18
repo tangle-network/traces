@@ -860,7 +860,8 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   const citings = new Map<string, SessionCiting>()
   const cite = !args.noContent && (format === 'json' || pattern !== undefined)
   const onSession = (reading: SessionReading): void => {
-    const source = readingFrom ?? sourceOf.get(reading.facts.sessionId ?? '') ?? null
+    // OTLP sources are keyed by trace id, which a span's own session id can differ from.
+    const source = readingFrom ?? sourceOf.get(reading.facts.sessionId ?? '') ?? sourceOf.get(reading.facts.traceId) ?? null
     if (cite && source !== null) {
       citings.set(reading.facts.sessionId ?? reading.facts.traceId, { path: resolve(source), callIds: callIdsOf(reading.spans) })
     }
