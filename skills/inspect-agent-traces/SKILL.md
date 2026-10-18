@@ -17,8 +17,9 @@ A ref is a session id or 8+ char prefix, a session file, an OTLP file or dir, a 
 3. To list commands, typed turns or agent messages by text: `traces facts <ref> --match '<re>'`.
    It prints the count first, then one line per hit, a command's with `ok`, `failed` or `?`,
    and under it the record's `file:line` and its output's `last:` line; a program's run count is on the sheet.
-4. To quote or cite, use `record` (`{file, line}`) on a turn, the first failure, a command row, a
-   non-zero exit or a changed file, and cite `file:line`. Never `find` or `grep` the store for it.
+4. To quote or cite, use `record` on a turn, the first failure, a command row, a non-zero exit or a
+   changed file: cite `<recordFile>:<line>` (`.sessions[0].recordFile`; a subagent's record names its own `file`).
+   Never `find` or `grep` the store for it.
 
 ```text
 .sessions[0].firstFailure | {name, message, at, record}                      first failure, its output

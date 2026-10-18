@@ -18,6 +18,9 @@ export interface RecordLine {
   readonly line: number
 }
 
+/** A record on the facts sheet: `file` only when it is not the session's `recordFile` (a subagent's sidechain). */
+export type SheetRecord = { readonly file?: string; readonly line: number }
+
 export interface RecordLinesQuery {
   /** Tool call ids to locate. */
   readonly callIds: ReadonlySet<string>
@@ -158,12 +161,19 @@ export interface SessionCiting {
   readonly callIds: ReadonlyMap<string, string>
 }
 
-/** Span id to call id for every span that names a tool call. */
+/**
+ * Span id to call id for every span that names a tool call: the shared reader's
+ * `gen_ai.tool.call.id`, else traces' own Codex reader's `tool:<call_id>` source span id.
+ */
 export function callIdsOf(spans: readonly OtlpSpan[]): Map<string, string> {
   const ids = new Map<string, string>()
   for (const span of spans) {
-    const id = span.attributes['gen_ai.tool.call.id']
-    if (typeof id === 'string' && id !== '') ids.set(span.span_id, id)
+    const shared = span.attributes['gen_ai.tool.call.id']
+    const native = span.attributes['traces.codex.source_span_id']
+    const id = typeof shared === 'string' && shared !== ''
+      ? shared
+      : typeof native === 'string' && native.startsWith('tool:') ? native.slice('tool:'.length) : undefined
+    if (id !== undefined && id !== '') ids.set(span.span_id, id)
   }
   return ids
 }
@@ -182,7 +192,9 @@ type Cited<T> = T & { readonly record: RecordLine | null }
  * call), on every commands row (its latest run's result) and each of its
  * `nonZeroExits`, and on every changed file (the call that first changed it);
  * a command `--match` row also gets `lastLine`, the last line of the command's
- * full output when its call ran it alone. Sessions without a {@link SessionCiting} are left as they are.
+ * full output when its call ran it alone. A session's own file is named once,
+ * as `recordFile`, so a record in it is `{line}`; a match row's is `{file, line}`.
+ * Sessions without a {@link SessionCiting} are left as they are.
  */
 export async function citeFacts<M extends SessionMatch>(
   sessions: readonly SessionFacts[],
@@ -226,6 +238,9 @@ export async function citeFacts<M extends SessionMatch>(
       const id = spanId === undefined ? undefined : citing.callIds.get(spanId)
       return id === undefined ? null : lines.call(id)
     }
+    // The sheet names the session's own file once, as `recordFile`; a record there is just its line.
+    const short = (record: RecordLine | null): SheetRecord | null =>
+      record === null ? null : record.file === citing.path ? { line: record.line } : record
     for (const match of own) {
       const id = citing.callIds.get(match.spanId)
       // Only a call that ran this one command has output of its own: a script's or a chain's is shared.
@@ -234,23 +249,25 @@ export async function citeFacts<M extends SessionMatch>(
     }
     citedSessions.push({
       ...facts,
+      recordFile: citing.path,
       humanTurns: facts.humanTurns.value === null
         ? facts.humanTurns
-        : { ...facts.humanTurns, value: facts.humanTurns.value.map((turn) => ({ ...turn, record: lines.turn(turn.at, turn.text) })) },
+        : { ...facts.humanTurns, value: facts.humanTurns.value.map((turn) => ({ ...turn, record: short(lines.turn(turn.at, turn.text)) })) },
       changedFiles: facts.changedFiles.value === null
         ? facts.changedFiles
-        : { ...facts.changedFiles, value: files.map((file) => ({ ...file, record: call(file.spanIds[0]) })) },
+        : { ...facts.changedFiles, value: files.map((file) => ({ ...file, record: short(call(file.spanIds[0])) })) },
       commands: facts.commands.value === null
         ? facts.commands
         : {
             ...facts.commands,
-            value: commands.map((row) => ({
+            // `lastSpanId` only finds the latest run's record; the row carries the record instead.
+            value: commands.map(({ lastSpanId, ...row }) => ({
               ...row,
-              record: result(row.lastSpanId),
-              nonZeroExits: row.nonZeroExits.map((exit) => ({ ...exit, record: result(exit.spanId) })),
+              record: short(result(lastSpanId)),
+              nonZeroExits: row.nonZeroExits.map((exit) => ({ ...exit, record: short(result(exit.spanId)) })),
             })),
           },
-      firstFailure: failure.spanId === undefined ? facts.firstFailure : { ...facts.firstFailure, record: result(failure.spanId) },
+      firstFailure: failure.spanId === undefined ? facts.firstFailure : { ...facts.firstFailure, record: short(result(failure.spanId)) },
     })
   }
   return { sessions: citedSessions, matches: matches.map((match) => citedMatches.get(match) ?? match) }

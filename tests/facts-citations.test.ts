@@ -19,13 +19,16 @@ const bench = (...args: string[]) =>
   execFileAsync(process.execPath, ['--import', tsx, join(process.cwd(), 'bench', 'audit', 'cli.ts'), ...args], { maxBuffer: 32 * 1024 * 1024 })
 
 interface RecordLine { file: string; line: number }
+/** A sheet record: `file` only when it is not the session's `recordFile`. */
+interface SheetRecord { file?: string; line: number }
 interface Quote { text: string; cite: string }
-interface Exit { code: number | null; inScript: boolean; at: string; spanId: string; record: RecordLine | null }
+interface Exit { code: number | null; inScript: boolean; at: string; spanId: string; record: SheetRecord | null }
 interface Facts {
-  humanTurns: { value: Array<{ text: string; record: RecordLine | null }> }
-  firstFailure: { spanId?: string; record?: RecordLine | null }
-  commands: { value: Array<{ command: string; runs: number; failed: number; record: RecordLine | null; nonZeroExits: Exit[] }> }
-  changedFiles: { value: Array<{ path: string; record: RecordLine | null }> }
+  recordFile: string
+  humanTurns: { value: Array<{ text: string; record: SheetRecord | null }> }
+  firstFailure: { spanId?: string; record?: SheetRecord | null }
+  commands: { value: Array<{ command: string; runs: number; failed: number; record: SheetRecord | null; nonZeroExits: Exit[] }> }
+  changedFiles: { value: Array<{ path: string; record: SheetRecord | null }> }
 }
 interface Match { kind: string; text: string; record?: RecordLine | null; lastLine?: string | null }
 
@@ -56,6 +59,10 @@ const cited = (quote: Quote): RecordLine => {
   return { file: join(fixtures, quote.cite.slice(0, at)), line: Number(quote.cite.slice(at + 1)) }
 }
 
+/** A sheet record as the absolute record it names. */
+const absolute = (facts: Facts, record: SheetRecord | null | undefined): RecordLine | null =>
+  record == null ? null : { file: record.file ?? facts.recordFile, line: record.line }
+
 async function recordText(record: RecordLine): Promise<string> {
   return (await readFile(record.file, 'utf8')).split('\n')[record.line - 1]!
 }
@@ -66,15 +73,16 @@ describe('facts cites each fact by the record it came from', () => {
     const answer = gold['op.last-human-turn'] as { last: Quote; previous: Quote }
     const [previous, last] = operator.humanTurns.value.slice(-2)
     expect(last!.text).toBe(answer.last.text)
-    expect(last!.record).toEqual(cited(answer.last))
+    expect(operator.recordFile).toBe(paths['codex-operator'])
+    expect(absolute(operator, last!.record)).toEqual(cited(answer.last))
     expect(previous!.text).toBe(answer.previous.text)
-    expect(previous!.record).toEqual(cited(answer.previous))
+    expect(absolute(operator, previous!.record)).toEqual(cited(answer.previous))
     expect(operator.humanTurns.value.every((turn) => turn.record !== null)).toBe(true)
   })
 
   it('cites the first failure at the result the gold quotes', async () => {
     const claude = await facts('claude')
-    expect(claude.firstFailure.record).toEqual(cited((gold['claude.first-bash-error'] as { output: Quote }).output))
+    expect(absolute(claude, claude.firstFailure.record)).toEqual(cited((gold['claude.first-bash-error'] as { output: Quote }).output))
   })
 
   it('lists each non-zero exit by command, with the codes the gold counts and the record of each', async () => {
@@ -86,7 +94,7 @@ describe('facts cites each fact by the record it came from', () => {
     for (const row of operator.commands.value) expect(row.nonZeroExits).toHaveLength(row.failed)
     for (const exit of exits) {
       expect(exit.record).not.toBeNull()
-      expect(await recordText(exit.record!)).toContain(`Process exited with code ${exit.code}`)
+      expect(await recordText(absolute(operator, exit.record)!)).toContain(`Process exited with code ${exit.code}`)
     }
     expect(operator.commands.value.every((row) => row.record !== null)).toBe(true)
   })
@@ -96,7 +104,7 @@ describe('facts cites each fact by the record it came from', () => {
     const path = (gold['op.local-copy'] as { path: string }).path
     const file = operator.changedFiles.value.find((entry) => entry.path === path)
     expect(file?.record).not.toBeNull()
-    expect(await recordText(file!.record!)).toContain(`Add File: ${path}`)
+    expect(await recordText(absolute(operator, file!.record)!)).toContain(`Add File: ${path}`)
     expect(operator.changedFiles.value.every((entry) => entry.record !== null)).toBe(true)
   })
 
@@ -116,5 +124,6 @@ describe('facts cites each fact by the record it came from', () => {
     const run = await runCli(['facts', paths['codex-operator']!, '--format', 'json', '--no-content'], { env: env() })
     expect(run.code, run.stderr).toBe(0)
     expect(run.stdout).not.toContain('"record"')
+    expect(run.stdout).not.toContain('"recordFile"')
   })
 })
