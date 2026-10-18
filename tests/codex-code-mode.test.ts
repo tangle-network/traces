@@ -223,7 +223,7 @@ describe('processes a Codex code-mode script started in a loop', () => {
       expect(run.code).toBe(0)
       const { commands } = (JSON.parse(run.stdout) as { sessions: Array<{ commands: { value: Array<Record<string, unknown>>; spanIds: string[] } }> }).sessions[0]!
       expect(commands.spanIds).toHaveLength(4)
-      expect(commands.value).toEqual([
+      expect(commands.value.map(({ command, runs, failed, inScripts }) => ({ command, runs, failed, inScripts }))).toEqual([
         { command: 'labctl run', runs: 4, failed: 1, inScripts: 2 },
         { command: 'labctl cancel', runs: 1, failed: 1, inScripts: 0 },
       ])
@@ -269,7 +269,8 @@ describe('processes a Codex code-mode script started in a loop', () => {
     }
     const text = await runCli(['facts', loopRollout, '--match', '^labctl run'], { env: loopEnv })
     expect(text.code).toBe(0)
-    expect(text.stdout.trimEnd().split('\n').slice(1).map((line) => line.split(/ {2,}/u).slice(2))).toEqual([
+    // Each command line is followed by its record's file:line.
+    expect(text.stdout.trimEnd().split('\n').slice(1).filter((line) => !line.startsWith('  ')).map((line) => line.split(/ {2,}/u).slice(2))).toEqual([
       ['command', 'ok', 'labctl run beta-probe --variant v1'],
       ['command', 'failed', 'labctl run gamma-grid'],
       ['command', '?', 'labctl run beta-probe --variant v3'],

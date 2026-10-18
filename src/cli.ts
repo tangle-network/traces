@@ -46,6 +46,7 @@ import {
   type SessionReading,
   type UnreadSessionFact,
 } from './session-facts.js'
+import { callIdsOf, citeFacts, type RecordLine, type SessionCiting } from './record-lines.js'
 import { sessionIdentityLookup } from './session-identity.js'
 import { conformanceOfSpans, renderValidation } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
@@ -855,8 +856,15 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   const host = hostOf(args)
   const rows: TurnRow[] = []
   const matches: SourcedMatch[] = []
+  // JSON facts and --match rows cite the record each fact came from; --no-content withholds paths.
+  const citings = new Map<string, SessionCiting>()
+  const cite = !args.noContent && (format === 'json' || pattern !== undefined)
   const onSession = (reading: SessionReading): void => {
-    const source = readingFrom ?? sourceOf.get(reading.facts.sessionId ?? '') ?? null
+    // OTLP sources are keyed by trace id, which a span's own session id can differ from.
+    const source = readingFrom ?? sourceOf.get(reading.facts.sessionId ?? '') ?? sourceOf.get(reading.facts.traceId) ?? null
+    if (cite && source !== null) {
+      citings.set(reading.facts.sessionId ?? reading.facts.traceId, { path: resolve(source), callIds: callIdsOf(reading.spans) })
+    }
     if (pattern !== undefined) {
       for (const match of sessionMatches(reading, pattern, window)) matches.push({ ...match, source })
       return
@@ -947,7 +955,7 @@ async function cmdFacts(args: CliArgs): Promise<void> {
       generatedAt: report.generatedAt,
       sessions: report.sessions.length,
       selection: report.selection,
-      matches,
+      matches: (await citeFacts(report.sessions, matches, citings)).matches,
     })
   }
   let rendered: string
@@ -958,7 +966,9 @@ async function cmdFacts(args: CliArgs): Promise<void> {
     rendered = rows.map((row) => `${JSON.stringify(row)}\n`).join('')
     summary = `turns → ${args.out}  (${rows.length} typed turn(s) in ${report.sessions.length} session(s), $0, no model call)`
   } else {
-    rendered = format === 'json' ? `${JSON.stringify(report)}\n` : renderSessionFacts(report)
+    rendered = format === 'json'
+      ? `${JSON.stringify({ ...report, sessions: (await citeFacts(report.sessions, [], citings)).sessions })}\n`
+      : renderSessionFacts(report)
     summary = `session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`
   }
   await writeOutput(args, rendered, summary)
@@ -989,7 +999,8 @@ async function writeOutput(args: CliArgs, rendered: string, summary: string): Pr
   process.stdout.write(rendered)
 }
 
-type SourcedMatch = SessionMatch & { readonly source: string | null }
+/** A match row, the file its session was read from, and for a command its record and output's last line (see `citeFacts`). */
+type SourcedMatch = SessionMatch & { readonly source: string | null; readonly record?: RecordLine | null; readonly lastLine?: string | null }
 
 /** The hits of `facts --match`, oldest first, in `format`. */
 async function writeMatches(
@@ -1067,11 +1078,13 @@ async function searchWindow(args: CliArgs, pattern: RegExp, window: SessionFacts
 }
 
 /** `facts --match` as text: one line per hit, oldest first; a command's line says `ok`, `failed`, or `?` when its call's status is not its own. */
-function renderMatches(pattern: string, sessions: number, matches: readonly SessionMatch[]): string {
+function renderMatches(pattern: string, sessions: number, matches: readonly SourcedMatch[]): string {
   const lines = [`${matches.length} match(es) for /${pattern}/ in ${sessions} session(s), deterministic, $0`]
   for (const match of matches) {
     const outcome = match.kind !== 'command' ? '' : `${(match.failed === true ? 'failed' : match.failed === false ? 'ok' : '?').padEnd(6)}  `
     lines.push(`${match.at}  ${(match.sessionId ?? '?').slice(0, 8)}  ${match.kind.padEnd(7)}  ${outcome}${match.text}`)
+    // The record to cite, and the output's last line, which no clipped row shows.
+    if (match.record) lines.push(`  ${match.record.file}:${match.record.line}${match.lastLine == null ? '' : `  last: ${match.lastLine.slice(0, 300)}`}`)
   }
   return `${lines.join('\n')}\n`
 }

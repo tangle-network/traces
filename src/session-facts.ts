@@ -779,6 +779,31 @@ export interface CommandCountFact {
   readonly failed: number
   /** Runs inside a Codex code-mode script, which records the script's status, never the command's exit code. */
   readonly inScripts: number
+  /** Each run {@link failed} counts, oldest first, with the exit code its output printed. */
+  readonly nonZeroExits: readonly NonZeroExit[]
+  /** The tool call of the latest run. */
+  readonly lastSpanId: string
+}
+
+/** One run of a command that exited non-zero. */
+export interface NonZeroExit {
+  /** The code the output printed (`Process exited with code N`, `Exit code N`); null when it printed none. */
+  readonly code: number | null
+  /** Always false today: a code-mode script records its own status, never a command's. */
+  readonly inScript: boolean
+  readonly at: string
+  readonly spanId: string
+}
+
+const EXIT_CODE = /^(?:Process exited with code|Exit code:?|Command failed with exit code)[ \t]+(-?\d+)\.?[ \t]*$/imu
+
+/** The exit code a shell tool's output printed in its header, else null. */
+function printedExitCode(span: OtlpSpan): number | null {
+  const output = span.attributes['output.value']
+  if (typeof output !== 'string') return null
+  const end = output.indexOf('\nOutput:\n')
+  const code = EXIT_CODE.exec(end >= 0 ? output.slice(0, end) : output.slice(0, 400))?.[1]
+  return code === undefined ? null : Number(code)
 }
 
 /** Shell builtins that change the shell's own state and start no process: not commands of their own. */
@@ -838,7 +863,7 @@ function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCou
   if (own.length > 0 && !own.some((span) => inputValue(span) !== null)) {
     return { value: null, spanIds: [], unavailable: 'no tool call recorded its arguments, so which commands ran cannot be read' }
   }
-  const rows = new Map<string, { runs: number; failed: number; inScripts: number }>()
+  const rows = new Map<string, { runs: number; failed: number; inScripts: number; nonZeroExits: NonZeroExit[]; lastSpanId: string }>()
   const spanIds: string[] = []
   for (const span of own) {
     const call = callCommands(span)
@@ -848,9 +873,13 @@ function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCou
       if (SHELL_STATE_BUILTINS.has(words[0]!)) return
       ran = true
       const name = commandName(words)
-      const row = rows.get(name) ?? { runs: 0, failed: 0, inScripts: 0 }
+      const row = rows.get(name) ?? { runs: 0, failed: 0, inScripts: 0, nonZeroExits: [], lastSpanId: span.span_id }
       row.runs += 1
-      if (call.failed[index] === true) row.failed += 1
+      row.lastSpanId = span.span_id
+      if (call.failed[index] === true) {
+        row.failed += 1
+        row.nonZeroExits.push({ code: printedExitCode(span), inScript: call.inScript, at: span.start_time, spanId: span.span_id })
+      }
       if (call.inScript) row.inScripts += 1
       rows.set(name, row)
     })
