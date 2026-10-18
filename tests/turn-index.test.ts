@@ -58,10 +58,11 @@ async function parsed(env: Env, ref: string, sessionId: string, pattern: string 
   const run = await runCli(['facts', ref, '--match', pattern, '--format', 'json'], { env })
   if (run.code === 2) return null
   expect(run.code, run.stderr).toBe(0)
-  return (JSON.parse(run.stdout) as Search).matches
-    .filter((match) => match.sessionId === sessionId)
-    .map(({ record: _record, lastLine: _lastLine, ...match }) => match)
+  return uncited((JSON.parse(run.stdout) as Search).matches.filter((match) => match.sessionId === sessionId))
 }
+
+/** Rows without the record and last output line a named read adds. */
+const uncited = (rows: readonly Match[]): Match[] => rows.map(({ record: _record, lastLine: _lastLine, ...match }) => match)
 
 const byTime = (rows: readonly Match[]): Match[] => [...rows].sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
 
@@ -226,7 +227,7 @@ describe('turn index: a session read as it is written', () => {
       const answer = await search(fx.env)
       // One whole read of all three; while one has no record yet, that run exits 2, so read each alone.
       const together = await runCli(['facts', ...files.map((file) => file.path), '--match', EVERY_ROW, '--format', 'json'], { env: fx.env })
-      const all = together.code === 0 ? (JSON.parse(together.stdout) as Search).matches : null
+      const all = together.code === 0 ? uncited((JSON.parse(together.stdout) as Search).matches) : null
       for (const { id, path } of files) {
         const whole = all ? all.filter((match) => match.sessionId === id) : await parsed(fx.env, path, id)
         const indexed = answer.matches.filter((match) => match.sessionId === id)
