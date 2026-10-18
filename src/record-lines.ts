@@ -100,7 +100,9 @@ export async function readRecordLines(files: readonly string[], query: RecordLin
   }
   // Codex writes a typed turn as a `response_item` message and an `event_msg`; the item is the record.
   const turns = new Map<string, { at: RecordLine; item: boolean }>()
-  for (const file of files) {
+  // Nothing to locate reads nothing: a collector's file of long lines with no call ids costs no scan.
+  const scan = query.callIds.size > 0 || wantedTurns.size > 0 ? files : []
+  for (const file of scan) {
     let line = 0
     try {
       const lines = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity })
