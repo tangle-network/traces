@@ -24,6 +24,8 @@ interface Match {
   spanId: string
   source: string | null
   text: string
+  record?: unknown
+  lastLine?: unknown
 }
 
 interface IndexStats {
@@ -48,12 +50,17 @@ async function search(env: Env, pattern: string = EVERY_ROW): Promise<Search> {
   return JSON.parse(run.stdout) as Search
 }
 
-/** `facts <ref>`, which parses the session whole: its own rows, or null when it cannot be read. */
+/**
+ * `facts <ref>`, which parses the session whole: its own rows, or null when it cannot be read.
+ * A named read also cites each command's record and output's last line, which the index keeps no source for.
+ */
 async function parsed(env: Env, ref: string, sessionId: string, pattern: string = EVERY_ROW): Promise<Match[] | null> {
   const run = await runCli(['facts', ref, '--match', pattern, '--format', 'json'], { env })
   if (run.code === 2) return null
   expect(run.code, run.stderr).toBe(0)
-  return (JSON.parse(run.stdout) as Search).matches.filter((match) => match.sessionId === sessionId)
+  return (JSON.parse(run.stdout) as Search).matches
+    .filter((match) => match.sessionId === sessionId)
+    .map(({ record: _record, lastLine: _lastLine, ...match }) => match)
 }
 
 const byTime = (rows: readonly Match[]): Match[] => [...rows].sort((left, right) => Date.parse(left.at) - Date.parse(right.at))

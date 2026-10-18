@@ -15,18 +15,21 @@ A ref is a session id or 8+ char prefix, a session file, an OTLP file or dir, a 
    `traces facts <ref> --format json | jq '<path>'` with a path below.
    Never print the whole JSON: it is tens of KB of span ids.
 3. To list commands, typed turns or agent messages by text: `traces facts <ref> --match '<re>'`.
-   It prints the count first, then one line per hit, a command's with `ok`, `failed` or `?`;
-   a program's run count is on the sheet.
+   It prints the count first, then one line per hit, a command's with `ok`, `failed` or `?`,
+   and under it the record's `file:line` and its output's `last:` line; a program's run count is on the sheet.
+4. To quote or cite, use `record` (`{file, line}`) on a turn, the first failure, a command row, a
+   non-zero exit or a changed file, and cite `file:line`. Never `find` or `grep` the store for it.
 
 ```text
-.sessions[0].firstFailure | {name, message, at, spanId}                      first failure, its output
+.sessions[0].firstFailure | {name, message, at, record}                      first failure, its output
 .sessions[0].measurements.tools[] | {name, calls, failed: .outcomes.error}   tool calls by name, failures
-.sessions[0].commands.value                                                  programs: runs, failed, inScripts
+.sessions[0].commands.value[] | {command, runs, failed, inScripts, record}    programs, latest run's record
+.sessions[0].commands.value[].nonZeroExits[] | {code, inScript, at, record}   each non-zero exit and its code
 .sessions[0].pullRequests.value | {created: [.created[] | {number, at}], merged: [.merged[] | {number, at}]}
-.sessions[0].humanTurns.value[] | {at, text, spanId, signals}                typed turns, in order
+.sessions[0].humanTurns.value[] | {at, text, record, signals}                typed turns, in order
 .sessions[0] | {tokens, cost}                                                tokens and cost
 .sessions[0].subagents.value[] | {taskName, agentType, status}               subagents spawned, refused ones ERROR
-[.sessions[0].changedFiles.value[].path]                                     files changed
+.sessions[0].changedFiles.value[] | {path, operations, record}            files changed, the call that changed each
 .sessions[0] | {first: .firstRecordAt.value, last: .lastRecordAt.value}      first and last record
 .sessions[0] | {parentSessionId, rel: .measurements.relationship}            parent, agent path, own task start, children
 ```
@@ -45,7 +48,7 @@ A count in a command's `failed` is a known non-zero exit; a run `inScripts` has 
 | A judgment question with checked citations ($) | `traces ask <ref> --question '<q>' --budget 1` |
 | Keep a session's evidence before a move | `traces bundle <ref> --out <dir>` |
 
-Report the ref, cite span ids, and say "unknown" where traces returns null.
+Report the ref, cite `record` as `file:line` (else span ids), and say "unknown" where traces returns null.
 Do not infer success from a completion message. Upload only when asked.
 
 ## Then consider

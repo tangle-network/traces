@@ -76,6 +76,17 @@ The rule is **not met**: the traces arm answers six more questions correctly, bu
 
 Large session, account skills off, three paired runs: traces 12 / 12 at $0.3579 (4 / 4 each run), raw-files 9 / 12 at $0.5494 (3 / 4 each run, counting `write_stdin` poll exits as command exits, 5,252 against 4,297); facts 4 / 4 at $0.
 
+**U11 rerun after #217 (2026-10-18, traces `e8c0d35`, on GTR).** The same questions, model (`claude -p` 2.1.302, `sonnet`), budget and arm settings; at most 2 `claude -p` at a time, each started at load1 ≤ 40 and 16 GiB available. The work trees sat under `/tmp`: under the login's home, both arms' agents loaded that home's skills, `AGENTS.md` and auto-memory.
+
+| Run | raw-files correct / partial / wrong | cost | traces correct / partial / wrong | cost | traces arm: skill loaded / ran traces / only `--help` / no traces |
+|---|---|---|---|---|---|
+| 1 | 15 / 1 / 3 | $0.5731 | 19 / 0 / 0 | $0.6029 | 12 / 12 / 0 / 7 |
+| 2 | 17 / 1 / 1 | $0.6931 | 19 / 0 / 0 | $0.6996 | 11 / 11 / 0 / 8 |
+| 3 | 16 / 2 / 1 | $0.7169 | 17 / 1 / 1 | $0.6828 | 11 / 11 / 1 / 7 |
+| **Total** | **48 / 57** | **$1.9830** | **55 / 57** | **$1.9853** | 34 / 34 / 1 / 22 of 57 |
+
+The rule is **not met**, by $0.0023 (0.1%). #217's facts closed the three gaps it named: over the three runs, `claude.bash` went from +$0.097 to −$0.004, `op.runs` from +$0.090 to −$0.052, and `claude.tasks` from +$0.053 to $0.000. What still costs more is answers that cite or quote a record. The agent reads the fact, then searches the session file for its line: `op.exit-codes` +$0.091 (no exit codes by command), `op.local-copy` +$0.066, `claude.first-bash-error` +$0.035, `op.large-output` +$0.033 (`--match` showed no output) and `op.last-human-turn` +$0.027. Large session, three pairs: traces 10 / 12 at $0.3784, raw-files 9 / 12 at $0.4097; both missed `large.commands` in most runs.
+
 ## Fork parity (step 20, this Mac, 2026-10-08 to 2026-10-14)
 
 Each parser traces retires, scored against the command that replaces it; a consumer PR deletes a fork only at or above its tolerance (90%).
