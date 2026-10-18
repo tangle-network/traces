@@ -1,8 +1,16 @@
 {
   "arm": "facts",
   "measuredAt": "2026-10-17",
-  "canonical": { "correct": 12, "partial": 3, "wrong": 4 },
-  "heldOut": { "correct": 12, "partial": 3, "wrong": 4 },
+  "canonical": {
+    "correct": 14,
+    "partial": 2,
+    "wrong": 3
+  },
+  "heldOut": {
+    "correct": 14,
+    "partial": 2,
+    "wrong": 3
+  },
   "correct": [
     "op.subagents",
     "op.runs",
@@ -15,6 +23,8 @@
     "child.lineage",
     "child.own-work",
     "child.spawned",
+    "claude.tasks",
+    "claude.bash",
     "claude.first-bash-error"
   ]
 }

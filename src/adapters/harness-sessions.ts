@@ -528,9 +528,12 @@ function codexMetaSummary(meta: NonNullable<CodexHead['payload']>): NonNullable<
  * them; the blocks are one message. So a piece ends before the last
  * response's first record. Codex holds a response open until a person's
  * message or a new turn starts, a turn ends, or a cumulative token count
- * moves with the response's own usage; a piece ends at the last of those.
- * A Codex fork first replays the history of the thread it came from, from
- * that thread's `session_meta` to its own first turn; no piece ends inside it.
+ * moves with the response's own usage; a piece ends at the last of those
+ * that no tool call is waiting across: a call's status arrives with its
+ * output, and a search row of a command carries it. A turn that ended leaves
+ * no call waiting. A Codex fork first replays the history of the thread it
+ * came from, from that thread's `session_meta` to its own first turn; no
+ * piece ends inside it.
  */
 export function pieceBoundary(harness: string, records: readonly PieceRecord[], carry: PieceCarry = PIECE_START): number {
   if (harness === 'claude-code') {
@@ -550,6 +553,12 @@ export function pieceBoundary(harness: string, records: readonly PieceRecord[], 
   return codexScan(records, carry).cut
 }
 
+/** Codex records that open a tool call; its `*_output` record with the same call id closes it. */
+const CODEX_CALLS: ReadonlySet<string> = new Set(['function_call', 'custom_tool_call', 'local_shell_call'])
+
+/** A turn starting or ending: no output for a call before it is still to come. */
+const TURN_EDGES: ReadonlySet<string> = new Set(['task_started', 'task_complete', 'turn_aborted'])
+
 /**
  * A Codex piece read the way the fold reads it: where it may end (see
  * {@link pieceBoundary}) and the last cumulative token usage the fold took
@@ -562,6 +571,11 @@ function codexScan(records: readonly PieceRecord[], carry: PieceCarry): { cut: n
   let forked = typeof carry.meta?.forked_from_id === 'string'
   let sessionId = carry.nativeSessionId ?? ''
   let inherited = false
+  // Calls written without their output yet, by call id.
+  const waiting = new Set<string>()
+  const end = (index: number): void => {
+    if (waiting.size === 0) cut = index
+  }
   records.forEach((record, index) => {
     const payload = record && isPlainObject(record.payload) ? record.payload : null
     if (!record || !payload) return
@@ -582,14 +596,20 @@ function codexScan(records: readonly PieceRecord[], carry: PieceCarry): { cut: n
       }
       return
     }
-    if (record.type === 'response_item' && payload.type === 'message' && payload.role === 'user') cut = index
-    else if (record.type === 'event_msg' && payload.type === 'task_started') cut = index
-    else if (record.type === 'event_msg' && (payload.type === 'task_complete' || payload.type === 'turn_aborted')) cut = index + 1
+    const callId = typeof payload.call_id === 'string' ? payload.call_id : null
+    if (record.type === 'response_item' && callId !== null) {
+      if (CODEX_CALLS.has(String(payload.type))) waiting.add(callId)
+      else if (String(payload.type).endsWith('_output')) waiting.delete(callId)
+    }
+    if (record.type === 'event_msg' && TURN_EDGES.has(String(payload.type))) waiting.clear()
+    if (record.type === 'response_item' && payload.type === 'message' && payload.role === 'user') end(index)
+    else if (record.type === 'event_msg' && payload.type === 'task_started') end(index)
+    else if (record.type === 'event_msg' && (payload.type === 'task_complete' || payload.type === 'turn_aborted')) end(index + 1)
     else if (record.type === 'event_msg' && payload.type === 'token_count' && isPlainObject(payload.info)) {
       const usage = payload.info.total_token_usage
       if (!isPlainObject(usage)) return
       const last = payload.info.last_token_usage
-      if (typeof usage.total_tokens === 'number' && usage.total_tokens !== tokens?.total_tokens && isPlainObject(last) && typeof last.output_tokens === 'number') cut = index + 1
+      if (typeof usage.total_tokens === 'number' && usage.total_tokens !== tokens?.total_tokens && isPlainObject(last) && typeof last.output_tokens === 'number') end(index + 1)
       tokens = usage
     }
   })

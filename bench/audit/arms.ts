@@ -98,7 +98,8 @@ interface Sheet {
   parentSessionId: string | null
   toolCalls: Fact<number>
   toolCallsByName: Fact<Record<string, number>>
-  subagents: Fact<Array<{ taskName: string | null; status: string }>>
+  subagents: Fact<Array<{ taskName: string | null; agentType: string | null; status: string }>>
+  subagentTools: Fact<Array<{ name: string; calls: number; failed: number }>>
   pullRequests: Fact<{ created: PullRequest[]; merged: PullRequest[] }>
   humanTurns: Fact<Array<{ at: string; text: string; spanId: string; signals: string[] }>>
   changedFiles: Fact<Array<{ path: string }>>
@@ -112,7 +113,7 @@ interface Sheet {
     relationship: { agentPath?: string | null; spawnedChildSessionIds?: string[]; taskStartedAt?: string }
   }
 }
-interface Match { kind: string; at: string; spanId: string; text: string }
+interface Match { kind: string; at: string; spanId: string; text: string; failed?: boolean | null }
 
 /** What the facts arm reads: each session's sheet, and the command rows of a few searches. */
 interface FactsReading {
@@ -181,7 +182,8 @@ const FACTS_ANSWERS: Readonly<Record<string, (facts: FactsReading) => Record<str
   },
   'op.runs': (facts) => {
     const sheet = facts.sheet('codex-operator')
-    const runs = facts.commands('codex-operator', '^labctl run\\b').map((match) => match.text.split(' '))
+    // A launch that failed started nothing; a launch in a code-mode script has no exit of its own.
+    const runs = facts.commands('codex-operator', '^labctl run\\b').filter((match) => match.failed !== true).map((match) => match.text.split(' '))
     return {
       launched: succeeded(sheet, 'labctl run'),
       failed_launches: sheet.commands.value?.find((entry) => entry.command === 'labctl run')?.failed ?? null,
@@ -232,15 +234,23 @@ const FACTS_ANSWERS: Readonly<Record<string, (facts: FactsReading) => Record<str
   'child.spawned': (facts) => ({ spawned_session_ids: facts.sheet('codex-child').measurements.relationship.spawnedChildSessionIds ?? null }),
   'claude.tasks': (facts) => {
     const sheet = facts.sheet('claude')
+    const spawns = sheet.subagents.value
     return {
       task_calls: sheet.toolCallsByName.value?.Task ?? null,
-      subagent_types: null,
-      descriptions: sheet.subagents.value?.map((spawn) => spawn.taskName) ?? null,
+      subagent_types: spawns === null ? null : [...new Set(spawns.flatMap((spawn) => (spawn.agentType === null ? [] : [spawn.agentType])))],
+      descriptions: spawns?.map((spawn) => spawn.taskName) ?? null,
     }
   },
   'claude.bash': (facts) => {
-    const bash = tool(facts.sheet('claude'), 'Bash')
-    return { bash_calls: bash?.calls ?? null, failed_bash_calls: bash?.outcomes.error ?? null, failed_in_subagents: null }
+    const sheet = facts.sheet('claude')
+    const own = tool(sheet, 'Bash')
+    const children = sheet.subagentTools.value
+    const theirs = children?.find((row) => row.name === 'Bash')
+    return {
+      bash_calls: own === undefined || children === null ? null : own.calls + (theirs?.calls ?? 0),
+      failed_bash_calls: own === undefined || children === null ? null : own.outcomes.error + (theirs?.failed ?? 0),
+      failed_in_subagents: children === null ? null : theirs?.failed ?? 0,
+    }
   },
   'claude.first-bash-error': (facts) => {
     const failure = facts.sheet('claude').firstFailure

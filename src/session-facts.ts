@@ -31,7 +31,7 @@
  * all), so a trace can hold two kinds of record: what this session's agent did,
  * and what a child agent it spawned did. The child's work is the child's: it is
  * excluded from this sheet's counts, named in `subagents` and counted in
- * `subagentToolSpans`, never added to the parent's totals. A trace with no
+ * `subagentTools`, never added to the parent's totals. A trace with no
  * subagent records is unaffected — every one of those counts is zero.
  *
  * The sheet is NOT a span and cannot be cited. It is prepared context, and
@@ -72,11 +72,11 @@ import {
   type AgentIdentityFact,
   type AgentIdentityLookup,
 } from './session-identity.js'
-import { commandLines, commandTextFromInput, isCodeModeScript, simpleCommands } from './shell-commands.js'
+import { commandTextFromInput, isCodeModeScript, simpleCommands } from './shell-commands.js'
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '7'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '8'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
@@ -164,11 +164,25 @@ export interface SubagentSpawnFact {
   readonly taskName: string | null
   /** Why `taskName` is null. Null when it was recorded. */
   readonly taskNameUnavailable: string | null
+  /**
+   * The kind of agent the call asked for: Claude Code's `subagent_type`
+   * (`Explore`, `general-purpose`, …). Null when the call names none, and
+   * under `--no-content`, since it is read from the call's input.
+   */
+  readonly agentType: string | null
   readonly startedAt: string
   /** The spawn span's status: `OK`, `ERROR`, or `UNSET` while still open. */
   readonly status: string
   /** The spawn call span, plus the subagent lifecycle span when one joined it. */
   readonly spanIds: readonly string[]
+}
+
+/** The tool calls of one name that a session's subagents made. */
+export interface SubagentToolCount {
+  readonly name: string
+  readonly calls: number
+  /** Calls that ended in error. */
+  readonly failed: number
 }
 
 /**
@@ -314,8 +328,12 @@ export interface SessionFacts {
   readonly toolCalls: SessionFact<number>
   /** Every synthesized span excluded from `toolCalls`, so the exclusion is checkable. */
   readonly synthesizedToolSpans: SessionFact<number>
-  /** TOOL spans excluded because a subagent, not this agent, made the call. */
-  readonly subagentToolSpans: SessionFact<number>
+  /**
+   * TOOL spans excluded because a subagent, not this agent, made the call, by
+   * tool name with the calls that ended in error, most calls first. `spanIds`
+   * lists every one, so the exclusion is checkable.
+   */
+  readonly subagentTools: SessionFact<readonly SubagentToolCount[]>
   /** Tool-call counts by tool name, over the same spans `toolCalls` counted. */
   readonly toolCallsByName: SessionFact<Readonly<Record<string, number>>>
   readonly subagents: SessionFact<readonly SubagentSpawnFact[]>
@@ -341,7 +359,7 @@ export interface SessionFacts {
   /**
    * The session's own agent's tokens (`execution.ts`): `input` is the whole
    * prompt, cache reads and writes included, on every harness. A subagent
-   * folded into the trace is not counted, as `subagentToolSpans` says of tools.
+   * folded into the trace is not counted, as `subagentTools` says of tools.
    */
   readonly tokens: SessionTokens
   /**
@@ -522,6 +540,9 @@ const UNRESOLVED_PATH = /(?:^|\/)\$/
 const FILE_PATH_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'write'])
 const FILE_PATH_KEY = /"(?:file_path|filePath|path|notebook_path)"\s*:\s*"((?:[^"\\]|\\.)*)"/g
 
+/** The kind of agent a Claude Code `Task` (or `Agent`) call asked for, in its input. */
+const SUBAGENT_TYPE_KEY = /"subagent_type"\s*:\s*"((?:[^"\\]|\\.)*)"/u
+
 function decodeJsonString(raw: string): string | null {
   try {
     const value: unknown = JSON.parse(`"${raw}"`)
@@ -675,11 +696,13 @@ function subagentsOf(ownSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]):
       attr(span, SUBAGENT_SPAWN_ATTR) === true
     if (!isSpawn || isSynthesizedSpan(span)) continue
     const taskName = stringAttr(span, 'traces.codex.spawn_agent_path') ?? stringAttr(span, SUBAGENT_SPAWN_TASK_ATTR)
+    const agentType = SUBAGENT_TYPE_KEY.exec(inputValue(span) ?? '')?.[1]
     spawns.push({
       taskName,
       taskNameUnavailable: taskName === null
         ? 'the spawn span carries no task name; the harness recorded none for this call'
         : null,
+      agentType: agentType === undefined ? null : decodeJsonString(agentType),
       startedAt: span.start_time,
       status: span.status.code,
       spanIds: [
@@ -690,6 +713,20 @@ function subagentsOf(ownSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]):
     })
   }
   return spawns
+}
+
+/** Tool calls by name, with the ones that ended in error, most calls first. */
+function toolCounts(spans: readonly OtlpSpan[]): SubagentToolCount[] {
+  const rows = new Map<string, { calls: number; failed: number }>()
+  for (const span of spans) {
+    const row = rows.get(toolName(span)) ?? { calls: 0, failed: 0 }
+    row.calls += 1
+    if (span.status.code === 'ERROR') row.failed += 1
+    rows.set(toolName(span), row)
+  }
+  return [...rows]
+    .map(([name, row]) => ({ name, ...row }))
+    .sort((left, right) => right.calls - left.calls || left.name.localeCompare(right.name))
 }
 
 function finalMessagesOf(spans: readonly OtlpSpan[]): FinalMessageFact[] {
@@ -763,6 +800,32 @@ function commandName(words: readonly string[]): string {
   return next !== undefined && !DATA_FIRST_PROGRAMS.has(program) && PLAIN_WORD.test(next) ? `${program} ${next}` : program
 }
 
+/** The simple commands one tool call ran, and whether each failed when the call's status is that command's own. */
+interface CallCommands {
+  readonly commands: readonly (readonly string[])[]
+  /** The call is a Codex code-mode script. */
+  readonly inScript: boolean
+  /**
+   * Per command: true when the call ran it alone (a `cd` aside) and ended in
+   * error, false when it ran it alone and ended OK, else null: a code-mode
+   * script records its own status and never a command's, a command that shared
+   * its call with others has the call's status, and a call still open has none.
+   */
+  readonly failed: readonly (boolean | null)[]
+}
+
+/** The commands a shell or code-mode tool call ran, or undefined for a call that ran none. */
+function callCommands(span: OtlpSpan): CallCommands | undefined {
+  const input = inputValue(span)
+  const script = input === null ? undefined : commandTextFromInput(input)
+  if (script === undefined) return undefined
+  const inScript = isCodeModeScript(input!)
+  const commands = simpleCommands(script)
+  const programs = commands.flatMap((words, index) => (SHELL_STATE_BUILTINS.has(words[0]!) ? [] : [index]))
+  const own = !inScript && programs.length === 1 && span.status.code !== 'UNSET' ? programs[0]! : -1
+  return { commands, inScript, failed: commands.map((_, index) => (index === own ? span.status.code === 'ERROR' : null)) }
+}
+
 /**
  * The programs the session's own tool calls ran (inherited history left out),
  * most runs first. Null with the reason when no tool call kept its arguments:
@@ -778,21 +841,20 @@ function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCou
   const rows = new Map<string, { runs: number; failed: number; inScripts: number }>()
   const spanIds: string[] = []
   for (const span of own) {
-    const input = inputValue(span)
-    const script = input === null ? undefined : commandTextFromInput(input)
-    if (script === undefined) continue
-    const inScript = isCodeModeScript(input!)
-    const commands = simpleCommands(script).filter((words) => !SHELL_STATE_BUILTINS.has(words[0]!))
-    const failed = !inScript && commands.length === 1 && span.status.code === 'ERROR'
-    if (commands.length > 0) spanIds.push(span.span_id)
-    for (const words of commands) {
+    const call = callCommands(span)
+    if (call === undefined) continue
+    let ran = false
+    call.commands.forEach((words, index) => {
+      if (SHELL_STATE_BUILTINS.has(words[0]!)) return
+      ran = true
       const name = commandName(words)
       const row = rows.get(name) ?? { runs: 0, failed: 0, inScripts: 0 }
       row.runs += 1
-      if (failed) row.failed += 1
-      if (inScript) row.inScripts += 1
+      if (call.failed[index] === true) row.failed += 1
+      if (call.inScript) row.inScripts += 1
       rows.set(name, row)
-    }
+    })
+    if (ran) spanIds.push(span.span_id)
   }
   const counts = [...rows]
     .map(([command, row]) => ({ command, ...row }))
@@ -1353,8 +1415,8 @@ function readSession(
       spanIds: synthesized.map((span) => span.span_id),
       unavailable: null,
     },
-    subagentToolSpans: {
-      value: subagentTools.length,
+    subagentTools: {
+      value: toolCounts(subagentTools),
       spanIds: subagentTools.map((span) => span.span_id),
       unavailable: null,
     },
@@ -1418,7 +1480,7 @@ function readSession(
     subagents: {
       ...facts.subagents,
       value: facts.subagents.value?.map((entry) => ({
-        ...entry, taskName: null, taskNameUnavailable: 'Assignment text was not requested.',
+        ...entry, taskName: null, taskNameUnavailable: 'Assignment text was not requested.', agentType: null,
       })) ?? null,
     },
     firstFailure: facts.firstFailure.status === 'found'
@@ -1687,12 +1749,20 @@ function sessionSheet(facts: SessionFacts): string[] {
   if (facts.agent.value) lines.push(`who ${renderAgent(facts.agent.value)}`)
   lines.push(turnLine(facts))
   const subagents = facts.subagents.value ?? []
-  const names = subagents.map((entry) => entry.taskName).filter((name): name is string => name !== null)
+  const names = subagents.flatMap((entry) => (entry.taskName === null ? [] : [
+    `${sheetText(entry.taskName, 40)}${entry.agentType ? ` [${sheetText(entry.agentType, 40)}]` : ''}`,
+  ]))
   const failedCalls = new Map(facts.measurements.tools.map((row) => [row.name, row.outcomes.error]))
   lines.push(
     `tools ${facts.toolCalls.value}${facts.toolCalls.value ? ` (${topCounts(facts.toolCallsByName.value ?? {}, 3, (name) => failedNote(failedCalls.get(name) ?? 0, 0))})` : ''}` +
-      ` · subagents ${subagents.length}${names.length > 0 ? ` (${names.slice(0, 3).map((name) => sheetText(name, 40)).join(', ')}${names.length > 3 ? ', …' : ''})` : ''}`,
+      ` · subagents ${subagents.length}${names.length > 0 ? ` (${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''})` : ''}`,
   )
+  const subagentTools = facts.subagentTools.value ?? []
+  if (subagentTools.length > 0) {
+    const calls = Object.fromEntries(subagentTools.map((row) => [row.name, row.calls]))
+    const failed = new Map(subagentTools.map((row) => [row.name, row.failed]))
+    lines.push(`subagent tools ${facts.subagentTools.spanIds.length} (${topCounts(calls, 3, (name) => failedNote(failed.get(name) ?? 0, 0))}), not in the tools count`)
+  }
   const commands = commandLine(facts)
   if (commands !== null) lines.push(commands)
   const skills = Object.fromEntries(Object.entries(facts.measurements.skills).map(([name, use]) => [name, use.model + use.slash + use.read]))
@@ -1790,6 +1860,8 @@ export interface SessionMatch {
   readonly at: string
   readonly spanId: string
   readonly text: string
+  /** A `command` row only: whether the command failed, by the rule of {@link CommandCountFact.failed}; null when its call's status is not its own. */
+  readonly failed?: boolean | null
 }
 
 /** `text` on one line, clipped to {@link MATCH_TEXT_CAP} characters around the first hit of `pattern`. */
@@ -1810,6 +1882,8 @@ export interface SessionRow {
   readonly at: string
   readonly spanId: string
   readonly text: string
+  /** A `command` row only: see {@link SessionMatch.failed}. */
+  readonly failed?: boolean | null
 }
 
 /**
@@ -1834,9 +1908,11 @@ export function sessionRows(spans: readonly OtlpSpan[], turns: readonly SessionT
       continue
     }
     if (!isToolSpan(span) || isSynthesizedSpan(span)) continue
-    const script = commandTextFromInput(inputValue(span) ?? '')
-    if (script === undefined) continue
-    for (const line of commandLines(script)) rows.push({ kind: 'command', at: span.start_time, spanId: span.span_id, text: line })
+    const call = callCommands(span)
+    if (call === undefined) continue
+    call.commands.forEach((words, index) => {
+      rows.push({ kind: 'command', at: span.start_time, spanId: span.span_id, text: words.join(' '), failed: call.failed[index] ?? null })
+    })
   }
   return rows
 }
@@ -1855,7 +1931,10 @@ export function matchRows(
     pattern.lastIndex = 0
     if (!pattern.test(row.text)) continue
     pattern.lastIndex = 0
-    matches.push({ sessionId, kind: row.kind, at: row.at, spanId: row.spanId, text: matchExcerpt(row.text, pattern) })
+    matches.push({
+      sessionId, kind: row.kind, at: row.at, spanId: row.spanId, text: matchExcerpt(row.text, pattern),
+      ...(row.kind === 'command' ? { failed: row.failed ?? null } : {}),
+    })
   }
   return matches.sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
 }
@@ -2122,7 +2201,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
     tool_calls: {
       count: facts.toolCalls.value,
       synthesized_excluded: facts.synthesizedToolSpans.value,
-      subagent_excluded: facts.subagentToolSpans.value,
+      subagent_excluded: facts.subagentTools.spanIds.length,
       span_ids: facts.toolCalls.spanIds,
     },
     tool_calls_by_name: facts.toolCallsByName.value,
@@ -2131,6 +2210,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
       entries: facts.subagents.value?.map((entry) => ({
         task_name: entry.taskName,
         ...(entry.taskNameUnavailable ? { task_name_unavailable: entry.taskNameUnavailable } : {}),
+        ...(entry.agentType ? { agent_type: entry.agentType } : {}),
         started_at: entry.startedAt,
         status: entry.status,
         span_ids: entry.spanIds,

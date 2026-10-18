@@ -1066,11 +1066,12 @@ async function searchWindow(args: CliArgs, pattern: RegExp, window: SessionFacts
   })
 }
 
-/** `facts --match` as text: one line per hit, oldest first. */
+/** `facts --match` as text: one line per hit, oldest first; a command's line says `ok`, `failed`, or `?` when its call's status is not its own. */
 function renderMatches(pattern: string, sessions: number, matches: readonly SessionMatch[]): string {
   const lines = [`${matches.length} match(es) for /${pattern}/ in ${sessions} session(s), deterministic, $0`]
   for (const match of matches) {
-    lines.push(`${match.at}  ${(match.sessionId ?? '?').slice(0, 8)}  ${match.kind.padEnd(7)}  ${match.text}`)
+    const outcome = match.kind !== 'command' ? '' : `${(match.failed === true ? 'failed' : match.failed === false ? 'ok' : '?').padEnd(6)}  `
+    lines.push(`${match.at}  ${(match.sessionId ?? '?').slice(0, 8)}  ${match.kind.padEnd(7)}  ${outcome}${match.text}`)
   }
   return `${lines.join('\n')}\n`
 }

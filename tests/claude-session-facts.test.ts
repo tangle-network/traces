@@ -173,13 +173,6 @@ describe('session facts from a Claude Code transcript', () => {
     // Bash, Edit and the Task call that spawned the subagent.
     expect(facts.toolCalls.value).toBe(3)
     expect(facts.toolCallsByName.value).toEqual({ Bash: 1, Edit: 1, Task: 1 })
-    // Read, Write and Edit, all made by the child.
-    expect(facts.subagentToolSpans.value).toBe(3)
-    expect(facts.subagentToolSpans.spanIds).toHaveLength(3)
-    // The exclusion is checkable: no excluded span is in the counted list.
-    for (const id of facts.subagentToolSpans.spanIds) {
-      expect(facts.toolCalls.spanIds).not.toContain(id)
-    }
   })
 
   it('lists each spawned subagent with the task its call named', async () => {

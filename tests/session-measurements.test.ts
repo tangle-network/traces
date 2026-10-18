@@ -76,7 +76,6 @@ describe('standard session measurements', () => {
     const facts = buildSessionFactsReport(spans).sessions[0]!
     expect(facts.measurements.compactions.value).toBeNull()
     expect(facts.measurements.tools).toEqual([])
-    expect(facts.subagentToolSpans.value).toBe(1)
   })
 })
 

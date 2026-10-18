@@ -43,7 +43,7 @@ describe('the facts text sheet', () => {
     expectTemplate(session!)
     expect(session![0]).toMatch(new RegExp(`^${TOKEN_IDS.claude.slice(0, 8)} claude-code · widgets · 10-14 11:00→11:00 UTC · active \\d+ s$`, 'u'))
     expect(session).toContain('human turns 1 · interrupts 0')
-    expect(session).toContain('tools 2 (Agent 1, Bash 1) · subagents 1 (Survey the repo)')
+    expect(session).toContain('tools 2 (Agent 1, Bash 1) · subagents 1 (Survey the repo [Explore])')
     expect(session).toContain('commands 1: gh pr 1')
     expect(session!.find((line) => line.startsWith('tokens '))).toMatch(/^tokens in \S+ · out \S+ · cache read \S+ · cache write \S+ · \$\d+\.\d+ list price \(Router rates\)$/u)
     expect(session).toContain('waste 0 min')

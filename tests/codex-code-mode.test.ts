@@ -249,6 +249,34 @@ describe('processes a Codex code-mode script started in a loop', () => {
     ])
   })
 
+  it('are search rows that say whether each failed, as commands counts it, on a named session and over a window', async () => {
+    const pattern = '^(labctl|cd) '
+    for (const argv of [[loopRollout], ['--since', '2026-09-01T00:00:00Z']]) {
+      const run = await runCli(['facts', ...argv, '--match', pattern, '--format', 'json'], { env: loopEnv })
+      expect(run.stderr).toBe('')
+      expect(run.code).toBe(0)
+      const { matches } = JSON.parse(run.stdout) as { matches: Array<{ text: string; failed: boolean | null }> }
+      expect(matches.map((match) => [match.text, match.failed])).toEqual([
+        ['labctl run beta-probe --variant v1', false],
+        ['labctl run gamma-grid', true],
+        // A code-mode script records its own status, never a command's.
+        ['labctl run beta-probe --variant v3', null],
+        ['labctl run beta-probe --variant v4', null],
+        // The call's exit is the one program's it ran, not the cd's.
+        ['cd /workspace/demo', null],
+        ['labctl cancel b-9', true],
+      ])
+    }
+    const text = await runCli(['facts', loopRollout, '--match', '^labctl run'], { env: loopEnv })
+    expect(text.code).toBe(0)
+    expect(text.stdout.trimEnd().split('\n').slice(1).map((line) => line.split(/ {2,}/u).slice(2))).toEqual([
+      ['command', 'ok', 'labctl run beta-probe --variant v1'],
+      ['command', 'failed', 'labctl run gamma-grid'],
+      ['command', '?', 'labctl run beta-probe --variant v3'],
+      ['command', '?', 'labctl run beta-probe --variant v4'],
+    ])
+  })
+
   it('are withheld with the conversation under --no-content', async () => {
     const run = await runCli(['facts', loopRollout, '--no-content', '--format', 'json'], { env: loopEnv })
     expect(run.code).toBe(0)
