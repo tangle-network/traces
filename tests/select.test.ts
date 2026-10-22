@@ -178,6 +178,12 @@ describe('selection: one unreadable session never ends a sweep', () => {
     expect(report.sessions.map((entry) => entry.sessionId)).toEqual([IDS.parent, IDS.child1])
     expect(report.selection?.unreadSessions.map((entry) => entry.sessionId)).toEqual([IDS.child2])
     expect(result.stderr).toContain(`1 unreadable: traces facts ${IDS.parent} --format json | jq .selection`)
+
+    const jsonl = await run(['facts', IDS.parent, '--format', 'jsonl'], { HOME: home })
+    expect(jsonl.code, jsonl.stderr).toBe(0)
+    const rows = jsonl.stdout.trim().split('\n').map((line) => JSON.parse(line))
+    expect([...new Set(rows.map((row) => row.session))]).toEqual([IDS.parent, IDS.child1])
+    expect(jsonl.stderr).toContain('1 unreadable')
   })
 
   it('exits 2 when the unreadable session is the one named', async () => {
@@ -185,6 +191,11 @@ describe('selection: one unreadable session never ends a sweep', () => {
     expect(result.code).toBe(2)
     expect(result.stdout).toBe('')
     expect(JSON.parse(result.stderr.trim().split('\n').at(-1)!)).toMatchObject({ code: 'unreadable' })
+
+    const jsonl = await run(['facts', IDS.unreadable, '--format', 'jsonl'])
+    expect(jsonl.code).toBe(2)
+    expect(jsonl.stdout).toBe('')
+    expect(JSON.parse(jsonl.stderr)).toMatchObject({ code: 'unreadable' })
   })
 })
 

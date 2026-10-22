@@ -969,7 +969,7 @@ async function writeTurnFacts(args: CliArgs, host: string, window?: SessionFacts
   }
   const result = await turnFactsJsonl(sources(), host, window)
   unread.push(...result.unread)
-  if (named > 0 && unread.length > 0) throw new RefError(`no records could be read: ${unread.map((entry) => entry.sessionId).join(', ')}`, 'unreadable')
+  if (named > 0 && result.unread.length > 0) throw new RefError(`no records could be read: ${result.unread.map((entry) => entry.sessionId).join(', ')}`, 'unreadable')
   warnUnread(args, unread)
   await writeOutput(args, result.text, `turns → ${args.out}  (${result.turns} typed turn(s) in ${result.sessions} session(s), $0, no model call)`)
 }
