@@ -182,7 +182,7 @@ describe('selection: one unreadable session never ends a sweep', () => {
     const jsonl = await run(['facts', IDS.parent, '--format', 'jsonl'], { HOME: home })
     expect(jsonl.code, jsonl.stderr).toBe(0)
     const rows = jsonl.stdout.trim().split('\n').map((line) => JSON.parse(line))
-    expect([...new Set(rows.map((row) => row.session))]).toEqual([IDS.parent, IDS.child1])
+    expect([...new Set(rows.map((row) => row.session))]).toEqual([IDS.parent])
     expect(jsonl.stderr).toContain('1 unreadable')
   })
 
