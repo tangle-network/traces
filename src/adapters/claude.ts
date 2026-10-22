@@ -1457,7 +1457,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     const spans: OtlpSpan[] = [root]
     appendAll(spans, main.spans)
 
-    await this.foldSubagents(
+    if (options.includeSubagents !== false) await this.foldSubagents(
       ref,
       traceId,
       main,

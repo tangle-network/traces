@@ -1,3 +1,4 @@
+import { ANSWERED_TEXT_CAP } from '../src/session-turns.js'
 /**
  * Two facts a reader of the human turns needs beside the turns themselves:
  * where the session ran, and what the person was answering.
@@ -18,7 +19,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { OtlpSpan } from '../src/otlp.js'
 import { resolveAdapter } from '../src/registry.js'
-import { ANSWERED_TEXT_CAP, computeSessionFacts, type SessionFacts } from '../src/session-facts.js'
+import { computeSessionFacts, type SessionFacts } from '../src/session-facts.js'
 import type { ParseOptions, SessionRef } from '../src/types.js'
 import { type Row, task, writeRollout } from './codex-facts-fixture.js'
 

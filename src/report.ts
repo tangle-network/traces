@@ -32,8 +32,8 @@ import {
   topCounts,
   utcMinute,
   type SessionFacts,
-  type SessionTurnFact,
 } from './session-facts.js'
+import type { SessionTurnFact } from './session-turns.js'
 import type { SessionCorruptionReceipt, SessionRef } from './types.js'
 
 const CORRUPTION_RECEIPT_DISPLAY_LIMIT = 100

@@ -46,12 +46,13 @@ import {
   type SessionReading,
   type UnreadSessionFact,
 } from './session-facts.js'
+import { turnFactsJsonl, type TurnSource } from './facts-jsonl.js'
 import { callIdsOf, citeFacts, type RecordLine, type SessionCiting } from './record-lines.js'
 import { sessionIdentityLookup } from './session-identity.js'
 import { conformanceOfSpans, renderValidation } from './conformance.js'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
-import { locateSessions, parseSession, sessionsInCwd } from './session-source.js'
+import { locateSessions, parseSession, readSessionSpans, sessionsInCwd } from './session-source.js'
 import { collectSessionSelection, type SessionSelection } from './session-selection.js'
 import {
   type SessionWorkflowIssue,
@@ -811,22 +812,6 @@ function hostOf(args: CliArgs): string {
   return hostname().split('.')[0]!.toLowerCase()
 }
 
-/** One `traces facts --format jsonl` row: a turn a person typed, or another agent or a pasted relay sent. */
-interface TurnRow {
-  readonly host: string
-  readonly harness: string | null
-  readonly session: string | null
-  readonly cwd: string | null
-  readonly at: string
-  readonly author: string
-  readonly text: string
-  readonly answered: string | null
-  readonly reply: string | null
-  readonly interrupted: boolean
-  readonly signals: readonly string[]
-  readonly spanId: string
-}
-
 /**
  * `traces facts` — the deterministic session-facts sheet, printed.
  *
@@ -854,7 +839,6 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   const sourceOf = new Map<string, string>()
   let readingFrom: string | null = null
   const host = hostOf(args)
-  const rows: TurnRow[] = []
   const matches: SourcedMatch[] = []
   // JSON facts and --match rows cite the record each fact came from; --no-content withholds paths.
   const citings = new Map<string, SessionCiting>()
@@ -865,31 +849,13 @@ async function cmdFacts(args: CliArgs): Promise<void> {
     if (cite && source !== null) {
       citings.set(reading.facts.sessionId ?? reading.facts.traceId, { path: resolve(source), callIds: callIdsOf(reading.spans) })
     }
-    if (pattern !== undefined) {
-      for (const match of sessionMatches(reading, pattern, window)) matches.push({ ...match, source })
-      return
-    }
-    if (format !== 'jsonl') return
-    for (const turn of reading.turns) {
-      rows.push({
-        host,
-        harness: reading.facts.harness,
-        session: reading.facts.sessionId,
-        cwd: reading.facts.cwd.value,
-        at: turn.at,
-        author: turn.author,
-        text: turn.text,
-        answered: turn.answered,
-        reply: turn.reply,
-        interrupted: turn.interrupted,
-        signals: turn.signals,
-        spanId: turn.spanId,
-      })
-    }
+    if (pattern === undefined) return
+    for (const match of sessionMatches(reading, pattern, window)) matches.push({ ...match, source })
   }
   // A store root alone is a place to select from, not a selection.
   const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
   if (pattern !== undefined && window !== undefined && named === 0) return searchWindow(args, pattern, window, format)
+  if (format === 'jsonl' && pattern === undefined) return writeTurnFacts(args, host, window)
   const builder = createSessionFactsReportBuilder({
     includeContent: !args.noContent,
     window,
@@ -958,20 +924,54 @@ async function cmdFacts(args: CliArgs): Promise<void> {
       matches: (await citeFacts(report.sessions, matches, citings)).matches,
     })
   }
-  let rendered: string
-  let summary: string
   // Rows and matches carry no cost, so only the sheet is priced.
-  if (format !== 'jsonl') report = await priceReport(report)
-  if (format === 'jsonl') {
-    rendered = rows.map((row) => `${JSON.stringify(row)}\n`).join('')
-    summary = `turns → ${args.out}  (${rows.length} typed turn(s) in ${report.sessions.length} session(s), $0, no model call)`
-  } else {
-    rendered = format === 'json'
-      ? `${JSON.stringify({ ...report, sessions: (await citeFacts(report.sessions, [], citings)).sessions })}\n`
-      : renderSessionFacts(report)
-    summary = `session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`
-  }
+  report = await priceReport(report)
+  const rendered = format === 'json'
+    ? `${JSON.stringify({ ...report, sessions: (await citeFacts(report.sessions, [], citings)).sessions })}\n`
+    : renderSessionFacts(report)
+  const summary = `session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`
   await writeOutput(args, rendered, summary)
+}
+
+
+/** JSONL needs only own-session turns; named refs retain the collector's workflow selection. */
+async function writeTurnFacts(args: CliArgs, host: string, window?: SessionFactsWindow): Promise<void> {
+  const unread: UnreadSessionFact[] = []
+  const named = (args.selection?.sessions.length ?? 0) + (args.selection?.spans.length ?? 0)
+  async function* sources(): AsyncGenerator<TurnSource> {
+    if (window !== undefined && named === 0) {
+      const found = await discover(args)
+      unread.push(...found.unread)
+      for (const { adapter, ref } of found.sessions) {
+        try {
+          yield { source: ref.path, spans: await readSessionSpans(adapter, ref, { taskScope: args.latestTurn ? 'latest' : 'all', includeSubagents: false }) }
+        } catch (error) {
+          unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: errorText(error) })
+        }
+      }
+      return
+    }
+    const collected = await collectSpans(args)
+    warnIncompleteWorkflow(collected.workflow)
+    unread.push(...collected.unread ?? [])
+    const byTrace = new Map<string, OtlpSpan[]>()
+    for (const span of collected.spans) {
+      const held = byTrace.get(span.trace_id)
+      if (held) held.push(span)
+      else byTrace.set(span.trace_id, [span])
+    }
+    const ids = indexSessionIdsByTrace(collected.spans).sessionByTrace
+    for (const [trace, spans] of byTrace) {
+      const source = collected.sources.find((entry) => entry.sessionId === (ids.get(trace) ?? trace))?.path
+        ?? (args.selection?.spans.length === 1 ? args.selection.spans[0]!.path : null)
+      yield { spans, source }
+    }
+  }
+  const result = await turnFactsJsonl(sources(), host, window)
+  unread.push(...result.unread)
+  if (named > 0 && unread.length > 0) throw new RefError(`no records could be read: ${unread.map((entry) => entry.sessionId).join(', ')}`, 'unreadable')
+  warnUnread(args, unread)
+  await writeOutput(args, result.text, `turns → ${args.out}  (${result.turns} typed turn(s) in ${result.sessions} session(s), $0, no model call)`)
 }
 
 /** The `--since`/`--until` window the facts sheet counts turns in, as ISO times; undefined with neither. */

@@ -23,7 +23,8 @@ export type { OtlpSpan } from './otlp.js'
 
 // ── facts: what happened, exactly, for $0 ─────────────────────────────────
 export { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from './session-facts.js'
-export type { SessionFact, SessionFacts, SessionFactsReport, SessionTurnFact } from './session-facts.js'
+export type { SessionFact, SessionFacts, SessionFactsReport } from './session-facts.js'
+export type { SessionTurnFact } from './session-turns.js'
 
 // ── analyze: what went wrong, ranked; your own analysts through `registry` ─
 export { analyzeSpans } from './analyze.js'
