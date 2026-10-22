@@ -53,6 +53,8 @@ const TIMESTAMP = /"timestamp":"([^"]+)"/u
 const USER_ROLE = /"role":"user"/u
 
 const flat = (text: string): string => text.replace(/\s+/gu, ' ').trim()
+/** A facts display cap is not part of the native text. */
+const citedText = (text: string): string => flat(text.replace(/… \[\+\d+ chars\]$/u, ''))
 
 /** Every string under `value`, depth first. */
 function strings(value: unknown, into: string[] = []): string[] {
@@ -93,10 +95,10 @@ export async function readRecordLines(files: readonly string[], query: RecordLin
   const calls = new Map<string, RecordLine>()
   const outputs = new Map<string, RecordLine>()
   const texts = new Map<string, string>()
-  const wantedTurns = new Map<number, string[]>()
+  const wantedTurns = new Map<number, Array<{ key: string; text: string }>>()
   for (const turn of query.turns ?? []) {
     const ms = Date.parse(turn.at)
-    if (Number.isFinite(ms)) wantedTurns.set(ms, [...(wantedTurns.get(ms) ?? []), flat(turn.text)])
+    if (Number.isFinite(ms)) wantedTurns.set(ms, [...(wantedTurns.get(ms) ?? []), { key: flat(turn.text), text: citedText(turn.text) }])
   }
   // Codex writes a typed turn as a `response_item` message and an `event_msg`; the item is the record.
   const turns = new Map<string, { at: RecordLine; item: boolean }>()
@@ -120,8 +122,8 @@ export async function readRecordLines(files: readonly string[], query: RecordLin
           }
           return parsed
         }
-        const isOutput = OUTPUT_RECORD.test(raw)
-        for (const match of raw.matchAll(CALL_ID)) {
+        const isOutput = query.callIds.size > 0 && OUTPUT_RECORD.test(raw)
+        for (const match of query.callIds.size > 0 ? raw.matchAll(CALL_ID) : []) {
           const id = match[1] ?? match[2] ?? match[3] ?? match[4]!
           if (!query.callIds.has(id)) continue
           if (!isOutput) {
@@ -142,8 +144,8 @@ export async function readRecordLines(files: readonly string[], query: RecordLin
         if (record === null) continue
         const said = strings(record).map(flat)
         const item = (record as { type?: unknown }).type === 'response_item'
-        for (const text of wanted) {
-          const key = `${Date.parse(stamp!)}\0${text}`
+        for (const { key: body, text } of wanted) {
+          const key = `${Date.parse(stamp!)}\0${body}`
           const prior = turns.get(key)
           if ((prior === undefined || (item && !prior.item)) && said.some((value) => value.includes(text))) turns.set(key, { at: here, item })
         }

@@ -16,6 +16,8 @@ import type { JsonlCorruptionReceipt } from './jsonl.js'
 export type CorruptionMode = 'recover' | 'strict'
 
 export interface ParseOptions {
+  /** Include spawned subagents (default true); turn-only views need the parent records alone. */
+  includeSubagents?: boolean
   /** Attach source locations for a caller that will retain the original files. */
   captureSources?: boolean
   /** Recover valid JSONL records by default; strict rejects the first corruption. */

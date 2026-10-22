@@ -2,17 +2,14 @@
  * Traces keeps selection and trace-specific presentation here; the shared reader
  * alone interprets the harness's records, model calls, tools, and token usage. */
 import { homedir } from 'node:os'
+import { nativeRef, tracesRef, type SupportedHarness } from './harness-refs.js'
 import { createReadStream } from 'node:fs'
 import { open, stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   claudeCodeRefForFile,
-  codexRefForFile,
-  factoryRefForFile,
-  kimiRefForFile,
   opencodeSessionsInStore,
-  piRefForFile,
   readerFor,
   readSessionInput,
   toOtlpSpans,
@@ -41,23 +38,6 @@ import { codexCompletedItem, type CodexLine, contentTextBlocks, multiAgentOperat
 import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
 
-type SupportedHarness = 'claude-code' | 'codex' | 'opencode' | 'pi' | 'kimi-code' | 'factory-droids'
-
-function nativeRef(harness: SupportedHarness, ref: SessionRef): NativeRef {
-  const unattributed = ref.sessionId.startsWith('unattributed:')
-  const selected = (native: NativeRef): NativeRef => unattributed
-    ? { ...native, nativeSessionId: ref.sessionId }
-    : native
-  switch (harness) {
-    case 'claude-code': return selected(claudeCodeRefForFile(ref.path))
-    case 'codex': return selected(codexRefForFile(ref.path))
-    case 'pi': return selected(piRefForFile(ref.path))
-    case 'kimi-code': return selected(kimiRefForFile(ref.path.endsWith('wire.jsonl') ? ref.path : join(ref.path, 'wire.jsonl')))
-    case 'factory-droids': return selected(factoryRefForFile(ref.path))
-    case 'opencode': throw new Error('OpenCode SQLite sessions must be selected from its session catalog')
-  }
-}
-
 async function isClaudeStreamJson(path: string): Promise<boolean> {
   const file = await open(path, 'r')
   try {
@@ -75,16 +55,6 @@ async function isClaudeStreamJson(path: string): Promise<boolean> {
     return false
   } finally {
     await file.close()
-  }
-}
-
-function tracesRef(ref: NativeRef, harness: string): SessionRef {
-  return {
-    harness,
-    sessionId: ref.nativeSessionId,
-    path: ref.path,
-    cwd: ref.cwd,
-    mtimeMs: ref.mtimeMs,
   }
 }
 
@@ -803,7 +773,8 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       return this.scopedAdapter.parse(ref, options)
     }
     options.signal?.throwIfAborted()
-    let source = await this.resolveNativeRef(ref)
+    let source = options.includeSubagents === false && this.nativeHarness === 'claude-code'
+      ? nativeRef(this.nativeHarness, ref) : await this.resolveNativeRef(ref)
     if (!source && this.nativeHarness === 'opencode') {
       const matches = await opencodeSessionsInStore(ref.path, null, {
         ...(ref.sessionId.startsWith('ses_') ? { nativeSessionId: ref.sessionId } : {}),

@@ -17,10 +17,10 @@ export const CONTENT_CAP = 8000
 /** Trim and cap a message's text at {@link CONTENT_CAP}. When the text is cut, a
  *  visible `… [+N chars]` marker is appended so analysts (and readers) know the
  *  content was truncated rather than silently lost. */
-export function capText(raw: string): string {
+export function capText(raw: string, limit = CONTENT_CAP): string {
   const t = raw.trim()
-  if (t.length <= CONTENT_CAP) return t
-  return `${t.slice(0, CONTENT_CAP)}… [+${t.length - CONTENT_CAP} chars]`
+  if (t.length <= limit) return t
+  return `${t.slice(0, limit)}… [+${t.length - limit} chars]`
 }
 
 /**

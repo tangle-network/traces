@@ -30,12 +30,11 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { type HarnessSessionsAdapter, type PieceCarry, type PieceRecord, PIECE_START, pieceBoundary, readsStoreRoots } from './adapters/harness-sessions.js'
 import {
   readSessionIndex,
-  TURN_FOLD_START,
   type SessionIndexRead,
   type SessionMatchKind,
   type SessionRow,
-  type TurnFoldState,
 } from './session-facts.js'
+import { TURN_FOLD_START, type TurnFoldState } from './session-turns.js'
 import { readSessionSpans, validateOtlpSpans } from './session-source.js'
 import { stampSessionIdentity } from './attributes.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
