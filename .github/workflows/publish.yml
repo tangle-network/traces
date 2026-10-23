@@ -89,11 +89,13 @@ jobs:
           PACKAGE_NAME: ${{ steps.package.outputs.name }}
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
         run: |
-          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          const { PACKAGE_NAME: name, PACKAGE_VERSION: version } = process.env;
+          const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, { signal: AbortSignal.timeout(15000) });
+          if (!response.ok && response.status !== 404) throw new Error(`Registry lookup failed: HTTP ${response.status}`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `exists=${response.ok}\n`);
+          NODE
       - name: Verify (typecheck + test + build)
         run: |
           pnpm typecheck
