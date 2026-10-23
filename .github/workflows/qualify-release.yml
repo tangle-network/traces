@@ -1,0 +1,165 @@
+name: Trusted Traces release
+
+on:
+  workflow_call:
+    inputs:
+      phase:
+        type: string
+        default: 'prepare'
+      existing_tag:
+        type: string
+        default: ''
+      tag:
+        type: string
+        default: ''
+    outputs:
+      tag:
+        value: ${{ jobs.prepare.outputs.tag }}
+      exists:
+        value: ${{ jobs.prepare.outputs.exists }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: >-
+      github.repository == 'tangle-network/traces' && inputs.phase == 'prepare' && (
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      )
+    runs-on:
+      group: public-app-production
+      labels: [self-hosted, ci-deploy]
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.publish-tag.outputs.tag_name }}
+      exists: ${{ steps.npm-version.outputs.exists }}
+    steps:
+      - name: Select publish tag
+        id: publish-tag
+        env:
+          EXISTING_TAG: ${{ inputs.existing_tag }}
+        run: |
+          if [ -n "$EXISTING_TAG" ]; then
+            case "$EXISTING_TAG" in
+              v*) TAG_NAME="$EXISTING_TAG" ;;
+              *) TAG_NAME="v$EXISTING_TAG" ;;
+            esac
+          elif [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+          else
+            echo "No release tag was provided" >&2
+            exit 1
+          fi
+
+          if ! printf '%s\n' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid release tag: $TAG_NAME" >&2
+            exit 1
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "ref=refs/tags/$TAG_NAME" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.publish-tag.outputs.ref }}
+          fetch-depth: 0
+      - name: Require a merged release source before running package code
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main
+
+      - name: Verify tag is merged to main
+        run: |
+          git fetch origin main:refs/remotes/origin/main --no-tags
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "Release tag must point to a commit merged into main" >&2
+            exit 1
+          fi
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify tag matches package version
+        id: package
+        env:
+          TAG_NAME: ${{ steps.publish-tag.outputs.tag_name }}
+        run: |
+          TAG_VERSION="${TAG_NAME#v}"
+          PACKAGE_VERSION="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version)")"
+          if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "tag version $TAG_VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          PACKAGE_NAME="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).name)")"
+          echo "name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Check npm version
+        id: npm-version
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          const { PACKAGE_NAME: name, PACKAGE_VERSION: version } = process.env;
+          const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, { signal: AbortSignal.timeout(15000) });
+          if (!response.ok && response.status !== 404) throw new Error(`Registry lookup failed: HTTP ${response.status}`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `exists=${response.ok}\n`);
+          NODE
+      - name: Verify (typecheck + test + build)
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm build
+          pnpm check:package
+      - name: Pack the verified release
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release"
+          mv "$RUNNER_TEMP/release/"*.tgz "$RUNNER_TEMP/release/package.tgz"
+          (cd "$RUNNER_TEMP/release" && sha256sum package.tgz > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: traces-release
+          path: ${{ runner.temp }}/release
+          retention-days: 1
+          if-no-files-found: error
+
+  github-release:
+    if: github.repository == 'tangle-network/traces' && inputs.phase == 'github-release' && github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on:
+      group: public-app-production
+      labels: [self-hosted, ci-deploy]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ inputs.tag }}
+      - name: Require a merged release source before running package code
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          # A release's notes are docs/release-<version>.md when the tagged commit has one.
+          notes="docs/release-${TAG_NAME#v}.md"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "GitHub release $TAG_NAME already exists"
+          elif [ -f "$notes" ]; then
+            gh release create "$TAG_NAME" --title "$TAG_NAME" --notes-file "$notes"
+          else
+            gh release create "$TAG_NAME" \
+              --title "$TAG_NAME" \
+              --notes "Published @tangle-network/traces@${TAG_NAME#v} to npm."
+          fi
