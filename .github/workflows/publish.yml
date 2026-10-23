@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   prepare:
-    uses: tangle-network/traces/.github/workflows/qualify-release.yml@main
+    uses: tangle-network/traces/.github/workflows/qualify-release.yml@9563a87e4cafc5bbd4b4d5edc27f90b1835bc217
     permissions:
       contents: read
     with:
@@ -50,7 +50,7 @@ jobs:
   github-release:
     needs: [prepare, publish]
     if: always() && needs.prepare.result == 'success' && (needs.publish.result == 'success' || needs.prepare.outputs.exists == 'true')
-    uses: tangle-network/traces/.github/workflows/qualify-release.yml@main
+    uses: tangle-network/traces/.github/workflows/qualify-release.yml@9563a87e4cafc5bbd4b4d5edc27f90b1835bc217
     permissions:
       contents: write
     with:
