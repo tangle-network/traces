@@ -65,11 +65,6 @@ jobs:
         with:
           ref: ${{ steps.publish-tag.outputs.ref }}
           fetch-depth: 0
-      - name: Require a merged release source before running package code
-        run: |
-          git fetch --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor HEAD origin/main
-
       - name: Verify tag is merged to main
         run: |
           git fetch origin main:refs/remotes/origin/main --no-tags
