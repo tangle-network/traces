@@ -15,7 +15,7 @@
  * holds the fields consumers read.
  */
 import { sessionIdFromAttributes } from './attributes.js'
-import type { OtlpSpan } from './otlp.js'
+import { type OtlpSpan, toOpenInferenceSpan } from './otlp.js'
 import {
   orderSpans,
   ruleContext,
@@ -51,8 +51,8 @@ export type TraceStreamEvent =
       readonly event: 'span'
       readonly generatedAt: string
       readonly session: TraceStreamSession
-      /** The span as this pass read it; a later event with the same span_id replaces it. */
-      readonly span: OtlpSpan
+      /** The span in the `traces convert` OTLP-JSONL contract; a later event with the same span_id replaces it. */
+      readonly span: ReturnType<typeof toOpenInferenceSpan>
     }
   | {
       readonly schemaVersion: 1
@@ -174,7 +174,7 @@ export async function watchSource(source: WatchSource, opts: WatchLoopOptions): 
           const state = `${span.end_time}|${span.status?.code ?? ''}`
           if (known.get(span.span_id) === state) continue
           known.set(span.span_id, state)
-          await opts.onEvent({ schemaVersion: 1, kind: 'traces.stream.span', event: 'span', generatedAt, session, span })
+          await opts.onEvent({ schemaVersion: 1, kind: 'traces.stream.span', event: 'span', generatedAt, session, span: toOpenInferenceSpan(span) })
         }
       }
       for (const finding of runRules(ruleContext(ordered, { session, generatedAt }), { extraAnalysts: opts.extraAnalysts })) {
