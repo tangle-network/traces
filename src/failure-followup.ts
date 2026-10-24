@@ -74,7 +74,22 @@ function schemeOf(key: string): string {
   return key.slice(0, key.indexOf(':'))
 }
 
-export function classifyFailureFollowUps(spans: readonly OtlpSpan[]): FailureFollowUpReport {
+/**
+ * The failed calls of one same-tool sequence, with the sort key of the
+ * sequence's first call: what a report over many batches needs to order the
+ * sequences exactly as one pass over every span would.
+ */
+export interface FailureFollowUpSequence {
+  readonly firstStart: string
+  readonly firstStep: number
+  readonly items: readonly FailureFollowUp[]
+}
+
+const byCallOrder = (a: { start: string; step: number }, b: { start: string; step: number }): number =>
+  a.start.localeCompare(b.start) || a.step - b.step
+
+/** The same-tool sequences of these spans that hold a failure, in call order. */
+export function failureFollowUpSequences(spans: readonly OtlpSpan[]): FailureFollowUpSequence[] {
   const calls: ToolCall[] = []
   for (const s of spans) {
     if (s.attributes[OPENINFERENCE_SPAN_KIND] !== 'TOOL') continue
@@ -95,9 +110,9 @@ export function classifyFailureFollowUps(spans: readonly OtlpSpan[]): FailureFol
     else sequences.set(key, [call])
   }
 
-  const items: FailureFollowUp[] = []
-  const blindByTool: Record<string, number> = {}
+  const out: FailureFollowUpSequence[] = []
   for (const seq of sequences.values()) {
+    const items: FailureFollowUp[] = []
     for (let i = 0; i < seq.length; i++) {
       const call = seq[i]!
       if (call.span.status.code !== 'ERROR') continue
@@ -115,7 +130,6 @@ export function classifyFailureFollowUps(spans: readonly OtlpSpan[]): FailureFol
       } else {
         kind = 'args-unknown'
       }
-      if (kind === 'blind') blindByTool[call.toolName] = (blindByTool[call.toolName] ?? 0) + 1
       items.push({
         traceId: call.span.trace_id,
         toolName: call.toolName,
@@ -126,8 +140,23 @@ export function classifyFailureFollowUps(spans: readonly OtlpSpan[]): FailureFol
           ? null : followUp.span.status.code === 'OK',
       })
     }
+    if (items.length > 0) out.push({ firstStart: seq[0]!.span.start_time, firstStep: Number(seq[0]!.span.attributes.step) || 0, items })
   }
+  return out
+}
 
+/**
+ * The report of sequences gathered batch by batch, in batch order. Sorting
+ * them by their first call, ties kept in batch order, is the order one pass
+ * over the concatenated spans gives, so the report is the same either way.
+ */
+export function failureFollowUpReport(sequences: readonly FailureFollowUpSequence[]): FailureFollowUpReport {
+  const ordered = sequences
+    .map((sequence) => ({ sequence, start: sequence.firstStart, step: sequence.firstStep }))
+    .sort(byCallOrder)
+  const items = ordered.flatMap(({ sequence }) => sequence.items)
+  const blindByTool: Record<string, number> = {}
+  for (const item of items) if (item.kind === 'blind') blindByTool[item.toolName] = (blindByTool[item.toolName] ?? 0) + 1
   const followedItems = items.filter((item) => item.kind !== 'none')
   return {
     failures: items.length,
@@ -139,4 +168,8 @@ export function classifyFailureFollowUps(spans: readonly OtlpSpan[]): FailureFol
     blindByTool,
     items,
   }
+}
+
+export function classifyFailureFollowUps(spans: readonly OtlpSpan[]): FailureFollowUpReport {
+  return failureFollowUpReport(failureFollowUpSequences(spans))
 }

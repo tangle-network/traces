@@ -57,6 +57,12 @@ export interface CollectSessionSelectionOptions {
   /** The store root the groups came from (see `LocateOptions.home`). */
   readonly home?: string
   readonly signal?: AbortSignal
+  /**
+   * Hand each row over as it is read instead of returning it, so a sweep holds
+   * one session's spans at a time; `rows` is then empty. An error it throws
+   * ends the selection.
+   */
+  readonly onRow?: (row: SessionSelectionRow) => void | Promise<void>
 }
 
 interface SessionSourceSnapshot {
@@ -172,11 +178,12 @@ export async function collectSessionSelection(
   const taskScope = options.taskScope ?? 'all'
   // A session reached twice (a seed that is also a child of an earlier seed) is read once.
   const read = new Set<string>()
-  const add = (row: SessionSelectionRow): void => {
+  const add = async (row: SessionSelectionRow): Promise<void> => {
     const key = `${row.adapter.harness}\0${row.ref.path}`
     if (read.has(key)) return
     read.add(key)
-    rows.push(row)
+    if (options.onRow) await options.onRow(row)
+    else rows.push(row)
   }
 
   for (const { adapter, refs } of groups) {
@@ -184,8 +191,9 @@ export async function collectSessionSelection(
     if (refs.length === 0) continue
     if (!options.workflow) {
       for (const ref of refs) {
+        let row: SessionSelectionRow
         try {
-          add(options.bindSources
+          row = options.bindSources
             ? await boundSessionRow(
                 adapter,
                 ref,
@@ -204,11 +212,13 @@ export async function collectSessionSelection(
                 }),
                 taskScope,
                 ...(options.taskTurnId ? { taskTurnId: options.taskTurnId } : {}),
-              })
+              }
         } catch (error) {
           if (!options.onUnreadable || options.signal?.aborted) throw error
           options.onUnreadable({ ref, error, seed: true })
+          continue
         }
+        await add(row)
       }
       continue
     }
@@ -224,7 +234,7 @@ export async function collectSessionSelection(
     })
     workflows.push(workflow)
     for (const session of workflow.sessions) {
-      add(options.bindSources
+      await add(options.bindSources
         ? await boundSessionRow(
             adapter,
             session.ref,

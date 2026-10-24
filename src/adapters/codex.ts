@@ -48,7 +48,7 @@ import {
   latestTimestamp,
   multiAgentOperation,
   spawnedSessionIds,
-  targetedSessionIds,
+  targetedSessionIds, taskEndStatus,
   timestampFromEpochMs,
   validTimestamp,
 } from './codex-format.js'
@@ -1285,7 +1285,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
         const completedTurnId = l.payload.turn_id ?? null
         if (activeTaskTurnId !== undefined && activeTaskTurnId === completedTurnId) {
           activeTaskTurnId = undefined
-          root.status = { code: 'OK' }
+          root.status = taskEndStatus(l.payload)
         }
       }
       if (!model && l.type === 'turn_context' && l.payload?.model) {

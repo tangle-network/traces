@@ -16,7 +16,7 @@ interface Analysis {
   kind: string
   facts: { kind: string; sessions: Array<{ cost: { usd: number | null; unavailable: string | null } }> }
   packet: { kind: string; schemaVersion: number; source: string; findings: Array<{ finding_id: string; severity: string }> }
-  measures: { stuckLoops: unknown; failureClusters: unknown; toolUse: unknown[]; failureFollowUps: unknown; toolErrors: unknown[] }
+  measures: { stuckLoops: unknown; failureClusters: unknown; toolUse: unknown[]; failureFollowUps: unknown; toolErrors: unknown[]; operating: unknown }
   conformance: { capabilities: unknown[] }
   cannotAnswer: Array<{ analysis: string; reason: string }>
 }
@@ -41,7 +41,7 @@ describe('analyze --format json', () => {
     expect(result).toMatchObject({ schemaVersion: 1, kind: 'traces.analysis' })
     expect(result.facts.kind).toBe('traces.session_facts_report')
     expect(result.packet).toMatchObject({ schemaVersion: 1, kind: 'traces.finding_packet', source: 'traces analyze' })
-    expect(Object.keys(result.measures).sort()).toEqual(['failureClusters', 'failureFollowUps', 'stuckLoops', 'toolErrors', 'toolUse'])
+    expect(Object.keys(result.measures).sort()).toEqual(['failureClusters', 'failureFollowUps', 'operating', 'stuckLoops', 'toolErrors', 'toolUse'])
     expect(result.conformance.capabilities.length).toBeGreaterThan(0)
     expect(result.cannotAnswer.length).toBeGreaterThanOrEqual(1)
     // claude-opus-5-5 is priced: a number, never 0 for unknown.
