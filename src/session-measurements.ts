@@ -268,6 +268,13 @@ const REPLY_SPANS = new Set(['message.assistant', 'llm.turn'])
 
 /** The limit the session's last reply reports: the session stopped because its account ran out. */
 function limitStopOf(spans: readonly OtlpSpan[]): LimitStop | null {
+  // A run that ended in error says why on its root: Codex's "You’ve hit your usage limit".
+  const root = spans.find((span) => span.parent_span_id === null && span.status.code === 'ERROR')
+  const notice = root?.status.message?.trim() ?? ''
+  const rootMatch = notice.length <= LIMIT_NOTICE_MAX_CHARS ? LIMIT_TEXT.exec(notice) : null
+  if (root && rootMatch) {
+    return { kind: (rootMatch[1] ?? rootMatch[2] ?? rootMatch[3] ?? rootMatch[4] ?? 'usage').toLowerCase(), text: notice, at: root.end_time, spanId: root.span_id }
+  }
   let last: OtlpSpan | undefined
   for (const span of spans) {
     if (isInherited(span) || !REPLY_SPANS.has(span.name) || typeof span.attributes.content !== 'string') continue

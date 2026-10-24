@@ -9,6 +9,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { task, userItem, writeRollout } from './codex-facts-fixture.js'
 import { jsonl } from './fixtures/analyze.js'
 import { runCli } from './run-cli.js'
 
@@ -152,5 +153,22 @@ describe('operating measures', () => {
     const facts = JSON.parse(run.stdout) as Analysis['facts']
     expect(facts.sessions[0]!.measurements.limitStop).toMatchObject({ kind: 'weekly', text: null })
     expect(run.stdout).not.toContain('resets Oct 27')
+  })
+
+  it('a Codex task that completed with the usage-limit error is a terminal failure and a limit stop', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-operating-codex-'))
+    const ref = writeRollout(dir, 'limited-codex', [
+      { t: 0, type: 'session_meta', payload: { id: 'limited-codex', cwd: '/workspace/demo' } },
+      { t: 0.5, type: 'turn_context', payload: { cwd: '/workspace/demo', model: 'gpt-fixture' } },
+      userItem(0.6, [{ type: 'input_text', text: 'Ship the fix.' }]),
+      task(1, 'task_started', 'turn-1'),
+      { t: 2, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: null, error: { message: 'You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits.' } } },
+    ])
+    const run = await runCli(['analyze', ref.path, '--harness', 'codex', '--format', 'json'], { env })
+    expect(run.code, run.stderr).toBe(0)
+    const analysis = JSON.parse(run.stdout) as Analysis & { measures: { failureClusters: { totalFailures: number } } }
+    expect(analysis.measures.failureClusters.totalFailures).toBe(1)
+    expect(analysis.facts.sessions[0]!.measurements.limitStop).toMatchObject({ kind: 'usage', at: expect.any(String) })
+    expect(analysis.measures.operating).toMatchObject({ limitStops: { sessions: 1, byKind: { usage: 1 }, terminalFailures: 1, terminalFailuresAtLimit: 1 } })
   })
 })
