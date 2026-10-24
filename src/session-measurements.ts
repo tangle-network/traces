@@ -158,7 +158,7 @@ export interface GuardRefusals {
 export interface LimitStop {
   /** The limit the reply names: `weekly`, `session`, `5-hour`, …, or `usage`. */
   readonly kind: string
-  /** The reply's text, at most 200 characters; null when content was not requested. */
+  /** The notice's text; null when content was not requested. */
   readonly text: string | null
   readonly at: string
 }
@@ -270,8 +270,14 @@ export function guardRefusalsSummary(toolCalls: number, byGuard: ReadonlyMap<str
   }
 }
 
-/** "You've hit your weekly limit · resets …", "Claude AI usage limit reached", "5-hour limit reached". */
-const LIMIT_TEXT = /you['’]ve hit your ([\w-]+) limit|(?:^|\s)([\w-]+) limit reached|reached your ([\w-]+) limit/iu
+/**
+ * The notice a harness writes in place of a reply when the account is out:
+ * "You've hit your weekly limit · resets …", "Claude AI usage limit
+ * reached|…", "5-hour limit reached ∙ resets …". It is the whole reply, so a
+ * reply that only quotes one (a fix to limit detection, say) is not one.
+ */
+const LIMIT_TEXT = /^(?:you['’]ve hit your ([\w-]+) limit|claude ai (usage) limit reached|([\w-]+) limit reached\b|you['’]ve reached your ([\w-]+) limit)/iu
+const LIMIT_NOTICE_MAX_CHARS = 300
 const REPLY_SPANS = new Set(['message.assistant', 'llm.turn'])
 
 /** The limit the session's last reply reports: the session stopped because its account ran out. */
@@ -283,11 +289,10 @@ function limitStopOf(spans: readonly OtlpSpan[]): SessionFact<LimitStop> {
   }
   if (!last) return { value: null, spanIds: [], unavailable: 'The session recorded no reply of its own.' }
   const text = (last.attributes.content as string).trim()
-  const match = LIMIT_TEXT.exec(text)
+  const match = text.length <= LIMIT_NOTICE_MAX_CHARS ? LIMIT_TEXT.exec(text) : null
   if (!match) return { value: null, spanIds: [], unavailable: null }
-  const word = (match[1] ?? match[2] ?? match[3] ?? 'usage').toLowerCase()
   return {
-    value: { kind: word === 'ai' ? 'usage' : word, text: text.length > 200 ? `${text.slice(0, 199)}…` : text, at: last.end_time },
+    value: { kind: (match[1] ?? match[2] ?? match[3] ?? match[4] ?? 'usage').toLowerCase(), text, at: last.end_time },
     spanIds: [last.span_id],
     unavailable: null,
   }
