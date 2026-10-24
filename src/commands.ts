@@ -98,10 +98,8 @@ export interface Args {
   /** `check --share-safe`: read each ref as bytes and give its share verdict. */
   shareSafe: boolean
   once: boolean
-  /** `watch --spans`: emit span deltas in the jsonl stream. */
+  /** `watch --spans`: emit span deltas in the jsonl stream, reading every second. */
   spans: boolean
-  /** `watch --interval`: seconds between passes. */
-  intervalMs?: number
   dryRun: boolean
   yes: boolean
   unused: boolean
@@ -202,7 +200,6 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   },
   '--once': { help: 'one pass, then exit', set: (a) => { a.once = true } },
   '--spans': { help: 'with --format jsonl: a span event for each new or changed span', set: (a) => { a.spans = true } },
-  '--interval': { value: 'S', help: 'seconds between passes', set: (a, v) => { a.intervalMs = positiveNumber('--interval', v, 'seconds') * 1000 } },
   '--dry-run': { help: 'redact and preview; send nothing', set: (a) => { a.dryRun = true } },
   '--yes': { help: 'skip the confirmation prompt', set: (a) => { a.yes = true } },
   '--unused': { help: 'only installed skills with no use in the window', set: (a) => { a.unused = true } },
@@ -398,8 +395,7 @@ const COMMANDS = [
       { flag: '--since', help: 'sessions active in the last T (default 30m; it slides with time), or since an ISO time' },
       '--cwd', { flag: '--harness', help: "only this harness's sessions; with a file ref, force its reader" },
       { flag: '--once', help: 'one pass, then exit' },
-      { flag: '--interval', help: 'seconds between passes (default 5 for sessions, 2 for a run tree; at least 0.25)' },
-      { flag: '--spans', help: 'with --format jsonl: also a span event for each span that is new or changed since the last pass' },
+      { flag: '--spans', help: 'with --format jsonl: also a span event for each new or changed span, reading every 1 s for live views' },
       { flag: '--format', help: 'text (default): a line per new finding, or the run tree; jsonl: the traces.stream events' },
     ],
     formats: ['text', 'jsonl'],
@@ -409,7 +405,7 @@ const COMMANDS = [
       ['select(.event == "tick") | .unreadSessions', 'sessions a pass could not read, and why'],
       ['select(.event == "span") | .span', 'with --spans: each new or changed span, in the OTLP-JSONL contract'],
     ],
-    examples: ['traces watch --once', 'traces watch runs/my-run --once', 'traces watch --since 2h --format jsonl', 'traces watch --current --format jsonl --spans --interval 1'],
+    examples: ['traces watch --once', 'traces watch runs/my-run --once', 'traces watch --since 2h --format jsonl', 'traces watch <id> --format jsonl --spans'],
     overview: [['What is happening right now?', 'traces watch [<run-dir>] [--once]']],
   },
   {

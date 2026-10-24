@@ -1386,7 +1386,7 @@ async function cmdWatch(args: CliArgs): Promise<void> {
   const scope = source ? source.ref : sessions ? `${sessions.length} named session${sessions.length === 1 ? '' : 's'}` : `every session active ${windowMs === undefined ? 'since' : 'in the last'} ${since}`
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
-  if (!args.once) process.stderr.write(`traces watch: ${scope}, every ${(args.intervalMs ?? 5_000) / 1000} s; read-only. Ctrl-C to stop.\n`)
+  if (!args.once) process.stderr.write(`traces watch: ${scope}, every ${args.spans ? 1 : 5} s; read-only. Ctrl-C to stop.\n`)
   // A session's ref is the shortest prefix or suffix that names it among the sessions seen.
   const ids: string[] = []
   const reported = new Set<string>()
@@ -1410,7 +1410,7 @@ async function cmdWatch(args: CliArgs): Promise<void> {
       }
     }
   }
-  const loop = { once: args.once, signal: controller.signal, onEvent, intervalMs: args.intervalMs, spans: args.spans }
+  const loop = { once: args.once, signal: controller.signal, onEvent, intervalMs: args.spans ? 1_000 : undefined, spans: args.spans }
   if (source) await watchSource(() => spanRuns(args, source.path), loop)
   else {
     await streamSessions({
@@ -1450,7 +1450,7 @@ async function cmdWatchRunTarget(dir: string, args: CliArgs): Promise<void> {
     )
   }
   // A tree view polls faster than sessions: a blocking question is worth surfacing the moment it lands.
-  const snapshot = await watchRunTarget(target, { once: args.once, intervalMs: args.intervalMs ?? 2000, signal: controller.signal })
+  const snapshot = await watchRunTarget(target, { once: args.once, intervalMs: 2000, signal: controller.signal })
   // A terminal run that ended badly should not look like a success to a script.
   const result = snapshot.journal?.result ?? null
   if (result !== null && result.errorMessage !== null) process.exitCode = 1
