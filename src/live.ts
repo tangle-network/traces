@@ -3,7 +3,9 @@
  *
  * Each pass reads the sessions a watch follows, runs the rules `analyze`
  * ranks (`pipelines.ts`) over each, and emits the `traces.stream.*` envelope
- * at schemaVersion 1: a `session` event the first time a session is seen, a
+ * at schemaVersion 1: a `session` event the first time a session is seen, with
+ * `spans` a `span` event for each span that is new or changed since the last
+ * pass (append-only deltas for live views), a
  * `finding` event the first time a finding is, and one `tick` per pass, which
  * names every session the pass could not read. `traces watch --format jsonl`
  * prints these events and `traces watch` text renders the same ones, so what
@@ -45,6 +47,15 @@ export type TraceStreamEvent =
     }
   | {
       readonly schemaVersion: 1
+      readonly kind: 'traces.stream.span'
+      readonly event: 'span'
+      readonly generatedAt: string
+      readonly session: TraceStreamSession
+      /** The span as this pass read it; a later event with the same span_id replaces it. */
+      readonly span: OtlpSpan
+    }
+  | {
+      readonly schemaVersion: 1
       readonly kind: 'traces.stream.finding'
       readonly event: 'finding'
       readonly generatedAt: string
@@ -81,6 +92,8 @@ export interface WatchLoopOptions {
   signal?: AbortSignal
   /** Adds custom rules after the built-ins. */
   readonly extraAnalysts?: readonly TraceLiveAnalyst[]
+  /** Emit a `span` event for each span that is new, or whose end or status changed, since the previous pass. */
+  readonly spans?: boolean
   readonly onEvent: (event: TraceStreamEvent) => void | Promise<void>
 }
 
@@ -127,6 +140,8 @@ export async function watchSource(source: WatchSource, opts: WatchLoopOptions): 
   const seenSessions = new Set<string>()
   const spanCounts = new Map<string, number>()
   const seenFindings = new Set<string>()
+  /** Per session: each span's end and status as last emitted. */
+  const emitted = new Map<string, Map<string, string>>()
   while (!opts.signal?.aborted) {
     let sessions = 0
     let newSpans = 0
@@ -151,6 +166,16 @@ export async function watchSource(source: WatchSource, opts: WatchLoopOptions): 
           startedAt: ordered[0]?.start_time ?? null,
           endedAt: ordered.at(-1)?.end_time ?? null,
         })
+      }
+      if (opts.spans) {
+        const known = emitted.get(key) ?? new Map<string, string>()
+        emitted.set(key, known)
+        for (const span of ordered) {
+          const state = `${span.end_time}|${span.status?.code ?? ''}`
+          if (known.get(span.span_id) === state) continue
+          known.set(span.span_id, state)
+          await opts.onEvent({ schemaVersion: 1, kind: 'traces.stream.span', event: 'span', generatedAt, session, span })
+        }
       }
       for (const finding of runRules(ruleContext(ordered, { session, generatedAt }), { extraAnalysts: opts.extraAnalysts })) {
         if (seenFindings.has(finding.id)) continue
