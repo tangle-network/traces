@@ -44,6 +44,7 @@ The first three are the rules `traces watch` runs live, so a finding means the s
 ## For programs
 
 `--format json` prints `facts`, `packet` (the finding packet ADC's Intelligence API reads), `measures`, `conformance` and `cannotAnswer` (every question the trace cannot answer, with the reason).
+`measures.operating` pools the sessions' `modelCalls`, `guardRefusals` and `limitStop` ([facts](facts.md)): context per model call, reply latency by context band, guard refusals per 1,000 tool calls, and how many sessions, and how many of the terminal failures, ended on a limit notice. A sweep (`--since`) reads and reduces one session at a time, so a week of a busy host runs in a few gigabytes; agent-eval's behavioral analyst reads every selected trace.
 `--out DIR` writes exactly `report.md` (every finding and every cannot-answer reason) and `findings.json` (the packet).
 A Runtime run directory as the ref reports its supervision tree. Your own analysts run through the SDK: `analyzeSpans(spans, { registry })` ([sdk](sdk.md)).
 

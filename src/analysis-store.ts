@@ -25,8 +25,8 @@ const DETERMINISTIC_PER_CALL_CEILING = 512 * 1024 * 1024
  * ceiling, so each tool result stays bounded for a model's context; the
  * engine drills in with `viewSpans` and `searchTrace` from a summary.
  */
-export function openAgenticTraceStore(spans: readonly OtlpSpan[]): TraceAnalysisStore {
-  return otlpTextToTraceAnalysisStore(exportBytes(spans))
+export function openAgenticTraceStore(spans: readonly OtlpSpan[] | Uint8Array): TraceAnalysisStore {
+  return otlpTextToTraceAnalysisStore(spans instanceof Uint8Array ? spans : exportBytes(spans))
 }
 
 /** Store for deterministic analysts, which have no context window to protect. */

@@ -499,6 +499,27 @@ async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   return collected
 }
 
+/**
+ * The selection a batch at a time: a sweep of harness sessions one session at
+ * a time (see `collectSessionSpans`), any other selection as one batch. The
+ * result carries no spans; `spanCount` counts what was handed over.
+ */
+async function forEachSpanBatch(args: CliArgs, onBatch: SpanBatchConsumer): Promise<CollectedSpans & { spanCount: number }> {
+  let spanCount = 0
+  const counted: SpanBatchConsumer = async (spans, harness) => {
+    spanCount += spans.length
+    await onBatch(spans, harness)
+  }
+  if ((args.selection?.spans.length ?? 0) === 0) {
+    const collected = await collectSessionSpans(args, counted)
+    warnUnread(args, collected.unread ?? [])
+    return { ...collected, spanCount }
+  }
+  const collected = await collectSpans(args)
+  if (collected.spans.length > 0) await counted(collected.spans, collected.harness)
+  return { ...collected, spans: [], spanCount }
+}
+
 /** Spans of several refs together. A source's conformance describes that source alone, so it is not carried. */
 function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
   const spans: OtlpSpan[] = []
@@ -535,23 +556,17 @@ async function collectSessionSpans(args: CliArgs, onBatch?: SpanBatchConsumer): 
   const harnesses = new Set<string>()
   const sources: SelectedSessionSource[] = []
   const sweep = onBatch !== undefined && args.since !== undefined && (args.selection?.sessions.length ?? 0) === 0
-  const selection = await collectSessionRows(args, args.last || 1, sweep
-    ? async (row) => {
-        harnesses.add(row.adapter.harness)
-        sources.push(sessionReportSource(row.ref, row.spans))
-        await onBatch(row.spans, row.adapter.harness)
-      }
-    : undefined)
-  for (const row of selection.rows) {
+  const take = (row: SessionSelectionRow): void => {
     harnesses.add(row.adapter.harness)
-    appendAll(spans, row.spans)
     sources.push(sessionReportSource(row.ref, row.spans))
   }
-  const harness = [...harnesses].join('+') || (args.harnessExplicit ? args.harness : 'none')
-  if (onBatch && !sweep && spans.length > 0) {
-    await onBatch(spans, harness)
-    spans.length = 0
+  const selection = await collectSessionRows(args, args.last || 1, sweep ? async (row) => { take(row); await onBatch(row.spans, row.adapter.harness) } : undefined)
+  for (const row of selection.rows) {
+    take(row)
+    appendAll(spans, row.spans)
   }
+  const harness = [...harnesses].join('+') || (args.harnessExplicit ? args.harness : 'none')
+  if (onBatch && !sweep && spans.length > 0) await onBatch(spans.splice(0), harness)
   return {
     spans,
     harness,
@@ -783,12 +798,13 @@ async function cmdBundle(args: CliArgs): Promise<void> {
  * carries the protocol, so everything else this command says goes to stderr.
  */
 async function cmdMcp(args: CliArgs): Promise<void> {
-  const { serveTraceMcp } = await import('./mcp.js')
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new Error('mcp: no spans found for the given selection')
+  const { createServedSpans, serveTraceMcp } = await import('./mcp.js')
+  const served = createServedSpans()
+  const collected = await forEachSpanBatch(args, async (spans) => served.add(spans))
+  if (collected.spanCount === 0) throw new Error('mcp: no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
-  process.stderr.write(`traces mcp: serving ${collected.spans.length} span(s) over stdio\n`)
-  await serveTraceMcp({ spans: collected.spans })
+  process.stderr.write(`traces mcp: serving ${collected.spanCount} span(s) over stdio\n`)
+  await serveTraceMcp({ served: served.finish() })
 }
 
 /**
@@ -1125,36 +1141,16 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
   }
   const { createTraceInvestigation, writeAnalysisArtifacts } = await import('./improvement.js')
   const { renderAnalysis, renderAnalysisReport } = await import('./report.js')
-  const investigate = (harness: string, conformance?: TraceValidation) => createTraceInvestigation({
-    harness,
-    ...(conformance ? { conformance } : {}),
-    facts: {
-      window: factsWindow(args),
-      agentIdentity: sessionIdentityLookup(args.selection?.home ?? (process.env.HOME || homedir())),
-    },
+  const investigation = createTraceInvestigation({
+    harness: args.harnessExplicit ? args.harness : 'none',
+    facts: { window: factsWindow(args), agentIdentity: sessionIdentityLookup(args.selection?.home ?? (process.env.HOME || homedir())) },
     log: analystLog,
   })
-  let spanCount = 0
-  let collected: CollectedSpans
-  let investigation: ReturnType<typeof investigate>
-  if ((args.selection?.spans.length ?? 0) === 0) {
-    // Harness sessions: a window sweep is read and reduced one session at a time.
-    investigation = investigate(args.harnessExplicit ? args.harness : 'none')
-    collected = await collectSessionSpans(args, async (spans, harness) => {
-      spanCount += spans.length
-      await investigation.add(spans, { harness })
-    })
-    warnUnread(args, collected.unread ?? [])
-  } else {
-    collected = await collectSpans(args)
-    investigation = investigate(collected.harness, collected.conformance)
-    spanCount = collected.spans.length
-    if (spanCount > 0) await investigation.add(collected.spans)
-  }
-  if (spanCount === 0) throw new Error('no spans found for the given selection')
+  const collected = await forEachSpanBatch(args, (spans, harness) => investigation.add(spans, { harness }))
+  if (collected.spanCount === 0) throw new Error('no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
   for (const entry of collected.unread ?? []) investigation.addUnread(entry)
-  const result = await investigation.finish({ harness: collected.harness })
+  const result = await investigation.finish(collected)
   if (args.out) {
     const artifacts = await writeAnalysisArtifacts(renderAnalysisReport(result), result.packet, args.out)
     console.log(
@@ -1218,7 +1214,7 @@ async function collectImportedSpans(
  */
 async function cmdAsk(args: CliArgs): Promise<void> {
   const { analysisEngineFromEnv, bridgeVersion, missingAskRequirements, UnservableModelError } = await import('./analyst-model-call.js')
-  const { isBridgeMismatchError, loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
+  const { createTraceQuestionCorpus, isBridgeMismatchError, loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
   let questions: TraceQuestion[]
   try {
     questions = [
@@ -1253,8 +1249,9 @@ async function cmdAsk(args: CliArgs): Promise<void> {
     if (error instanceof UnservableModelError) throw new CliError(error.message, error.failure.code)
     throw error
   }
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new CliError('no spans found for the given selection', 'unreadable')
+  const corpus = createTraceQuestionCorpus()
+  const collected = await forEachSpanBatch(args, async (spans) => corpus.add(spans))
+  if (collected.spanCount === 0) throw new CliError('no spans found for the given selection', 'unreadable')
   warnIncompleteWorkflow(collected.workflow)
   const interrupt = () => controller.abort(new Error('ask interrupted'))
   process.once('SIGINT', interrupt)
@@ -1262,7 +1259,7 @@ async function cmdAsk(args: CliArgs): Promise<void> {
   try {
     result = await runTraceQuestions({
       questions,
-      spans: collected.spans,
+      corpus: corpus.finish(),
       engine,
       harness: collected.harness,
       concurrency: DEFAULT_ASK_CONCURRENCY,

@@ -384,8 +384,11 @@ export interface TraceInvestigation {
    */
   add(spans: readonly OtlpSpan[], batch?: { readonly harness?: string }): Promise<void>
   addUnread(entry: UnreadSessionFact): void
-  /** `harness` names every harness the batches came from, when it was not known at the start. */
-  finish(end?: { readonly harness?: string }): Promise<TraceInvestigationResult>
+  /**
+   * `harness` names every harness the batches came from, and `conformance`
+   * grades the source they were read from, when either was not known at the start.
+   */
+  finish(end?: { readonly harness?: string; readonly conformance?: TraceValidation }): Promise<TraceInvestigationResult>
 }
 
 /**
@@ -497,7 +500,7 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
         if (summary.status !== 'ok') opts.log?.(`[analyst] ${summary.status.toUpperCase()} ${summary.analyst_id}`, { error: summary.error?.message ?? summary.reason })
       }
 
-      let conformance = opts.conformance
+      let conformance = end.conformance ?? opts.conformance
       if (!conformance) {
         // The validator reads `length` and reports what lies past the spans it reads.
         const views = conformanceSpans
