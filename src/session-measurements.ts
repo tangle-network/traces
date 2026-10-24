@@ -3,6 +3,7 @@ import { INTERRUPT_TEXT, isFleetTurn } from './adapters/actor.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { canonicalJson } from './adapters/tool-io.js'
 import { INHERITED_SOURCE_ATTR, INHERITED_SPAN_ATTR } from './adapters/provenance.js'
+import { modelCallContextTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import type { SessionFact } from './session-facts.js'
 import { describeSessionRelationship, type SessionRelationship } from './session-relationship.js'
@@ -113,7 +114,185 @@ export interface SessionMeasurements {
   readonly tools: readonly ToolMeasurement[]
   readonly compactions: SessionFact<readonly CompactionMeasurement[]>
   readonly contextFootprints: readonly ContentFootprint[]
+  /** The context each of the session's own model calls read, and how long the model took to answer by context size. */
+  readonly modelCalls: ModelCallMeasurement
+  /** Tool calls a PreToolUse hook (a guard) refused, by guard. */
+  readonly guardRefusals: GuardRefusals
+  /** The usage or weekly limit the session's last reply reports, when that reply is one. */
+  readonly limitStop: SessionFact<LimitStop>
 }
+
+/** Model latency of the calls whose context fell in one {@link CONTEXT_BAND_TOKENS} band. */
+export interface ContextBandLatency {
+  /** `0-100k` … `800-900k`, then `900k+`. */
+  readonly band: string
+  readonly calls: number
+  readonly p50Ms: number
+  readonly p90Ms: number
+}
+
+export interface ModelCallMeasurement {
+  /** Model calls that reported usage. */
+  readonly calls: number
+  /** Input + cache read + cache creation tokens per call; null with no call. */
+  readonly contextTokens: { readonly mean: number | null; readonly p50: number | null }
+  /**
+   * From a tool result to the model's next reply, by that reply's context:
+   * the time the model took to read the result and answer. A reply more than
+   * {@link LATENCY_MAX_MS} after the result is a wait, not latency, and is left out.
+   */
+  readonly latencyByContext: readonly ContextBandLatency[]
+}
+
+export interface GuardRefusals {
+  /** The session's own tool calls. */
+  readonly toolCalls: number
+  readonly refusals: number
+  /** Refusals per 1,000 tool calls; null with no tool call. */
+  readonly perThousandCalls: number | null
+  /** Largest first; a refusal that names no guard is `(unnamed)`. */
+  readonly byGuard: readonly { readonly guard: string; readonly refusals: number; readonly perThousandCalls: number }[]
+  readonly spanIds: readonly string[]
+}
+
+export interface LimitStop {
+  /** The limit the reply names: `weekly`, `session`, `5-hour`, …, or `usage`. */
+  readonly kind: string
+  /** The reply's text, at most 200 characters; null when content was not requested. */
+  readonly text: string | null
+  readonly at: string
+}
+
+/** The raw values behind {@link ModelCallMeasurement}, which a report over many sessions pools. */
+export interface OperatingSamples {
+  readonly contextTokens: readonly number[]
+  /** Milliseconds per band index (0 = 0-100k … 9 = 900k+). */
+  readonly latencyMs: readonly (readonly number[])[]
+}
+/** Context bands of 100k tokens; the last holds every call from 900k up. */
+export const CONTEXT_BAND_TOKENS = 100_000
+export const CONTEXT_BANDS = 10
+/** A model reply this long after the tool result it followed was waiting on something else. */
+export const LATENCY_MAX_MS = 600_000
+
+export function contextBandLabel(index: number): string {
+  return index >= CONTEXT_BANDS - 1 ? `${CONTEXT_BANDS - 1}00k+` : `${index * 100 === 0 ? 0 : `${index}00`}-${index + 1}00k`
+}
+
+/** The value at rank floor(n·q) of the sorted values: the hand scripts' p50 and p90. */
+export function rankPercentile(sorted: readonly number[], q: number): number {
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]!
+}
+
+/** Each of the session's own model calls' context, and its latency after a tool result, by band. */
+export function operatingSamplesOf(spans: readonly OtlpSpan[], tools: readonly OtlpSpan[]): OperatingSamples {
+  const calls = spans
+    .filter((span) => !isInherited(span))
+    .map((span) => ({ span, context: modelCallContextTokens(span) }))
+    .filter((call): call is { span: OtlpSpan; context: number } => call.context !== null)
+    .map((call) => ({ ...call, start: Date.parse(call.span.start_time), end: Date.parse(call.span.end_time) }))
+    .sort((a, b) => a.start - b.start)
+  const results = tools
+    .filter((span) => !isInherited(span) && span.status.code !== 'UNSET')
+    .map((span) => Date.parse(span.end_time))
+    .filter((at) => Number.isFinite(at))
+    .sort((a, b) => a - b)
+  const latencyMs: number[][] = Array.from({ length: CONTEXT_BANDS }, () => [])
+  let next = 0
+  let previousEnd = Number.NEGATIVE_INFINITY
+  for (const call of calls) {
+    if (!Number.isFinite(call.start)) continue
+    // The last tool result after the previous reply and at or before this one.
+    let result: number | undefined
+    while (next < results.length && results[next]! <= call.start) {
+      if (results[next]! > previousEnd) result = results[next]
+      next++
+    }
+    const elapsed = result === undefined ? NaN : call.start - result
+    if (elapsed > 0 && elapsed < LATENCY_MAX_MS) latencyMs[Math.min(CONTEXT_BANDS - 1, Math.floor(call.context / CONTEXT_BAND_TOKENS))]!.push(elapsed)
+    previousEnd = Number.isFinite(call.end) ? Math.max(call.end, call.start) : call.start
+  }
+  return { contextTokens: calls.map((call) => call.context), latencyMs }
+}
+
+/** The summary {@link ModelCallMeasurement} of pooled samples. */
+export function modelCallMeasurement(samples: OperatingSamples): ModelCallMeasurement {
+  const contexts = [...samples.contextTokens].sort((a, b) => a - b)
+  return {
+    calls: contexts.length,
+    contextTokens: contexts.length === 0
+      ? { mean: null, p50: null }
+      : { mean: Math.round(contexts.reduce((sum, value) => sum + value, 0) / contexts.length), p50: rankPercentile(contexts, 0.5) },
+    latencyByContext: samples.latencyMs.flatMap((values, index) => {
+      if (values.length === 0) return []
+      const sorted = [...values].sort((a, b) => a - b)
+      return [{ band: contextBandLabel(index), calls: sorted.length, p50Ms: rankPercentile(sorted, 0.5), p90Ms: rankPercentile(sorted, 0.9) }]
+    }),
+  }
+}
+
+/** `PreToolUse:Bash hook error: ci-wait-guard: …`, or `hook error: [/path/guard.sh]: …`. */
+const HOOK_ERROR = /hook error: (?:\[([^\]]+)\]|([A-Za-z0-9_.-]+)(?=:| \())?/u
+
+/** The guard that refused a tool call, or undefined when no hook did. */
+export function refusingGuard(span: OtlpSpan): string | undefined {
+  if (span.status.code !== 'ERROR') return undefined
+  const match = HOOK_ERROR.exec(span.status.message ?? '')
+  if (!match) return undefined
+  return match[1] ? basename(match[1]) : match[2] ?? '(unnamed)'
+}
+
+const perThousand = (count: number, calls: number): number => Math.round((count * 1000 / calls) * 100) / 100
+
+export function guardRefusalsOf(tools: readonly OtlpSpan[]): GuardRefusals {
+  const own = tools.filter((span) => !isInherited(span))
+  const byGuard = new Map<string, number>()
+  const spanIds: string[] = []
+  for (const span of own) {
+    const guard = refusingGuard(span)
+    if (guard === undefined) continue
+    byGuard.set(guard, (byGuard.get(guard) ?? 0) + 1)
+    spanIds.push(span.span_id)
+  }
+  return guardRefusalsSummary(own.length, byGuard, spanIds)
+}
+
+export function guardRefusalsSummary(toolCalls: number, byGuard: ReadonlyMap<string, number>, spanIds: readonly string[]): GuardRefusals {
+  const refusals = [...byGuard.values()].reduce((sum, count) => sum + count, 0)
+  return {
+    toolCalls,
+    refusals,
+    perThousandCalls: toolCalls === 0 ? null : perThousand(refusals, toolCalls),
+    byGuard: [...byGuard]
+      .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
+      .map(([guard, count]) => ({ guard, refusals: count, perThousandCalls: toolCalls === 0 ? 0 : perThousand(count, toolCalls) })),
+    spanIds,
+  }
+}
+
+/** "You've hit your weekly limit · resets …", "Claude AI usage limit reached", "5-hour limit reached". */
+const LIMIT_TEXT = /you['’]ve hit your ([\w-]+) limit|(?:^|\s)([\w-]+) limit reached|reached your ([\w-]+) limit/iu
+const REPLY_SPANS = new Set(['message.assistant', 'llm.turn'])
+
+/** The limit the session's last reply reports: the session stopped because its account ran out. */
+function limitStopOf(spans: readonly OtlpSpan[]): SessionFact<LimitStop> {
+  let last: OtlpSpan | undefined
+  for (const span of spans) {
+    if (isInherited(span) || !REPLY_SPANS.has(span.name) || typeof span.attributes.content !== 'string') continue
+    if (!last || Date.parse(span.end_time) >= Date.parse(last.end_time)) last = span
+  }
+  if (!last) return { value: null, spanIds: [], unavailable: 'The session recorded no reply of its own.' }
+  const text = (last.attributes.content as string).trim()
+  const match = LIMIT_TEXT.exec(text)
+  if (!match) return { value: null, spanIds: [], unavailable: null }
+  const word = (match[1] ?? match[2] ?? match[3] ?? 'usage').toLowerCase()
+  return {
+    value: { kind: word === 'ai' ? 'usage' : word, text: text.length > 200 ? `${text.slice(0, 199)}…` : text, at: last.end_time },
+    spanIds: [last.span_id],
+    unavailable: null,
+  }
+}
+
 const number = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
 
@@ -441,6 +620,8 @@ export function computeSessionMeasurements(input: {
   readonly tools: readonly OtlpSpan[]
   readonly sessionId: string | null
   readonly harness: string | null
+  /** {@link operatingSamplesOf} these spans and tools, when the caller already has them. */
+  readonly operating?: OperatingSamples
 }): SessionMeasurements {
   const { spans, records, tools, sessionId, harness } = input
   return {
@@ -452,6 +633,9 @@ export function computeSessionMeasurements(input: {
     tools: toolMeasurements(tools),
     compactions: compactions(spans),
     contextFootprints: contextFootprints(spans),
+    modelCalls: modelCallMeasurement(input.operating ?? operatingSamplesOf(spans, tools)),
+    guardRefusals: guardRefusalsOf(tools),
+    limitStop: limitStopOf(spans),
   }
 }
 

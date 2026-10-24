@@ -10,16 +10,18 @@
  * failed. No model is called: `traces ask` is the one command that spends.
  */
 
+import { createHash } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { type AnalystFinding, type AnalystRegistry, makeFinding } from '@tangle-network/agent-eval/analyst'
-import { analyzeSpans } from './analyze.js'
+import { createSpanAnalysis } from './analyze.js'
+import { appendAll } from './arrays.js'
 import { conformanceOfSpans, skippedAnalyses } from './conformance.js'
 import type { OtlpSpan } from './otlp.js'
 import {
+  createPipelineAccumulator,
   ruleContext,
-  runPipelines,
   runRules,
   type PipelineReport,
   type TraceLiveFinding,
@@ -32,6 +34,13 @@ import {
   type SessionFactsReportOptions,
   type UnreadSessionFact,
 } from './session-facts.js'
+import {
+  CONTEXT_BANDS,
+  guardRefusalsSummary,
+  modelCallMeasurement,
+  type GuardRefusals,
+  type ModelCallMeasurement,
+} from './session-measurements.js'
 
 export interface TraceInvestigationOptions {
   readonly spans: readonly OtlpSpan[]
@@ -80,9 +89,30 @@ export interface SessionToolErrors {
   readonly clusters: readonly ToolErrorCluster[]
 }
 
+/**
+ * How the selected sessions ran, pooled from each session's
+ * `facts.measurements` (`session-measurements.ts` owns every value): the
+ * context each model call read, the model's latency by context, the tool
+ * calls guards refused, and the sessions that stopped on an account limit.
+ */
+export interface OperatingMeasures {
+  readonly modelCalls: ModelCallMeasurement
+  readonly guardRefusals: Omit<GuardRefusals, 'spanIds'>
+  readonly limitStops: {
+    /** Sessions whose last reply is a usage or weekly limit notice. */
+    readonly sessions: number
+    readonly byKind: Readonly<Record<string, number>>
+    /** Selected sessions whose root span ended in an error. */
+    readonly terminalFailures: number
+    /** Of those, the ones whose last reply is a limit notice. */
+    readonly terminalFailuresAtLimit: number
+  }
+}
+
 /** The deterministic measures beside the facts sheet: loops, failure clusters, tool use and errors, failure follow-ups. */
 export interface AnalysisMeasures extends PipelineReport {
   readonly toolErrors: readonly SessionToolErrors[]
+  readonly operating: OperatingMeasures
 }
 
 export interface TraceInvestigationResult {
@@ -332,76 +362,200 @@ function argumentsCannotAnswer(pipelines: PipelineReport): CannotAnswer[] {
   }]
 }
 
-export async function runTraceInvestigation(opts: TraceInvestigationOptions): Promise<TraceInvestigationResult> {
-  if (opts.spans.length === 0) throw new Error('runTraceInvestigation: no spans to analyze')
-  opts.signal?.throwIfAborted()
-  const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const builder = createSessionFactsReportBuilder({ ...opts.facts, harness: opts.harness, generatedAt })
-  const groups = byTrace(opts.spans)
-  for (const spans of groups.values()) builder.add(spans)
-  for (const entry of opts.unread ?? []) builder.addUnread(entry)
-  const facts = await priceReport(builder.build())
-  opts.signal?.throwIfAborted()
+/** Spans a conformance grade reads: agent-trace-contract's validator reads at most this many in one call. */
+const CONFORMANCE_SPANS_READ = 250_000
+/** A string attribute longer than this is kept for conformance as its digest: equal text stays equal, and only its presence is read. */
+const CONFORMANCE_TEXT_KEPT = 256
 
-  const pipelines = await runPipelines(opts.spans, { minLoopOccurrences: opts.minLoopOccurrences })
-  opts.signal?.throwIfAborted()
-  const findings: AnalystFinding[] = []
-  const toolErrors: SessionToolErrors[] = []
-  for (const sheet of facts.sessions) {
-    const spans = groups.get(sheet.traceId)
-    if (!spans) continue
-    const sessionId = sheet.sessionId ?? sheet.traceId
-    const context = ruleContext(spans, {
-      session: { harness: sheet.harness ?? opts.harness, sessionId, cwd: sheet.cwd.value },
-      generatedAt,
-      facts: [sheet],
-    })
-    for (const live of runRules(context)) findings.push(ruleFinding(live, sheet.traceId))
-    toolErrors.push(toolErrorsOf(sessionId, context.tools, context.erroredTools))
+function conformanceView(span: OtlpSpan): OtlpSpan {
+  let attributes: Record<string, unknown> | undefined
+  for (const [key, value] of Object.entries(span.attributes)) {
+    if (typeof value !== 'string' || value.length <= CONFORMANCE_TEXT_KEPT) continue
+    attributes ??= { ...span.attributes }
+    attributes[key] = `sha256:${createHash('sha256').update(value).digest('hex')}`
   }
-  const terminal = terminalFailureFinding(pipelines, opts.spans)
-  if (terminal) findings.push(terminal)
-  const analysis = await analyzeSpans(opts.spans, {
+  return attributes ? { ...span, attributes } : span
+}
+
+export interface TraceInvestigation {
+  /**
+   * One batch of whole sessions, in selection order: a trace's spans never
+   * span two batches. Only what the report needs is kept of it.
+   */
+  add(spans: readonly OtlpSpan[], batch?: { readonly harness?: string }): Promise<void>
+  addUnread(entry: UnreadSessionFact): void
+  /** `harness` names every harness the batches came from, when it was not known at the start. */
+  finish(end?: { readonly harness?: string }): Promise<TraceInvestigationResult>
+}
+
+/**
+ * `traces analyze` over batches, so a week of sessions is read one session at
+ * a time. Each batch is reduced at once to its facts sheets, rule findings,
+ * tool errors, per-trace measures and the metadata export the behavioral
+ * analyst reads; the spans are then dropped. Every part that reads one trace
+ * at a time is run trace by trace and merged in selection order, so the
+ * result equals one pass over every span.
+ */
+export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, 'spans'>): TraceInvestigation {
+  const generatedAt = opts.generatedAt ?? new Date().toISOString()
+  let selected: SessionFacts | undefined
+  const contexts: number[] = []
+  const latencies: number[][] = Array.from({ length: CONTEXT_BANDS }, () => [])
+  const builder = createSessionFactsReportBuilder({
+    ...opts.facts,
+    harness: opts.harness,
+    generatedAt,
+    onSession: (reading) => {
+      selected = reading.facts
+      appendAll(contexts, reading.operating.contextTokens)
+      reading.operating.latencyMs.forEach((values, band) => appendAll(latencies[band]!, values))
+    },
+  })
+  let toolCalls = 0
+  const byGuard = new Map<string, number>()
+  const limitKinds = new Map<string, number>()
+  let terminalFailures = 0
+  let terminalAtLimit = 0
+  const pipelines = createPipelineAccumulator({ minLoopOccurrences: opts.minLoopOccurrences })
+  const analysis = createSpanAnalysis({
     ...(opts.registry ? { registry: opts.registry } : {}),
     runId: `traces-analysis-${Date.parse(generatedAt) || Date.now()}`,
     ...(opts.signal ? { signal: opts.signal } : {}),
     ...(opts.log ? { log: opts.log } : {}),
   })
-  findings.push(...analysis.result.findings)
-  for (const summary of analysis.result.per_analyst) {
-    if (summary.status !== 'ok') opts.log?.(`[analyst] ${summary.status.toUpperCase()} ${summary.analyst_id}`, { error: summary.error?.message ?? summary.reason })
-  }
-
-  const conformance = opts.conformance ?? conformanceOfSpans(opts.spans)
-  const cannotAnswer: CannotAnswer[] = [
-    ...skippedAnalyses(conformance).map((skipped) => ({ analysis: `${skipped.capability}: ${skipped.analysis}`, reason: skipped.reason })),
-    ...argumentsCannotAnswer(pipelines),
-    ...analysis.result.per_analyst
-      .filter((summary) => summary.status !== 'ok')
-      .map((summary) => ({ analysis: `analyst ${summary.analyst_id}`, reason: summary.error?.message ?? summary.reason ?? summary.status })),
-    ...(facts.selection?.unreadSessions ?? []).map((entry) => ({
-      analysis: 'every question about this session',
-      reason: entry.reason,
-      sessionId: entry.sessionId ?? entry.traceId ?? entry.source ?? 'unknown',
-    })),
-    ...facts.sessions.flatMap(factsCannotAnswer),
-  ]
+  const rules = new Map<string, { findings: AnalystFinding[]; toolErrors: SessionToolErrors }>()
+  const failedRoots: OtlpSpan[] = []
+  const conformanceSpans: OtlpSpan[] = []
+  let spanCount = 0
+  let empty = true
   return {
-    schemaVersion: 1,
-    kind: 'traces.analysis',
-    generatedAt,
-    harness: opts.harness,
-    facts,
-    packet: buildTraceFindingPacket({
-      findings: rankFindings(findings.map(measuredSeverity)),
-      generatedAt,
-      source: 'traces analyze',
-      title: 'traces analyze findings',
-    }),
-    measures: { ...pipelines, toolErrors },
-    conformance,
-    cannotAnswer,
+    async add(spans, batch = {}) {
+      opts.signal?.throwIfAborted()
+      if (spans.length === 0) return
+      empty = false
+      spanCount += spans.length
+      const groups = byTrace(spans)
+      for (const [traceId, group] of groups) {
+        selected = undefined
+        builder.add(group)
+        const sheet = selected as SessionFacts | undefined
+        const failed = group.find((item) => item.parent_span_id === null && item.status.code === 'ERROR')
+        if (failed) failedRoots.push({ ...failed, attributes: {} })
+        if (!sheet) continue
+        const { guardRefusals, limitStop } = sheet.measurements
+        toolCalls += guardRefusals.toolCalls
+        for (const entry of guardRefusals.byGuard) byGuard.set(entry.guard, (byGuard.get(entry.guard) ?? 0) + entry.refusals)
+        if (limitStop.value) limitKinds.set(limitStop.value.kind, (limitKinds.get(limitStop.value.kind) ?? 0) + 1)
+        if (failed) {
+          terminalFailures += 1
+          if (limitStop.value) terminalAtLimit += 1
+        }
+        const sessionId = sheet.sessionId ?? sheet.traceId
+        const context = ruleContext(group, {
+          session: { harness: sheet.harness ?? batch.harness ?? opts.harness, sessionId, cwd: sheet.cwd.value },
+          generatedAt,
+          facts: [sheet],
+        })
+        rules.set(traceId, {
+          findings: runRules(context).map((live) => ruleFinding(live, sheet.traceId)),
+          toolErrors: toolErrorsOf(sessionId, context.tools, context.erroredTools),
+        })
+      }
+      await pipelines.add(spans)
+      analysis.add(spans)
+      if (!opts.conformance) {
+        for (const span of spans) {
+          if (conformanceSpans.length >= CONFORMANCE_SPANS_READ) break
+          conformanceSpans.push(conformanceView(span))
+        }
+      }
+    },
+    addUnread(entry) {
+      builder.addUnread(entry)
+    },
+    async finish(end = {}) {
+      if (empty) throw new Error('runTraceInvestigation: no spans to analyze')
+      opts.signal?.throwIfAborted()
+      const harness = end.harness ?? opts.harness
+      for (const entry of opts.unread ?? []) builder.addUnread(entry)
+      const facts = await priceReport({ ...builder.build(), harness })
+      opts.signal?.throwIfAborted()
+      const measures = pipelines.report()
+      const findings: AnalystFinding[] = []
+      const toolErrors: SessionToolErrors[] = []
+      for (const sheet of facts.sessions) {
+        const held = rules.get(sheet.traceId)
+        if (!held) continue
+        appendAll(findings, held.findings)
+        toolErrors.push(held.toolErrors)
+      }
+      const terminal = terminalFailureFinding(measures, failedRoots)
+      if (terminal) findings.push(terminal)
+      const result = await analysis.run()
+      appendAll(findings, result.result.findings)
+      for (const summary of result.result.per_analyst) {
+        if (summary.status !== 'ok') opts.log?.(`[analyst] ${summary.status.toUpperCase()} ${summary.analyst_id}`, { error: summary.error?.message ?? summary.reason })
+      }
+
+      let conformance = opts.conformance
+      if (!conformance) {
+        // The validator reads `length` and reports what lies past the spans it reads.
+        const views = conformanceSpans
+        if (spanCount > views.length) views.length = spanCount
+        conformance = conformanceOfSpans(views)
+      }
+      const cannotAnswer: CannotAnswer[] = [
+        ...skippedAnalyses(conformance).map((skipped) => ({ analysis: `${skipped.capability}: ${skipped.analysis}`, reason: skipped.reason })),
+        ...argumentsCannotAnswer(measures),
+        ...result.result.per_analyst
+          .filter((summary) => summary.status !== 'ok')
+          .map((summary) => ({ analysis: `analyst ${summary.analyst_id}`, reason: summary.error?.message ?? summary.reason ?? summary.status })),
+        ...(facts.selection?.unreadSessions ?? []).map((entry) => ({
+          analysis: 'every question about this session',
+          reason: entry.reason,
+          sessionId: entry.sessionId ?? entry.traceId ?? entry.source ?? 'unknown',
+        })),
+        ...facts.sessions.flatMap(factsCannotAnswer),
+      ]
+      return {
+        schemaVersion: 1,
+        kind: 'traces.analysis',
+        generatedAt,
+        harness,
+        facts,
+        packet: buildTraceFindingPacket({
+          findings: rankFindings(findings.map(measuredSeverity)),
+          generatedAt,
+          source: 'traces analyze',
+          title: 'traces analyze findings',
+        }),
+        measures: {
+          ...measures,
+          toolErrors,
+          operating: {
+            modelCalls: modelCallMeasurement({ contextTokens: contexts, latencyMs: latencies }),
+            guardRefusals: (({ spanIds: _spanIds, ...rest }) => rest)(guardRefusalsSummary(toolCalls, byGuard, [])),
+            limitStops: {
+              sessions: [...limitKinds.values()].reduce((sum, count) => sum + count, 0),
+              byKind: Object.fromEntries([...limitKinds].sort(([a], [b]) => a.localeCompare(b))),
+              terminalFailures,
+              terminalFailuresAtLimit: terminalAtLimit,
+            },
+          },
+        },
+        conformance,
+        cannotAnswer,
+      }
+    },
   }
+}
+
+export async function runTraceInvestigation(opts: TraceInvestigationOptions): Promise<TraceInvestigationResult> {
+  if (opts.spans.length === 0) throw new Error('runTraceInvestigation: no spans to analyze')
+  const { spans, ...rest } = opts
+  const investigation = createTraceInvestigation(rest)
+  await investigation.add(spans)
+  return investigation.finish()
 }
 
 export interface AnalysisArtifacts {

@@ -148,6 +148,15 @@ interface CallUsage extends ModelTokens {
 
 const UNRECORDED_MODEL = '(model not recorded)'
 
+/**
+ * The context one model call read: its whole prompt, fresh input plus cache
+ * reads plus cache writes, the `tokens.input` share of that call. Null when
+ * the span is not a model call or reports no usage.
+ */
+export function modelCallContextTokens(span: OtlpSpan): number | null {
+  return callUsage(span)?.input ?? null
+}
+
 /** A model call's usage, or null when the span reports none. */
 function callUsage(span: OtlpSpan): CallUsage | null {
   if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'LLM') return null

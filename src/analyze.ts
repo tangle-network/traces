@@ -19,7 +19,7 @@ import {
   type AnalystRunResult,
   buildDefaultAnalystRegistry,
 } from '@tangle-network/agent-eval/analyst'
-import { openDeterministicTraceStore } from './analysis-store.js'
+import { exportBytes, openDeterministicTraceStore } from './analysis-store.js'
 import { metadataOnly } from './metadata-only.js'
 import type { OtlpSpan } from './otlp.js'
 import { classifyLiveActions } from './pipelines.js'
@@ -77,24 +77,12 @@ function toolSignalHolds(finding: AnalystFinding, traceId: string, checked: Read
   return !checked.has(traceId)
 }
 
-/** Keep agent-eval's tool signals only for the traces where {@link toolSignalHolds}. */
-function withHeldToolSignals(result: AnalystRunResult, spans: readonly OtlpSpan[]): AnalystRunResult {
-  let checked: Set<string> | undefined
-  const checkedTraces = (): ReadonlySet<string> => {
-    if (checked) return checked
-    const byTrace = new Map<string, OtlpSpan[]>()
-    for (const span of spans) {
-      const group = byTrace.get(span.trace_id)
-      if (group) group.push(span)
-      else byTrace.set(span.trace_id, [span])
-    }
-    checked = new Set([...byTrace].filter(([, group]) => classifyLiveActions(group).some((action) => action.kind === 'verify')).map(([traceId]) => traceId))
-    return checked
-  }
+/** Keep agent-eval's tool signals only for the traces where {@link toolSignalHolds}; `checked` holds every trace that ran a check. */
+function withHeldToolSignals(result: AnalystRunResult, checked: ReadonlySet<string>): AnalystRunResult {
   const findings = result.findings.flatMap((finding) => {
     if (!finding.subject || !TOOL_SIGNALS.has(finding.subject)) return [finding]
     const traces = Array.isArray(finding.metadata?.evidence_trace_ids) ? finding.metadata.evidence_trace_ids as string[] : []
-    const kept = traces.filter((traceId) => toolSignalHolds(finding, traceId, checkedTraces()))
+    const kept = traces.filter((traceId) => toolSignalHolds(finding, traceId, checked))
     if (kept.length === 0) return []
     if (kept.length === traces.length) return [finding]
     return [{
@@ -115,18 +103,70 @@ function withHeldToolSignals(result: AnalystRunResult, spans: readonly OtlpSpan[
   }
 }
 
+/**
+ * agent-eval's behavioral analyst refuses more traces than its explicit limit
+ * (1,000 by default) so an unfiltered store is never read by accident. A
+ * traces selection is explicit, and the analyst reads one trace at a time, so
+ * the limit is the selection's own trace count: a week of one host runs it too.
+ */
+const BEHAVIORAL_DEFAULT_MAX_TRACES = 1_000
+
+export interface SpanAnalysis {
+  /** One batch of whole traces, in selection order. */
+  add(spans: readonly OtlpSpan[]): void
+  run(): Promise<AnalyzeResult>
+}
+
+/**
+ * {@link analyzeSpans} batch by batch: each batch is kept only as its export's
+ * bytes (metadata only for the built-in analyst) and whether each of its
+ * traces ran a check, so a week of sessions is never held as spans at once.
+ */
+export function createSpanAnalysis(opts: AnalyzeOptions = {}): SpanAnalysis {
+  const chunks: Buffer[] = []
+  const traces = new Set<string>()
+  const checked = new Set<string>()
+  return {
+    add(spans) {
+      if (spans.length === 0) return
+      chunks.push(exportBytes(opts.registry ? spans : metadataOnly(spans).spans))
+      if (opts.registry) return
+      const byTrace = new Map<string, OtlpSpan[]>()
+      for (const span of spans) {
+        traces.add(span.trace_id)
+        const group = byTrace.get(span.trace_id)
+        if (group) group.push(span)
+        else byTrace.set(span.trace_id, [span])
+      }
+      for (const [traceId, group] of byTrace) if (classifyLiveActions(group).some((action) => action.kind === 'verify')) checked.add(traceId)
+    },
+    async run() {
+      if (chunks.length === 0) throw new Error('analyzeSpans: no spans to analyze')
+      opts.signal?.throwIfAborted()
+      const runId = opts.runId ?? `traces-${Date.now()}`
+      const store = openDeterministicTraceStore(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks))
+      chunks.length = 0
+      if (opts.registry) {
+        const result = await opts.registry.run(runId, { traceStore: store }, { signal: opts.signal })
+        opts.signal?.throwIfAborted()
+        return { result }
+      }
+      opts.signal?.throwIfAborted()
+      const registry = buildDefaultAnalystRegistry({
+        registry: { log: opts.log },
+        behavioral: { maxTraces: Math.max(BEHAVIORAL_DEFAULT_MAX_TRACES, traces.size) },
+      })
+      const result = await registry.run(runId, { traceStore: store }, { signal: opts.signal })
+      opts.signal?.throwIfAborted()
+      return { result: withHeldToolSignals(result, checked) }
+    },
+  }
+}
+
 export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOptions = {}): Promise<AnalyzeResult> {
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
-  const runId = opts.runId ?? `traces-${Date.now()}`
-  if (opts.registry) {
-    const result = await opts.registry.run(runId, { traceStore: openDeterministicTraceStore(spans) }, { signal: opts.signal })
-    opts.signal?.throwIfAborted()
-    return { result }
-  }
-  const store = openDeterministicTraceStore(metadataOnly(spans).spans)
-  opts.signal?.throwIfAborted()
-  const result = await buildDefaultAnalystRegistry({ registry: { log: opts.log } }).run(runId, { traceStore: store }, { signal: opts.signal })
-  opts.signal?.throwIfAborted()
-  return { result: withHeldToolSignals(result, spans) }
+  const analysis = createSpanAnalysis(opts)
+  analysis.add(spans)
+  return analysis.run()
 }

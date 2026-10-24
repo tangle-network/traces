@@ -30,11 +30,13 @@ export function openAgenticTraceStore(spans: readonly OtlpSpan[]): TraceAnalysis
 }
 
 /** Store for deterministic analysts, which have no context window to protect. */
-export function openDeterministicTraceStore(spans: readonly OtlpSpan[]): TraceAnalysisStore {
-  return otlpTextToTraceAnalysisStore(exportBytes(spans), { perCallByteCeiling: DETERMINISTIC_PER_CALL_CEILING })
+export function openDeterministicTraceStore(spans: readonly OtlpSpan[] | Uint8Array): TraceAnalysisStore {
+  const bytes = spans instanceof Uint8Array ? spans : exportBytes(spans)
+  return otlpTextToTraceAnalysisStore(bytes, { perCallByteCeiling: DETERMINISTIC_PER_CALL_CEILING })
 }
 
-function exportBytes(spans: readonly OtlpSpan[]): Buffer {
+/** The OpenInference export of these spans as UTF-8 bytes, one span line at a time. */
+export function exportBytes(spans: readonly OtlpSpan[]): Buffer {
   const lines: Buffer[] = []
   for (const line of iterSerializedSpans(spans)) lines.push(Buffer.from(line, 'utf8'))
   return Buffer.concat(lines)

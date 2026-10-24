@@ -360,9 +360,35 @@ function fleetHeader(result: TraceInvestigationResult): string[] {
     waste,
     `${plural(interrupts, 'interrupt')}`,
   ].join(' · ')]
+  const operating = operatingLine(result)
+  if (operating) lines.push(operating)
   const unread = result.facts.selection?.unreadSessions ?? []
   if (unread.length > 0) lines.push(`unreadable ${unread.length}: ${unread.slice(0, 2).map((entry) => `${short(entry.sessionId ?? entry.traceId ?? entry.source ?? '?')} ${sheetText(entry.reason, 50)}`).join(' · ')}`)
   return lines
+}
+
+const kTokens = (tokens: number): string => `${Math.round(tokens / 1000)}k`
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`
+
+/** Context per model call, latency at the smallest and largest context band, guard refusals and limit stops. */
+function operatingLine(result: TraceInvestigationResult): string | undefined {
+  const { modelCalls, guardRefusals, limitStops } = result.measures.operating
+  if (modelCalls.calls === 0 && guardRefusals.toolCalls === 0) return undefined
+  const parts: string[] = []
+  if (modelCalls.contextTokens.mean !== null && modelCalls.contextTokens.p50 !== null) {
+    parts.push(`context/call mean ${kTokens(modelCalls.contextTokens.mean)} p50 ${kTokens(modelCalls.contextTokens.p50)}`)
+  }
+  const bands = modelCalls.latencyByContext
+  if (bands.length > 0) {
+    const ends = bands.length === 1 ? [bands[0]!] : [bands[0]!, bands.at(-1)!]
+    parts.push(`reply p50 ${ends.map((band) => `${seconds(band.p50Ms)} at ${band.band}`).join(', ')}`)
+  }
+  if (guardRefusals.perThousandCalls !== null) {
+    const top = guardRefusals.byGuard[0]
+    parts.push(`guard refusals ${guardRefusals.perThousandCalls}/1k calls${top ? ` (${top.guard} ${top.refusals})` : ''}`)
+  }
+  parts.push(`limit stops ${limitStops.sessions} (${limitStops.terminalFailuresAtLimit}/${limitStops.terminalFailures} terminal failures)`)
+  return parts.join(' · ')
 }
 
 function cell(text: string, width: number): string {
