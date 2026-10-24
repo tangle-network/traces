@@ -34,13 +34,7 @@ import {
   type SessionFactsReportOptions,
   type UnreadSessionFact,
 } from './session-facts.js'
-import {
-  CONTEXT_BANDS,
-  guardRefusalsSummary,
-  modelCallMeasurement,
-  type GuardRefusals,
-  type ModelCallMeasurement,
-} from './session-measurements.js'
+import { CONTEXT_BANDS, modelCallMeasurement, type ModelCallMeasurement } from './session-measurements.js'
 
 export interface TraceInvestigationOptions {
   readonly spans: readonly OtlpSpan[]
@@ -97,7 +91,15 @@ export interface SessionToolErrors {
  */
 export interface OperatingMeasures {
   readonly modelCalls: ModelCallMeasurement
-  readonly guardRefusals: Omit<GuardRefusals, 'spanIds'>
+  readonly guardRefusals: {
+    /** The selected sessions' `toolCalls`. */
+    readonly toolCalls: number
+    readonly refusals: number
+    /** Refusals per 1,000 tool calls; null with no tool call. */
+    readonly perThousandCalls: number | null
+    /** Largest first. */
+    readonly byGuard: readonly { readonly guard: string; readonly refusals: number; readonly perThousandCalls: number }[]
+  }
   readonly limitStops: {
     /** Sessions whose last reply is a usage or weekly limit notice. */
     readonly sessions: number
@@ -377,6 +379,21 @@ function conformanceView(span: OtlpSpan): OtlpSpan {
   return attributes ? { ...span, attributes } : span
 }
 
+const perThousand = (count: number, calls: number): number => Math.round((count * 1000 / calls) * 100) / 100
+
+/** Refusals over the selection's tool calls, by guard, largest first. */
+function guardRefusalRates(toolCalls: number, byGuard: ReadonlyMap<string, number>): OperatingMeasures['guardRefusals'] {
+  const refusals = [...byGuard.values()].reduce((sum, count) => sum + count, 0)
+  return {
+    toolCalls,
+    refusals,
+    perThousandCalls: toolCalls === 0 ? null : perThousand(refusals, toolCalls),
+    byGuard: [...byGuard]
+      .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
+      .map(([guard, count]) => ({ guard, refusals: count, perThousandCalls: toolCalls === 0 ? 0 : perThousand(count, toolCalls) })),
+  }
+}
+
 export interface TraceInvestigation {
   /**
    * One batch of whole sessions, in selection order: a trace's spans never
@@ -446,12 +463,12 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
         if (failed) failedRoots.push({ ...failed, attributes: {} })
         if (!sheet) continue
         const { guardRefusals, limitStop } = sheet.measurements
-        toolCalls += guardRefusals.toolCalls
-        for (const entry of guardRefusals.byGuard) byGuard.set(entry.guard, (byGuard.get(entry.guard) ?? 0) + entry.refusals)
-        if (limitStop.value) limitKinds.set(limitStop.value.kind, (limitKinds.get(limitStop.value.kind) ?? 0) + 1)
+        toolCalls += sheet.toolCalls.value ?? 0
+        for (const [guard, count] of Object.entries(guardRefusals.byGuard)) byGuard.set(guard, (byGuard.get(guard) ?? 0) + count)
+        if (limitStop) limitKinds.set(limitStop.kind, (limitKinds.get(limitStop.kind) ?? 0) + 1)
         if (failed) {
           terminalFailures += 1
-          if (limitStop.value) terminalAtLimit += 1
+          if (limitStop) terminalAtLimit += 1
         }
         const sessionId = sheet.sessionId ?? sheet.traceId
         const context = ruleContext(group, {
@@ -537,7 +554,7 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
           toolErrors,
           operating: {
             modelCalls: modelCallMeasurement({ contextTokens: contexts, latencyMs: latencies }),
-            guardRefusals: (({ spanIds: _spanIds, ...rest }) => rest)(guardRefusalsSummary(toolCalls, byGuard, [])),
+            guardRefusals: guardRefusalRates(toolCalls, byGuard),
             limitStops: {
               sessions: [...limitKinds.values()].reduce((sum, count) => sum + count, 0),
               byKind: Object.fromEntries([...limitKinds].sort(([a], [b]) => a.localeCompare(b))),

@@ -36,10 +36,7 @@ export function withholdContent(facts: SessionFacts): SessionFacts {
           value: facts.measurements.waste.failingStreaks.value?.map((streak) => ({ ...streak, command: null })) ?? null,
         },
       },
-      limitStop: {
-        ...facts.measurements.limitStop,
-        value: facts.measurements.limitStop.value ? { ...facts.measurements.limitStop.value, text: null } : null,
-      },
+      limitStop: facts.measurements.limitStop ? { ...facts.measurements.limitStop, text: null } : null,
     },
   }
 }
