@@ -98,10 +98,12 @@ describe('graph observations through maintained readers', () => {
   it('exports the real workflow reader and relationship projection to the Runtime consumer', async () => {
     const { fixture, session } = await sessionWithChild()
     const selection = await collectSessionSelection([{ adapter: session.adapter, refs: [session.ref] }], {
-      workflow: true, parents: false, home: fixture.home,
+      workflow: true, parents: false, home: fixture.home, bindSources: true,
     })
     expect(selection.workflow?.complete).toBe(true)
     expect(selection.rows).toHaveLength(1)
+    expect(selection.rows[0]!.sourceSha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(selection.rows[0]!.sourceFiles!.length).toBeGreaterThanOrEqual(2)
     expect(describeSessionRelationship(session.ref, selection.rows[0]!.spans).sessionId).toBe(TOKEN_IDS.claude)
     const metadata = computeSessionFacts(selection.rows[0]!.spans, { includeSubagents: true, includeContent: false })
     expect(metadata).toHaveLength(2)
