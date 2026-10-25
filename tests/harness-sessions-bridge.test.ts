@@ -1,7 +1,6 @@
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { resolveAdapter } from '../src/registry.js'
 import { parseSession } from '../src/session-source.js'
@@ -12,11 +11,10 @@ const row = (timestamp: number, type: string, payload: Record<string, unknown>) 
   JSON.stringify({ timestamp, message: { type, payload } })
 
 describe('shared native-session bridge', () => {
-  it.runIf(process.env.TRACES_KIMI_CAPTURE_HOME && process.env.TRACES_RUNTIME_MODULE)('reads the SDK-owned real parent and child wires through selection, canonical spans, facts and the built CLI', async () => {
+  it.runIf(process.env.TRACES_KIMI_CAPTURE_HOME)('reads the SDK-owned real parent and child wires through selection, canonical spans, facts and the built CLI', async () => {
     // The sole retained/redacted capture is owned by agent-sdk's Kimi fixture;
     // qualification supplies its HOME layout instead of copying it into Traces.
     const home = process.env.TRACES_KIMI_CAPTURE_HOME!
-    const runtimeModule = process.env.TRACES_RUNTIME_MODULE!
     const adapter = resolveAdapter('kimi')!
     const parent = await adapter.locateBySessionId!('parent', { home })
     expect(parent).toHaveLength(1)
@@ -49,17 +47,17 @@ describe('shared native-session bridge', () => {
     expect(report.sessions.reduce((sum: number, fact: { toolCalls: { value: number | null } }) => sum + (fact.toolCalls.value ?? 0), 0)).toBe(112)
     const registryRoot = join(state, 'registry')
     const observed = await runCli(['graphs', 'parent', '--harness', 'kimi', '--out', registryRoot,
-      '--runtime-module', runtimeModule, '--format', 'json'], { env: { HOME: home, XDG_STATE_HOME: state } })
+      '--format', 'json'], { env: { HOME: home, XDG_STATE_HOME: state } })
     expect(observed.code, observed.stderr).toBe(0)
     expect(JSON.parse(observed.stdout)).toMatchObject({ recordCount: 1, ingested: 1 })
-    const owner = await import(runtimeModule.startsWith('file:') ? runtimeModule : pathToFileURL(runtimeModule).href)
+    const owner = await import('@tangle-network/agent-runtime/kernel')
     const registry = owner.graphRegistry(registryRoot)
     const records = await owner.listGraphRuns(registry)
     expect(records).toHaveLength(1)
-    const graph = await owner.loadGraph(registry, records[0].graphDigest)
-    expect(graph.nodes).toHaveLength(3)
-    expect(graph.edges).toHaveLength(0)
-    expect(records[0].unknowns.join(' ')).toContain('parent/child topology may be incomplete')
+    const graph = await owner.loadGraph(registry, records[0]!.graphDigest)
+    expect(graph?.nodes).toHaveLength(3)
+    expect(graph?.edges).toHaveLength(0)
+    expect(records[0]!.unknowns?.join(' ')).toContain('parent/child topology may be incomplete')
   })
   it('analyzes Kimi with a real human prompt, model usage, and a tool result', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-kimi-bridge-'))

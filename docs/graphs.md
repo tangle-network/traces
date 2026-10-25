@@ -5,7 +5,7 @@
 `traces graphs` observes sessions through the existing readers and stores Runtime's `StoredGraph` and `GraphRunRecord`. The existing span-run tree owns execution boundaries: sessions, agents and recorded workflow phases become nodes. Parent edges retain containment without claiming delegation. Node tokens are exclusive: summing a parent and its children never counts a child's usage twice. Missing identity, timing, usage and relationships remain explicit unknowns.
 
 ```bash
-traces graphs --since 7d --out corpus --runtime-module /path/to/runtime/dist/kernel.js
+traces graphs --since 7d --out corpus
 traces graphs --registry corpus --task-type bugfix --format json
 ```
 
@@ -13,7 +13,7 @@ A selection ingests one session tree at a time and byte-binds each selected sour
 
 Task type is explicit. A source's final message or successful tool result does not prove delivery: newly ingested sessions have unknown outcomes until an owner attaches independently checked merge or served-release evidence. Unknown outcomes are excluded from delivered-rate denominators and counted beside each group. Ranking uses delivered rate, median wall minutes, tokens and human messages; median minutes to merge stays null without a verified merge time. Run links accompany every group. Exact repository-qualified PR command references are retained as `pr-created-command` or `pr-merge-command` evidence; these are observations for an independent GitHub join, never delivery labels.
 
-The currently pinned Runtime predates corpus ingestion. Until a compatible Runtime release is published, pass `--runtime-module` pointing to its exact built or packed **public** `dist/kernel.js`. A missing API exits 2 with an actionable setup error. Source PR merges do not publish packages. Observed graphs cannot become replay candidates.
+The declared Runtime dependency supplies corpus ingestion and queries through its installed public kernel. To use another compatible build, pass `--runtime-module` pointing to its exact built or packed **public** `dist/kernel.js`. A missing API exits 2 with an actionable setup error. Source PR merges do not publish packages. Observed graphs cannot become replay candidates.
 
 `--discovery-index PATH` streams Discovery’s maintained `run-index.jsonl` or host run catalog. Directory locations retain existing OTLP when present; otherwise they reuse the existing Runtime supervisor reader and normalize its recorded nodes into the same spans. The two sources are never added together. Recursive OTLP discovery prunes confirmed Git metadata, including bare repositories, while retaining loose and nested exports; explicitly named files remain readable. Named Runtime run directories use that reader too. Unavailable journals remain run containers with unknown topology and usage; a `winner` state does not establish software delivery. Missing start/registration timestamps stay unreadable, never replaced with index time. Driver usage excludes child-inclusive settlement totals, and absent channels remain unknown. No second journal parser or index is maintained.
 

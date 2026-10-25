@@ -52,30 +52,29 @@ describe('graph observations through maintained readers', () => {
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 
-  it.runIf(process.env.TRACES_RUNTIME_MODULE)('ingests native and Pi workflow sources through the built CLI and real Runtime registry', async () => {
+  it('ingests native and Pi workflow sources through the built CLI and real Runtime registry', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-graphs-cli-'))
     const { fixture } = await sessionWithChild()
-    const module = process.env.TRACES_RUNTIME_MODULE!
     const pi = fileURLToPath(new URL('./fixtures/pi-workflow/run.json', import.meta.url))
     try {
-      const first = await runCli(['graphs', fixture.claude, '--out', dir, '--runtime-module', module, '--format', 'json'], { env: fixture.env })
+      const first = await runCli(['graphs', fixture.claude, '--out', dir, '--format', 'json'], { env: fixture.env })
       expect(first.code, first.stderr).toBe(0)
       expect(JSON.parse(first.stdout)).toMatchObject({ recordCount: 1, ingested: 1, factScope: 'whole-session', accountingCutoffApplied: false })
-      const second = await runCli(['graphs', fixture.claude, '--out', dir, '--runtime-module', module, '--format', 'json'], { env: fixture.env })
+      const second = await runCli(['graphs', fixture.claude, '--out', dir, '--format', 'json'], { env: fixture.env })
       expect(second.code, second.stderr).toBe(0)
       expect(JSON.parse(second.stdout)).toMatchObject({ recordCount: 1, ingested: 0, cached: 1 })
-      const workflow = await runCli(['graphs', pi, '--out', dir, '--runtime-module', module, '--format', 'json'])
+      const workflow = await runCli(['graphs', pi, '--out', dir, '--format', 'json'])
       expect(workflow.code, workflow.stderr).toBe(0)
       const report = JSON.parse(workflow.stdout)
       expect(report.recordCount).toBe(2)
       expect(report.groups.every((group: { deliveredRate: unknown }) => group.deliveredRate === null)).toBe(true)
-      const query = await runCli(['graphs', '--registry', dir, '--runtime-module', module, '--format', 'json'])
+      const query = await runCli(['graphs', '--registry', dir, '--format', 'json'])
       expect(query.code, query.stderr).toBe(0)
       expect(JSON.parse(query.stdout).recordCount).toBe(2)
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 
-  it.runIf(process.env.TRACES_RUNTIME_MODULE)('keeps a named child scope distinct from a cached discovered workflow', async () => {
+  it('keeps a named child scope distinct from a cached discovered workflow', async () => {
     const fixture = await makeTokenHome()
     const registry = join(fixture.home, 'corpus')
     const childId = '0199f7c0-dddd-7ddd-8ddd-dddddddddd78'
@@ -97,7 +96,7 @@ describe('graph observations through maintained readers', () => {
     await utimes(fixture.codex, new Date('2026-10-14T11:01:00Z'), new Date('2026-10-14T11:01:00Z'))
     await utimes(childPath, new Date('2026-10-14T11:02:00Z'), new Date('2026-10-14T11:02:00Z'))
     const options = { env: fixture.env, cli: process.env.TRACES_GRAPH_CACHE_CLI }
-    const flags = ['--harness', 'codex', '--out', registry, '--runtime-module', process.env.TRACES_RUNTIME_MODULE!, '--format', 'json']
+    const flags = ['--harness', 'codex', '--out', registry, '--format', 'json']
     type Run = { source: { id: string }; nodeUsage: Array<{ sourceId?: string }>; graphDigest: string; cost: { inputTokens: number; outputTokens: number } }
     const runs = (report: { groups: Array<{ runs: Run[] }> }): Run[] => report.groups.flatMap((group) => group.runs)
     try {
@@ -186,14 +185,5 @@ describe('graph observations through maintained readers', () => {
       expect(reference.url).toBe(repository ? 'https://github.com/acme/other/pull/12' : null)
       if (!repository) expect(reference.repositoryUnavailable).toContain('disagree')
     }
-  })
-
-  it('fails closed with an actionable setup error against the installed Runtime before reading a session', async () => {
-    const run = await runCli(['graphs', '--last', '1', '--format', 'json'], { env: { HOME: '/no-session-store' } })
-    expect(run.code).toBe(2)
-    expect(run.stdout).toBe('')
-    const error = JSON.parse(run.stderr)
-    expect(error.code).toBe('setup')
-    expect(error.error).toContain('--runtime-module')
   })
 })

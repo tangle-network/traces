@@ -64,7 +64,7 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
   let cached = 0
   if (selected) {
     if (!owner.graphFromSessionFacts || !owner.recordStoredGraphRun) throw new CliError(
-      'Runtime public module lacks graph corpus ingestion; use --runtime-module /path/to/built/dist/kernel.js until the corpus API is published', 'setup')
+      'Runtime public module lacks graph corpus ingestion; use --runtime-module /path/to/built/dist/kernel.js', 'setup')
     const seen = new Set<string>()
     const cache = await GraphSourceCache.load(registry.root)
     const existingSources = new Set((await owner.listGraphRuns(registry)).map((record) => {
@@ -152,7 +152,7 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
     }
   }
   if (!owner.graphCorpusSummary) throw new CliError(
-    'Runtime public module lacks graphCorpusSummary; use --runtime-module /path/to/built/dist/kernel.js until the corpus query is published', 'setup')
+    'Runtime public module lacks graphCorpusSummary; use --runtime-module /path/to/built/dist/kernel.js', 'setup')
   const summary = await owner.graphCorpusSummary(registry, { taskType: args.taskType, topologyDigest: args.shape })
   const report = { ...summary, registry: registry.root, ingested, cached, unreadSessions: unread,
     factScope: 'whole-session', selectionWindow: { since: args.since ?? null, until: args.until ?? null },
