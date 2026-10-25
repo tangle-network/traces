@@ -48,7 +48,7 @@ export function subagentLifecycleSpan(
     // The transcript records what the child did, not whether the parent
     // accepted it; the parent's own tool span carries that status.
     status: 'UNSET',
-    service: SERVICE,
+    service: 'claude-code',
     agent: agent.meta.agentType ? `subagent:${agent.meta.agentType}` : 'subagent',
     extra: {
       ...toolIoAttributes({
