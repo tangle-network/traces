@@ -251,8 +251,13 @@ describe('Claude Workflow subagents', () => {
     const workflowCalls = all.filter(
       (item) => item.attributes['tool.name'] === 'Workflow',
     )
-    const childParent = (content: string) =>
-      all.find((item) => item.attributes.content === content)?.parent_span_id
+    const childParent = (content: string) => {
+      const child = all.find((item) => item.attributes.content === content)!
+      const lifecycle = all.find((item) => item.span_id === child.parent_span_id)!
+      expect(lifecycle.name).toBe('subagent.lifecycle')
+      expect(lifecycle.attributes['openinference.span.kind']).toBe('AGENT')
+      return lifecycle.parent_span_id
+    }
 
     expect(workflowCalls).toHaveLength(3)
     expect(childParent('INITIAL-A WORKFLOW TASK')).toBe(workflowCalls[0]?.span_id)
@@ -319,7 +324,10 @@ describe('Claude Workflow subagents', () => {
     )
 
     expect(calls).toHaveLength(2)
-    expect(child?.parent_span_id).toBe(calls[1]?.span_id)
+    const lifecycle = spans.find((item) => item.span_id === child?.parent_span_id)!
+    expect(lifecycle.name).toBe('subagent.lifecycle')
+    expect(lifecycle.attributes['openinference.span.kind']).toBe('AGENT')
+    expect(lifecycle.parent_span_id).toBe(calls[1]?.span_id)
     expect(contents(latest)).toContain('CURRENT WORKFLOW ANSWER')
     expect(contents(previous)).not.toContain('CURRENT WORKFLOW ANSWER')
     expect(sourcePaths).toEqual(expect.arrayContaining([

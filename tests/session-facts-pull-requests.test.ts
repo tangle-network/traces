@@ -239,6 +239,9 @@ describe('session facts: pull requests', () => {
       task(7, 'task_complete', 'turn-1'),
     ])
     expect(ids(facts.pullRequests.value!.created)).toEqual(['44'])
+    const [created] = facts.pullRequests.value!.created
+    expect(created!.url).toBe('https://example.test/acme/demo/pull/44')
+    expect(created!.spanIds.length).toBeGreaterThan(1)
   })
 
   it('says the spans cannot answer when none of them carries a command', async () => {

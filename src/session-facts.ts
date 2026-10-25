@@ -310,7 +310,7 @@ export interface SessionFacts {
   /** Every `user.prompt` turn by actor, so the human filter is checkable. */
   readonly turnsByActor: SessionFact<readonly TurnActorCount[]>
   /** Typed turns after the shared classifier: human, fleet, relay; metadata only. */
-  readonly typedTurnCounts: SessionFact<readonly TurnActorCount[]>
+  readonly typedTurnCounts: SessionFact<readonly Pick<TurnActorCount, 'actor' | 'turns'>[]>
   /** The last message of the session's own agent, and of each subagent task. */
   readonly finalMessages: SessionFact<readonly FinalMessageFact[]>
   readonly changedFiles: SessionFact<readonly ChangedFileFact[]>
@@ -975,8 +975,8 @@ function readSession(
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
     actorCounts.set(actor, [...(actorCounts.get(actor) ?? []), span.span_id])
   }
-  const typedCounts = new Map<string, string[]>()
-  for (const turn of typedTurns) typedCounts.set(turn.author, [...(typedCounts.get(turn.author) ?? []), turn.spanId])
+  const typedCounts = new Map<string, number>()
+  for (const turn of typedTurns) typedCounts.set(turn.author, (typedCounts.get(turn.author) ?? 0) + 1)
   const finalMessages = finalMessagesOf(spans)
   const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, ownSpans)
 
@@ -1088,7 +1088,7 @@ function readSession(
       : { value: null, spanIds: [], unavailable: pullRequests.unavailable ?? 'unread' },
     humanTurns: sourceChannelUnavailable(ownSpans, 'human-turns') ? { value: null, spanIds: [], unavailable: 'The source does not record human turns.' } : listFact(humanTurns, humanTurns.map((turn) => turn.spanId)),
     excludedTurns: listFact(excludedTurns, excludedTurns.flatMap((entry) => entry.spanIds)),
-    typedTurnCounts: sourceChannelUnavailable(ownSpans, 'human-turns') ? { value: null, spanIds: [], unavailable: 'The source does not record typed turns.' } : listFact([...typedCounts].map(([actor, spanIds]) => ({ actor, turns: spanIds.length, spanIds })), typedTurns.map((turn) => turn.spanId)),
+    typedTurnCounts: sourceChannelUnavailable(ownSpans, 'human-turns') ? { value: null, spanIds: [], unavailable: 'The source does not record typed turns.' } : listFact([...typedCounts].map(([actor, turns]) => ({ actor, turns })), []),
     turnsByActor: listFact(
       [...actorCounts]
         .sort(([left], [right]) => left.localeCompare(right))

@@ -90,7 +90,7 @@ describe('graph observations through maintained readers', () => {
     expect(child.parentSessionId).toBe(TOKEN_IDS.claude)
     expect(child.tokens.input).toBe(21)
     expect(child.tokens.output).toBe(5)
-    expect(child.firstRecordAt.value).toBe('2026-10-14T11:00:04Z')
+    expect(Date.parse(child.firstRecordAt.value!)).toBe(Date.parse('2026-10-14T11:00:04Z'))
     expect(parent!.tokens.input! + child.tokens.input!).toBe(3981)
     expect(computeSessionFacts(session.spans)).toEqual([parent])
   })

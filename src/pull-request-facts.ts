@@ -552,8 +552,17 @@ function identify(event: PullRequestEvent): PullRequestFact {
  */
 function distinct(events: readonly PullRequestEvent[]): PullRequestFact[] {
   const groups = new Map<string, PullRequestEvent[]>()
+  const identity = (event: PullRequestEvent): string =>
+    JSON.stringify([event.repository, event.number ?? event.headBranch ?? `command:${event.command}`])
   for (const event of events) {
-    const key = JSON.stringify([event.repository, event.number ?? event.headBranch ?? `command:${event.command}`])
+    // A failed identical create has no PR of its own. A unique successful retry
+    // supplies the displayed identity; never assign its repository to the failed event.
+    const retries = event.action === 'create' && event.failed && event.number === null && event.headBranch !== null
+      ? events.filter((other) => !other.failed && other.number !== null && other.command === event.command
+          && other.headBranch === event.headBranch && (event.repository === null || other.repository === event.repository))
+      : []
+    const identities = new Set(retries.map(identity))
+    const key = identities.size === 1 ? [...identities][0]! : identity(event)
     groups.set(key, [...(groups.get(key) ?? []), event])
   }
   return [...groups.values()].map((group) => {

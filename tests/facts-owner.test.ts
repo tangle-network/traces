@@ -215,7 +215,7 @@ describe('the price table loads only to price a sheet', () => {
     const run = await runCli(argv, { env: { ...env, TRACES_IMPORT_LOG: log, NODE_OPTIONS: `--import ${hook}` } })
     expect(run.code, run.stderr).toBe(0)
     const urls = (await readFile(log, 'utf8')).split('\n')
-    expect(urls.length).toBeGreaterThan(100)
+    expect(urls).toContain('trace-price-import-probe-ready')
     return urls.some((url) => url.endsWith('/agent-runtime/dist/index.js'))
   }
 
