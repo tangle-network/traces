@@ -88,6 +88,16 @@ export const SESSION_TOTAL_CACHED_INPUT_ATTR = 'traces.session.total_cached_inpu
 export const SESSION_TOTAL_CACHE_WRITE_ATTR = 'traces.session.total_cache_write_input_tokens'
 export const SESSION_TOTAL_REASONING_ATTR = 'traces.session.total_reasoning_tokens'
 
+/**
+ * A turn span whose usage is the sum of its own model-call child spans (cli-bridge writes one LLM span per call
+ * and marks the turn). Readers sum the calls and skip the marked turn, or every token counts twice.
+ */
+export const USAGE_SCOPE_ATTR = 'cli_bridge.usage.scope'
+export const USAGE_SCOPE_SUM_OF_CHILDREN = 'sum_of_children'
+export function isUsageAggregate(attributes: Record<string, unknown>): boolean {
+  return attributes[USAGE_SCOPE_ATTR] === USAGE_SCOPE_SUM_OF_CHILDREN
+}
+
 /** `tangle.ingest_source` value for CLI-uploaded traces. Wire contract. */
 export const INGEST_SOURCE_CLI = 'cli'
 
