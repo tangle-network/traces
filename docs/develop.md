@@ -4,14 +4,14 @@
 
 ## Local merge gate
 
-`he gate fetches the pushed revision and installs frozen dependencies. Build before tests, which spawn the CLI.
+The gate fetches the pushed revision and installs frozen dependencies. Build before tests, which spawn the CLI.
 
 ```bash
 beelink-gate auto https://github.com/tangle-network/traces.git <full-commit-sha> -- bash -euc \
   'pnpm check:source && pnpm typecheck && pnpm build && pnpm test && pnpm run verify:contracts-corpus && pnpm check:package'
 ```
 
-PRs and branch pushes run no CI. `he corpus checks real trace fixtures; `check:package` checks the packed CLI. Use the package's Node engine range; tag publication retains its own runtime and qualification.
+PRs and branch pushes run no CI. The corpus checks real trace fixtures; `check:package` checks the packed CLI. Use the package's Node engine range; tag publication retains its own runtime and qualification.
 
 ## Release
 
