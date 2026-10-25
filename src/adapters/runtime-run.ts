@@ -3,11 +3,11 @@ import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR } from '../attributes.js'
 import { span, type OtlpSpan } from '../otlp.js'
 import { SUBSTITUTED_FIELDS_ATTR } from '../otlp-input.js'
-import { readRunContextSnapshot } from '../supervisor-run-context.js'
 
 export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string): Promise<{
   spans: OtlpSpan[]; unknowns: string[]
 }> {
+  const { readRunContextSnapshot } = await import('../supervisor-run-context.js')
   const snapshot = await readRunContextSnapshot(runDir)
   const unknowns = [
     'Runtime parent relationships establish containment, not delegation.',
@@ -53,7 +53,7 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
       },
     }))
   }
-  if (spans[0]) spans[0].attributes['traces.source.unknowns'] = JSON.stringify([...new Set(unknowns)])
+  if (spans[0]) Object.assign(spans[0].attributes, { [ATTR.CORRUPTION_COUNT]: snapshot.invalidJournalRows, 'traces.source.partial_tail': snapshot.partialTail, 'traces.source.unknowns': JSON.stringify([...new Set(unknowns)]) })
   return { spans, unknowns: [...new Set(unknowns)] }
 }
 
@@ -71,5 +71,6 @@ export async function readRuntimeRunDirectory(path: string): Promise<OtlpSpan[]>
     const reasons = typeof value === 'string' ? JSON.parse(value) as string[] : []
     spans[0].attributes['traces.source.unknowns'] = JSON.stringify([...reasons, `${directories.length - 100} run directories exceed the 100-run read bound`])
   }
+  if (spans.length === 0) throw new Error('No readable Runtime supervisor journal nodes with recorded timing were found')
   return spans
 }

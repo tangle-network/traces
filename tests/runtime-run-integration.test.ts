@@ -1,5 +1,5 @@
 /** Maintained file journal → shared contract spans → canonical tree and facts. */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
@@ -32,5 +32,8 @@ it('reads a named Runtime run through its owner without summing child-inclusive 
     expect(JSON.stringify(spans)).not.toContain('PRIVATE_LABEL')
     expect(facts.every((fact) => fact.humanTurns.value === null && fact.toolCalls.value === null)).toBe(true)
     expect(facts.every((fact) => fact.tokens.cacheRead === null && fact.tokens.cacheWrite === null)).toBe(true)
+    await appendFile(join(dir, 'spawn-journal.jsonl'), '{invalid}\n')
+    const partial = computeSessionFacts(await readRefSpans(dir), { includeSubagents: true })
+    expect(partial.reduce((sum, fact) => sum + (fact.unreadRecords.value ?? 0), 0)).toBe(1)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
