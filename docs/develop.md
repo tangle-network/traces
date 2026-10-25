@@ -2,11 +2,7 @@
 
 [traces](../README.md#docs) › Develop and release
 
-## Develop
-
-Use `pnpm dev facts --current` to run from source. `ests exercise the CLI process and SDK boundaries.
-
-### Local merge gate
+## Local merge gate
 
 `he gate fetches the pushed revision and installs frozen dependencies. Build before tests, which spawn the CLI.
 
