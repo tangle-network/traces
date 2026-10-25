@@ -54,34 +54,30 @@ export async function appendClaudeWorkflowJournals(options: {
       if (key && id) { const ids = agentByKey.get(key) ?? new Set<string>(); ids.add(id); agentByKey.set(key, ids) }
     }
     const agents = new Map<string, Row[]>()
-    const phases = new Map<string, Row[]>()
     for (const row of rows) {
       const byKey = text(row.key) ? agentByKey.get(text(row.key)!) : undefined
       const agent = text(row.agentId) ?? (byKey?.size === 1 ? [...byKey][0] : undefined)
       if (agent) { const events = agents.get(agent) ?? []; events.push(row); agents.set(agent, events) }
-      // A phase lifecycle without an agent is distinct from a phase name on
-      // an agent call. The latter establishes association, not phase clocks.
-      else if (text(row.phase) && text(row.key)) { const events = phases.get(text(row.key)!) ?? []; events.push(row); phases.set(text(row.key)!, events) }
-      else unknowns.push('Workflow journal event has no unambiguous agent or phase identity')
+      else unknowns.push('Workflow journal event has no unambiguous agent identity; phase association does not establish phase lifecycle timing')
     }
-    for (const [key, events, isAgent] of [...[...agents].map(([key, events]) => [key, events, true] as const), ...[...phases].map(([key, events]) => [key, events, false] as const)]) {
+    for (const [key, events] of agents) {
       const start = events.filter((row) => row.kind === 'started' || row.kind === 'launched').map(instant).find((value) => !!value)
       const end = [...events].reverse().filter((row) => row.kind === 'result' || row.kind === 'failed').map(instant).find((value) => !!value)
       if (!start || (end && Date.parse(end) < Date.parse(start))) { unknowns.push('Workflow lifecycle lacks a valid recorded start/end interval'); continue }
       const phaseNames = [...new Set(events.map((row) => text(row.phase)).filter((value): value is string => !!value))]
-      const anchors = isAgent ? options.spans.filter((item) => item.attributes['traces.claude.subagent_agent_id'] === key
-        && String(item.attributes['traces.claude.subagent_transcript'] ?? '').split(/[\\/]/).includes(runId)) : []
+      const anchors = options.spans.filter((item) => item.attributes['traces.claude.subagent_agent_id'] === key
+        && String(item.attributes['traces.claude.subagent_transcript'] ?? '').split(/[\\/]/).includes(runId))
       const metadata = { 'traces.workflow.run_id': runId, 'traces.workflow.lifecycle_key': key,
         ...(phaseNames.length === 1 ? { 'traces.workflow.phase': phaseNames[0] } : {}) }
       if (anchors.length === 1) { Object.assign(anchors[0]!.attributes, metadata); continue }
       if (anchors.length > 1) { unknowns.push('Workflow agent ID has multiple native transcript anchors'); continue }
-      options.spans.push(span({ traceId: options.traceId, spanId: `workflow:${runId}:${isAgent ? 'agent' : 'phase'}:${key}`,
-        parentSpanId: parents[0], name: isAgent ? 'workflow.agent' : 'workflow.phase', kind: isAgent ? 'AGENT' : 'CHAIN',
+      options.spans.push(span({ traceId: options.traceId, spanId: `workflow:${runId}:agent:${key}`,
+        parentSpanId: parents[0], name: 'workflow.agent', kind: 'AGENT',
         startTime: start, ...(end ? { endTime: end } : {}), status: events.some((row) => row.kind === 'failed') ? 'ERROR' : 'UNSET',
         service: 'claude-code', extra: { ...metadata, 'agent.parent.confidence': 'explicit', [SOURCE_MISSING_CHANNELS_ATTR]: JSON.stringify(['human-turns', 'tool-calls']), [SUBAGENT_SPAN_ATTR]: true,
           ...(!end ? { [SUBSTITUTED_FIELDS_ATTR]: 'end_time' } : {}) } }))
     }
-    if (agents.size > 0 && phases.size === 0) unknowns.push('Workflow agent phase associations have no separate recorded phase lifecycle; phase timings remain unknown')
+    if (agents.size > 0) unknowns.push('Workflow agent phase associations have no separate recorded phase lifecycle; phase timings remain unknown')
     unknowns.push('Workflow journal lifecycle does not establish complete tool coverage, provider usage or software delivery')
   }
   if (invalidRows && options.spans[0]) options.spans[0].attributes[ATTR.CORRUPTION_COUNT] = Number(options.spans[0].attributes[ATTR.CORRUPTION_COUNT] ?? 0) + invalidRows

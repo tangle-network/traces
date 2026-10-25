@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { span, serializeSpans } from '../src/otlp.js'
+import { readOtlpInput } from '../src/otlp-input.js'
 import { describe, expect, it } from 'vitest'
 import { buildSpanRunTree, collectSessionSelection, computeSessionFacts, describeSessionRelationship, parseSession, scanSessions } from '../src/index.js'
 import { makeTokenHome, TOKEN_IDS } from './fixtures/tokens.js'
@@ -28,6 +30,28 @@ async function sessionWithChild() {
 }
 
 describe('graph observations through maintained readers', () => {
+  it('preserves recorded anonymous CHAIN phases through file ingestion and exclusive facts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-phase-'))
+    const path = join(dir, 'phases.jsonl')
+    const traceId = '11111111111111111111111111111111'
+    const startTime = '2026-01-01T00:00:00Z'
+    const root = span({ traceId, spanId: '2222222222222222', name: 'run', kind: 'AGENT', startTime })
+    const phase = span({ traceId, spanId: '3333333333333333', parentSpanId: root.span_id, name: 'workflow.phase', kind: 'CHAIN', startTime })
+    const call = span({ traceId, spanId: '4444444444444444', parentSpanId: phase.span_id, name: 'provider.call', kind: 'LLM', startTime, inputTokens: 31, outputTokens: 7 })
+    try {
+      await writeFile(path, serializeSpans([root, phase, call]))
+      const spans = (await readOtlpInput(path)).spans
+      const tree = buildSpanRunTree(spans, path)
+      expect(tree.nodes.map((node) => node.kind)).toEqual(['AGENT', 'CHAIN'])
+      const facts = computeSessionFacts(spans, { includeSubagents: true })
+      expect(facts).toHaveLength(2)
+      expect(facts.every((fact) => fact.sessionId === null)).toBe(true)
+      expect(facts.find((fact) => fact.rootSpanId.value === phase.span_id)?.tokens.input).toBe(31)
+      expect(facts.reduce((sum, fact) => sum + (fact.tokens.input ?? 0), 0)).toBe(31)
+      expect(facts.every((fact) => fact.traceId === traceId)).toBe(true)
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+
   it.runIf(process.env.TRACES_RUNTIME_MODULE)('ingests native and Pi workflow sources through the built CLI and real Runtime registry', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-graphs-cli-'))
     const { fixture } = await sessionWithChild()

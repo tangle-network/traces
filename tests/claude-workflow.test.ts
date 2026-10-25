@@ -114,7 +114,7 @@ function writeWorkflowChild(
 }
 
 describe('Claude Workflow subagents', () => {
-  it('ingests journal phases and call metadata through the existing native reader without duplicating transcript nodes', async () => {
+  it('ingests journal call metadata and preserves phase-timing unknowns through the existing native reader without duplicating transcript nodes', async () => {
     const path = join(dir, 'journalled.jsonl')
     const workflowDir = join(dir, 'journalled', 'subagents', 'workflows', 'wf-journalled')
     writeWorkflowChild(workflowDir, 'journalled', '00')
@@ -130,10 +130,10 @@ describe('Claude Workflow subagents', () => {
     expect(await adapter.sourcePaths(refFor(path))).toContain(join(workflowDir, 'journal.jsonl'))
     expect(spans.filter((item) => item.name === 'subagent.lifecycle')).toHaveLength(1)
     expect(spans.filter((item) => item.name === 'workflow.agent')).toHaveLength(0)
-    const phase = spans.find((item) => item.name === 'workflow.phase')!
-    expect(phase.end_time).toBe('2026-01-01T00:00:05.000Z')
-    expect(buildSpanRunTree(spans, path).nodes).toHaveLength(3)
-    expect(computeSessionFacts(spans, { includeSubagents: true })).toHaveLength(3)
+    expect(spans.some((item) => item.name === 'workflow.phase')).toBe(false)
+    expect(String(spans[0]?.attributes['traces.source.unknowns'])).toContain('phase lifecycle')
+    expect(buildSpanRunTree(spans, path).nodes).toHaveLength(2)
+    expect(computeSessionFacts(spans, { includeSubagents: true })).toHaveLength(2)
     expect(JSON.stringify(spans)).not.toContain('PRIVATE_JOURNAL_')
   })
 
