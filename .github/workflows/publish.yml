@@ -18,8 +18,12 @@ concurrency:
 jobs:
   prepare:
     uses: tangle-network/traces/.github/workflows/qualify-release.yml@9563a87e4cafc5bbd4b4d5edc27f90b1835bc217
+    # A ceiling, not a grant: GitHub checks every job of the called workflow
+    # against it, skipped ones included, and qualify-release's github-release
+    # job asks for contents: write, so read here fails the run at startup.
+    # The prepare job itself declares contents: read and gets only that.
     permissions:
-      contents: read
+      contents: write
     with:
       existing_tag: ${{ inputs.existing_tag }}
 
