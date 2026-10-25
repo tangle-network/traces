@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   prepare:
-    uses: tangle-network/traces/.github/workflows/qualify-release.yml@23dbfb72db46dba7c481763dcf88bc6978e2f9db
+    uses: tangle-network/traces/.github/workflows/qualify-release.yml@b59d06fd2e20cfe5f2eb43b2962b21b4c4eb13eb
     # A ceiling, not a grant: GitHub checks every job of the called workflow
     # against it, skipped ones included, and qualify-release's github-release
     # job asks for contents: write, so read here fails the run at startup.
@@ -54,7 +54,7 @@ jobs:
   github-release:
     needs: [prepare, publish]
     if: always() && needs.prepare.result == 'success' && (needs.publish.result == 'success' || needs.prepare.outputs.exists == 'true')
-    uses: tangle-network/traces/.github/workflows/qualify-release.yml@23dbfb72db46dba7c481763dcf88bc6978e2f9db
+    uses: tangle-network/traces/.github/workflows/qualify-release.yml@b59d06fd2e20cfe5f2eb43b2962b21b4c4eb13eb
     permissions:
       contents: write
     with:
