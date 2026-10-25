@@ -754,5 +754,14 @@ describe('traces CLI', () => {
       'same-failing-command',
       'verification-without-change',
     ])
+
+    // --spans adds each span once, as the OTLP-JSONL contract, after its session and before its findings.
+    const withSpans = parseRows((await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch', input, '--once', '--format', 'jsonl', '--spans'], {
+      cwd: process.cwd(), env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' }, maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
+    })).stdout)
+    expect(withSpans.map((row) => row.event)).toEqual(['session', 'span', 'span', 'span', 'span', 'span', 'span', 'finding', 'finding', 'finding', 'tick'])
+    const streamed = withSpans.filter((row) => row.event === 'span').map((row) => row.span as Record<string, unknown>)
+    expect(streamed.map((row) => row.span_id).sort()).toEqual(['claim', 'edit', 'root', 'test-1', 'test-2', 'test-3'])
+    expect(withSpans.find((row) => row.event === 'span')!.kind).toBe('traces.stream.span')
   })
 })

@@ -104,6 +104,8 @@ export interface Args {
   /** `check --share-safe`: read each ref as bytes and give its share verdict. */
   shareSafe: boolean
   once: boolean
+  /** `watch --spans`: emit span deltas in the jsonl stream, reading every second. */
+  spans: boolean
   dryRun: boolean
   yes: boolean
   unused: boolean
@@ -124,6 +126,7 @@ function emptyArgs(command: string): Args {
     contracts: [],
     shareSafe: false,
     once: false,
+    spans: false,
     dryRun: false,
     yes: false,
     unused: false,
@@ -211,6 +214,7 @@ const FLAGS: Readonly<Record<string, Flag>> = {
     set: (a) => { a.shareSafe = true },
   },
   '--once': { help: 'one pass, then exit', set: (a) => { a.once = true } },
+  '--spans': { help: 'with --format jsonl: a span event for each new or changed span', set: (a) => { a.spans = true } },
   '--dry-run': { help: 'redact and preview; send nothing', set: (a) => { a.dryRun = true } },
   '--yes': { help: 'skip the confirmation prompt', set: (a) => { a.yes = true } },
   '--unused': { help: 'only installed skills with no use in the window', set: (a) => { a.unused = true } },
@@ -418,6 +422,7 @@ const COMMANDS = [
       { flag: '--since', help: 'sessions active in the last T (default 30m; it slides with time), or since an ISO time' },
       '--cwd', { flag: '--harness', help: "only this harness's sessions; with a file ref, force its reader" },
       { flag: '--once', help: 'one pass, then exit' },
+      { flag: '--spans', help: 'with --format jsonl: also a span event for each new or changed span, reading every 1 s for live views' },
       { flag: '--format', help: 'text (default): a line per new finding, or the run tree; jsonl: the traces.stream events' },
     ],
     formats: ['text', 'jsonl'],
@@ -425,8 +430,9 @@ const COMMANDS = [
     jq: [
       ['select(.event == "finding") | .finding | {severity, ruleId, claim}', 'each new finding'],
       ['select(.event == "tick") | .unreadSessions', 'sessions a pass could not read, and why'],
+      ['select(.event == "span") | .span', 'with --spans: each new or changed span, in the OTLP-JSONL contract'],
     ],
-    examples: ['traces watch --once', 'traces watch runs/my-run --once', 'traces watch --since 2h --format jsonl'],
+    examples: ['traces watch --once', 'traces watch runs/my-run --once', 'traces watch --since 2h --format jsonl', 'traces watch <id> --format jsonl --spans'],
     overview: [['What is happening right now?', 'traces watch [<run-dir>] [--once]']],
   },
   {
