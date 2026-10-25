@@ -1,5 +1,5 @@
 /** Real native reader → public facts SDK, plus the built CLI's graph boundary. */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -7,7 +7,7 @@ import { span, serializeSpans } from '../src/otlp.js'
 import { readOtlpInput } from '../src/otlp-input.js'
 import { describe, expect, it } from 'vitest'
 import { buildSpanRunTree, collectSessionSelection, computeSessionFacts, describeSessionRelationship, parseSession, scanSessions } from '../src/index.js'
-import { makeTokenHome, TOKEN_IDS } from './fixtures/tokens.js'
+import { codexTokensRollout, makeTokenHome, TOKEN_IDS } from './fixtures/tokens.js'
 import { runCli } from './run-cli.js'
 
 async function sessionWithChild() {
@@ -73,6 +73,55 @@ describe('graph observations through maintained readers', () => {
       expect(query.code, query.stderr).toBe(0)
       expect(JSON.parse(query.stdout).recordCount).toBe(2)
     } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+
+  it.runIf(process.env.TRACES_RUNTIME_MODULE)('keeps a named child scope distinct from a cached discovered workflow', async () => {
+    const fixture = await makeTokenHome()
+    const registry = join(fixture.home, 'corpus')
+    const childId = '0199f7c0-dddd-7ddd-8ddd-dddddddddd78'
+    const childPath = join(dirname(fixture.codex), `rollout-2026-10-14T11-00-00-${childId}.jsonl`)
+    const childRows = codexTokensRollout(childId, dirname(fixture.codex)).trim().split('\n').map((line) => JSON.parse(line))
+    Object.assign(childRows[0].payload, { parent_thread_id: TOKEN_IDS.codex, thread_source: 'subagent',
+      source: { subagent: { thread_spawn: { parent_thread_id: TOKEN_IDS.codex, depth: 1 } } } })
+    childRows[1].payload.turn_id = childId
+    childRows.at(-1)!.payload.turn_id = childId
+    const parentRows = (await readFile(fixture.codex, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+    parentRows.splice(6, 0,
+      { timestamp: '2026-10-14T11:00:07.000Z', type: 'response_item', payload: {
+        type: 'function_call', name: 'spawn_agent', call_id: 'cache-scope-child', arguments: '{}' } },
+      { timestamp: '2026-10-14T11:00:07.500Z', type: 'response_item', payload: {
+        type: 'function_call_output', call_id: 'cache-scope-child', output: JSON.stringify({ agent_id: childId }) } })
+    await writeFile(fixture.codex, parentRows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+    await writeFile(childPath, childRows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+    // Discovery must start from the child, not reach it after caching the parent.
+    await utimes(fixture.codex, new Date('2026-10-14T11:01:00Z'), new Date('2026-10-14T11:01:00Z'))
+    await utimes(childPath, new Date('2026-10-14T11:02:00Z'), new Date('2026-10-14T11:02:00Z'))
+    const options = { env: fixture.env, cli: process.env.TRACES_GRAPH_CACHE_CLI }
+    const flags = ['--harness', 'codex', '--out', registry, '--runtime-module', process.env.TRACES_RUNTIME_MODULE!, '--format', 'json']
+    type Run = { source: { id: string }; nodeUsage: Array<{ sourceId?: string }>; graphDigest: string; cost: { inputTokens: number; outputTokens: number } }
+    const runs = (report: { groups: Array<{ runs: Run[] }> }): Run[] => report.groups.flatMap((group) => group.runs)
+    try {
+      // TRACES_GRAPH_CACHE_CLI can select the retained old packed CLI for the deciding red.
+      const discovered = await runCli(['graphs', '--last', '1', ...flags], options)
+      expect(discovered.code, discovered.stderr).toBe(0)
+      const first = JSON.parse(discovered.stdout)
+      expect(first).toMatchObject({ recordCount: 1, ingested: 1, cached: 0, unreadSessions: [] })
+      expect(runs(first)[0]!.source.id).toBe(TOKEN_IDS.codex)
+      expect(runs(first)[0]!.nodeUsage.map((node) => node.sourceId)).toEqual(expect.arrayContaining([TOKEN_IDS.codex, childId]))
+      const named = await runCli(['graphs', childPath, ...flags], options)
+      expect(named.code, named.stderr).toBe(0)
+      const second = JSON.parse(named.stdout)
+      expect(second).toMatchObject({ recordCount: 2, ingested: 1, cached: 0, unreadSessions: [] })
+      const child = runs(second).find((run) => run.source.id === childId)!
+      expect(child).toBeDefined()
+      expect(child.nodeUsage.map((node) => node.sourceId)).toEqual([childId])
+      expect(child.cost).toMatchObject({ inputTokens: 2700, outputTokens: 70 })
+      const repeated = await runCli(['graphs', childPath, ...flags], options)
+      expect(repeated.code, repeated.stderr).toBe(0)
+      const third = JSON.parse(repeated.stdout)
+      expect(third).toMatchObject({ recordCount: 2, ingested: 0, cached: 1, unreadSessions: [] })
+      expect(runs(third).find((run) => run.source.id === childId)).toEqual(child)
+    } finally { await rm(fixture.home, { recursive: true, force: true }) }
   })
 
   it('keeps the default parent facts and emits exclusive child facts with the same token owner', async () => {

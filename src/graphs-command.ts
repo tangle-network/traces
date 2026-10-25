@@ -92,14 +92,15 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
     if (args.fleetRun && (named.length !== 1 || args.discoveryIndex || args.selection?.spans.length)) throw new UsageError('--fleet-run requires exactly one named native session; it binds a run ID, not a reusable lane ID')
     const found = args.discoveryIndex && args.refs.length === 0 && !args.current && !args.last ? { sessions: [], unread: [] } : named.length ? { sessions: named, unread: [] } : args.selection?.spans.length ? { sessions: [], unread: [] } : await readers.discover()
     unread.push(...found.unread)
+    const parents = named.length === 0
     for (const { adapter, ref } of found.sessions) {
-      const cacheKey = JSON.stringify([adapter.harness, ref.path, args.latestTurn, args.taskType, args.fleetRun, args.runtimeModule ?? 'installed', args.since, args.until])
+      const cacheKey = JSON.stringify([adapter.harness, ref.path, args.latestTurn, args.taskType, args.fleetRun, args.runtimeModule ?? 'installed', args.since, args.until, parents])
       if (seen.has(`${adapter.harness}:${ref.path}`)) continue
       if (await cache.unchanged(cacheKey, existingSources)) { cached += 1; continue }
       try {
         const readStartedAt = Date.now()
         const selection = await collectSessionSelection([{ adapter, refs: [ref] }], {
-          workflow: true, parents: named.length === 0, maxWorkflowSessions: 100, home: args.selection?.home,
+          workflow: true, parents, maxWorkflowSessions: 100, home: args.selection?.home,
           taskScope: args.latestTurn ? 'latest' : 'all', bindSources: true,
           onUnreadable: (failure) => {
             if (failure.seed && named.length) throw failure.error
