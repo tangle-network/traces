@@ -173,13 +173,15 @@ export async function takeJsonl<T>(
   path: string,
   limit: number,
   options: JsonlReadOptions = { mode: 'strict' },
+  retain: (row: T, index: number) => boolean = () => true,
 ): Promise<T[]> {
   if (!Number.isInteger(limit) || limit < 0) throw new RangeError('limit must be a non-negative integer')
   const rows: T[] = []
   if (limit === 0) return rows
+  let scanned = 0
   for await (const row of readJsonl<T>(path, options)) {
-    rows.push(row)
-    if (rows.length === limit) break
+    if (retain(row, scanned)) rows.push(row)
+    if (++scanned === limit) break
   }
   return rows
 }

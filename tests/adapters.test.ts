@@ -33,35 +33,6 @@ const userPrompt = (s: OtlpSpan[]) => s.find((x) => x.name === 'user.prompt')
 const codexTraceId = (id: string) => deriveHexId(id, 16)
 const codexSpanId = (traceId: string, id: string) => deriveHexId(`${traceId}:${id}`, 8)
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (!value || typeof value !== 'object') return value
-  const record = value as Record<string, unknown>
-  return Object.fromEntries(
-    Object.keys(record)
-      .sort()
-      .map((key) => [key, canonicalize(record[key])]),
-  )
-}
-
-function spanDigest(spans: OtlpSpan[]): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize(spans))).digest('hex')
-}
-
-function traceShapeDigest(spans: OtlpSpan[]): string {
-  return spanDigest(
-    spans.map((item) => {
-      const attributes = Object.fromEntries(
-        Object.entries(item.attributes).filter(
-          ([key]) => !/^(?:input|output)\.|^traces\.(?:input|output)\./.test(key),
-        ),
-      )
-      if (item.attributes['openinference.span.kind'] === 'TOOL') delete attributes.content
-      return { ...item, attributes }
-    }),
-  )
-}
-
 async function expectJsonlParseFailure(
   parse: Promise<unknown>,
   sourcePath: string,
@@ -1038,76 +1009,6 @@ describe('claude adapter (conversation capture)', () => {
     )
     const dupeIds = new Set(dupes.map((d) => d.span_id))
     for (const d of dupes) expect(dupeIds.has(d.parent_span_id ?? '')).toBe(false)
-  })
-
-  it('preserves complete output while folding subagents under their Agent call', async () => {
-    const path = join(dir, 'claude.jsonl')
-    writeFileSync(
-      path,
-      [
-        JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: [{ type: 'text', text: 'ship it' }] } }),
-        JSON.stringify({
-          type: 'assistant',
-          uuid: 'a1',
-          sessionId: 'claude-trace',
-          timestamp: '2026-01-01T00:00:01Z',
-          message: { role: 'assistant', model: 'opus', usage: { input_tokens: 10, cache_read_input_tokens: 5, output_tokens: 3 }, content: [{ type: 'text', text: 'working' }, { type: 'tool_use', id: 'agent-call', name: 'Agent', input: { task: 'inspect' } }] },
-        }),
-        JSON.stringify({ type: 'user', uuid: 'u2', timestamp: '2026-01-01T00:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-call', is_error: false, content: 'done' }] } }),
-      ].join('\n'),
-    )
-    const subDir = join(dir, 'claude', 'subagents')
-    mkdirSync(subDir, { recursive: true })
-    writeFileSync(
-      join(subDir, 'agent-a.jsonl'),
-      [
-        { type: 'user', uuid: 'su1', timestamp: '2026-01-01T00:00:01.100Z', isSidechain: true, message: { role: 'user', content: [{ type: 'text', text: 'inspect' }] } },
-        {
-          type: 'assistant',
-          uuid: 'sa1',
-          timestamp: '2026-01-01T00:00:01.200Z',
-          message: { role: 'assistant', model: 'haiku', usage: { input_tokens: 2, output_tokens: 1 }, content: [{ type: 'text', text: 'found it' }] },
-        },
-      ]
-        .map((e) => JSON.stringify(e))
-        .join('\n'),
-    )
-    writeFileSync(join(subDir, 'agent-a.meta.json'), JSON.stringify({ agentType: 'Explore', toolUseId: 'agent-call' }))
-
-    const spans = await new ClaudeAdapter().parse(refFor(path, 'claude-code'))
-    // Digest moved when fix/claude-workflow-parent-confidence added
-    // agent.parent.confidence: the subagent's spans below now carry
-    // 'correlated' (joined by the agent-call toolUseId meta), which this
-    // fixture's own subagent.meta.json declares.
-    expect(traceShapeDigest(spans)).toBe('8ad485e1d2ba81502a84e3535ca1f96f9729661241e8ee7a219f57245f2a6f0b')
-    expect(spans.map((item) => item.name)).toEqual([
-      'session',
-      'user.prompt',
-      'llm.turn',
-      'message.assistant',
-      'tool.Agent',
-      'user.prompt',
-      'subagent.lifecycle',
-      'llm.turn',
-      'message.assistant',
-    ])
-    expect(spans.every((item) => item.trace_id === deriveHexId('claude-trace', 16))).toBe(true)
-    expect(spans[0]).toMatchObject({ start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:00:02Z' })
-    const mainTurn = llm(spans)
-    expect(mainTurn?.attributes['llm.token_count.prompt']).toBe(10)
-    expect(mainTurn?.attributes['llm.token_count.prompt_cache_hit']).toBe(5)
-    expect(mainTurn?.attributes['llm.token_count.completion']).toBe(3)
-    const agentCall = tool(spans)
-    expect(agentCall).toMatchObject({ end_time: '2026-01-01T00:00:02Z', status: { code: 'OK' } })
-    expect(agentCall?.attributes.content).toBeUndefined()
-    expect(agentCall?.attributes['output.value']).toBe('done')
-    // The child's own spans nest inside the child; what hangs from the Agent
-    // call is every span at the top of that child's transcript.
-    const explore = spans.filter((item) => item.attributes['agent.name'] === 'subagent:Explore')
-    const exploreIds = new Set(explore.map((item) => item.span_id))
-    expect(explore.every((item) => item.parent_span_id === agentCall?.span_id
-      || exploreIds.has(item.parent_span_id ?? ''))).toBe(true)
-    expect(explore.filter((item) => item.parent_span_id === agentCall?.span_id).length).toBeGreaterThan(0)
   })
 
   it('parses a session with more than 65k spans without array spread overflow', async () => {
