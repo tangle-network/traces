@@ -120,7 +120,7 @@ pnpm typecheck
 pnpm build          # dist/index.js (SDK), dist/cli.js (bin), .d.ts
 pnpm test
 pnpm check:package  # proves the packed npm tarball actually contains the `traces` binary
-pnpm run verify:contracts-corpus   # real-trace corpus that CI runs traces check against
+pnpm run verify:contracts-corpus   # real-trace corpus checked before release publication
 ```
 
 `pnpm bench:audit` (see [How quality is measured](docs/develop.md#how-quality-is-measured)): its $0 facts
