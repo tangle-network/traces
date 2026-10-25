@@ -106,11 +106,12 @@ jobs:
           if (!response.ok && response.status !== 404) throw new Error(`Registry lookup failed: HTTP ${response.status}`);
           appendFileSync(process.env.GITHUB_OUTPUT, `exists=${response.ok}\n`);
           NODE
-      - name: Verify (typecheck + test + build)
+      # The tests spawn the built CLI (dist/cli.js), so the build comes first, as in ci.yml.
+      - name: Verify (typecheck + build + test)
         run: |
           pnpm typecheck
-          pnpm test
           pnpm build
+          pnpm test
           pnpm check:package
       - name: Pack the verified release
         run: |
