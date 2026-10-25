@@ -4,35 +4,18 @@
 
 ## Develop
 
-```bash
-pnpm install --frozen-lockfile
-pnpm build        # dist/index.js (SDK), dist/cli.js (bin) and .d.ts; tests spawn dist/cli.js
-pnpm test
-pnpm typecheck
-pnpm dev facts --current   # run from source through tsx
-```
-
-Tests assert through public boundaries: they spawn `dist/cli.js` with argv (`tests/run-cli.ts`) and assert stdout, stderr and exit code, or import SDK exports. Only process boundaries are faked: a fixture HOME and `XDG_STATE_HOME`, the clock, a stub `npm`, and the Python bridge as a stub child process.
+Use `pnpm dev facts --current` to run from source. `ests exercise the CLI process and SDK boundaries.
 
 ### Local merge gate
 
-Run the checks on a Beelink before merging the pushed commit. The gate fetches the exact
-revision and installs frozen dependencies; the build precedes tests because they spawn the
-built CLI. Pull requests and pushes do not start a separate CI run.
+`he gate fetches the pushed revision and installs frozen dependencies. Build before tests, which spawn the CLI.
 
 ```bash
-beelink-gate auto https://github.com/tangle-network/traces.git <full-commit-sha> -- \
-  bash -euc 'pnpm check:source
-pnpm typecheck
-pnpm build
-pnpm test
-pnpm run verify:contracts-corpus
-pnpm check:package'
+beelink-gate auto https://github.com/tangle-network/traces.git <full-commit-sha> -- bash -euc \
+  'pnpm check:source && pnpm typecheck && pnpm build && pnpm test && pnpm run verify:contracts-corpus && pnpm check:package'
 ```
 
-The contract corpus reads real trace fixtures. `check:package` verifies the packed CLI.
-Use the package's declared Node engine range; publication qualifies its tagged artifact
-through the runtime configured in the trusted release workflow.
+PRs and branch pushes run no CI. `he corpus checks real trace fixtures; `check:package` checks the packed CLI. Use the package's Node engine range; tag publication retains its own runtime and qualification.
 
 ## Release
 
