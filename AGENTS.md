@@ -112,16 +112,10 @@ control should emit the contract and pass its file as a ref, never get a new ada
 
 ## Validation
 
-Run from the package root:
-
-```bash
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm build          # dist/index.js (SDK), dist/cli.js (bin), .d.ts
-pnpm test
-pnpm check:package  # proves the packed npm tarball actually contains the `traces` binary
-pnpm run verify:contracts-corpus   # real-trace corpus that CI runs traces check against
-```
+Before merging, run the [local merge gate](docs/develop.md#local-merge-gate) against the pushed commit.
+It owns the frozen install, source-text check, typecheck, build, public-boundary tests,
+real-trace contract corpus and packed CLI check. Pull requests and pushes do not run CI.
+The tag publication path retains its own qualification before publishing.
 
 `pnpm bench:audit` (see [How quality is measured](docs/develop.md#how-quality-is-measured)): its $0 facts
 arm is in `pnpm test`; the model arms cost money and run by hand before a release tag.
