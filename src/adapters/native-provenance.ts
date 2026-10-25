@@ -2,6 +2,11 @@ import type { HarnessSession } from '@tangle-network/harness-sessions'
 import type { OtlpSpan } from '../otlp.js'
 
 export function stampNativeProvenance(session: HarnessSession, spans: OtlpSpan[]): void {
+  if (session.harness !== 'claude-code' && session.children.length > 0 && spans[0]) {
+    spans[0].attributes['traces.source.unknowns'] = JSON.stringify([
+      'Native child-session relationships are separate from span containment; parent/child topology may be incomplete.',
+    ])
+  }
   const prefix = session.harness === 'codex' ? 'traces.codex' : 'traces.claude'
   if (session.harness !== 'codex' && session.harness !== 'claude-code') return
   for (const item of spans) item.attributes[`${prefix}.source_trace_id`] = session.nativeSessionId

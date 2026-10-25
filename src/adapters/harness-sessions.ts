@@ -683,7 +683,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async locateBySessionId(sessionId: string, opts: LocateOptions = {}): Promise<SessionRef[]> {
-    return this.locateIn(opts.home ?? ownHome(), { ...opts, nativeSessionId: sessionId })
+    return (await this.locateIn(opts.home ?? ownHome(), { ...opts, nativeSessionId: sessionId })).filter((ref) => ref.sessionId === sessionId)
   }
 
   /**
