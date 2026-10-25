@@ -40,6 +40,7 @@ import {
   SESSION_TOTAL_INPUT_ATTR,
   SESSION_TOTAL_OUTPUT_ATTR,
   SESSION_TOTAL_REASONING_ATTR,
+  sourceChannelUnavailable,
 } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { toOpenInferenceSpan } from './otlp.js'
@@ -148,6 +149,15 @@ interface CallUsage extends ModelTokens {
 
 const UNRECORDED_MODEL = '(model not recorded)'
 
+/**
+ * The context one model call read: its whole prompt, fresh input plus cache
+ * reads plus cache writes, the `tokens.input` share of that call. Null when
+ * the span is not a model call or reports no usage.
+ */
+export function modelCallContextTokens(span: OtlpSpan): number | null {
+  return callUsage(span)?.input ?? null
+}
+
 /** A model call's usage, or null when the span reports none. */
 function callUsage(span: OtlpSpan): CallUsage | null {
   if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'LLM') return null
@@ -201,15 +211,15 @@ export function sessionTokens(own: readonly OtlpSpan[]): SessionTokens {
   if (root) {
     const input = count(root.attributes[SESSION_TOTAL_INPUT_ATTR])!
     const output = count(root.attributes[SESSION_TOTAL_OUTPUT_ATTR])!
-    const cacheRead = count(root.attributes[SESSION_TOTAL_CACHED_INPUT_ATTR]) ?? 0
-    const cacheWrite = count(root.attributes[SESSION_TOTAL_CACHE_WRITE_ATTR]) ?? 0
+    const cacheRead = count(root.attributes[SESSION_TOTAL_CACHED_INPUT_ATTR]) ?? (sourceChannelUnavailable(own, 'cache-read') ? null : 0)
+    const cacheWrite = count(root.attributes[SESSION_TOTAL_CACHE_WRITE_ATTR]) ?? (sourceChannelUnavailable(own, 'cache-write') ? null : 0)
     const perCall = byModel(calls)
     const recorded = [...new Set(calls.filter((call) => call.modelRecorded).map((call) => call.model))]
     const callInput = calls.reduce((total, call) => total + call.input, 0)
     const callOutput = calls.reduce((total, call) => total + call.output, 0)
     // The counter does not split by model. One model takes all of it; several
     // are priced per call when the calls add up to the counter exactly.
-    const models: ModelTokens[] = recorded.length === 1
+    const models: ModelTokens[] = cacheRead === null || cacheWrite === null ? [] : recorded.length === 1
       ? [{ model: recorded[0]!, input, output, cacheRead, cacheWrite }]
       : recorded.length > 1 && callInput === input && callOutput === output ? perCall : []
     return {

@@ -526,7 +526,7 @@ export async function readRefSpans(ref: string, options: ResolveRefOptions = {})
     case 'session':
       return parseSession(resolved.adapter, resolved.session)
     case 'run-dir':
-      return [...(await readOtlpInput(resolved.path)).spans]
+      return (await import('./adapters/runtime-run.js')).readRuntimeRunDirectory(resolved.path)
     case 'store-root':
       throw new RefError(`${ref} is a store root, which holds many sessions; name one session in it`, 'usage')
     case 'spans': {

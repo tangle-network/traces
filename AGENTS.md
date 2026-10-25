@@ -87,7 +87,7 @@ control should emit the contract and pass its file as a ref, never get a new ada
 - **The `traces.stream.*` envelope is a stable API.** `traces watch --format jsonl` prints session,
   finding and tick events at `schemaVersion` 1, and trustgate reads them. `tests/watch-jsonl-contract.test.ts`
   pins every field a consumer reads and keeps `docs/watch-jsonl.v1.example.jsonl` equal to the CLI's output.
-- **The SDK is the committed list.** [src/index.ts](src/index.ts) exports 25 functions and 25 types, each
+- **The SDK is the committed list.** [src/index.ts](src/index.ts) exports its committed functions and types, each
   by name (no `export *`). `tests/sdk-surface.test.ts` holds `dist/index.js` and `dist/index.d.ts` to that
   list and `docs/sdk.md` to naming every entry. A name joins only when a command is built on it, it is the
   analyst extension point, or a named consumer imports it.
@@ -112,16 +112,10 @@ control should emit the contract and pass its file as a ref, never get a new ada
 
 ## Validation
 
-Run from the package root:
-
-```bash
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm build          # dist/index.js (SDK), dist/cli.js (bin), .d.ts
-pnpm test
-pnpm check:package  # proves the packed npm tarball actually contains the `traces` binary
-pnpm run verify:contracts-corpus   # real-trace corpus that CI runs traces check against
-```
+Before merging, run the [local merge gate](docs/develop.md#local-merge-gate) against the pushed commit.
+It owns the frozen install, source-text check, typecheck, build, public-boundary tests,
+real-trace contract corpus and packed CLI check. Pull requests and pushes do not run CI.
+The tag publication path retains its own qualification before publishing.
 
 `pnpm bench:audit` (see [How quality is measured](docs/develop.md#how-quality-is-measured)): its $0 facts
 arm is in `pnpm test`; the model arms cost money and run by hand before a release tag.

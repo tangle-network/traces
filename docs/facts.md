@@ -46,7 +46,7 @@ Three rules hold for every field. Every fact is about this session's own agent: 
 | `excludedTurns`, `turnsByActor` | every left-out turn, by reason and author, so the filter is checkable |
 | `tokens`, `cost` | from one owner on every harness; `input` is the whole prompt, cache included; `cost` is agent-runtime's `priceTokens`, labelled `list price (Router rates)` |
 | `measurements.waste` | failing streaks (3 or more identical failures), stalls of 10 minutes or more that no turn ended, `git revert` and `reset --hard`, repeated commands |
-| `measurements.activeMinutes`, `measurements.skills` | minutes worked (gaps capped at 10), and skills used, by the classifier `traces skills` uses |
+| `measurements.activeMinutes`, `.skills`, `.modelCalls`, `.guardRefusals`, `.limitStop` | minutes worked (gaps capped at 10); skills used, by the classifier `traces skills` uses; the context each of the session's own model calls read (input + cache read + cache write): `contextTokens.mean`, and `.p50` from 2 calls, and `latencyByContext`, tool result to next reply in 100k-token bands (`0-100k` … `900k+`), `p50Ms`/`p90Ms` from 2 replies, leaving out waits of 10 minutes or more; the `toolCalls` a hook refused (`hook error: <guard>`), `byGuard`; and the usage or weekly limit notice the session stopped on, its run's error (Codex: "You’ve hit your usage limit") or else its last reply (Claude Code: "You've hit your weekly limit"), else `null` |
 | `repo`, `cwd`, `changedFiles`, `finalMessages`, `recordFile`, `record` | the repository and recorded cwd, files the session changed, and the last message of the agent and each subagent. With `--format json`, `recordFile` is the session file, and `record` sits on each `humanTurns` entry, `firstFailure` (the failing call's result, else the call), `commands` row (its latest run's result) and each of its `nonZeroExits`, and `changedFiles` entry (the call that first changed it), the record it came from: `{line}` in `recordFile`, `{file, line}` in a subagent's file, `null` when no record names it. Cite `recordFile:line` instead of searching the files. Absent under `--no-content` |
 | `firstFailure` | the first failure among the session's own records, with its blame; `unknown` when no status was recorded, `ambiguous` when two ended at once |
 | `agent` | the profile, model, harness and directive that acted, from the root span, else the session-identity record |
@@ -62,7 +62,7 @@ For Codex, the harness's own labels (`content_item_kinds`) decide: a message is 
 ## Pull requests
 
 `pullRequests` scans each command the way a shell would, so a `gh pr create` inside a heredoc body never counts.
-A pull request is named by its number when the command or an output that joins to it shows one, else by its head branch.
+A pull request is named by its number when the command or an output that joins to it shows one, else by its head branch. `repository` and `url` retain an explicit `--repo`/`-R`, target URL or joined returned PR URL; a session repository is never substituted. Missing or conflicting repository evidence stays null with `repositoryUnavailable`.
 A create whose call returned while it still ran takes the number a later poll of that process printed.
 In a Codex code-mode script, each tool result the script printed is decoded (`exit_code` or `session_id`, and the command's output), and a later script's `write_stdin` poll of the session counts as that poll.
 A create counts only where an output shows `gh` answered: a script that completed says nothing about its commands.
@@ -112,3 +112,5 @@ Examples:
   traces facts 019a3c7e --format json | jq '.sessions[0].measurements.waste'
   traces facts --since 30d --match '^gh pr merge'
 ```
+
+Sources that explicitly lack a measurement channel report unavailable facts rather than zero: supervisor journals do not establish human turns or tool calls, and compact Pi workflow histories do not establish human turns. Reported usage remains separate from token estimates.

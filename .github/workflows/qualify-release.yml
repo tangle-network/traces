@@ -106,11 +106,14 @@ jobs:
           if (!response.ok && response.status !== 404) throw new Error(`Registry lookup failed: HTTP ${response.status}`);
           appendFileSync(process.env.GITHUB_OUTPUT, `exists=${response.ok}\n`);
           NODE
-      - name: Verify (typecheck + test + build)
+      # CLI integration checks spawn dist/cli.js, so build the artifact first.
+      - name: Verify (typecheck + build + test)
         run: |
+          pnpm check:source
           pnpm typecheck
-          pnpm test
           pnpm build
+          pnpm test
+          pnpm run verify:contracts-corpus
           pnpm check:package
       - name: Pack the verified release
         run: |

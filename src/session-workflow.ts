@@ -381,6 +381,7 @@ export async function collectSessionWorkflow(
     let spans: OtlpSpan[]
     try {
       spans = await parseSession(adapter, ref, {
+        captureSources: options.captureSources,
         corruptionMode: options.corruptionMode,
         taskScope,
         taskTurnId,

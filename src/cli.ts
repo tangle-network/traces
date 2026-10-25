@@ -11,13 +11,12 @@
  * selection flag (`--current`, `--last`, `--since`) names the sessions.
  */
 
-import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { stat, writeFile } from 'node:fs/promises'
 import { homedir, hostname } from 'node:os'
 import { basename, dirname, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
-import { findingRejectionDetail } from './finding-rejections.js'
-import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
+import { analystLog } from './analyst-log.js'
 import { metadataOnly } from './metadata-only.js'
 import { shellWord } from './moved.js'
 import type { TraceStreamEvent, WatchedSession } from './live.js'
@@ -26,13 +25,6 @@ import { DEFAULT_ANALYST_MODEL, DEFAULT_ASK_CONCURRENCY, DEFAULT_QUESTION_MAX_CO
 import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
 import { iterSerializedSpans, writeOtlpFile } from './otlp.js'
-import type {
-  OtlpFieldWithheld,
-  OtlpIngestIssue,
-  OtlpInputFile,
-  SkippedInputFile,
-  UnreadableSourceRows,
-} from './otlp-input.js'
 import { readOtlpInput } from './otlp-input.js'
 import {
   createSessionFactsReportBuilder,
@@ -50,10 +42,9 @@ import { turnFactsJsonl, type TurnSource } from './facts-jsonl.js'
 import { callIdsOf, citeFacts, type RecordLine, type SessionCiting } from './record-lines.js'
 import { sessionIdentityLookup } from './session-identity.js'
 import { conformanceOfSpans, renderValidation } from './conformance.js'
-import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession, readSessionSpans, sessionsInCwd } from './session-source.js'
-import { collectSessionSelection, type SessionSelection } from './session-selection.js'
+import { collectSessionSelection, type SessionSelection, type SessionSelectionRow } from './session-selection.js'
 import {
   type SessionWorkflowIssue,
   type SessionWorkflowSummary,
@@ -62,34 +53,16 @@ import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
 import type { ReportSource } from './report.js'
 import { parseSince, parseTimeBound, relativeBoundMs } from './time.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
-import { RefError, resolveRefs, selectSpans, shortestRefs, type ResolvedRef } from './refs.js'
+import { RefError, resolveRefs, shortestRefs, type ResolvedRef } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import type { RefusedSession, UploadPlan } from './upload.js'
-import {
-  buildSkillUsageReport,
-  defaultSkillUsageStorePath,
-  readInstalledSkills,
-  renderSkillUsage,
-  SkillUsageStore,
-} from './skill-usage.js'
+import { cmdSkills } from './skills-command.js'
+import { cmdGraphs } from './graphs-command.js'
+import { collectImportedSpans, collectOtlpSpans, collectRuntimeSpans, type CollectedSpans } from './cli-span-input.js'
+import type { CliArgs, RefSelection } from './cli-selection-types.js'
+
 import { type Args, CliError, type Handler, runTraces, UsageError, writeError } from './commands.js'
 import { type IndexedSession, TurnIndex } from './turn-index.js'
-
-/**
- * What a command's positional refs resolved to. Read once, before the command
- * runs, so every reader below sees the same sessions and files.
- */
-interface RefSelection {
-  /** Harness sessions a ref named: an id, a unique prefix or suffix, or a session file. */
-  readonly sessions: ReadonlyArray<{ readonly adapter: HarnessTraceAdapter; readonly ref: SessionRef }>
-  /** Span sources a ref named: OTLP or trace evidence files and directories, bundles, run directories. */
-  readonly spans: ReadonlyArray<Extract<ResolvedRef, { kind: 'spans' | 'run-dir' }>>
-  /** A store root: selection runs over it instead of HOME. */
-  readonly home?: string
-}
-
-/** A parsed command line, with its refs resolved for the commands that read them. */
-type CliArgs = Args & { selection?: RefSelection }
 
 /** The most spawned children a named session brings with it. */
 const MAX_CHILD_SESSIONS = 100
@@ -402,81 +375,6 @@ async function cmdList(args: CliArgs): Promise<void> {
 
 type SelectedSessionSource = ReportSource
 
-interface CollectedSpans {
-  spans: OtlpSpan[]
-  harness: string
-  sources: SelectedSessionSource[]
-  workflow?: SessionWorkflowSummary
-  /**
-   * Conformance of the SOURCE, present when the spans were read from OTLP.
-   * Absent for adapter output, which is graded from the spans themselves.
-   */
-  conformance?: TraceValidation
-  conformanceSubject?: string
-  conformanceFiles?: readonly OtlpInputFile[]
-  conformanceSkipped?: readonly SkippedInputFile[]
-  conformanceIssues?: readonly OtlpIngestIssue[]
-  conformanceWithheld?: readonly OtlpFieldWithheld[]
-  conformanceUnreadable?: UnreadableSourceRows
-  /** Sessions the selection skipped because they could not be read. */
-  unread?: readonly UnreadSessionFact[]
-}
-
-/**
- * Read OTLP spans a foreign system emitted, skipping the adapter stage
- * entirely: the analysis engine is already OTLP-native, so conforming spans
- * need no translation to be analysed.
- */
-async function collectOtlpSpans(path: string, selector?: string): Promise<CollectedSpans> {
-  const { sessionReportSource } = await import('./report.js')
-  let input: Awaited<ReturnType<typeof readOtlpInput>>
-  try {
-    input = await readOtlpInput(path)
-  } catch (error) {
-    if (!(await stat(path).catch(() => undefined))?.isDirectory()) throw error
-    // A directory that is no run, store root or bundle is read as OTLP: say what else it could have been.
-    throw new Error(
-      `${errorText(error)}. A directory ref is read as OTLP-JSONL unless it is a Runtime run ` +
-        '(spawn-journal.jsonl, observer.jsonl or failure.json), a harness store root, or a bundle (manifest.json)',
-    )
-  }
-  if (input.spans.length === 0) {
-    throw new Error(
-      `no analyzable spans in ${path} (${input.files.length} file(s), ${input.rows.length} row(s), ` +
-        `${input.issues.length} unusable). Run \`traces check ${path} --contract conformance\` for the per-finding reason.`,
-    )
-  }
-  const fileByTrace = new Map<string, string>()
-  for (const file of input.files) {
-    for (const traceId of file.traceIds) if (!fileByTrace.has(traceId)) fileByTrace.set(traceId, file.path)
-  }
-  const selected = selector ? selectSpans(input.spans, selector, path) : input.spans
-  const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of selected) {
-    const grouped = byTrace.get(span.trace_id) ?? []
-    grouped.push(span)
-    byTrace.set(span.trace_id, grouped)
-  }
-  return {
-    spans: [...selected],
-    harness: 'otlp',
-    sources: [...byTrace].map(([traceId, spans]) => sessionReportSource({
-      harness: 'otlp',
-      sessionId: traceId,
-      path: fileByTrace.get(traceId) ?? path,
-      cwd: null,
-      mtimeMs: 0,
-    }, spans, traceId)),
-    conformance: input.validation,
-    conformanceSubject: path,
-    conformanceFiles: input.files,
-    conformanceSkipped: input.skipped,
-    conformanceIssues: input.issues,
-    conformanceWithheld: input.withheld,
-    conformanceUnreadable: input.unreadable,
-  }
-}
-
 async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   if (args.refs.length > 0 && !args.selection) throw new Error(`internal: ${args.command} read its refs before resolving them`)
   const sources = args.selection?.spans ?? []
@@ -488,7 +386,7 @@ async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   const parts: CollectedSpans[] = []
   for (const source of sources) {
     parts.push(source.kind === 'run-dir'
-      ? await collectOtlpSpans(source.path)
+      ? await collectRuntimeSpans(source.path)
       : source.reader === 'otlp'
         ? await collectOtlpSpans(source.path, source.selector)
         : await collectImportedSpans(source.path, source.reader, source.selector))
@@ -497,6 +395,27 @@ async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   const collected = parts.length === 1 ? parts[0]! : mergeCollected(parts)
   warnUnread(args, collected.unread ?? [])
   return collected
+}
+
+/**
+ * The selection a batch at a time: a sweep of harness sessions one session at
+ * a time (see `collectSessionSpans`), any other selection as one batch. The
+ * result carries no spans; `spanCount` counts what was handed over.
+ */
+async function forEachSpanBatch(args: CliArgs, onBatch: SpanBatchConsumer): Promise<CollectedSpans & { spanCount: number }> {
+  let spanCount = 0
+  const counted: SpanBatchConsumer = async (spans, harness) => {
+    spanCount += spans.length
+    await onBatch(spans, harness)
+  }
+  if ((args.selection?.spans.length ?? 0) === 0) {
+    const collected = await collectSessionSpans(args, counted)
+    warnUnread(args, collected.unread ?? [])
+    return { ...collected, spanCount }
+  }
+  const collected = await collectSpans(args)
+  if (collected.spans.length > 0) await counted(collected.spans, collected.harness)
+  return { ...collected, spans: [], spanCount }
 }
 
 /** Spans of several refs together. A source's conformance describes that source alone, so it is not carried. */
@@ -519,21 +438,36 @@ function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
   }
 }
 
-/** Spans of the selected harness sessions: refs, `--current`, or discovery. */
-async function collectSessionSpans(args: CliArgs): Promise<CollectedSpans> {
+/** One session's spans as a sweep reads it, and the harness that wrote it. */
+type SpanBatchConsumer = (spans: readonly OtlpSpan[], harness: string) => Promise<void>
+
+/**
+ * Spans of the selected harness sessions: refs, `--current`, or discovery.
+ * With `onBatch`, a window sweep (`--since` with nothing named) hands each
+ * session's spans over as it is read and keeps none, so a week of sessions is
+ * never held at once; any other selection is handed over whole, in one batch.
+ * `spans` is then empty.
+ */
+async function collectSessionSpans(args: CliArgs, onBatch?: SpanBatchConsumer): Promise<CollectedSpans> {
   const { sessionReportSource } = await import('./report.js')
-  const selection = await collectSessionRows(args, args.last || 1)
   const spans: OtlpSpan[] = []
   const harnesses = new Set<string>()
   const sources: SelectedSessionSource[] = []
-  for (const row of selection.rows) {
+  const sweep = onBatch !== undefined && args.since !== undefined && (args.selection?.sessions.length ?? 0) === 0
+  const take = (row: SessionSelectionRow): void => {
     harnesses.add(row.adapter.harness)
-    appendAll(spans, row.spans)
     sources.push(sessionReportSource(row.ref, row.spans))
   }
+  const selection = await collectSessionRows(args, args.last || 1, sweep ? async (row) => { take(row); await onBatch(row.spans, row.adapter.harness) } : undefined)
+  for (const row of selection.rows) {
+    take(row)
+    appendAll(spans, row.spans)
+  }
+  const harness = [...harnesses].join('+') || (args.harnessExplicit ? args.harness : 'none')
+  if (onBatch && !sweep && spans.length > 0) await onBatch(spans.splice(0), harness)
   return {
     spans,
-    harness: [...harnesses].join('+') || (args.harnessExplicit ? args.harness : 'none'),
+    harness,
     sources,
     ...(selection.workflow ? { workflow: selection.workflow } : {}),
     ...(selection.unread.length > 0 ? { unread: selection.unread } : {}),
@@ -714,7 +648,11 @@ type CollectedSessionRows = SessionSelection & { readonly unread: UnreadSessionF
  * session that cannot be read exits 2; any other session that cannot be read
  * is skipped and named in `unread`.
  */
-async function collectSessionRows(args: CliArgs, defaultLast: number): Promise<CollectedSessionRows> {
+async function collectSessionRows(
+  args: CliArgs,
+  defaultLast: number,
+  onRow?: (row: SessionSelectionRow) => Promise<void>,
+): Promise<CollectedSessionRows> {
   const named = args.selection?.sessions ?? []
   const source = args.selection?.spans[0]
   if (source && named.length === 0) {
@@ -728,6 +666,7 @@ async function collectSessionRows(args: CliArgs, defaultLast: number): Promise<C
     maxWorkflowSessions: MAX_CHILD_SESSIONS,
     taskScope: args.latestTurn ? 'latest' : 'all',
     home: args.selection?.home,
+    ...(onRow ? { onRow } : {}),
     onUnreadable: ({ ref, error, seed }) => {
       if (seed && named.length > 0) throw new RefError(`${ref.sessionId} could not be read (${ref.path}): ${errorText(error)}`, 'unreadable')
       unread.push({ sessionId: ref.sessionId, traceId: null, source: ref.path, reason: errorText(error) })
@@ -757,12 +696,13 @@ async function cmdBundle(args: CliArgs): Promise<void> {
  * carries the protocol, so everything else this command says goes to stderr.
  */
 async function cmdMcp(args: CliArgs): Promise<void> {
-  const { serveTraceMcp } = await import('./mcp.js')
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new Error('mcp: no spans found for the given selection')
+  const { createServedSpans, serveTraceMcp } = await import('./mcp.js')
+  const served = createServedSpans()
+  const collected = await forEachSpanBatch(args, async (spans) => served.add(spans))
+  if (collected.spanCount === 0) throw new Error('mcp: no spans found for the given selection')
   warnIncompleteWorkflow(collected.workflow)
-  process.stderr.write(`traces mcp: serving ${collected.spans.length} span(s) over stdio\n`)
-  await serveTraceMcp({ spans: collected.spans })
+  process.stderr.write(`traces mcp: serving ${collected.spanCount} span(s) over stdio\n`)
+  await serveTraceMcp({ served: served.finish() })
 }
 
 /**
@@ -983,12 +923,6 @@ function factsWindow(args: CliArgs): SessionFactsWindow | undefined {
   }
 }
 
-/** Write a report file, making its directory first. */
-async function saveReport(path: string, report: string): Promise<void> {
-  await mkdir(dirname(resolve(path)), { recursive: true })
-  await writeFile(path, report, 'utf8')
-}
-
 /** `rendered` to `--out` with a one-line summary on stdout, or to stdout. */
 async function writeOutput(args: CliArgs, rendered: string, summary: string): Promise<void> {
   if (args.out) {
@@ -1100,24 +1034,21 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
   const runDir = args.selection?.spans.find((source) => source.kind === 'run-dir')
   if (runDir) {
     if (args.refs.length > 1) throw new UsageError(`analyze reports one supervision tree at a time; ${runDir.ref} is a run directory`)
-    return cmdAnalyzeSupervisorRun(runDir.path, args)
+    const { writeSupervisorReport } = await import('./supervisor-report.js')
+    return writeSupervisorReport(runDir.path, args.out)
   }
-  const { runTraceInvestigation, writeAnalysisArtifacts } = await import('./improvement.js')
+  const { createTraceInvestigation, writeAnalysisArtifacts } = await import('./improvement.js')
   const { renderAnalysis, renderAnalysisReport } = await import('./report.js')
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new Error('no spans found for the given selection')
-  warnIncompleteWorkflow(collected.workflow)
-  const result = await runTraceInvestigation({
-    spans: collected.spans,
-    harness: collected.harness,
-    ...(collected.unread ? { unread: collected.unread } : {}),
-    ...(collected.conformance ? { conformance: collected.conformance } : {}),
-    facts: {
-      window: factsWindow(args),
-      agentIdentity: sessionIdentityLookup(args.selection?.home ?? (process.env.HOME || homedir())),
-    },
+  const investigation = createTraceInvestigation({
+    harness: args.harnessExplicit ? args.harness : 'none',
+    facts: { window: factsWindow(args), agentIdentity: sessionIdentityLookup(args.selection?.home ?? (process.env.HOME || homedir())) },
     log: analystLog,
   })
+  const collected = await forEachSpanBatch(args, (spans, harness) => investigation.add(spans, { harness }))
+  if (collected.spanCount === 0) throw new Error('no spans found for the given selection')
+  warnIncompleteWorkflow(collected.workflow)
+  for (const entry of collected.unread ?? []) investigation.addUnread(entry)
+  const result = await investigation.finish(collected)
   if (args.out) {
     const artifacts = await writeAnalysisArtifacts(renderAnalysisReport(result), result.packet, args.out)
     console.log(
@@ -1134,95 +1065,6 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
   process.stdout.write(renderAnalysis(result))
 }
 
-/**
- * Supervision-tree view: what the TREE did (steers, spawn waves, concurrency,
- * idle wall, cost by role, accepted vs rejected), as opposed to the rest of
- * this CLI, which reports what happened inside one harness session.
- *
- * Eval owns Runtime run discovery and analysis. Traces adds coordination-log
- * evidence through its reader, then prints a single report or a rollup.
- */
-async function cmdAnalyzeSupervisorRun(runDir: string, args: CliArgs): Promise<void> {
-  const { analyzeSupervisorRun, findSupervisorRunDirs, isRuntimeSupervisorRunDir, renderSupervisorRollupMarkdown, renderSupervisorRunMarkdown, rollupSupervisorRuns } = await import('@tangle-network/agent-eval/supervisor-run')
-  const { fileRunContextSupervisorRunReader } = await import('./supervisor-run-context.js')
-  const single = await isRuntimeSupervisorRunDir(runDir)
-  const runDirs = single ? [runDir] : await findSupervisorRunDirs(runDir)
-  if (runDirs.length === 0) {
-    throw new Error(
-      `no supervisor run found at ${runDir} — expected a Runtime run containing ` +
-        'spawn-journal.jsonl, observer.jsonl, or failure.json, or a parent directory containing such runs',
-    )
-  }
-  const reports = await Promise.all(
-    runDirs.map((dir) => analyzeSupervisorRun(fileRunContextSupervisorRunReader(dir))),
-  )
-  const markdown = single
-    ? renderSupervisorRunMarkdown(reports[0]!)
-    : renderSupervisorRollupMarkdown(rollupSupervisorRuns(reports), `Supervisor rollup — ${runDir}`)
-  if (args.out) {
-    const path = resolve(args.out, 'report.md')
-    await saveReport(path, markdown)
-    console.log(`supervisor report → ${path}  (${runDirs.length === 1 ? '1 run' : `${runDirs.length} runs`})`)
-  } else {
-    console.log(markdown)
-  }
-}
-
-async function collectImportedSpans(
-  path: string,
-  format: TraceEvidenceFormatOption,
-  selector?: string,
-): Promise<CollectedSpans> {
-  const { sessionReportSource } = await import('./report.js')
-  const result = await exportTraceEvidenceFile(path, { format })
-  const spans = selector ? selectSpans(result.spans, selector, path) : result.spans
-  const { sessionByTrace } = indexSessionIdsByTrace(spans)
-  const sessions = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
-    const sessionId = sessionByTrace.get(span.trace_id)
-    if (!sessionId) continue
-    const grouped = sessions.get(sessionId) ?? []
-    grouped.push(span)
-    sessions.set(sessionId, grouped)
-  }
-  return {
-    spans,
-    harness: result.format,
-    sources: [...sessions].map(([sessionId, grouped]) => sessionReportSource({
-      harness: result.format,
-      sessionId,
-      path,
-      cwd: null,
-      mtimeMs: 0,
-    }, grouped, sessionId)),
-  }
-}
-
-/** A registry or engine line that reports a failure, not progress. */
-const ANALYST_FAILURE = /\[analyst\] (?:FAIL|WARN) |\bmodel call \d+ FAIL\b/u
-
-/**
- * The analysts' log on stderr: what failed, and nothing else. Progress (the
- * registry's `[analyst] ok <id>` and `skip` lines, each analyst's own notes,
- * the engine's `model call N ok`) is not printed: the report carries every
- * analyst's status, and stderr is for what went wrong. The registry's
- * `[analyst] FAIL <id>` line carries its reason only in the structured
- * fields; a message-only sink turns every engine-startup failure into an
- * unactionable one-liner.
- */
-function analystLog(msg: string, fields?: Record<string, unknown>): void {
-  // A gate rejection names its cause only in the fields; without them the
-  // line says a finding was dropped but not why, which nobody can act on.
-  const rejection = findingRejectionDetail(msg, fields)
-  if (rejection !== undefined) {
-    process.stderr.write(rejection ? `${msg} — ${rejection}\n` : `${msg}\n`)
-    return
-  }
-  if (!ANALYST_FAILURE.test(msg)) return
-  const error = typeof fields?.error === 'string' && fields.error ? fields.error : undefined
-  const errorClass = typeof fields?.error_class === 'string' && fields.error_class ? `${fields.error_class}: ` : ''
-  process.stderr.write(error ? `${msg} — ${errorClass}${error}\n` : `${msg}\n`)
-}
 
 /**
  * `traces ask`: free-form questions over the selected sessions, the one
@@ -1241,7 +1083,7 @@ function analystLog(msg: string, fields?: Record<string, unknown>): void {
  */
 async function cmdAsk(args: CliArgs): Promise<void> {
   const { analysisEngineFromEnv, bridgeVersion, missingAskRequirements, UnservableModelError } = await import('./analyst-model-call.js')
-  const { isBridgeMismatchError, loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
+  const { createTraceQuestionCorpus, isBridgeMismatchError, loadTraceQuestionsFile, normalizeTraceQuestions, runTraceQuestions, writeTraceQuestionsArtifacts } = await import('./ask.js')
   let questions: TraceQuestion[]
   try {
     questions = [
@@ -1276,8 +1118,9 @@ async function cmdAsk(args: CliArgs): Promise<void> {
     if (error instanceof UnservableModelError) throw new CliError(error.message, error.failure.code)
     throw error
   }
-  const collected = await collectSpans(args)
-  if (collected.spans.length === 0) throw new CliError('no spans found for the given selection', 'unreadable')
+  const corpus = createTraceQuestionCorpus()
+  const collected = await forEachSpanBatch(args, async (spans) => corpus.add(spans))
+  if (collected.spanCount === 0) throw new CliError('no spans found for the given selection', 'unreadable')
   warnIncompleteWorkflow(collected.workflow)
   const interrupt = () => controller.abort(new Error('ask interrupted'))
   process.once('SIGINT', interrupt)
@@ -1285,7 +1128,7 @@ async function cmdAsk(args: CliArgs): Promise<void> {
   try {
     result = await runTraceQuestions({
       questions,
-      spans: collected.spans,
+      corpus: corpus.finish(),
       engine,
       harness: collected.harness,
       concurrency: DEFAULT_ASK_CONCURRENCY,
@@ -1581,29 +1424,6 @@ function reportRefused(refused: readonly RefusedSession[]): void {
 }
 
 /** The window `traces skills` counts when no `--since` is given. */
-const SKILLS_SINCE = '30d'
-
-/**
- * `traces skills`: skill use across Claude Code, Codex and Kimi Code sessions,
- * with no model call. Each run reads the bytes sessions appended since the
- * last into the store under `$XDG_STATE_HOME/traces`, then counts the window.
- */
-async function cmdSkills(args: CliArgs): Promise<void> {
-  const since = parseSince(args.since ?? SKILLS_SINCE)
-  const storePath = defaultSkillUsageStorePath()
-  const store = await SkillUsageStore.load(storePath)
-  const refreshed = await store.refresh()
-  await store.save()
-  const report = buildSkillUsageReport(store.list(), await readInstalledSkills(), storePath, { since, refresh: refreshed })
-  const json = args.format === 'json'
-  if (args.unused) {
-    if (json) process.stdout.write(`${JSON.stringify(report.unused, null, 2)}\n`)
-    else for (const skill of report.unused) process.stdout.write(`${skill.skill}\t${skill.installedIn.join(',')}\n`)
-    return
-  }
-  process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : `${renderSkillUsage(report)}\n`)
-}
-
 /** `--current` named as a ref, and `--latest-turn` checked against the harness. */
 function prepare(args: Args): CliArgs {
   return validateLatestTurn(applyCurrentSessionSelection(args))
@@ -1643,6 +1463,7 @@ await runTraces(process.argv.slice(2), {
   'bundle verify': cmdBundleVerify,
   convert: reading(cmdConvert),
   upload: reading(cmdUpload),
+  graphs: reading((args) => cmdGraphs(args, { discover: () => discover(args), readSpans: () => collectSpans(args) })),
   skills: cmdSkills,
   mcp: reading(cmdMcp),
 })

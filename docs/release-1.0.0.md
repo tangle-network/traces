@@ -28,6 +28,20 @@ The `inspect-agent-traces` skill maps each question an agent asks to the command
 
 The full table: [docs/migrate-1.0.md](migrate-1.0.md), or `traces help moved`.
 
+## A week of one host
+
+`analyze`, `ask` and `mcp` read a `--since` sweep one session at a time and keep only what their reports need, so a week of a busy host is never held as spans.
+On drew-gtr-pro, `traces analyze --since 7d --format json` over every harness (4,079 sessions, 1.54 million spans) exits 0 at the default heap with a peak RSS of 6.5 GB in 18 minutes, under `nice -n 10` at load 40 to 65. Before, it ran out of V8 heap at the default ~4.5 GB; with a 24 GB heap it held 7.5 GB and more, and skipped agent-eval's behavioral analyst (`4063 traces exceed maxTraces=1000`). Every analyst now reads every selected trace.
+For small selections the output is unchanged: analyze JSON before and after differs only in the new fields.
+
+`facts.measurements` gains three measures, and `analyze` pools them in `measures.operating`:
+
+- `modelCalls`: the context each model call read (input + cache read + cache write), and the model's latency after a tool result by 100k-token context band. Claude Code on the GTR week: mean 366k, p50 298k tokens; reply p50 3.4 s at 0-100k and 5.3 s at 900k+.
+- `guardRefusals`: tool calls a hook refused, by guard. GTR week: 1.7 per 1,000 tool calls, process-guard most.
+- `limitStop`: the usage or weekly limit notice a session stopped on. GTR week: 81 of 129 terminal failures. Mac week: 11 of 12.
+
+A Codex task that completes with an error (`You’ve hit your usage limit`) now ends its run in error, where it read as a success.
+
 ## Benchmark: traces against an agent reading the raw files (U11)
 
 `bench/audit` asks 19 questions about three synthetic sessions, scored by exact match. Each model arm is one `claude -p` agent per question, model `sonnet` (served as `claude-sonnet-5-5`), $0.25 per question, tools `Bash`, `Read`, `Grep`, `Glob`; cost is the harness's own `total_cost_usd` at list price. The rule: the traces arm answers at least as many questions correctly as the raw-files arm, at lower cost.

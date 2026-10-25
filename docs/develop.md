@@ -2,17 +2,16 @@
 
 [traces](../README.md#docs) › Develop and release
 
-## Develop
+## Local merge gate
+
+The gate fetches the pushed revision and installs frozen dependencies. Build before tests, which spawn the CLI.
 
 ```bash
-pnpm install
-pnpm build        # dist/index.js (SDK), dist/cli.js (bin) and .d.ts; tests spawn dist/cli.js
-pnpm test
-pnpm typecheck
-pnpm dev facts --current   # run from source through tsx
+beelink-gate auto https://github.com/tangle-network/traces.git <full-commit-sha> -- bash -euc \
+  'pnpm check:source && pnpm typecheck && pnpm build && pnpm test && pnpm run verify:contracts-corpus && pnpm check:package'
 ```
 
-Tests assert through public boundaries: they spawn `dist/cli.js` with argv (`tests/run-cli.ts`) and assert stdout, stderr and exit code, or import SDK exports. Only process boundaries are faked: a fixture HOME and `XDG_STATE_HOME`, the clock, a stub `npm`, and the Python bridge as a stub child process.
+PRs and branch pushes run no CI. The corpus checks real trace fixtures; `check:package` checks the packed CLI. Use the package's Node engine range; tag publication retains its own runtime and qualification.
 
 ## Release
 

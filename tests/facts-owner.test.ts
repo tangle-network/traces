@@ -185,8 +185,11 @@ describe('compact JSON', () => {
   // (6,405), its rows already without span ids. Citations add about 240 (6,649 at a 57-character
   // fixture path): `recordFile` once (74 here, growing with TMPDIR), six `record`s of `{line}`
   // (123) and two empty `nonZeroExits` (36). They replace the find and grep an agent would
-  // otherwise run to quote a fact, so the budget takes them.
-  it('keeps the sheet of the 13-span fixture within 6,800 bytes, with no n = 1 distribution', async () => {
+  // otherwise run to quote a fact, so the budget takes them. 6,950: the operating measures add about
+  // 150 bytes here (6,820 at this fixture path): `modelCalls` with only a mean for one call and no
+  // latency band under 2 replies, `guardRefusals` without a rate or tool count (`toolCalls` owns
+  // it), and `limitStop: null`. Each answers a question analyze rolls up across a week.
+  it('keeps the sheet of the 13-span fixture within 6,950 bytes, with no n = 1 distribution', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-facts-size-'))
     const path = join(dir, `${FIXTURE_SESSION_ID}.jsonl`)
     await writeFile(path, `${fixtureRecords().map((record) => JSON.stringify(record)).join('\n')}\n`)
@@ -194,7 +197,7 @@ describe('compact JSON', () => {
     expect(run.code).toBe(0)
     const report = JSON.parse(run.stdout) as { spanCount: number }
     expect(report.spanCount).toBe(13)
-    expect(Buffer.byteLength(run.stdout)).toBeLessThanOrEqual(6_800)
+    expect(Buffer.byteLength(run.stdout)).toBeLessThanOrEqual(6_950)
     expect(run.stdout).not.toMatch(/"p50"|"p95"|"durationMs"/u)
   })
 })
@@ -212,7 +215,7 @@ describe('the price table loads only to price a sheet', () => {
     const run = await runCli(argv, { env: { ...env, TRACES_IMPORT_LOG: log, NODE_OPTIONS: `--import ${hook}` } })
     expect(run.code, run.stderr).toBe(0)
     const urls = (await readFile(log, 'utf8')).split('\n')
-    expect(urls.length).toBeGreaterThan(100)
+    expect(urls).toContain('trace-price-import-probe-ready')
     return urls.some((url) => url.endsWith('/agent-runtime/dist/index.js'))
   }
 

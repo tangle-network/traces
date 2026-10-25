@@ -365,6 +365,29 @@ function fleetHeader(result: TraceInvestigationResult): string[] {
   return lines
 }
 
+const kTokens = (tokens: number): string => (tokens < 1000 ? String(tokens) : `${Math.round(tokens / 1000)}k`)
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`
+
+/** Context per model call, latency at the smallest and largest context band, guard refusals and limit stops. */
+function operatingLine(result: TraceInvestigationResult): string | undefined {
+  const { modelCalls, guardRefusals, limitStops } = result.measures.operating
+  if (modelCalls.calls === 0 && guardRefusals.toolCalls === 0) return undefined
+  const parts: string[] = []
+  const { mean, p50 } = modelCalls.contextTokens
+  if (mean !== null) parts.push(`context/call mean ${kTokens(mean)}${p50 === undefined ? '' : ` p50 ${kTokens(p50)}`}`)
+  const bands = modelCalls.latencyByContext
+  if (bands.length > 0) {
+    const ends = bands.length === 1 ? [bands[0]!] : [bands[0]!, bands.at(-1)!]
+    parts.push(`reply p50 ${ends.map((band) => `${seconds(band.p50Ms)} at ${band.band}`).join(', ')}`)
+  }
+  if (guardRefusals.perThousandCalls !== null) {
+    const top = guardRefusals.byGuard[0]
+    parts.push(`guard refusals ${guardRefusals.perThousandCalls}/1k calls${top ? ` (${top.guard} ${top.refusals})` : ''}`)
+  }
+  parts.push(`limit stops ${limitStops.sessions} (${limitStops.terminalFailuresAtLimit}/${limitStops.terminalFailures} terminal failures)`)
+  return parts.join(' · ')
+}
+
 function cell(text: string, width: number): string {
   return text.length > width ? `${text.slice(0, width - 1)}…` : text.padEnd(width)
 }
@@ -399,7 +422,8 @@ function sessionTable(result: TraceInvestigationResult): string[] {
 /** The `traces analyze` text: at most {@link ANALYZE_TEXT_LINES} lines. */
 export function renderAnalysis(result: TraceInvestigationResult): string {
   const sessions = result.facts.sessions
-  const body = sessions.length === 1 ? singleSession(result, sessions[0]!) : [...fleetHeader(result), ...sessionTable(result)]
+  const operating = sessions.length === 1 ? undefined : operatingLine(result)
+  const body = sessions.length === 1 ? singleSession(result, sessions[0]!) : [...fleetHeader(result), ...sessionTable(result), ...(operating ? [operating] : [])]
   const lines = [...body, ...closingLines(result, body.length)]
   return `${lines.slice(0, ANALYZE_TEXT_LINES).join('\n')}\n`
 }

@@ -41,7 +41,14 @@
 
 import { createHash } from 'node:crypto'
 import { canonicalJson } from './adapters/tool-io.js'
-import { computeSessionMeasurements, STALL_MINUTES, type SessionMeasurements } from './session-measurements.js'
+import { withholdContent } from './session-facts-withheld.js'
+import {
+  computeSessionMeasurements,
+  operatingSamplesOf,
+  STALL_MINUTES,
+  type OperatingSamples,
+  type SessionMeasurements,
+} from './session-measurements.js'
 export type {
   SessionMeasurements, ToolMeasurement, CoveredMeasurement, CompactionMeasurement, ContentFootprint,
   SessionWaste, FailingStreak, Stall, RepeatedCommands,
@@ -60,7 +67,9 @@ import {
   isSubagentSpan,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { ATTR, indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
+import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
+import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
+import { groupByTrace, type TraceGroup } from './session-scopes.js'
 import { needsPrice, routerPrices, sessionCost, sessionTokens, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
@@ -75,7 +84,7 @@ import { commandTextFromInput, isCodeModeScript, simpleCommands } from './shell-
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '8'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '9'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
@@ -89,6 +98,8 @@ export interface SessionFactsWindow {
 }
 
 export interface SessionFactsOptions {
+  /** Emit folded child sessions as separate facts, each counting only its own tokens and records. */
+  readonly includeSubagents?: boolean
   /** Defaults to true for compatibility. False withholds conversation, commands, paths and assignment text. */
   readonly includeContent?: boolean
   /**
@@ -242,6 +253,8 @@ export interface SessionFacts {
   readonly traceId: string
   readonly sessionId: string | null
   readonly harness: string | null
+  /** Recorded canonical span boundary for this session; child facts retain their original trace ID. */
+  readonly rootSpanId: SessionFact<string>
   /**
    * The session that spawned this one, when this is a spawned child read with
    * its parent. A child's numbers are its own; none is added to its parent's.
@@ -296,6 +309,8 @@ export interface SessionFacts {
   readonly excludedTurns: SessionFact<readonly ExcludedTurnFact[]>
   /** Every `user.prompt` turn by actor, so the human filter is checkable. */
   readonly turnsByActor: SessionFact<readonly TurnActorCount[]>
+  /** Typed turns after the shared classifier: human, fleet, relay; metadata only. */
+  readonly typedTurnCounts: SessionFact<readonly Pick<TurnActorCount, 'actor' | 'turns'>[]>
   /** The last message of the session's own agent, and of each subagent task. */
   readonly finalMessages: SessionFact<readonly FinalMessageFact[]>
   readonly changedFiles: SessionFact<readonly ChangedFileFact[]>
@@ -889,39 +904,6 @@ function excludedTurnFacts(
     .map(({ reason, author, spanIds }) => ({ reason, author, turns: spanIds.length, spanIds }))
 }
 
-/** Epoch bounds of a window; `null` when the window is absent or open on both sides. */
-interface WindowBounds {
-  readonly since: string | null
-  readonly until: string | null
-  readonly sinceMs: number
-  readonly untilMs: number
-}
-
-function windowBounds(window: SessionFactsWindow | undefined): WindowBounds | null {
-  if (!window || (window.since === undefined && window.until === undefined)) return null
-  const bound = (value: string | undefined, name: string, open: number): number => {
-    if (value === undefined) return open
-    const ms = Date.parse(value)
-    if (!Number.isFinite(ms)) throw new RangeError(`window ${name} is not a readable time: ${value}`)
-    return ms
-  }
-  const sinceMs = bound(window.since, 'since', Number.NEGATIVE_INFINITY)
-  const untilMs = bound(window.until, 'until', Number.POSITIVE_INFINITY)
-  if (!(sinceMs < untilMs)) throw new RangeError(`window since (${window.since}) must be before until (${window.until})`)
-  return {
-    since: window.since === undefined ? null : new Date(sinceMs).toISOString(),
-    until: window.until === undefined ? null : new Date(untilMs).toISOString(),
-    sinceMs,
-    untilMs,
-  }
-}
-
-function insideWindow(bounds: WindowBounds | null, time: string): boolean {
-  if (bounds === null) return true
-  const ms = Date.parse(time)
-  return Number.isFinite(ms) && ms >= bounds.sinceMs && ms < bounds.untilMs
-}
-
 /** A span the adapter built from one of the session's records: not the root, not an integrity receipt. */
 function isRecordSpan(span: OtlpSpan): boolean {
   return span.parent_span_id !== null && span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] === undefined
@@ -934,34 +916,13 @@ function isRecordSpan(span: OtlpSpan): boolean {
  */
 export function computeSessionFacts(spans: readonly OtlpSpan[], options: SessionFactsOptions = {}): SessionFacts[] {
   const bounds = windowBounds(options.window)
-  return groupByTrace(spans)
+  return groupByTrace(spans, options.includeSubagents)
     .sort((left, right) => compareIds(left.traceId, right.traceId))
     .map((group) => readSession(group.traceId, group.sessionId, group.spans, options, bounds).facts)
 }
 
 function compareIds(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
-}
-
-interface TraceGroup {
-  readonly traceId: string
-  readonly sessionId: string | null
-  readonly spans: OtlpSpan[]
-}
-
-function groupByTrace(spans: readonly OtlpSpan[]): TraceGroup[] {
-  const { sessionByTrace } = indexSessionIdsByTrace(spans)
-  const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
-    const group = byTrace.get(span.trace_id)
-    if (group) group.push(span)
-    else byTrace.set(span.trace_id, [span])
-  }
-  return [...byTrace].map(([traceId, traceSpans]) => ({
-    traceId,
-    sessionId: sessionByTrace.get(traceId) ?? null,
-    spans: traceSpans,
-  }))
 }
 
 /**
@@ -973,6 +934,8 @@ export interface SessionReading {
   readonly facts: SessionFacts
   readonly spans: readonly OtlpSpan[]
   readonly turns: readonly SessionTurnFact[]
+  /** The raw values behind `facts.measurements.modelCalls`, which `analyze` pools across sessions. */
+  readonly operating: OperatingSamples
 }
 
 function readSession(
@@ -1012,6 +975,8 @@ function readSession(
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
     actorCounts.set(actor, [...(actorCounts.get(actor) ?? []), span.span_id])
   }
+  const typedCounts = new Map<string, number>()
+  for (const turn of typedTurns) typedCounts.set(turn.author, (typedCounts.get(turn.author) ?? 0) + 1)
   const finalMessages = finalMessagesOf(spans)
   const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, ownSpans)
 
@@ -1027,6 +992,7 @@ function readSession(
   )
 
   const tokens = sessionTokens(ownSpans)
+  const operating = operatingSamplesOf(ownSpans, invoked)
   const receipts = spans.filter((span) => span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] !== undefined)
   const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
@@ -1044,6 +1010,9 @@ function readSession(
     traceId,
     sessionId,
     harness,
+    rootSpanId: spans.find((span) => span.parent_span_id === null)
+      ? { value: spans.find((span) => span.parent_span_id === null)!.span_id, spanIds: [spans.find((span) => span.parent_span_id === null)!.span_id], unavailable: null }
+      : { value: null, spanIds: [], unavailable: 'no recorded root span boundary' },
     parentSessionId: spans
       .filter((span) => span.parent_span_id === null)
       .map((span) => stringAttr(span, 'traces.parent_session_id'))
@@ -1087,11 +1056,11 @@ function readSession(
           spanIds: [],
           unavailable: `no span carries ${ATTR.GIT_REPOSITORY}: the recorded cwd is not a checkout with a remote, or no longer exists`,
         },
-    measurements: computeSessionMeasurements({ spans: ownSpans, records: ownSpans.filter(isRecordSpan), tools: invoked, sessionId, harness }),
+    measurements: computeSessionMeasurements({ spans: ownSpans, records: ownSpans.filter(isRecordSpan), tools: invoked, sessionId, harness, operating }),
     toolCalls: {
-      value: invoked.length,
+      value: sourceChannelUnavailable(ownSpans, 'tool-calls') ? null : invoked.length,
       spanIds: invoked.map((span) => span.span_id),
-      unavailable: null,
+      unavailable: sourceChannelUnavailable(ownSpans, 'tool-calls') ? 'The source does not record tool calls.' : null,
     },
     synthesizedToolSpans: {
       value: synthesized.length,
@@ -1117,8 +1086,9 @@ function readSession(
           ...(pullRequests.partial ? { partial: pullRequests.partial } : {}),
         }
       : { value: null, spanIds: [], unavailable: pullRequests.unavailable ?? 'unread' },
-    humanTurns: listFact(humanTurns, humanTurns.map((turn) => turn.spanId)),
+    humanTurns: sourceChannelUnavailable(ownSpans, 'human-turns') ? { value: null, spanIds: [], unavailable: 'The source does not record human turns.' } : listFact(humanTurns, humanTurns.map((turn) => turn.spanId)),
     excludedTurns: listFact(excludedTurns, excludedTurns.flatMap((entry) => entry.spanIds)),
+    typedTurnCounts: sourceChannelUnavailable(ownSpans, 'human-turns') ? { value: null, spanIds: [], unavailable: 'The source does not record typed turns.' } : listFact([...typedCounts].map(([actor, turns]) => ({ actor, turns })), []),
     turnsByActor: listFact(
       [...actorCounts]
         .sort(([left], [right]) => left.localeCompare(right))
@@ -1147,40 +1117,8 @@ function readSession(
       : { value: tokens.input + (tokens.output ?? 0), spanIds: tokens.spanIds, unavailable: null },
     agent,
   }
-  if (options.includeContent !== false) return { facts, spans, turns: typedTurns }
-  const withheld = <T>(): SessionFact<T> => ({
-    value: null, spanIds: [], unavailable: 'Content was not requested.',
-  })
-  const withheldFacts: SessionFacts = {
-    ...facts,
-    cwd: withheld(),
-    repo: withheld(),
-    humanTurns: withheld(),
-    finalMessages: withheld(),
-    changedFiles: withheld(),
-    commands: withheld(),
-    pullRequests: withheld(),
-    subagents: {
-      ...facts.subagents,
-      value: facts.subagents.value?.map((entry) => ({
-        ...entry, taskName: null, taskNameUnavailable: 'Assignment text was not requested.', agentType: null,
-      })) ?? null,
-    },
-    firstFailure: facts.firstFailure.status === 'found'
-      ? { ...facts.firstFailure, message: null, classification: facts.firstFailure.classification ? { ...facts.firstFailure.classification, reason: 'Content was not requested.' } : null }
-      : facts.firstFailure,
-    measurements: {
-      ...facts.measurements,
-      waste: {
-        ...facts.measurements.waste,
-        failingStreaks: {
-          ...facts.measurements.waste.failingStreaks,
-          value: facts.measurements.waste.failingStreaks.value?.map((streak) => ({ ...streak, command: null })) ?? null,
-        },
-      },
-    },
-  }
-  return { facts: withheldFacts, spans, turns: [] }
+  if (options.includeContent !== false) return { facts, spans, turns: typedTurns, operating }
+  return { facts: withholdContent(facts), spans, turns: [], operating }
 }
 
 /**
@@ -1292,7 +1230,7 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
 
   return {
     add(spans) {
-      for (const group of groupByTrace(spans)) {
+      for (const group of groupByTrace(spans, options.includeSubagents)) {
         if (bounds === null && options.nameUnread !== true) {
           select(group)
           continue

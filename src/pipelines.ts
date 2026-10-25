@@ -22,11 +22,18 @@ import type { ToolUseMetrics } from '@tangle-network/agent-eval'
 import {
   failureClusterView,
   stuckLoopView,
+  type FailureCluster,
   type FailureClusterReport,
   type StuckLoopReport,
 } from '@tangle-network/agent-eval/pipelines'
 import { isInheritedSpan, isSubagentSpan, isSynthesizedSpan } from './adapters/provenance.js'
-import { classifyFailureFollowUps, type FailureFollowUpReport } from './failure-followup.js'
+import { appendAll } from './arrays.js'
+import {
+  failureFollowUpReport,
+  failureFollowUpSequences,
+  type FailureFollowUpReport,
+  type FailureFollowUpSequence,
+} from './failure-followup.js'
 import type { OtlpSpan } from './otlp.js'
 import { toRuntimeStore } from './runtime-store.js'
 import { computeSessionFacts, type SessionFacts } from './session-facts.js'
@@ -45,7 +52,8 @@ export interface PipelineOptions {
   minLoopOccurrences?: number
 }
 
-export async function runPipelines(spans: readonly OtlpSpan[], opts: PipelineOptions = {}): Promise<PipelineReport> {
+/** The measures of one trace's spans: every view reads one run at a time. */
+async function tracePipelines(spans: readonly OtlpSpan[], opts: PipelineOptions): Promise<Omit<PipelineReport, 'failureFollowUps'>> {
   const { store, runIds } = await toRuntimeStore(spans)
   // A second store only when some call is an expected wait: it would be the same store otherwise.
   const loopEligible = spans.filter((item) => item.attributes['traces.expected_blocking'] !== true)
@@ -55,7 +63,79 @@ export async function runPipelines(spans: readonly OtlpSpan[], opts: PipelineOpt
     failureClusterView(store),
     Promise.all(runIds.map((runId) => computeToolUseMetrics(store, runId))),
   ])
-  return { stuckLoops, failureClusters, toolUse, failureFollowUps: classifyFailureFollowUps(spans) }
+  return { stuckLoops, failureClusters, toolUse }
+}
+
+/** The key `failureClusterView` groups failed runs by. */
+const clusterKey = (cluster: FailureCluster): string =>
+  `${cluster.failureClass}|${cluster.toolName ?? ''}|${cluster.argPrefix ?? ''}|${cluster.dimension ?? ''}`
+
+export interface PipelineAccumulator {
+  /** One batch of whole traces: a trace's spans never span two batches. */
+  add(spans: readonly OtlpSpan[]): Promise<void>
+  report(): PipelineReport
+}
+
+/**
+ * The measures over many batches of spans, holding only what each view
+ * reports. `stuckLoopView`, `failureClusterView` and `computeToolUseMetrics`
+ * each read one run (trace) at a time, so running them trace by trace and
+ * merging in trace order gives the report one store of every span would,
+ * without that store.
+ */
+export function createPipelineAccumulator(opts: PipelineOptions = {}): PipelineAccumulator {
+  const loops: StuckLoopReport['findings'] = []
+  let loopRuns = 0
+  const clusters = new Map<string, FailureCluster>()
+  let totalFailures = 0
+  let totalRuns = 0
+  const toolUse: ToolUseMetrics[] = []
+  const sequences: FailureFollowUpSequence[] = []
+  return {
+    async add(spans) {
+      if (spans.length === 0) return
+      const groups = new Map<string, OtlpSpan[]>()
+      for (const span of spans) {
+        const group = groups.get(span.trace_id)
+        if (group) group.push(span)
+        else groups.set(span.trace_id, [span])
+      }
+      for (const group of groups.values()) {
+        const one = await tracePipelines(group, opts)
+        appendAll(loops, one.stuckLoops.findings)
+        loopRuns += one.stuckLoops.totalRuns
+        for (const cluster of one.failureClusters.clusters) {
+          const key = clusterKey(cluster)
+          const held = clusters.get(key)
+          if (!held) {
+            clusters.set(key, { ...cluster, scenarioIds: [...cluster.scenarioIds] })
+            continue
+          }
+          held.runCount += cluster.runCount
+          for (const id of cluster.scenarioIds) if (!held.scenarioIds.includes(id)) held.scenarioIds.push(id)
+        }
+        totalFailures += one.failureClusters.totalFailures
+        totalRuns += one.failureClusters.totalRuns
+        appendAll(toolUse, one.toolUse)
+      }
+      appendAll(sequences, failureFollowUpSequences(spans))
+    },
+    report() {
+      const affected = new Set(loops.map((finding) => finding.runId))
+      return {
+        stuckLoops: { findings: [...loops], affectedRunRatio: loopRuns > 0 ? affected.size / loopRuns : 0, totalRuns: loopRuns },
+        failureClusters: { clusters: [...clusters.values()].sort((a, b) => b.runCount - a.runCount), totalFailures, totalRuns },
+        toolUse: [...toolUse],
+        failureFollowUps: failureFollowUpReport(sequences),
+      }
+    },
+  }
+}
+
+export async function runPipelines(spans: readonly OtlpSpan[], opts: PipelineOptions = {}): Promise<PipelineReport> {
+  const accumulator = createPipelineAccumulator(opts)
+  await accumulator.add(spans)
+  return accumulator.report()
 }
 
 // ── the rule set analyze and watch share ────────────────────────────────────

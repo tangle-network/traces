@@ -24,9 +24,16 @@
  *   redaction rule in either, so no boundary redaction can make it safe.
  */
 
-import { buildTraceAnalysisToolDescriptors, redact, shareAllowed, UNTRUSTED_TRACE_TEXT } from '@tangle-network/agent-eval/traces'
+import {
+  buildTraceAnalysisToolDescriptors,
+  combineVerdicts,
+  redact,
+  shareAllowed,
+  type ShareSafetyVerdict,
+  UNTRUSTED_TRACE_TEXT,
+} from '@tangle-network/agent-eval/traces'
 import { createStdioToolServer, type McpToolDescriptor } from '@tangle-network/agent-runtime/mcp'
-import { openAgenticTraceStore } from './analysis-store.js'
+import { exportBytes, openAgenticTraceStore } from './analysis-store.js'
 import type { OtlpSpan } from './otlp.js'
 import { assessSpans, redactSpans } from './redact.js'
 import { tracesVersion } from './version.js'
@@ -35,16 +42,49 @@ import { tracesVersion } from './version.js'
 const MCP_RESULT_BYTE_CAP = 512 * 1024
 
 export interface TraceMcpServerOptions {
-  readonly spans: readonly OtlpSpan[]
+  /** The selected spans; or pass `served`, redacted a batch at a time. */
+  readonly spans?: readonly OtlpSpan[]
+  readonly served?: ServedSpans
+}
+
+/** The redacted export the server reads, and the share-safety verdict of exactly those spans. */
+export interface ServedSpans {
+  readonly bytes: Buffer
+  readonly verdict: ShareSafetyVerdict
+}
+
+/**
+ * Redact and assess a batch of sessions at a time, keeping only the redacted
+ * export's bytes: a week of sessions is never held as spans. Verdicts combine
+ * the way one assessment of every span does (counts add, the first paths are kept).
+ */
+export function createServedSpans(): { add(spans: readonly OtlpSpan[]): void; finish(): ServedSpans } {
+  const chunks: Buffer[] = []
+  const verdicts: ShareSafetyVerdict[] = []
+  return {
+    add(spans) {
+      if (spans.length === 0) return
+      const { spans: redacted } = redactSpans(spans)
+      verdicts.push(assessSpans(redacted))
+      chunks.push(exportBytes(redacted))
+    },
+    finish() {
+      return { bytes: Buffer.concat(chunks), verdict: combineVerdicts('default', verdicts) }
+    },
+  }
 }
 
 /** Build the MCP tools over the selected spans, redacted. */
 function traceMcpTools(options: TraceMcpServerOptions): McpToolDescriptor[] {
-  const { spans } = redactSpans(options.spans)
+  const served = options.served ?? (() => {
+    const builder = createServedSpans()
+    builder.add(options.spans ?? [])
+    return builder.finish()
+  })()
   // Gate on what would actually be served, the same way upload gates on what
   // would actually be sent: a detector gap in redactSpans shows up here as
   // UNSAFE (refuse) instead of a leak served to a client.
-  const verdict = assessSpans(spans)
+  const { verdict } = served
   if (!shareAllowed(verdict)) {
     const findings = verdict.findings.map((f) => `${f.category}/${f.detector} (${f.count})`).join(', ')
     throw new Error(
@@ -53,7 +93,7 @@ function traceMcpTools(options: TraceMcpServerOptions): McpToolDescriptor[] {
         (verdict.unreadable.length > 0 ? `; unreadable: ${verdict.unreadable.join('; ')}` : ''),
     )
   }
-  const store = openAgenticTraceStore(spans)
+  const store = openAgenticTraceStore(served.bytes)
   const descriptors = buildTraceAnalysisToolDescriptors({ store }).filter((d) => d.name !== 'readSpanSource')
   return descriptors.map((descriptor): McpToolDescriptor => ({
     name: descriptor.name,

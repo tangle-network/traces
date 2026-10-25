@@ -1,3 +1,4 @@
+import type { OtlpSpan } from './otlp.js'
 /**
  * Span-attribute keys the upload path stamps. The CLI is the producer; the
  * Tangle Intelligence Platform is the consumer.
@@ -231,4 +232,15 @@ export function stampSessionIdentity(
       span.attributes[ATTR.SESSION_ID] = sessionId
     }
   }
+}
+
+/** A source adapter may explicitly lack a measurement channel, rather than observe zero. */
+export const SOURCE_MISSING_CHANNELS_ATTR = 'traces.source.missing_channels'
+export function sourceChannelUnavailable(spans: readonly OtlpSpan[], channel: string): boolean {
+  return spans.some((span) => {
+    const value = span.attributes[SOURCE_MISSING_CHANNELS_ATTR]
+    if (typeof value !== 'string') return false
+    try { const channels: unknown = JSON.parse(value); return Array.isArray(channels) && channels.includes(channel) }
+    catch { return true }
+  })
 }
