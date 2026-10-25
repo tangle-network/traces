@@ -501,3 +501,16 @@ export function multiAgentOperation(name: string): string | null {
   if (name.startsWith(prefix)) return name.slice(prefix.length)
   return DIRECT_AGENT_OPERATIONS.has(name) ? name : null
 }
+
+/**
+ * The root status a `task_complete` event leaves: ERROR with the error it
+ * carries (`error.message`, or `error` as text), else OK. A task that ended in
+ * an error ended the session's work there: "You’ve hit your usage limit", a
+ * refused model, a crashed turn.
+ */
+export function taskEndStatus(payload: unknown): { code: 'OK' } | { code: 'ERROR'; message: string } {
+  const error = (payload as { error?: unknown } | undefined)?.error
+  const raw = typeof error === 'string' ? error : (error as { message?: unknown } | null | undefined)?.message
+  const message = typeof raw === 'string' ? raw.trim() : ''
+  return message ? { code: 'ERROR', message } : { code: 'OK' }
+}

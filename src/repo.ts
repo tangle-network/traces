@@ -83,7 +83,28 @@ export function normalizeRemote(url: string): string | null {
   return null
 }
 
-async function readGit(cwd: string): Promise<{ remote: string | null; branch: string | null; commit: string | null }> {
+type GitIdentity = { remote: string | null; branch: string | null; commit: string | null }
+
+/**
+ * How long one read of a repository's remote, branch and commit is reused.
+ * A sweep reads thousands of sessions from a few dozen repositories, and each
+ * read is three or four git processes: without reuse, a week of sessions spent
+ * most of its wall time waiting on git. A long `watch` still sees a branch
+ * switch within a minute.
+ */
+const GIT_READ_REUSE_MS = 60_000
+const gitReads = new Map<string, { readonly at: number; readonly identity: Promise<GitIdentity> }>()
+
+function readGit(cwd: string): Promise<GitIdentity> {
+  const now = Date.now()
+  const held = gitReads.get(cwd)
+  if (held && now - held.at < GIT_READ_REUSE_MS) return held.identity
+  const identity = readGitOnce(cwd)
+  gitReads.set(cwd, { at: now, identity })
+  return identity
+}
+
+async function readGitOnce(cwd: string): Promise<GitIdentity> {
   // A readable `.git` (dir for a normal repo, file for a worktree/submodule).
   await stat(`${cwd}/.git`) // throws if absent → caller falls back
 

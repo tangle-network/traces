@@ -25,7 +25,7 @@ import {
   type TraceAnalystLimits,
 } from '@tangle-network/agent-eval/analyst'
 import type { TraceAnalysisStore } from '@tangle-network/agent-eval/traces'
-import { openAgenticTraceStore } from './analysis-store.js'
+import { exportBytes, openAgenticTraceStore } from './analysis-store.js'
 import { type AnswerSchema, answerSchemaErrors, assertAnswerSchema, parseJsonAnswer } from './answer-schema.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import {
@@ -36,7 +36,8 @@ import {
 } from './finding-rejections.js'
 import { ASK_QUESTION_HEADER, DEFAULT_ASK_CONCURRENCY, MAX_TRACE_QUESTION_CHARS, QUESTION_LABEL } from './ask-defaults.js'
 import type { OtlpSpan } from './otlp.js'
-import { sessionFactsContext } from './session-facts.js'
+import { appendAll } from './arrays.js'
+import { createSessionFactsReportBuilder, renderSessionFactsContext } from './session-facts.js'
 
 export { DEFAULT_ASK_CONCURRENCY, MAX_TRACE_QUESTION_CHARS }
 
@@ -173,7 +174,9 @@ export interface TraceQuestionsResult {
 
 export interface TraceQuestionsOptions {
   readonly questions: readonly TraceQuestion[]
-  readonly spans: readonly OtlpSpan[]
+  /** The spans to ask about; or pass `corpus`, built a batch at a time. */
+  readonly spans?: readonly OtlpSpan[]
+  readonly corpus?: TraceQuestionCorpus
   readonly engine: TraceAnalysisEngine
   readonly harness?: string
   /** Questions running at once. Default 4. */
@@ -364,7 +367,7 @@ function describeTraces(spans: readonly OtlpSpan[]): TraceQuestionTrace[] {
  * `searchTrace` stops at 500 hits). Neither is citable: the sheet names the span
  * ids behind every fact, and a citation still has to resolve against the store.
  */
-function preparedContext(traces: readonly TraceQuestionTrace[], spans: readonly OtlpSpan[]): string {
+function preparedContext(traces: readonly TraceQuestionTrace[], sheet: string | undefined): string {
   const list = JSON.stringify({
     traces: traces.slice(0, MAX_CONTEXT_TRACES).map((trace) => ({
       trace_id: trace.traceId,
@@ -376,8 +379,53 @@ function preparedContext(traces: readonly TraceQuestionTrace[], spans: readonly 
     })),
     omitted_traces: Math.max(0, traces.length - MAX_CONTEXT_TRACES),
   })
-  const sheet = sessionFactsContext(spans)
   return sheet ? `${list}\n\n${sheet}` : list
+}
+
+/** What every question reads: the store, the trace list and the prepared context. */
+export interface TraceQuestionCorpus {
+  readonly store: TraceAnalysisStore
+  readonly traces: readonly TraceQuestionTrace[]
+  readonly context: string
+  readonly spanCount: number
+}
+
+export interface TraceQuestionCorpusBuilder {
+  /** One batch of whole sessions, in selection order. */
+  add(spans: readonly OtlpSpan[]): void
+  finish(): TraceQuestionCorpus
+}
+
+/**
+ * The corpus a batch at a time: each batch is kept as its export's bytes, its
+ * traces' summaries and its facts sheets, so a week of sessions is never held
+ * as spans. One batch of every span gives what one pass over them gives.
+ */
+export function createTraceQuestionCorpus(): TraceQuestionCorpusBuilder {
+  const chunks: Buffer[] = []
+  const traces: TraceQuestionTrace[] = []
+  const facts = createSessionFactsReportBuilder()
+  let spanCount = 0
+  return {
+    add(spans) {
+      if (spans.length === 0) return
+      spanCount += spans.length
+      chunks.push(exportBytes(spans))
+      appendAll(traces, describeTraces(spans))
+      facts.add(spans)
+    },
+    finish() {
+      const store = openAgenticTraceStore(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks))
+      chunks.length = 0
+      const report = facts.build()
+      return {
+        store,
+        traces,
+        context: preparedContext(traces, report.sessions.length === 0 ? undefined : renderSessionFactsContext(report)),
+        spanCount,
+      }
+    },
+  }
 }
 
 const TRACE_URI = /trace:\/\/[^\s/"'`<>()[\]{}]+\/span\/[^\s/"'`<>()[\]{},;]+/g
@@ -558,7 +606,7 @@ function sumOrNull(values: ReadonlyArray<number | null>): number | null {
  * budget below one call's reservation.
  */
 export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<TraceQuestionsResult> {
-  if (opts.spans.length === 0) throw new Error('runTraceQuestions: no spans to ask about')
+  if ((opts.corpus?.spanCount ?? opts.spans?.length ?? 0) === 0) throw new Error('runTraceQuestions: no spans to ask about')
   const questions = normalizeTraceQuestions(opts.questions)
   const concurrency = opts.concurrency ?? DEFAULT_ASK_CONCURRENCY
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new RangeError('concurrency must be an integer >= 1')
@@ -591,9 +639,12 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   // exists to shorten, and `setupTimeMs` says how much of it that was.
   const runStarted = performance.now()
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  const store = openAgenticTraceStore(opts.spans)
-  const traces = describeTraces(opts.spans)
-  const context = preparedContext(traces, opts.spans)
+  const corpus = opts.corpus ?? (() => {
+    const builder = createTraceQuestionCorpus()
+    builder.add(opts.spans!)
+    return builder.finish()
+  })()
+  const { store, traces, context } = corpus
   const runId = `traces-ask-${Date.parse(generatedAt) || Date.now()}`
   const ledger = new CostLedger(budgetUsd)
 
@@ -778,7 +829,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
     questionTimeoutMs: typeof opts.engine.executionConfig.timeout_ms === 'number'
       ? opts.engine.executionConfig.timeout_ms
       : null,
-    spanCount: opts.spans.length,
+    spanCount: corpus.spanCount,
     traces,
     questions: answers,
     totals,

@@ -41,7 +41,14 @@
 
 import { createHash } from 'node:crypto'
 import { canonicalJson } from './adapters/tool-io.js'
-import { computeSessionMeasurements, STALL_MINUTES, type SessionMeasurements } from './session-measurements.js'
+import { withholdContent } from './session-facts-withheld.js'
+import {
+  computeSessionMeasurements,
+  operatingSamplesOf,
+  STALL_MINUTES,
+  type OperatingSamples,
+  type SessionMeasurements,
+} from './session-measurements.js'
 export type {
   SessionMeasurements, ToolMeasurement, CoveredMeasurement, CompactionMeasurement, ContentFootprint,
   SessionWaste, FailingStreak, Stall, RepeatedCommands,
@@ -927,6 +934,8 @@ export interface SessionReading {
   readonly facts: SessionFacts
   readonly spans: readonly OtlpSpan[]
   readonly turns: readonly SessionTurnFact[]
+  /** The raw values behind `facts.measurements.modelCalls`, which `analyze` pools across sessions. */
+  readonly operating: OperatingSamples
 }
 
 function readSession(
@@ -983,6 +992,7 @@ function readSession(
   )
 
   const tokens = sessionTokens(ownSpans)
+  const operating = operatingSamplesOf(ownSpans, invoked)
   const receipts = spans.filter((span) => span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] !== undefined)
   const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
@@ -1046,7 +1056,7 @@ function readSession(
           spanIds: [],
           unavailable: `no span carries ${ATTR.GIT_REPOSITORY}: the recorded cwd is not a checkout with a remote, or no longer exists`,
         },
-    measurements: computeSessionMeasurements({ spans: ownSpans, records: ownSpans.filter(isRecordSpan), tools: invoked, sessionId, harness }),
+    measurements: computeSessionMeasurements({ spans: ownSpans, records: ownSpans.filter(isRecordSpan), tools: invoked, sessionId, harness, operating }),
     toolCalls: {
       value: sourceChannelUnavailable(ownSpans, 'tool-calls') ? null : invoked.length,
       spanIds: invoked.map((span) => span.span_id),
@@ -1107,40 +1117,8 @@ function readSession(
       : { value: tokens.input + (tokens.output ?? 0), spanIds: tokens.spanIds, unavailable: null },
     agent,
   }
-  if (options.includeContent !== false) return { facts, spans, turns: typedTurns }
-  const withheld = <T>(): SessionFact<T> => ({
-    value: null, spanIds: [], unavailable: 'Content was not requested.',
-  })
-  const withheldFacts: SessionFacts = {
-    ...facts,
-    cwd: withheld(),
-    repo: withheld(),
-    humanTurns: withheld(),
-    finalMessages: withheld(),
-    changedFiles: withheld(),
-    commands: withheld(),
-    pullRequests: withheld(),
-    subagents: {
-      ...facts.subagents,
-      value: facts.subagents.value?.map((entry) => ({
-        ...entry, taskName: null, taskNameUnavailable: 'Assignment text was not requested.', agentType: null,
-      })) ?? null,
-    },
-    firstFailure: facts.firstFailure.status === 'found'
-      ? { ...facts.firstFailure, message: null, classification: facts.firstFailure.classification ? { ...facts.firstFailure.classification, reason: 'Content was not requested.' } : null }
-      : facts.firstFailure,
-    measurements: {
-      ...facts.measurements,
-      waste: {
-        ...facts.measurements.waste,
-        failingStreaks: {
-          ...facts.measurements.waste.failingStreaks,
-          value: facts.measurements.waste.failingStreaks.value?.map((streak) => ({ ...streak, command: null })) ?? null,
-        },
-      },
-    },
-  }
-  return { facts: withheldFacts, spans, turns: [] }
+  if (options.includeContent !== false) return { facts, spans, turns: typedTurns, operating }
+  return { facts: withholdContent(facts), spans, turns: [], operating }
 }
 
 /**
