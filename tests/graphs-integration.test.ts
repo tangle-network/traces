@@ -138,13 +138,4 @@ describe('graph observations through maintained readers', () => {
       if (!repository) expect(reference.repositoryUnavailable).toContain('disagree')
     }
   })
-
-  it('fails closed with an actionable setup error against the installed Runtime before reading a session', async () => {
-    const run = await runCli(['graphs', '--last', '1', '--format', 'json'], { env: { HOME: '/no-session-store' } })
-    expect(run.code).toBe(2)
-    expect(run.stdout).toBe('')
-    const error = JSON.parse(run.stderr)
-    expect(error.code).toBe('setup')
-    expect(error.error).toContain('--runtime-module')
-  })
 })

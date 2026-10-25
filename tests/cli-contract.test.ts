@@ -234,7 +234,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   ask: [...SELECT, '--question', '--questions', '--budget', '--model', '--format', '--out'],
   check: ['--contract', '--share-safe', '--known-secret-env', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
   diff: ['--format'],
-  watch: ['--since', '--cwd', '--harness', '--once', '--format'],
+  watch: ['--since', '--cwd', '--harness', '--once', '--spans', '--format'],
   bundle: ['--current', '--harness', '--out'],
   'bundle verify': ['--format'],
   convert: [...SELECT, '--no-content', '--out', '--format'],
@@ -243,13 +243,13 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   mcp: ['--current', '--last', '--since', '--cwd', '--harness'],
 }
 
-/** The 24 options of §2.5; `--help` and `--version` are global. */
+/** The accepted command options; `--help` and `--version` are global. */
 const OPTIONS = [
   '--fleet-run', '--discovery-index', '--registry', '--task-type', '--shape', '--runtime-module',
   '--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn',
   '--format', '--out', '--match', '--no-content',
   '--question', '--questions', '--budget', '--model',
-  '--contract', '--share-safe', '--known-secret-env', '--once', '--dry-run', '--yes', '--unused',
+  '--contract', '--share-safe', '--known-secret-env', '--once', '--spans', '--dry-run', '--yes', '--unused',
 ]
 
 let dir: string

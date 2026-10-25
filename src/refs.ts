@@ -20,6 +20,7 @@
  * input format named on the command line forces how a file ref is read.
  */
 
+import type { Stats } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
@@ -83,7 +84,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-async function statOf(path: string): Promise<Awaited<ReturnType<typeof stat>> | null> {
+async function statOf(path: string): Promise<Stats | null> {
   try {
     return await stat(path)
   } catch (error) {

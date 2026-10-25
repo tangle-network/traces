@@ -880,7 +880,7 @@ export class CodexAdapter implements HarnessTraceAdapter {
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     const jsonl = sessionJsonlOptions(ref, options)
-    const head = await takeJsonl<CodexLine>(ref.path, SESSION_HEAD_LINES, jsonl)
+    const head = await takeJsonl<CodexLine>(ref.path, SESSION_HEAD_LINES, jsonl, (row, index) => index === 0 || row.type === 'session_meta' || row.type === 'turn_context')
     let first = head[0]
     let meta = head.find((line) => line.type === 'session_meta')
     const taskStartedAt = currentTaskStartedAt(meta)
