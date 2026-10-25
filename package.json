@@ -68,7 +68,7 @@
     "@tangle-network/agent-runtime": "0.349.0",
     "@tangle-network/agent-trace-contract": "2.1.0",
     "@tangle-network/harness-sessions": "0.2.1",
-    "@tangle-network/sandbox": "0.66.4"
+    "@tangle-network/sandbox": "0.66.5"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
