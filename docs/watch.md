@@ -24,8 +24,12 @@ Text prints one line per new finding:
 | `kind` | When | Fields |
 |---|---|---|
 | `traces.stream.session` | the first pass that reads a session | `session` (`harness`, `sessionId`, `cwd`, `path`), `spanCount`, `startedAt`, `endedAt` |
+| `traces.stream.span` | with `--spans`, a span is new or its end/status changes | `session`, `span` (the complete OTLP-JSONL record) |
 | `traces.stream.finding` | the first pass that finds it | `finding`: `ruleId`, `fingerprint`, `severity`, `claim`, `action`, `check`, `evidence`, `session`, `observedAt` |
 | `traces.stream.tick` | the end of every pass | `sessions`, `newSpans`, `findings`, `unreadSessions` |
+
+Use `--spans` with `--format jsonl` to include new or changed spans in the convert contract.
+A later span event with the same `span_id` replaces the prior record.
 
 Every event also carries `schemaVersion`, `event` and `generatedAt`. Custom live rules go through the SDK: `streamSessions({ extraAnalysts })`.
 
@@ -53,14 +57,17 @@ A run dir or span file prints its tree as text, and its findings with --format j
   --cwd DIR           sessions recorded in DIR or under it, or in a worktree of its repo
   --harness ID        only this harness's sessions; with a file ref, force its reader
   --once              one pass, then exit
+  --spans             with --format jsonl: also a span event for each new or changed span, reading every 1 s for live views
   --format text|jsonl text (default): a line per new finding, or the run tree; jsonl: the traces.stream events
 
 jq paths (--format jsonl):
   select(.event == "finding") | .finding | {severity, ruleId, claim}  each new finding
   select(.event == "tick") | .unreadSessions                          sessions a pass could not read, and why
+  select(.event == "span") | .span                                    with --spans: each new or changed span, in the OTLP-JSONL contract
 
 Examples:
   traces watch --once
   traces watch runs/my-run --once
   traces watch --since 2h --format jsonl
+  traces watch <id> --format jsonl --spans
 ```
