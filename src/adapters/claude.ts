@@ -11,8 +11,7 @@
  * under `workflows/<runId>` and bind to the exact run ID and transcript
  * directory returned by the parent `Workflow` call.
  *
- * Shared by the claudish / openclaw / nanoclaw forks via aliases — they
- * write the same transcript shape.
+ * Shared by the claudish / openclaw / nanoclaw forks via aliases.
  *
  * The same reader takes the `claude -p --output-format stream-json --verbose`
  * output a CI job captures. Its `system`/`init` record lists the tools the
@@ -21,6 +20,7 @@
  * the run failed, which the root span keeps as `run.status`.
  */
 
+import { foldedChildIdentity } from './native-provenance.js'
 import { createHash } from 'node:crypto'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -1641,7 +1641,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         // Every span here came from the CHILD's transcript. Marking it says so,
         // which is what keeps the parent's tool count, changed files, human
         // turns and record window from absorbing work the parent never did.
-        item.attributes[SUBAGENT_SPAN_ATTR] = true
+        Object.assign(item.attributes, foldedChildIdentity(traceId, agent.sourceKey))
         if (task) item.attributes[SUBAGENT_TASK_ATTR] = task
         if (agent.parentToolUseId && !parentSpan) {
           item.attributes['traces.claude.parent_tool_missing'] = true

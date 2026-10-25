@@ -75,6 +75,10 @@ export interface Args {
   refs: string[]
   /** The first ref, for the commands that take one path. */
   input?: string
+  registry?: string
+  runtimeModule?: string
+  taskType?: string
+  shape?: string
   harness: string
   /** True when `--harness` was given; otherwise every harness is read. */
   harnessExplicit: boolean
@@ -163,6 +167,13 @@ function harnessId(raw: string): string {
 
 /** Every flag any command takes, by its long name. */
 const FLAGS: Readonly<Record<string, Flag>> = {
+  '--registry': { value: 'DIR', help: 'query an existing Runtime graph registry', set: (a, v) => { a.registry = resolve(v) } },
+  '--runtime-module': { value: 'MODULE', help: 'Runtime public module path or URL (default installed kernel)', set: (a, v) => { a.runtimeModule = v } },
+  '--task-type': { value: 'TYPE', help: 'explicit feature, bugfix, consolidation, investigation or ops', set: (a, v) => {
+    if (!['feature', 'bugfix', 'consolidation', 'investigation', 'ops'].includes(v)) throw new UsageError(`unknown task type ${v}`)
+    a.taskType = v
+  } },
+  '--shape': { value: 'DIGEST', help: 'filter an exact task digest or topology digest', set: (a, v) => { a.shape = v } },
   '--current': { help: "the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID", set: (a) => { a.current = true } },
   '--last': { value: 'N', help: "the N newest sessions by file mtime, never the caller's own", set: (a, v) => { a.last = positiveInteger('--last', v) } },
   '--since': { value: 'T', help: 'every session with a record since T: 30m, 2h, 7d or an ISO time', set: (a, v) => { a.since = timeBound('--since', v) } },
@@ -236,6 +247,18 @@ const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--lates
 const MANY = Number.POSITIVE_INFINITY
 
 const COMMANDS = [
+  {
+    name: 'graphs',
+    usage: 'graphs [<ref…> | --current | --last N | --since T] [flags]',
+    job: 'Ingest session graphs, or rank a Runtime corpus by delivery, wall minutes, tokens and human messages.',
+    flags: [...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--registry', '--task-type', '--shape', '--runtime-module',
+      { flag: '--out', value: 'DIR', help: 'ingest into this Runtime registry (default local traces state)' }, '--format'],
+    formats: ['text', 'json'],
+    refs: [0, MANY],
+    jq: [['.groups[] | {taskType, topologyDigest, deliveredRate, medianMergeMinutes}', 'task type × topology; unknown stays null']],
+    examples: ['traces graphs --since 7d --out corpus', 'traces graphs --registry corpus --task-type bugfix --format json'],
+    overview: [['Which graph topologies delivered?', 'traces graphs [--registry DIR]']],
+  },
   {
     name: 'list',
     usage: 'list [<store-root>] [--last N | --since T] [--cwd DIR] [--harness ID] [--format text|json]',

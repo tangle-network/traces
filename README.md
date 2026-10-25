@@ -33,6 +33,7 @@ traces check run.jsonl --contract contract.json  # fail CI when a run took a for
 
 | Job | Command | Page |
 |---|---|---|
+| Compare workflow topologies | `graphs` | [Graph corpus](docs/graphs.md) |
 | Find a session | `list` | [Refs, selection and harnesses](docs/select.md) |
 | What happened, exactly, for $0 | `facts` | [Session facts](docs/facts.md) |
 | What went wrong, ranked, for $0 | `analyze` | [Analyze a session](docs/analyze.md) |
@@ -52,6 +53,7 @@ Each page embeds its command's `--help`, and `tests/docs-help.test.ts` holds the
 traces: what your agents did, where they wasted time, whether a run passes
 Start here for one session: traces facts <ref> (25 lines); one field: add --format json | jq '<path>'
 
+  Which graph topologies delivered?                traces graphs [--registry DIR]
   Which sessions ran?                              traces list [--cwd .] [--last N]
   What happened (turns, PRs, failure, cost)? $0    traces facts <ref> | --current | --since 1d
   Did we already try X / what was said? $0         traces facts <ref> | --since 30d --match '<re>'
@@ -84,7 +86,7 @@ console.log(input.validation.capabilities)             // what this trace can an
 const [facts] = computeSessionFacts(input.spans)
 ```
 
-The SDK is 25 functions and 25 types, one engine per command: [Library (SDK)](docs/sdk.md). Runnable code is in [examples](examples/README.md).
+The SDK is named functions and types, one engine per command: [Library (SDK)](docs/sdk.md). Runnable code is in [examples](examples/README.md).
 
 ## Docs
 

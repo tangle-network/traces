@@ -2,12 +2,14 @@
 
 [traces](../README.md#docs) › Library (SDK)
 
-The SDK is 25 functions and 25 types. Each function is the engine of a `traces` command, or the analyst extension point (`analyzeSpans` with your own `registry`).
+The SDK is named functions and types. Each function is the engine of a `traces` command, or the analyst extension point (`analyzeSpans` with your own `registry`).
 [`src/index.ts`](../src/index.ts) lists them, and `tests/sdk-surface.test.ts` fails when the built package exports any other name.
 Import other packages' names from their owners: `AnalystRegistry`, `makeFinding`, `checkTraceContracts` and the redaction core from `@tangle-network/agent-eval`, and the span builders from `@tangle-network/agent-trace-contract`.
 
 | Export | Signature | Command it serves |
 |---|---|---|
+| `collectSessionSelection` | `(SessionSeedGroup[], CollectSessionSelectionOptions?) → Promise<SessionSelection>` | `traces graphs`: existing workflow expansion, source binding and explicit missing/ambiguous relationships |
+| `describeSessionRelationship` | `(SessionRef, spans) → SessionRelationship` | `traces graphs`: recorded parent, child and resumed-session links |
 | `scanSessions` | `(ScanOptions) → AsyncGenerator<ScannedSession>` | every command: locate, then parse, each harness session |
 | `parseSession` | `(adapter, SessionRef, opts?) → Promise<OtlpSpan[]>` | one session's spans |
 | `knownHarnesses` | `() → string[]` | the ids `--harness` takes |
@@ -34,7 +36,7 @@ Import other packages' names from their owners: `AnalystRegistry`, `makeFinding`
 | `verifySessionBundle` | `(dir) → Promise<verification>` | `traces bundle verify <dir>` |
 | `tracesVersion` | `() → string` | `traces --version` |
 
-**Types:** `OtlpSpan`, `SessionRef`, `ScanOptions`, `ScannedSession`, `HarnessTraceAdapter`, `OtlpInput`, `SessionFact`, `SessionFacts`, `SessionFactsReport`, `SessionTurnFact`, `AnalyzeOptions`, `AnalyzeResult`, `TraceInvestigationOptions`, `TraceInvestigationResult`, `TraceFindingPacket`, `BuildTraceFindingPacketOptions`, `TraceQuestion`, `TraceQuestionsResult`, `RunDiffReport`, `TraceStreamEvent`, `TraceLiveFinding`, `UploadPlan`, `UploadBackend`, `VerifySafeResult`, `SessionBundleManifest`.
+**Types:** `SessionSeedGroup`, `SessionSelection`, `SessionSelectionRow`, `CollectSessionSelectionOptions`, `SessionRelationship`, `SessionWorkflowSummary`, `SessionWorkflowIssue`, `OtlpSpan`, `SessionRef`, `ScanOptions`, `ScannedSession`, `HarnessTraceAdapter`, `OtlpInput`, `SessionFact`, `SessionFacts`, `SessionFactsReport`, `SessionTurnFact`, `AnalyzeOptions`, `AnalyzeResult`, `TraceInvestigationOptions`, `TraceInvestigationResult`, `TraceFindingPacket`, `BuildTraceFindingPacketOptions`, `TraceQuestion`, `TraceQuestionsResult`, `RunDiffReport`, `TraceStreamEvent`, `TraceLiveFinding`, `UploadPlan`, `UploadBackend`, `VerifySafeResult`, `SessionBundleManifest`.
 An options type that is not listed is still in `dist/index.d.ts`; name it as `Parameters<typeof runTraceQuestions>[0]`.
 
 ```ts
@@ -75,3 +77,9 @@ const { result } = await analyzeSpans(spans, { registry })
 
 The runnable version is [`examples/custom-analyst.ts`](../examples/custom-analyst.ts) (`pnpm tsx examples/custom-analyst.ts --fixture` prints its one finding).
 Do not rewrite policy from an analyst's prose alone: attach a measured outcome or reviewed feedback, promote the failure into an eval case, change one thing, and compare on fresh cases.
+
+## Observed workflow nodes
+
+`computeSessionFacts(spans, { includeSubagents: true })` emits folded Claude Code children as separate `SessionFacts` with `parentSessionId`. Each node counts its own records and tokens through the same facts engine; a parent's tokens exclude its children. The default remains one sheet per trace. Unknown child identity cannot be reconstructed from old exports. `typedTurnCounts` preserves the shared classifier's human, fleet and relay counts without message text.
+
+`collectSessionSelection` expands existing parent/child links and returns its workflow's `complete` and `issues`; callers retain those unknowns. This is a reader result, not another graph schema. Runtime owns `StoredGraph`, `GraphRunRecord` and converting these facts into observations.

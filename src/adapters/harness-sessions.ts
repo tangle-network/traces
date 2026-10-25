@@ -32,6 +32,7 @@ import { takeJsonl } from '../jsonl.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { codexActor } from './actor.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
+import { stampNativeProvenance } from './native-provenance.js'
 import { SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './provenance.js'
 import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath, userTurnKey } from './codex.js'
 import { codexCompletedItem, type CodexLine, contentTextBlocks, multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
@@ -632,24 +633,6 @@ function addLegacyPrompts(head: readonly CodexHead[], session: HarnessSession, r
   }
 }
 
-function stampNativeProvenance(session: HarnessSession, spans: OtlpSpan[]): void {
-  const prefix = session.harness === 'codex' ? 'traces.codex' : 'traces.claude'
-  if (session.harness !== 'codex' && session.harness !== 'claude-code') return
-  for (const item of spans) item.attributes[`${prefix}.source_trace_id`] = session.nativeSessionId
-  const tools = new Map(spans.filter((item) => item.attributes['openinference.span.kind'] === 'TOOL')
-    .map((item) => [item.attributes['gen_ai.tool.call.id'], item]))
-  const counts = new Map<string, number>()
-  for (const call of session.toolCalls) {
-    const item = tools.get(call.id)
-    if (!item) continue
-    const key = call.messageId ?? ''
-    const index = counts.get(key) ?? 0
-    counts.set(key, index + 1)
-    item.attributes[`${prefix}.source_span_id`] = session.harness === 'codex'
-      ? `tool:${call.id}` : `${key}:tool:${index}`
-  }
-}
-
 /** The compatibility boundary between traces' session selection and the shared native reader. */
 export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   readonly harness: string
@@ -839,6 +822,8 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
         for (const item of [...projected, ...presentationSpans(child, projected[0]!)]) {
           item.trace_id = root.trace_id
           item.attributes['traces.span.subagent'] = true
+          item.attributes['traces.span.subagent_session_id'] = child.nativeSessionId
+          item.attributes['traces.span.parent_session_id'] = session.nativeSessionId
           item.attributes['service.name'] = this.harness
           // Folded into this session's trace, the subagent's records belong to
           // this session: its own id stays in `traces.claude.source_trace_id`,

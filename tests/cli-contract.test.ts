@@ -227,6 +227,7 @@ const MOVED = [...STEP_4, ...STEP_5, ...STEP_6, ...STEP_7, ...STEP_12, ...STEP_1
 /** The visible flags of each command at this step (spec §2.2 and §2.5). */
 const SELECT = ['--current', '--last', '--since', '--cwd', '--harness', '--latest-turn']
 const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  graphs: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--registry', '--task-type', '--shape', '--runtime-module', '--out', '--format'],
   list: ['--last', '--since', '--cwd', '--harness', '--format'],
   facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--match', '--no-content', '--format', '--out'],
   analyze: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--format', '--out'],
@@ -244,6 +245,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
 
 /** The 24 options of §2.5; `--help` and `--version` are global. */
 const OPTIONS = [
+  '--registry', '--task-type', '--shape', '--runtime-module',
   '--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn',
   '--format', '--out', '--match', '--no-content',
   '--question', '--questions', '--budget', '--model',

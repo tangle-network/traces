@@ -87,7 +87,7 @@ control should emit the contract and pass its file as a ref, never get a new ada
 - **The `traces.stream.*` envelope is a stable API.** `traces watch --format jsonl` prints session,
   finding and tick events at `schemaVersion` 1, and trustgate reads them. `tests/watch-jsonl-contract.test.ts`
   pins every field a consumer reads and keeps `docs/watch-jsonl.v1.example.jsonl` equal to the CLI's output.
-- **The SDK is the committed list.** [src/index.ts](src/index.ts) exports 25 functions and 25 types, each
+- **The SDK is the committed list.** [src/index.ts](src/index.ts) exports named functions and types, each
   by name (no `export *`). `tests/sdk-surface.test.ts` holds `dist/index.js` and `dist/index.d.ts` to that
   list and `docs/sdk.md` to naming every entry. A name joins only when a command is built on it, it is the
   analyst extension point, or a named consumer imports it.

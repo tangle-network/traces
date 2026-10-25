@@ -60,7 +60,8 @@ import {
   isSubagentSpan,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { ATTR, indexSessionIdsByTrace, SESSION_CWD_ATTR } from './attributes.js'
+import { ATTR, SESSION_CWD_ATTR } from './attributes.js'
+import { groupByTrace, type TraceGroup } from './session-scopes.js'
 import { needsPrice, routerPrices, sessionCost, sessionTokens, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
@@ -89,6 +90,8 @@ export interface SessionFactsWindow {
 }
 
 export interface SessionFactsOptions {
+  /** Emit folded child sessions as separate facts, each counting only its own tokens and records. */
+  readonly includeSubagents?: boolean
   /** Defaults to true for compatibility. False withholds conversation, commands, paths and assignment text. */
   readonly includeContent?: boolean
   /**
@@ -296,6 +299,8 @@ export interface SessionFacts {
   readonly excludedTurns: SessionFact<readonly ExcludedTurnFact[]>
   /** Every `user.prompt` turn by actor, so the human filter is checkable. */
   readonly turnsByActor: SessionFact<readonly TurnActorCount[]>
+  /** Typed turns after the shared classifier: human, fleet, relay; metadata only. */
+  readonly typedTurnCounts: SessionFact<readonly TurnActorCount[]>
   /** The last message of the session's own agent, and of each subagent task. */
   readonly finalMessages: SessionFact<readonly FinalMessageFact[]>
   readonly changedFiles: SessionFact<readonly ChangedFileFact[]>
@@ -934,34 +939,13 @@ function isRecordSpan(span: OtlpSpan): boolean {
  */
 export function computeSessionFacts(spans: readonly OtlpSpan[], options: SessionFactsOptions = {}): SessionFacts[] {
   const bounds = windowBounds(options.window)
-  return groupByTrace(spans)
+  return groupByTrace(spans, options.includeSubagents)
     .sort((left, right) => compareIds(left.traceId, right.traceId))
     .map((group) => readSession(group.traceId, group.sessionId, group.spans, options, bounds).facts)
 }
 
 function compareIds(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
-}
-
-interface TraceGroup {
-  readonly traceId: string
-  readonly sessionId: string | null
-  readonly spans: OtlpSpan[]
-}
-
-function groupByTrace(spans: readonly OtlpSpan[]): TraceGroup[] {
-  const { sessionByTrace } = indexSessionIdsByTrace(spans)
-  const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
-    const group = byTrace.get(span.trace_id)
-    if (group) group.push(span)
-    else byTrace.set(span.trace_id, [span])
-  }
-  return [...byTrace].map(([traceId, traceSpans]) => ({
-    traceId,
-    sessionId: sessionByTrace.get(traceId) ?? null,
-    spans: traceSpans,
-  }))
 }
 
 /**
@@ -1012,6 +996,8 @@ function readSession(
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
     actorCounts.set(actor, [...(actorCounts.get(actor) ?? []), span.span_id])
   }
+  const typedCounts = new Map<string, string[]>()
+  for (const turn of typedTurns) typedCounts.set(turn.author, [...(typedCounts.get(turn.author) ?? []), turn.spanId])
   const finalMessages = finalMessagesOf(spans)
   const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, ownSpans)
 
@@ -1119,6 +1105,7 @@ function readSession(
       : { value: null, spanIds: [], unavailable: pullRequests.unavailable ?? 'unread' },
     humanTurns: listFact(humanTurns, humanTurns.map((turn) => turn.spanId)),
     excludedTurns: listFact(excludedTurns, excludedTurns.flatMap((entry) => entry.spanIds)),
+    typedTurnCounts: listFact([...typedCounts].map(([actor, spanIds]) => ({ actor, turns: spanIds.length, spanIds })), typedTurns.map((turn) => turn.spanId)),
     turnsByActor: listFact(
       [...actorCounts]
         .sort(([left], [right]) => left.localeCompare(right))
@@ -1292,7 +1279,7 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
 
   return {
     add(spans) {
-      for (const group of groupByTrace(spans)) {
+      for (const group of groupByTrace(spans, options.includeSubagents)) {
         if (bounds === null && options.nameUnread !== true) {
           select(group)
           continue
