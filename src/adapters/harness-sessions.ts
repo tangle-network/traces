@@ -740,9 +740,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     if (this.legacyOpencode && !ref.path.endsWith('.db')) return this.legacyOpencode.parse(ref, options)
-    // Task-turn selection and source-byte citations are traces-specific views
-    // that the normalized session schema does not yet carry. Preserve their
-    // existing explicit path while ordinary session reads use the shared fold.
+    // Scoped/cited reads retain their existing projection; ordinary sessions use the shared fold.
     if (this.scopedAdapter && (options.taskScope === 'latest' || options.taskScope === 'turn' || options.captureSources)) {
       return this.scopedAdapter.parse(ref, options)
     }
@@ -768,6 +766,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       source = matches[0]!
     }
     source ??= nativeRef(this.nativeHarness, ref)
+    if (this.scopedAdapter instanceof ClaudeAdapter && source.files.some((path) => basename(path) === 'journal.jsonl')) return this.scopedAdapter.parse(ref, options)
     let session: HarnessSession
     try {
       session = await this.reader.read(source, {

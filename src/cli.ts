@@ -469,7 +469,7 @@ async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   const parts: CollectedSpans[] = []
   for (const source of sources) {
     parts.push(source.kind === 'run-dir'
-      ? await collectOtlpSpans(source.path)
+      ? { spans: await (await import('./adapters/runtime-run.js')).readRuntimeRunDirectory(source.path), harness: 'agent-runtime', sources: [] }
       : source.reader === 'otlp'
         ? await collectOtlpSpans(source.path, source.selector)
         : await collectImportedSpans(source.path, source.reader, source.selector))

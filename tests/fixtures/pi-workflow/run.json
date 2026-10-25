@@ -1,0 +1,53 @@
+{
+  "runId": "workflow-fixture-1",
+  "workflowName": "fixture-workflow",
+  "sessionId": "pi-parent-fixture",
+  "script": "PRIVATE_SCRIPT_SHOULD_NOT_BE_EMITTED",
+  "status": "completed",
+  "phases": ["Inspect", "Verify"],
+  "currentPhase": "Verify",
+  "startedAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-01T00:09:00Z",
+  "completedAt": "2026-01-01T00:01:00Z",
+  "tokenUsage": { "input": 999999, "output": 888888, "total": 1888887 },
+  "agents": [
+    {
+      "id": 1,
+      "callId": "workflow-fixture-1:0",
+      "phase": "Inspect",
+      "label": "PRIVATE_AGENT_LABEL",
+      "prompt": "PRIVATE_AGENT_PROMPT",
+      "result": "PRIVATE_AGENT_RESULT",
+      "status": "done",
+      "startedAt": "2026-01-01T00:00:01Z",
+      "endedAt": "2026-01-01T00:00:15Z",
+      "model": "configured/provider-model",
+      "tokens": 999999,
+      "tokenUsage": { "input": 100, "output": 20, "cacheRead": 30, "cacheWrite": 5, "total": 155, "cost": 0.01 },
+      "history": [
+        { "role": "user", "kind": "text", "text": "PRIVATE_HISTORY_PROMPT", "timestamp": 1767225601000 },
+        { "role": "assistant", "kind": "toolCall", "toolName": "read", "text": "PRIVATE_TOOL_ARGUMENTS", "timestamp": 1767225605000 },
+        { "role": "tool", "kind": "toolResult", "toolName": "read", "text": "PRIVATE_TOOL_RESULT", "timestamp": 1767225607000 },
+        { "role": "assistant", "kind": "toolCall", "toolName": "write", "text": "PRIVATE_UNTIMED_TOOL_ARGUMENTS" }
+      ]
+    },
+    {
+      "id": 2,
+      "callId": "workflow-fixture-1:1",
+      "phase": "Verify",
+      "status": "running",
+      "startedAt": "2026-01-01T00:00:16Z",
+      "tokens": 77777,
+      "history": [
+        { "role": "assistant", "kind": "toolCall", "toolName": "bash", "text": "PRIVATE_CHECK_COMMAND", "timestamp": 1767225620000 }
+      ]
+    },
+    {
+      "id": 3,
+      "callId": "workflow-fixture-1:2",
+      "phase": "Verify",
+      "status": "queued",
+      "tokens": 44444
+    }
+  ]
+}

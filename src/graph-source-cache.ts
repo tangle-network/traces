@@ -5,8 +5,8 @@ import { dirname, join, relative } from 'node:path'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 
 interface Fingerprint { readonly path: string; readonly mtimeMs: number; readonly size: number; readonly ino: number }
-interface SourceSnapshot { readonly files: readonly Fingerprint[]; readonly directories: readonly Fingerprint[] }
-const CACHE_VERSION = 1
+interface SourceSnapshot { readonly sourceKey: string; readonly files: readonly Fingerprint[]; readonly directories: readonly Fingerprint[] }
+const CACHE_VERSION = 2
 
 async function fingerprint(path: string): Promise<Fingerprint> {
   const info = await stat(path)
@@ -20,19 +20,19 @@ export class GraphSourceCache {
     let entries: Record<string, SourceSnapshot> = {}
     try {
       const saved = JSON.parse(await readFile(path, 'utf8')) as { version: number; entries: Record<string, SourceSnapshot> }
-      if (saved.version === CACHE_VERSION) entries = saved.entries
+      if (saved.version === CACHE_VERSION && saved.entries && typeof saved.entries === 'object') entries = saved.entries
     } catch { /* A missing or invalid derived cache requires a real reader pass. */ }
     return new GraphSourceCache(path, entries)
   }
-  async unchanged(key: string): Promise<boolean> {
+  async unchanged(key: string, existingSources: ReadonlySet<string>): Promise<boolean> {
     const entry = this.entries[key]
-    if (!entry) return false
+    if (!entry || !existingSources.has(entry.sourceKey)) return false
     try {
       const fresh = await Promise.all([...entry.files, ...entry.directories].map((file) => fingerprint(file.path)))
       return JSON.stringify(fresh) === JSON.stringify([...entry.files, ...entry.directories])
     } catch { return false }
   }
-  async remember(key: string, rows: readonly { adapter: HarnessTraceAdapter; ref: SessionRef }[], readStartedAt: number): Promise<void> {
+  async remember(key: string, rows: readonly { adapter: HarnessTraceAdapter; ref: SessionRef }[], readStartedAt: number, sourceKey: string): Promise<void> {
     const paths = (await Promise.all(rows.map(({ adapter, ref }) => adapter.sourcePaths ? adapter.sourcePaths(ref) : [ref.path]))).flat()
     const directories = new Set<string>()
     const base = dirname(rows[0]!.ref.path)
@@ -45,6 +45,7 @@ export class GraphSourceCache {
       }
     }
     const snapshot = {
+      sourceKey,
       files: await Promise.all([...new Set(paths)].sort().map(fingerprint)),
       directories: await Promise.all([...directories].sort().map(fingerprint)),
     }

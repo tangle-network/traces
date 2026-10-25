@@ -19,6 +19,7 @@ interface WorkflowSubagentLocation {
 
 export interface ClaudeSubagentSources {
   files: readonly string[]
+  workflowDirectories: readonly string[]
   workflowByFile: ReadonlyMap<string, WorkflowSubagentLocation>
 }
 
@@ -205,7 +206,8 @@ export async function collectClaudeSubagentSources(
     }
   }
 
-  for (const location of await workflowTranscriptDirectories(ref, bindings)) {
+  const locations = await workflowTranscriptDirectories(ref, bindings)
+  for (const location of locations) {
     signal?.throwIfAborted()
     const { runId, transcriptDir } = location
     const files = await listSubagentFiles(transcriptDir, signal, location.copiedWorkflow)
@@ -234,5 +236,5 @@ export async function collectClaudeSubagentSources(
     const file = filesByPath.get(path)
     if (file) workflowByFile.set(file, location)
   }
-  return { files, workflowByFile }
+  return { files, workflowByFile, workflowDirectories: [...new Set([...locations.map((location) => location.transcriptDir), ...[...workflowByFile.values()].map((location) => location.transcriptDir)])] }
 }

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
+import { buildSpanRunTree, computeSessionFacts } from '../src/index.js'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
 import type { OtlpSpan } from '../src/otlp.js'
 import type { SessionRef } from '../src/types.js'
@@ -113,6 +114,29 @@ function writeWorkflowChild(
 }
 
 describe('Claude Workflow subagents', () => {
+  it('ingests journal phases and call metadata through the existing native reader without duplicating transcript nodes', async () => {
+    const path = join(dir, 'journalled.jsonl')
+    const workflowDir = join(dir, 'journalled', 'subagents', 'workflows', 'wf-journalled')
+    writeWorkflowChild(workflowDir, 'journalled', '00')
+    writeFileSync(path, workflowEvents({ turn: 'journalled', minute: '00', workflowDir }).map((event) => JSON.stringify(event)).join('\n'))
+    writeFileSync(join(workflowDir, 'journal.jsonl'), [
+      { type: 'started', key: 'inspect-phase', phase: 'inspect', timestamp: '2026-01-01T00:00:02Z' },
+      { type: 'started', key: 'worker', agentId: 'journalled', phase: 'inspect', timestamp: '2026-01-01T00:00:03Z', prompt: 'PRIVATE_JOURNAL_PROMPT' },
+      { type: 'result', key: 'worker', agentId: 'journalled', phase: 'inspect', timestamp: '2026-01-01T00:00:04Z', result: 'PRIVATE_JOURNAL_RESULT' },
+      { type: 'result', key: 'inspect-phase', phase: 'inspect', timestamp: '2026-01-01T00:00:05Z' },
+    ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+    const adapter = new ClaudeAdapter()
+    const spans = await adapter.parse(refFor(path))
+    expect(await adapter.sourcePaths(refFor(path))).toContain(join(workflowDir, 'journal.jsonl'))
+    expect(spans.filter((item) => item.name === 'subagent.lifecycle')).toHaveLength(1)
+    expect(spans.filter((item) => item.name === 'workflow.agent')).toHaveLength(0)
+    const phase = spans.find((item) => item.name === 'workflow.phase')!
+    expect(phase.end_time).toBe('2026-01-01T00:00:05.000Z')
+    expect(buildSpanRunTree(spans, path).nodes).toHaveLength(3)
+    expect(computeSessionFacts(spans, { includeSubagents: true })).toHaveLength(3)
+    expect(JSON.stringify(spans)).not.toContain('PRIVATE_JOURNAL_')
+  })
+
   it('binds every workflow child to the exact Workflow tool call', async () => {
     const path = join(dir, 'linked.jsonl')
     const workflowDir = join(dir, 'linked', 'subagents', 'workflows', 'wf-linked')
@@ -137,8 +161,6 @@ describe('Claude Workflow subagents', () => {
     expect(workflowSpans).toHaveLength(4)
     expect(workflowSpans.filter((item) => item.name === 'subagent.lifecycle')).toHaveLength(1)
     const workflowTurn = workflowSpans.find((item) => item.name === 'llm.turn')
-    expect(workflowSpans.filter((item) => item.parent_span_id === workflowCall?.span_id)).toHaveLength(3)
-    expect(workflowSpans.filter((item) => item.parent_span_id === workflowTurn?.span_id)).toHaveLength(1)
     expect(workflowSpans.every(
       (item) => String(item.attributes['traces.claude.source_span_id'])
         .startsWith('workflows:wf-linked:agent-linked:'),

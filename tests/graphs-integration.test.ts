@@ -1,8 +1,10 @@
 /** Real native reader → public facts SDK, plus the built CLI's graph boundary. */
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { collectSessionSelection, computeSessionFacts, describeSessionRelationship, scanSessions } from '../src/index.js'
+import { buildSpanRunTree, collectSessionSelection, computeSessionFacts, describeSessionRelationship, parseSession, scanSessions } from '../src/index.js'
 import { makeTokenHome, TOKEN_IDS } from './fixtures/tokens.js'
 import { runCli } from './run-cli.js'
 
@@ -26,11 +28,37 @@ async function sessionWithChild() {
 }
 
 describe('graph observations through maintained readers', () => {
+  it.runIf(process.env.TRACES_RUNTIME_MODULE)('ingests native and Pi workflow sources through the built CLI and real Runtime registry', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-graphs-cli-'))
+    const { fixture } = await sessionWithChild()
+    const module = process.env.TRACES_RUNTIME_MODULE!
+    const pi = fileURLToPath(new URL('./fixtures/pi-workflow/run.json', import.meta.url))
+    try {
+      const first = await runCli(['graphs', fixture.claude, '--out', dir, '--runtime-module', module, '--format', 'json'], { env: fixture.env })
+      expect(first.code, first.stderr).toBe(0)
+      expect(JSON.parse(first.stdout)).toMatchObject({ recordCount: 1, ingested: 1, factScope: 'whole-session', accountingCutoffApplied: false })
+      const second = await runCli(['graphs', fixture.claude, '--out', dir, '--runtime-module', module, '--format', 'json'], { env: fixture.env })
+      expect(second.code, second.stderr).toBe(0)
+      expect(JSON.parse(second.stdout)).toMatchObject({ recordCount: 1, ingested: 0, cached: 1 })
+      const workflow = await runCli(['graphs', pi, '--out', dir, '--runtime-module', module, '--format', 'json'])
+      expect(workflow.code, workflow.stderr).toBe(0)
+      const report = JSON.parse(workflow.stdout)
+      expect(report.recordCount).toBe(2)
+      expect(report.groups.every((group: { deliveredRate: unknown }) => group.deliveredRate === null)).toBe(true)
+      const query = await runCli(['graphs', '--registry', dir, '--runtime-module', module, '--format', 'json'])
+      expect(query.code, query.stderr).toBe(0)
+      expect(JSON.parse(query.stdout).recordCount).toBe(2)
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+
   it('keeps the default parent facts and emits exclusive child facts with the same token owner', async () => {
     const { session } = await sessionWithChild()
     const [parent] = computeSessionFacts(session.spans)
     const facts = computeSessionFacts(session.spans, { includeSubagents: true })
     expect(facts).toHaveLength(2)
+    const tree = buildSpanRunTree(session.spans, session.ref.path)
+    expect(tree.nodes).toHaveLength(2)
+    expect(tree.nodes.filter((node) => node.parentNodeId !== null)).toHaveLength(1)
     expect(facts.find((fact) => fact.sessionId === parent!.sessionId)).toEqual(parent)
     expect(parent!.tokens.input).toBe(3960)
     expect(parent!.tokens.output).toBe(75)
@@ -55,6 +83,34 @@ describe('graph observations through maintained readers', () => {
     expect(metadata).toHaveLength(2)
     expect(metadata[0]!.humanTurns.value).toBeNull()
     expect(metadata.every((fact) => fact.typedTurnCounts.value !== null)).toBe(true)
+  })
+
+
+  it('keeps explicit PR repository and URL provenance without using the session repository', async () => {
+    const { session } = await sessionWithChild()
+    const [facts] = computeSessionFacts(session.spans)
+    const created = facts!.pullRequests.value!.created[0]!
+    expect(created.repository).toBe('acme/widgets')
+    expect(created.url).toBe('https://github.com/acme/widgets/pull/12')
+    expect(created.repositoryUnavailable).toBeNull()
+  })
+
+  it('keeps cross-repository PR identity explicit and refuses conflicting repository evidence', async () => {
+    const { fixture, session } = await sessionWithChild()
+    const original = await readFile(fixture.claude, 'utf8')
+    for (const [command, output, action, repository] of [
+      ['gh pr create -Racme/other --title Survey --body Done', 'https://github.com/acme/other/pull/12', 'created', 'acme/other'],
+      ['gh-drew pr merge 12 --repo acme/other --merge', 'Merged pull request #12.', 'merged', 'acme/other'],
+      ['gh pr create --repo acme/other --title Survey --body Done', 'https://github.com/acme/widgets/pull/12', 'created', null],
+    ] as const) {
+      await writeFile(fixture.claude, original.replace('gh pr create --title Survey --body Done', command).replace('https://github.com/acme/widgets/pull/12', output))
+      const [facts] = computeSessionFacts(await parseSession(session.adapter, session.ref))
+      const reference = facts!.pullRequests.value![action][0]!
+      expect(reference.number).toBe('12')
+      expect(reference.repository).toBe(repository)
+      expect(reference.url).toBe(repository ? 'https://github.com/acme/other/pull/12' : null)
+      if (!repository) expect(reference.repositoryUnavailable).toContain('disagree')
+    }
   })
 
   it('fails closed with an actionable setup error against the installed Runtime before reading a session', async () => {

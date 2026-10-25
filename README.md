@@ -86,7 +86,7 @@ console.log(input.validation.capabilities)             // what this trace can an
 const [facts] = computeSessionFacts(input.spans)
 ```
 
-The SDK is named functions and types, one engine per command: [Library (SDK)](docs/sdk.md). Runnable code is in [examples](examples/README.md).
+The SDK exposes one engine per command: [Library (SDK)](docs/sdk.md). Runnable code is in [examples](examples/README.md).
 
 ## Docs
 

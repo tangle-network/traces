@@ -1,11 +1,14 @@
 /** Graph ingestion and comparison over Runtime's one durable graph registry. */
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { graphOwner, graphRecordObject as object } from './graph-owner.js'
+import { importDiscoveryRunIndex } from './graphs-discovery.js'
 import { GraphSourceCache } from './graph-source-cache.js'
 import { CliError, UsageError } from './commands.js'
 import type { CliArgs } from './cli-selection-types.js'
 import type { OtlpSpan } from './otlp.js'
+import { buildSpanRunTree } from './run-span-tree.js'
 import { collectSessionSelection } from './session-selection.js'
 import { computeSessionFacts, type SessionFacts, type UnreadSessionFact } from './session-facts.js'
 import { describeSessionRelationship } from './session-relationship.js'
@@ -20,100 +23,46 @@ interface GraphCommandReaders {
   readSpans(): Promise<{ spans: readonly OtlpSpan[] }>
 }
 
-type OwnerRow = Readonly<Record<string, unknown>>
-type Registry = { readonly root: string }
-interface GraphOwner {
-  graphRegistry(root: string): Registry
-  listGraphRuns(registry: Registry): Promise<OwnerRow[]>
-  loadGraph(registry: Registry, digest: string): Promise<unknown | undefined>
-  graphFromSessionFacts?: (facts: readonly SessionFacts[], options: Record<string, unknown>) => {
-    graph: unknown; record: OwnerRow
-  }
-  recordStoredGraphRun?: (registry: Registry, graph: unknown, record: OwnerRow) => Promise<unknown>
+function pullRequestEvidence(facts: readonly SessionFacts[]): Array<{ kind: string; url: string; at: string }> {
+  return facts.flatMap((fact) => {
+    const references = fact.pullRequests.value
+    return references ? (['created', 'merged'] as const).flatMap((action) => references[action].flatMap((reference) =>
+      reference.repository && reference.number && reference.url ? [{ kind: action === 'created' ? 'pr-created-command' : 'pr-merge-command', url: reference.url, at: reference.at }] : [])) : []
+  })
 }
 
-async function graphOwner(moduleRef?: string): Promise<GraphOwner> {
-  const module = moduleRef === undefined ? '@tangle-network/agent-runtime/kernel'
-    : moduleRef.startsWith('file:') ? moduleRef
-      : isAbsolute(moduleRef) || moduleRef.startsWith('.') ? pathToFileURL(resolve(moduleRef)).href : moduleRef
-  let owner: Record<string, unknown>
-  try { owner = await import(module) as Record<string, unknown> } catch (error) {
-    throw new CliError(`cannot load Runtime public module ${module}: ${String(error)}`, 'setup')
-  }
-  for (const name of ['graphRegistry', 'listGraphRuns', 'loadGraph']) {
-    if (typeof owner[name] !== 'function') throw new CliError(
-      `Runtime public module lacks ${name}; install a Runtime release with graph registry exports, or pass --runtime-module /path/to/dist/kernel.js`, 'setup')
-  }
-  return owner as unknown as GraphOwner
+function sourceCoverage(spans: readonly OtlpSpan[]): Array<{ kind: string; reason: string }> {
+  return spans.flatMap((span) => {
+    const value = span.attributes['traces.source.unknowns']
+    if (typeof value !== 'string') return []
+    try {
+      const reasons: unknown = JSON.parse(value)
+      return Array.isArray(reasons) ? reasons.filter((reason): reason is string => typeof reason === 'string').map((reason) => ({ kind: 'source-coverage', reason })) : []
+    } catch { return [{ kind: 'source-coverage', reason: 'source coverage metadata was unreadable' }] }
+  })
 }
 
-function object(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : {}
-}
-function field(record: OwnerRow, name: string): unknown { return object(record)[name] }
-function scalar(value: unknown): string | null { return typeof value === 'string' && value.length > 0 ? value : null }
-function cost(record: OwnerRow, name: string): number | null {
-  const value = object(record.cost)[name]
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
-}
-function median(values: readonly (number | null)[]): number | null {
-  const known = values.filter((value): value is number => value !== null).sort((a, b) => a - b)
-  if (known.length === 0) return null
-  const middle = Math.floor(known.length / 2)
-  return known.length % 2 ? known[middle]! : (known[middle - 1]! + known[middle]!) / 2
-}
-
-function summarize(records: readonly OwnerRow[]) {
-  const groups = new Map<string, OwnerRow[]>()
-  for (const record of records) {
-    const key = JSON.stringify([scalar(field(record, 'taskType')), scalar(field(record, 'topologyDigest')) ?? record.graphDigest])
-    groups.set(key, [...(groups.get(key) ?? []), record])
-  }
-  return [...groups.values()].map((runs) => {
-    const delivered = runs.filter((run) => object(run.outcome).kind === 'delivered').length
-    const known = runs.filter((run) => ['delivered', 'no-winner'].includes(String(object(run.outcome).kind))).length
-    return {
-      taskType: scalar(field(runs[0]!, 'taskType')),
-      topologyDigest: scalar(field(runs[0]!, 'topologyDigest')),
-      runs: runs.length, delivered, known, unknown: runs.length - known,
-      deliveredRate: known === 0 ? null : delivered / known,
-      medianMergeMinutes: median(runs.map((run) => cost(run, 'mergeMs') === null ? null : cost(run, 'mergeMs')! / 60_000)),
-      medianWallMinutes: median(runs.map((run) => cost(run, 'ms') === null ? null : cost(run, 'ms')! / 60_000)),
-      medianTokens: median(runs.map((run) => cost(run, 'tokens'))),
-      medianHumanMessages: median(runs.map((run) => cost(run, 'humanMessages'))),
-      runLinks: runs.map((run) => {
-        const source = object(field(run, 'source'))
-        return { id: scalar(source.id), url: scalar(source.url), graphDigest: run.graphDigest,
-          taskDigest: run.taskDigest, outcome: object(run.outcome).kind, unknowns: field(run, 'unknowns') ?? [] }
-      }),
-    }
-  }).sort((a, b) => (b.deliveredRate ?? -1) - (a.deliveredRate ?? -1)
-    || (a.medianWallMinutes ?? Infinity) - (b.medianWallMinutes ?? Infinity)
-    || (a.medianTokens ?? Infinity) - (b.medianTokens ?? Infinity)
-    || (a.medianHumanMessages ?? Infinity) - (b.medianHumanMessages ?? Infinity)
-    || String(a.taskType).localeCompare(String(b.taskType))
-    || String(a.topologyDigest).localeCompare(String(b.topologyDigest)))
-}
-
-function render(report: { registry: string; ingested: number; cached: number; records: number; unreadSessions: readonly unknown[]; groups: ReturnType<typeof summarize> }): string {
-  const number = (value: number | null, digits = 1): string => value === null ? 'unknown' : value.toFixed(digits)
+function render(report: Record<string, unknown>): string {
+  const number = (value: unknown, digits = 1): string => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'unknown'
+  const groups = Array.isArray(report.groups) ? report.groups.map(object) : []
   const lines = [
-    `${report.records} graph run(s) · ${report.ingested} ingested · ${report.cached} unchanged · ${report.unreadSessions.length} unreadable · ${report.registry}`,
+    `${report.recordCount} graph run(s) · ${report.ingested} ingested · ${report.cached} unchanged · ${Array.isArray(report.unreadSessions) ? report.unreadSessions.length : 0} unreadable · ${report.registry}`,
     'task type       topology      delivered / known (unknown)  median merge min  wall min  tokens    human',
-    ...report.groups.map((group) => `${(group.taskType ?? 'unknown').padEnd(15)} ${(group.topologyDigest?.slice(0, 12) ?? 'unknown').padEnd(13)} `
-      + `${group.delivered}/${group.known} (${group.unknown}) ${group.deliveredRate === null ? 'unknown' : `${(group.deliveredRate * 100).toFixed(1)}%`}`.padEnd(29)
-      + `${number(group.medianMergeMinutes).padEnd(18)} ${number(group.medianWallMinutes).padEnd(9)} ${number(group.medianTokens, 0).padEnd(9)} ${number(group.medianHumanMessages)}`),
-    'Ranking: delivered rate among known outcomes, then wall minutes, tokens, human messages. Unknown outcomes excluded from rate.',
+    ...groups.map((group) => `${String(group.taskType ?? 'unknown').padEnd(15)} ${String(group.topologyDigest ?? 'unknown').slice(0, 12).padEnd(13)} `
+      + `${group.delivered}/${group.assessed} (${group.unknown}) ${typeof group.deliveredRate === 'number' ? `${(group.deliveredRate * 100).toFixed(1)}%` : 'unknown'}`.padEnd(29)
+      + `${number(typeof group.medianMergeMs === 'number' ? group.medianMergeMs / 60_000 : null).padEnd(18)} ${number(typeof group.medianWallMs === 'number' ? group.medianWallMs / 60_000 : null).padEnd(9)} ${number(group.medianTokens, 0).padEnd(9)} ${number(group.medianHumanMessages)}`),
+    'Ranking and denominators are computed by Runtime graph registry; unknown measurements remain unknown.',
   ]
-  for (const group of report.groups) for (const link of group.runLinks) {
-    lines.push(`  ${String(link.outcome).padEnd(10)} ${link.id ?? String(link.graphDigest).slice(0, 12)} ${link.url ?? `(graph ${link.graphDigest}, task ${link.taskDigest})`}`)
+  for (const group of groups) for (const run of Array.isArray(group.runs) ? group.runs.map(object) : []) {
+    const source = object(run.source)
+    lines.push(`  ${String(object(run.outcome).kind ?? 'unknown').padEnd(10)} ${source.id ?? String(run.graphDigest).slice(0, 12)} ${source.url ?? `(graph ${run.graphDigest}, task ${run.taskDigest})`}`)
   }
   return `${lines.join('\n')}\n`
 }
 
 /** The CLI supplies its maintained ref selection; this command never opens native session bytes. */
 export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Promise<void> {
-  const selected = args.refs.length > 0 || args.current || args.last > 0 || args.since !== undefined
+  const selected = args.discoveryIndex !== undefined || args.refs.length > 0 || args.current || args.last > 0 || args.since !== undefined
   if (args.registry && selected && !args.out) throw new UsageError('ingesting into a registry requires --out DIR; --registry DIR selects an existing registry to query')
   const root = args.out ?? args.registry ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'traces', 'graphs')
   const bounds = { since: args.since ? parseTimeBound(args.since, '--since') : undefined, until: args.until ? parseTimeBound(args.until, '--until') : undefined }
@@ -128,29 +77,40 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
       'Runtime public module lacks graph corpus ingestion; use --runtime-module /path/to/built/dist/kernel.js until the corpus API is published', 'setup')
     const seen = new Set<string>()
     const cache = await GraphSourceCache.load(registry.root)
+    const existingSources = new Set((await owner.listGraphRuns(registry)).map((record) => {
+      const source = object(record.source)
+      return JSON.stringify([source.kind, source.id])
+    }))
     const ingest = async (facts: readonly SessionFacts[], options: Record<string, unknown>): Promise<void> => {
-      const selectedFacts = facts.filter((fact) => {
+      const overlaps = facts.some((fact) => {
         const start = Date.parse(fact.firstRecordAt.value ?? '')
         const end = Date.parse(fact.lastRecordAt.value ?? '')
-        return (!bounds.since || end >= bounds.since) && (!bounds.until || start < bounds.until)
+        return (bounds.since === undefined || end >= bounds.since) && (bounds.until === undefined || start < bounds.until)
       })
-      if (selectedFacts.length === 0) return
-      const observation = owner.graphFromSessionFacts!(selectedFacts, { ...options, taskType: args.taskType })
-      await owner.recordStoredGraphRun!(registry, observation.graph, observation.record)
+      if (!overlaps) return
+      const observation = owner.graphFromSessionFacts!(facts, { ...options, taskType: args.taskType, evidence: [...(Array.isArray(options.evidence) ? options.evidence : []), ...pullRequestEvidence(facts)] })
+      await owner.recordStoredGraphRun!(registry, observation.graph, observation.record, { preserveLabels: true })
       ingested += 1
     }
+    if (args.discoveryIndex) {
+      const result = await importDiscoveryRunIndex(args.discoveryIndex, { owner, registry,
+        taskType: args.taskType, sinceMs: bounds.since, untilMs: bounds.until })
+      ingested += result.ingested
+      unread.push(...result.unread)
+    }
     const named = args.selection?.sessions ?? []
-    const found = named.length ? { sessions: named, unread: [] } : args.selection?.spans.length ? { sessions: [], unread: [] } : await readers.discover()
+    if (args.fleetRun && (named.length !== 1 || args.discoveryIndex || args.selection?.spans.length)) throw new UsageError('--fleet-run requires exactly one named native session; it binds a run ID, not a reusable lane ID')
+    const found = args.discoveryIndex && args.refs.length === 0 && !args.current && !args.last ? { sessions: [], unread: [] } : named.length ? { sessions: named, unread: [] } : args.selection?.spans.length ? { sessions: [], unread: [] } : await readers.discover()
     unread.push(...found.unread)
     for (const { adapter, ref } of found.sessions) {
-      const cacheKey = JSON.stringify([adapter.harness, ref.path, args.latestTurn, args.taskType, args.runtimeModule ?? 'installed', args.since, args.until])
+      const cacheKey = JSON.stringify([adapter.harness, ref.path, args.latestTurn, args.taskType, args.fleetRun, args.runtimeModule ?? 'installed', args.since, args.until])
       if (seen.has(`${adapter.harness}:${ref.sessionId}`)) continue
-      if (await cache.unchanged(cacheKey)) { cached += 1; continue }
+      if (await cache.unchanged(cacheKey, existingSources)) { cached += 1; continue }
       try {
         const readStartedAt = Date.now()
         const selection = await collectSessionSelection([{ adapter, refs: [ref] }], {
           workflow: true, parents: named.length === 0, maxWorkflowSessions: 100, home: args.selection?.home,
-          taskScope: args.latestTurn ? 'latest' : 'all',
+          taskScope: args.latestTurn ? 'latest' : 'all', bindSources: true,
           onUnreadable: (failure) => {
             if (failure.seed && named.length) throw failure.error
             unread.push({ sessionId: failure.ref.sessionId, reason: String(failure.error) })
@@ -158,15 +118,28 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
         })
         const facts: SessionFacts[] = []
         const relationships = []
+        const execution = buildSpanRunTree(selection.rows.flatMap((row) => [...row.spans]), ref.path)
         for (const row of selection.rows) {
           seen.add(`${row.adapter.harness}:${row.ref.sessionId}`)
           facts.push(...computeSessionFacts(row.spans, { includeSubagents: true }))
           relationships.push(describeSessionRelationship(row.ref, row.spans))
         }
         const rootFact = facts.find((fact) => fact.parentSessionId === null) ?? facts[0]
-        await ingest(facts, { source: { kind: adapter.harness, id: rootFact?.sessionId ?? ref.sessionId, url: pathToFileURL(ref.path).href },
-          relationships, complete: selection.workflow?.complete, issues: selection.workflow?.issues })
-        if (selection.workflow?.complete !== false) await cache.remember(cacheKey, selection.rows, readStartedAt)
+        const rootRelation = relationships.find((relation) => relation.sessionId === rootFact?.sessionId)
+        const nativeSourceId = `${rootFact?.sessionId ?? ref.sessionId}${args.latestTurn && rootRelation?.turnId ? `#turn=${rootRelation.turnId}` : ''}`
+        const sourceId = args.fleetRun ? `${args.fleetRun}:${ref.sessionId}` : nativeSourceId
+        const sourceKind = args.fleetRun ? 'fleet' : adapter.harness
+        await ingest(facts, { source: { kind: sourceKind, id: sourceId, url: pathToFileURL(ref.path).href },
+          relationships, complete: selection.workflow?.complete,
+          issues: [...sourceCoverage(selection.rows.flatMap((row) => [...row.spans])), ...(selection.workflow?.issues ?? []),
+            ...(execution.orphanSpans ? [{ kind: 'orphan-spans', count: execution.orphanSpans }] : []),
+            ...(execution.nodes.length === 0 && execution.spanCount > 0 ? [{ kind: 'unplaced-span-tree' }] : [])],
+          evidence: [...execution.traceIds.map((traceId) => ({ kind: 'trace-run', url: `trace://${traceId}` })),
+            ...(args.fleetRun ? [{ kind: 'fleet-run', url: `fleet://${encodeURIComponent(args.fleetRun)}/session/${encodeURIComponent(ref.sessionId)}` }] : [])],
+          spanRun: execution, traceRunId: execution.traceIds.length === 1 ? execution.traceIds[0] : undefined,
+          observedAt: new Date().toISOString(),
+        })
+        if (selection.workflow?.complete !== false) await cache.remember(cacheKey, selection.rows, readStartedAt, JSON.stringify([sourceKind, sourceId]))
       } catch (error) {
         if (named.length) throw error
         unread.push({ sessionId: ref.sessionId, reason: String(error) })
@@ -175,13 +148,23 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
     await cache.save()
     if (args.selection?.spans.length) {
       const input = await readers.readSpans()
-      const facts = computeSessionFacts(input.spans, { includeSubagents: true })
-      for (const fact of facts) await ingest([fact], { source: { kind: 'otlp', id: fact.sessionId ?? fact.traceId } })
+      for (const traceId of new Set(input.spans.map((span) => span.trace_id))) {
+        const spans = input.spans.filter((span) => span.trace_id === traceId)
+        const facts = computeSessionFacts(spans, { includeSubagents: true })
+
+        const execution = buildSpanRunTree(spans, args.refs.join(', '))
+        const runtimeRunId = spans.find((span) => typeof span.attributes['traces.runtime.run_id'] === 'string')?.attributes['traces.runtime.run_id']
+        await ingest(facts, { source: { kind: runtimeRunId ? 'agent-runtime' : 'otlp', id: runtimeRunId ?? traceId }, spanRun: execution, traceRunId: traceId,
+          evidence: [{ kind: 'trace-run', url: `trace://${traceId}` }],
+          issues: [...sourceCoverage(spans), ...(execution.orphanSpans ? [{ kind: 'orphan-spans', count: execution.orphanSpans }] : [])], observedAt: new Date().toISOString() })
+      }
     }
   }
-  const records = (await owner.listGraphRuns(registry)).filter((record) =>
-    (!args.taskType || field(record, 'taskType') === args.taskType)
-    && (!args.shape || record.taskDigest === args.shape || field(record, 'topologyDigest') === args.shape))
-  const report = { registry: registry.root, ingested, cached, records: records.length, unreadSessions: unread, groups: summarize(records) }
+  if (!owner.graphCorpusSummary) throw new CliError(
+    'Runtime public module lacks graphCorpusSummary; use --runtime-module /path/to/built/dist/kernel.js until the corpus query is published', 'setup')
+  const summary = await owner.graphCorpusSummary(registry, { taskType: args.taskType, topologyDigest: args.shape })
+  const report = { ...summary, registry: registry.root, ingested, cached, unreadSessions: unread,
+    factScope: 'whole-session', selectionWindow: { since: args.since ?? null, until: args.until ?? null },
+    accountingCutoffApplied: false, observedAt: new Date().toISOString() }
   process.stdout.write(args.format === 'json' ? `${JSON.stringify(report)}\n` : render(report))
 }

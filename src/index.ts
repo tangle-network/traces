@@ -26,6 +26,9 @@ export type { OtlpInput } from './otlp-input.js'
 export { writeOtlpFile } from './otlp.js'
 export type { OtlpSpan } from './otlp.js'
 
+export { buildSpanRunTree } from './run-span-tree.js'
+export type { SpanRunSnapshot, SpanRunNode } from './run-span-tree.js'
+
 // ── facts: what happened, exactly, for $0 ─────────────────────────────────
 export { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from './session-facts.js'
 export type { SessionFact, SessionFacts, SessionFactsReport } from './session-facts.js'

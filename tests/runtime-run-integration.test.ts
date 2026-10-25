@@ -1,0 +1,36 @@
+/** Maintained file journal → shared contract spans → canonical tree and facts. */
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { expect, it } from 'vitest'
+import { readRefSpans } from '../src/refs.js'
+import { buildSpanRunTree, computeSessionFacts } from '../src/index.js'
+
+it('reads a named Runtime run through its owner without summing child-inclusive settlements', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'traces-runtime-graph-'))
+  const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, '0')}Z`
+  const root = 'runtime-fixture'
+  const spawn = (id: string, parent?: string) => ({ kind: 'spawned', id, parent, label: 'PRIVATE_LABEL', budget: { maxTokens: 1000 }, runtime: 'pi', seq: 0, at: at(0) })
+  const spend = (input: number, output: number) => ({ tokens: { input, output }, usd: 0, usdKnown: false, ms: 1 })
+  try {
+    const events = [spawn(root), spawn('child', root),
+      { kind: 'metered', id: root, spend: spend(100, 10), seq: 0, at: at(1) },
+      { kind: 'metered', id: 'child', spend: spend(20, 2), seq: 0, at: at(1) },
+      { kind: 'settled', id: 'child', status: 'done', spend: spend(20, 2), seq: 0, at: at(2) },
+      { kind: 'settled', id: root, status: 'done', spend: spend(120, 12), seq: 0, at: at(3) }]
+    await writeFile(join(dir, 'spawn-journal.jsonl'), [
+      { kind: 'begin', root, at: at(0) }, ...events.map((event) => ({ kind: 'event', root, event })),
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+    const spans = await readRefSpans(dir)
+    const tree = buildSpanRunTree(spans, dir)
+    expect(tree.nodes).toHaveLength(2)
+    expect(tree.nodes.filter((node) => node.parentNodeId !== null)).toHaveLength(1)
+    const facts = computeSessionFacts(spans, { includeSubagents: true })
+    expect(facts).toHaveLength(2)
+    expect(facts.reduce((total, fact) => total + (fact.tokens.input ?? 0), 0)).toBe(120)
+    expect(facts.reduce((total, fact) => total + (fact.tokens.output ?? 0), 0)).toBe(12)
+    expect(JSON.stringify(spans)).not.toContain('PRIVATE_LABEL')
+    expect(facts.every((fact) => fact.humanTurns.value === null && fact.toolCalls.value === null)).toBe(true)
+    expect(facts.every((fact) => fact.tokens.cacheRead === null && fact.tokens.cacheWrite === null)).toBe(true)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

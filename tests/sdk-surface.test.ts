@@ -19,6 +19,7 @@ const ROOT = join(dirname(CLI), '..')
 
 const VALUES = [
   // read
+  'buildSpanRunTree',
   'collectSessionSelection',
   'describeSessionRelationship',
   'scanSessions',
@@ -58,6 +59,8 @@ const VALUES = [
 ] as const
 
 const TYPES = [
+  'SpanRunSnapshot',
+  'SpanRunNode',
   'SessionSeedGroup',
   'SessionSelection',
   'SessionSelectionRow',

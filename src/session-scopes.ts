@@ -1,6 +1,6 @@
 /** Session scopes over normalized spans. Child projection never reads a native store. */
-import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { ATTR, indexSessionIdsByTrace } from './attributes.js'
+import { buildSpanRunTree } from './run-span-tree.js'
 import { isSubagentSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
 
@@ -21,7 +21,7 @@ export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = fals
   }
   return [...byTrace].flatMap(([traceId, traceSpans]) => {
     const parent = { traceId, sessionId: sessionByTrace.get(traceId) ?? null, spans: traceSpans }
-    return includeSubagents ? [parent, ...foldedChildScopes(parent)] : [parent]
+    return includeSubagents ? canonicalNodeScopes(parent) : [parent]
   })
 }
 
@@ -30,39 +30,35 @@ function text(span: OtlpSpan, key: string): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
-function foldedChildScopes(parent: TraceGroup): TraceGroup[] {
-  const children = new Map<string, OtlpSpan[]>()
-  for (const span of parent.spans) {
-    if (!isSubagentSpan(span.attributes)) continue
-    const id = text(span, 'traces.span.subagent_session_id')
-      ?? text(span, 'traces.claude.source_trace_id')
-    // An old export that lacks child identity cannot support a separate node's facts.
-    if (!id || id === parent.sessionId) continue
-    const group = children.get(id) ?? []
-    group.push(span)
-    children.set(id, group)
-  }
-  const owner = new Map(parent.spans.map((span) => [span.span_id,
-    isSubagentSpan(span.attributes)
-      ? text(span, 'traces.span.subagent_session_id') ?? text(span, 'traces.claude.source_trace_id')
-      : parent.sessionId]))
-  return [...children].map(([sessionId, source]) => {
-    const traceId = deriveHexId(`traces.session.scope:${sessionId}`, 16)
+function canonicalNodeScopes(parent: TraceGroup): TraceGroup[] {
+  const tree = buildSpanRunTree(parent.spans, 'session-facts')
+  if (tree.nodes.length <= 1) return [parent]
+  const byId = new Map(parent.spans.map((span) => [span.span_id, span]))
+  const nodeSession = new Map(tree.nodes.map((node) => {
+    const anchor = byId.get(node.spanId)!
+    const legacyChild = isSubagentSpan(anchor.attributes) ? text(anchor, 'traces.claude.source_trace_id') : undefined
+    const id = text(anchor, 'traces.span.subagent_session_id')
+      ?? (legacyChild !== parent.sessionId ? legacyChild : undefined)
+      ?? (node.parentNodeId === null ? parent.sessionId : undefined)
+      ?? null
+    return [node.spanId, id]
+  }))
+  return tree.nodes.map((node) => {
+    const sessionId = nodeSession.get(node.spanId)!
+    const source = node.spanIds.map((id) => byId.get(id)!).filter(Boolean)
+    // The normal sheet remains exactly unchanged for a harness parent whose children
+    // were already marked as separate records; generic span nodes are exclusive too.
+    if (node.parentNodeId === null && parent.spans.some((span) => isSubagentSpan(span.attributes))) return parent
     const ids = new Set(source.map((span) => span.span_id))
-    const anchor = source.find((span) => span.attributes['openinference.span.kind'] === 'AGENT'
-      && (!span.parent_span_id || !ids.has(span.parent_span_id)))
     const spans = source.map((span): OtlpSpan => {
       const attributes: Record<string, unknown> = { ...span.attributes, [ATTR.SESSION_ID]: sessionId }
       delete attributes['traces.span.subagent']
-      const external = span.parent_span_id && !ids.has(span.parent_span_id)
-      const recordedParent = text(span, 'traces.span.parent_session_id')
-        ?? (external ? owner.get(span.parent_span_id!) : undefined)
-      if (recordedParent && recordedParent !== sessionId) attributes['traces.parent_session_id'] = recordedParent
-      return {
-        ...span, trace_id: traceId, attributes,
-        parent_span_id: span === anchor ? null : external && anchor ? anchor.span_id : span.parent_span_id,
-      }
+      const parentSessionId = node.parentNodeId === null ? undefined : nodeSession.get(node.parentNodeId)
+      if (parentSessionId) attributes['traces.parent_session_id'] = parentSessionId
+      return { ...span, attributes,
+        parent_span_id: span.span_id === node.spanId ? null
+          : span.parent_span_id && ids.has(span.parent_span_id) ? span.parent_span_id : node.spanId }
     })
-    return { traceId, sessionId, spans }
+    return { traceId: parent.traceId, sessionId, spans }
   })
 }

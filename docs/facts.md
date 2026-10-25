@@ -62,7 +62,7 @@ For Codex, the harness's own labels (`content_item_kinds`) decide: a message is 
 ## Pull requests
 
 `pullRequests` scans each command the way a shell would, so a `gh pr create` inside a heredoc body never counts.
-A pull request is named by its number when the command or an output that joins to it shows one, else by its head branch.
+A pull request is named by its number when the command or an output that joins to it shows one, else by its head branch. `repository` and `url` retain an explicit `--repo`/`-R`, target URL or joined returned PR URL; a session repository is never substituted. Missing or conflicting repository evidence stays null with `repositoryUnavailable`.
 A create whose call returned while it still ran takes the number a later poll of that process printed.
 In a Codex code-mode script, each tool result the script printed is decoded (`exit_code` or `session_id`, and the command's output), and a later script's `write_stdin` poll of the session counts as that poll.
 A create counts only where an output shows `gh` answered: a script that completed says nothing about its commands.
@@ -112,3 +112,5 @@ Examples:
   traces facts 019a3c7e --format json | jq '.sessions[0].measurements.waste'
   traces facts --since 30d --match '^gh pr merge'
 ```
+
+Sources that explicitly lack a measurement channel report unavailable facts rather than zero: supervisor journals do not establish human turns or tool calls, and compact Pi workflow histories do not establish human turns. Reported usage remains separate from token estimates.

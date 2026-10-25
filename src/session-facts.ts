@@ -60,7 +60,8 @@ import {
   isSubagentSpan,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { ATTR, SESSION_CWD_ATTR } from './attributes.js'
+import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
+import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
 import { groupByTrace, type TraceGroup } from './session-scopes.js'
 import { needsPrice, routerPrices, sessionCost, sessionTokens, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -76,7 +77,7 @@ import { commandTextFromInput, isCodeModeScript, simpleCommands } from './shell-
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '8'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '9'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
@@ -245,6 +246,8 @@ export interface SessionFacts {
   readonly traceId: string
   readonly sessionId: string | null
   readonly harness: string | null
+  /** Recorded canonical span boundary for this session; child facts retain their original trace ID. */
+  readonly rootSpanId: SessionFact<string>
   /**
    * The session that spawned this one, when this is a spawned child read with
    * its parent. A child's numbers are its own; none is added to its parent's.
@@ -894,39 +897,6 @@ function excludedTurnFacts(
     .map(({ reason, author, spanIds }) => ({ reason, author, turns: spanIds.length, spanIds }))
 }
 
-/** Epoch bounds of a window; `null` when the window is absent or open on both sides. */
-interface WindowBounds {
-  readonly since: string | null
-  readonly until: string | null
-  readonly sinceMs: number
-  readonly untilMs: number
-}
-
-function windowBounds(window: SessionFactsWindow | undefined): WindowBounds | null {
-  if (!window || (window.since === undefined && window.until === undefined)) return null
-  const bound = (value: string | undefined, name: string, open: number): number => {
-    if (value === undefined) return open
-    const ms = Date.parse(value)
-    if (!Number.isFinite(ms)) throw new RangeError(`window ${name} is not a readable time: ${value}`)
-    return ms
-  }
-  const sinceMs = bound(window.since, 'since', Number.NEGATIVE_INFINITY)
-  const untilMs = bound(window.until, 'until', Number.POSITIVE_INFINITY)
-  if (!(sinceMs < untilMs)) throw new RangeError(`window since (${window.since}) must be before until (${window.until})`)
-  return {
-    since: window.since === undefined ? null : new Date(sinceMs).toISOString(),
-    until: window.until === undefined ? null : new Date(untilMs).toISOString(),
-    sinceMs,
-    untilMs,
-  }
-}
-
-function insideWindow(bounds: WindowBounds | null, time: string): boolean {
-  if (bounds === null) return true
-  const ms = Date.parse(time)
-  return Number.isFinite(ms) && ms >= bounds.sinceMs && ms < bounds.untilMs
-}
-
 /** A span the adapter built from one of the session's records: not the root, not an integrity receipt. */
 function isRecordSpan(span: OtlpSpan): boolean {
   return span.parent_span_id !== null && span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] === undefined
@@ -1030,6 +1000,9 @@ function readSession(
     traceId,
     sessionId,
     harness,
+    rootSpanId: spans.find((span) => span.parent_span_id === null)
+      ? { value: spans.find((span) => span.parent_span_id === null)!.span_id, spanIds: [spans.find((span) => span.parent_span_id === null)!.span_id], unavailable: null }
+      : { value: null, spanIds: [], unavailable: 'no recorded root span boundary' },
     parentSessionId: spans
       .filter((span) => span.parent_span_id === null)
       .map((span) => stringAttr(span, 'traces.parent_session_id'))
@@ -1075,9 +1048,9 @@ function readSession(
         },
     measurements: computeSessionMeasurements({ spans: ownSpans, records: ownSpans.filter(isRecordSpan), tools: invoked, sessionId, harness }),
     toolCalls: {
-      value: invoked.length,
+      value: sourceChannelUnavailable(ownSpans, 'tool-calls') ? null : invoked.length,
       spanIds: invoked.map((span) => span.span_id),
-      unavailable: null,
+      unavailable: sourceChannelUnavailable(ownSpans, 'tool-calls') ? 'The source does not record tool calls.' : null,
     },
     synthesizedToolSpans: {
       value: synthesized.length,
@@ -1103,9 +1076,9 @@ function readSession(
           ...(pullRequests.partial ? { partial: pullRequests.partial } : {}),
         }
       : { value: null, spanIds: [], unavailable: pullRequests.unavailable ?? 'unread' },
-    humanTurns: listFact(humanTurns, humanTurns.map((turn) => turn.spanId)),
+    humanTurns: sourceChannelUnavailable(ownSpans, 'human-turns') ? { value: null, spanIds: [], unavailable: 'The source does not record human turns.' } : listFact(humanTurns, humanTurns.map((turn) => turn.spanId)),
     excludedTurns: listFact(excludedTurns, excludedTurns.flatMap((entry) => entry.spanIds)),
-    typedTurnCounts: listFact([...typedCounts].map(([actor, spanIds]) => ({ actor, turns: spanIds.length, spanIds })), typedTurns.map((turn) => turn.spanId)),
+    typedTurnCounts: sourceChannelUnavailable(ownSpans, 'human-turns') ? { value: null, spanIds: [], unavailable: 'The source does not record typed turns.' } : listFact([...typedCounts].map(([actor, spanIds]) => ({ actor, turns: spanIds.length, spanIds })), typedTurns.map((turn) => turn.spanId)),
     turnsByActor: listFact(
       [...actorCounts]
         .sort(([left], [right]) => left.localeCompare(right))

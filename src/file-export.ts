@@ -1,3 +1,4 @@
+import { isPiWorkflowRun, normalizePiWorkflowRun } from './adapters/pi-workflow.js'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { ATTR, stampEnvironmentAttrs } from './attributes.js'
@@ -14,7 +15,7 @@ import { validateOtlpSpans } from './span-validation.js'
 
 type JsonObject = Record<string, unknown>
 
-export type TraceEvidenceInputFormat = 'sandbox-events' | 'openinference'
+export type TraceEvidenceInputFormat = 'sandbox-events' | 'openinference' | 'pi-workflow'
 export type TraceEvidenceFormatOption = TraceEvidenceInputFormat | 'auto'
 
 export interface TraceEvidenceExportOptions {
@@ -170,6 +171,7 @@ function looksLikeSandboxEvent(row: unknown): row is JsonObject {
  */
 export function detectEvidenceFormat(rows: readonly unknown[]): Exclude<TraceEvidenceInputFormat, 'openinference'> | undefined {
   if (rows.length === 0 || rows.every(isOpenInferenceRow)) return undefined
+  if (rows.length === 1 && isPiWorkflowRun(rows[0])) return 'pi-workflow'
   if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
   return undefined
 }
@@ -178,6 +180,7 @@ function detectFormat(rows: readonly unknown[], requested: TraceEvidenceFormatOp
   if (requested !== 'auto') return requested
   if (rows.length === 0) throw new Error('input contains no rows')
   if (rows.every(isOpenInferenceRow)) return 'openinference'
+  if (rows.length === 1 && isPiWorkflowRun(rows[0])) return 'pi-workflow'
   if (rows.some(looksLikeSandboxEvent)) return 'sandbox-events'
   throw new Error('could not detect input format: expected OpenInference span rows or sandbox events')
 }
@@ -598,7 +601,8 @@ export function exportTraceEvidenceRows(
   const format = detectFormat(rows, opts.format ?? 'auto')
   const converted = format === 'openinference'
     ? openInferenceToSpans(requireOpenInferenceRows(rows))
-    : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
+    : format === 'pi-workflow' ? normalizePiWorkflowRun(rows[0]).spans
+      : sandboxEventsToSpans(requireObjectRows(rows), wrapper)
   const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)
