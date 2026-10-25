@@ -40,6 +40,7 @@ import {
   SPAN_KIND_ATTR_KEYS,
 } from '@tangle-network/agent-eval/trace-attributes'
 import { isSynthesizedSpan } from './adapters/provenance.js'
+import { isUsageAggregate } from './attributes.js'
 import { exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
 import { connectors, forEachTreeNode, int, ms, tokens, usd } from './run-view-format.js'
@@ -294,7 +295,7 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
     if (host !== undefined) {
       host.spanIds.push(span.span_id)
       const kind = spanKind(span)
-      if (kind === 'LLM') {
+      if (kind === 'LLM' && !isUsageAggregate(span.attributes)) {
         host.driver = addSpend(host.driver, spanSpend(span))
         if (firstNumberAttr(span.attributes, LLM_INPUT_TOKEN_ATTR_KEYS) === null &&
           firstNumberAttr(span.attributes, LLM_OUTPUT_TOKEN_ATTR_KEYS) === null) {

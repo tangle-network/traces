@@ -1229,7 +1229,7 @@ async function cmdWatch(args: CliArgs): Promise<void> {
   const scope = source ? source.ref : sessions ? `${sessions.length} named session${sessions.length === 1 ? '' : 's'}` : `every session active ${windowMs === undefined ? 'since' : 'in the last'} ${since}`
   const controller = new AbortController()
   process.once('SIGINT', () => controller.abort())
-  if (!args.once) process.stderr.write(`traces watch: ${scope}, every 5 s; read-only. Ctrl-C to stop.\n`)
+  if (!args.once) process.stderr.write(`traces watch: ${scope}, every ${args.spans ? 1 : 5} s; read-only. Ctrl-C to stop.\n`)
   // A session's ref is the shortest prefix or suffix that names it among the sessions seen.
   const ids: string[] = []
   const reported = new Set<string>()
@@ -1242,7 +1242,7 @@ async function cmdWatch(args: CliArgs): Promise<void> {
       findings += 1
       const id = event.finding.session.sessionId
       if (!jsonl) process.stdout.write(`${liveFindingLine(event.finding, shortestRefs(ids).get(id) ?? id)}\n`)
-    } else {
+    } else if (event.event === 'tick') {
       last = event
       if (args.once) return
       for (const unread of event.unreadSessions) {
@@ -1253,7 +1253,7 @@ async function cmdWatch(args: CliArgs): Promise<void> {
       }
     }
   }
-  const loop = { once: args.once, signal: controller.signal, onEvent }
+  const loop = { once: args.once, signal: controller.signal, onEvent, intervalMs: args.spans ? 1_000 : undefined, spans: args.spans }
   if (source) await watchSource(() => spanRuns(args, source.path), loop)
   else {
     await streamSessions({

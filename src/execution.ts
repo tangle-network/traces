@@ -40,6 +40,7 @@ import {
   SESSION_TOTAL_INPUT_ATTR,
   SESSION_TOTAL_OUTPUT_ATTR,
   SESSION_TOTAL_REASONING_ATTR,
+  isUsageAggregate,
   sourceChannelUnavailable,
 } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
@@ -161,6 +162,8 @@ export function modelCallContextTokens(span: OtlpSpan): number | null {
 /** A model call's usage, or null when the span reports none. */
 function callUsage(span: OtlpSpan): CallUsage | null {
   if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'LLM') return null
+  // Its calls carry the usage; counting the turn too would double every total.
+  if (isUsageAggregate(span.attributes)) return null
   const fresh = count(firstNumberAttr(span.attributes, LLM_INPUT_TOKEN_ATTR_KEYS))
   const output = count(firstNumberAttr(span.attributes, LLM_OUTPUT_TOKEN_ATTR_KEYS))
   const cacheRead = count(firstNumberAttr(span.attributes, LLM_CACHED_TOKEN_ATTR_KEYS)) ?? 0
