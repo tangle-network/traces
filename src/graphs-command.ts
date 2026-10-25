@@ -32,7 +32,7 @@ function pullRequestEvidence(facts: readonly SessionFacts[]): Array<{ kind: stri
 }
 
 function sourceCoverage(spans: readonly OtlpSpan[]): Array<{ kind: string; reason: string }> {
-  return spans.flatMap((span) => {
+  const issues = spans.flatMap((span) => {
     const value = span.attributes['traces.source.unknowns']
     if (typeof value !== 'string') return []
     try {
@@ -40,6 +40,9 @@ function sourceCoverage(spans: readonly OtlpSpan[]): Array<{ kind: string; reaso
       return Array.isArray(reasons) ? reasons.filter((reason): reason is string => typeof reason === 'string').map((reason) => ({ kind: 'source-coverage', reason })) : []
     } catch { return [{ kind: 'source-coverage', reason: 'source coverage metadata was unreadable' }] }
   })
+  const uncertain = new Set(spans.map((span) => span.attributes['agent.parent.confidence']).filter((value) => value === 'heuristic' || value === 'unknown'))
+  for (const confidence of uncertain) issues.push({ kind: 'source-coverage', reason: `Recorded parent binding confidence is ${confidence}; topology includes uncertain source containment` })
+  return issues
 }
 
 function render(report: Record<string, unknown>): string {
@@ -104,7 +107,7 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
     unread.push(...found.unread)
     for (const { adapter, ref } of found.sessions) {
       const cacheKey = JSON.stringify([adapter.harness, ref.path, args.latestTurn, args.taskType, args.fleetRun, args.runtimeModule ?? 'installed', args.since, args.until])
-      if (seen.has(`${adapter.harness}:${ref.sessionId}`)) continue
+      if (seen.has(`${adapter.harness}:${ref.path}`)) continue
       if (await cache.unchanged(cacheKey, existingSources)) { cached += 1; continue }
       try {
         const readStartedAt = Date.now()
@@ -120,7 +123,7 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
         const relationships = []
         const execution = buildSpanRunTree(selection.rows.flatMap((row) => [...row.spans]), ref.path)
         for (const row of selection.rows) {
-          seen.add(`${row.adapter.harness}:${row.ref.sessionId}`)
+          seen.add(`${row.adapter.harness}:${row.ref.path}`)
           facts.push(...computeSessionFacts(row.spans, { includeSubagents: true }))
           relationships.push(describeSessionRelationship(row.ref, row.spans))
         }
