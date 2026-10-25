@@ -224,6 +224,8 @@ export async function collectSessionSelection(
     }
 
     const workflow = await collectSessionWorkflow(adapter, refs, {
+      // Selection and its bound re-read must use the same adapter projection.
+      captureSources: options.bindSources,
       maxSessions: options.maxWorkflowSessions,
       home: options.home,
       taskScope,

@@ -164,7 +164,7 @@ describe('traces facts --since/--until', () => {
     expect(report.sessions[0]!.humanTurns.value).toHaveLength(4)
 
     await expect(cli(['list', '--harness', 'claude-code', '--until', '1d']))
-      .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('--until does not apply to list; it applies to: facts') })
+      .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('--until does not apply to list; it applies to:') })
     await expect(cli(['facts', '--harness', 'claude-code', '--until', 'yesterday-ish']))
       .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('--until: expected') })
   })

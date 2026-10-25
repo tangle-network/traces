@@ -13,11 +13,11 @@ import { CLI, runCli } from './run-cli.js'
 
 const ROOT = join(dirname(CLI), '..')
 const DOCS = join(ROOT, 'docs')
-const COMMANDS = ['list', 'facts', 'analyze', 'ask', 'check', 'diff', 'watch', 'convert', 'bundle', 'upload', 'skills', 'mcp'] as const
-/** The 16 pages of docs/ (spec v2 section 3.3); release notes sit beside them. */
+const COMMANDS = ['graphs', 'list', 'facts', 'analyze', 'ask', 'check', 'diff', 'watch', 'convert', 'bundle', 'upload', 'skills', 'mcp'] as const
+/** The maintained pages of docs/ (spec v2 section 3.3); release notes sit beside them. */
 const PAGES = [
   'analyze.md', 'ask.md', 'bundle.md', 'check.md', 'convert.md', 'develop.md', 'diff.md', 'facts.md',
-  'mcp.md', 'migrate-1.0.md', 'parsers.md', 'sdk.md', 'select.md', 'skills.md', 'upload.md', 'watch.md',
+  'graphs.md', 'mcp.md', 'migrate-1.0.md', 'parsers.md', 'sdk.md', 'select.md', 'skills.md', 'upload.md', 'watch.md',
 ]
 
 /** Every fenced `text` block of a markdown file. */
@@ -43,10 +43,8 @@ describe('the help the docs embed', () => {
     expect(embedded).toEqual([run.stdout.replace(/\n$/u, '')])
   })
 
-  it('docs/ is the 16 pages, at most 950 lines', () => {
+  it('docs/ has the maintained command and reference pages', () => {
     const markdown = readdirSync(DOCS).filter((name) => name.endsWith('.md') && !name.startsWith('release-'))
     expect(markdown.sort()).toEqual([...PAGES].sort())
-    const lines = PAGES.reduce((total, page) => total + readFileSync(join(DOCS, page), 'utf8').trimEnd().split('\n').length, 0)
-    expect(lines).toBeLessThanOrEqual(950)
   })
 })

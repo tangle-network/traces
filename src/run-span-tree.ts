@@ -43,8 +43,7 @@ import { isSynthesizedSpan } from './adapters/provenance.js'
 import { exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
 import { connectors, forEachTreeNode, int, ms, tokens, usd } from './run-view-format.js'
-import type { SpendRoll } from './supervisor-run-context.js'
-import { addSpend, mergeRolls, ZERO_ROLL } from './supervisor-run-context.js'
+import { addSpend, mergeRolls, ZERO_ROLL, type SpendRoll } from './spend-roll.js'
 
 /**
  * Agent-identity keys, in the order a reader should trust them. These are the
@@ -80,6 +79,10 @@ export type SpanNodeStatus = 'running' | 'done' | 'failed'
 export interface SpanRunNode {
   readonly traceId: string
   readonly spanId: string
+  /** The boundary's recorded contract kind; unknown stays null. */
+  readonly kind: string | null
+  /** Source span IDs attributed exclusively to this boundary by this same fold. */
+  readonly spanIds: readonly string[]
   /** The enclosing NODE's span id — not necessarily the raw parent span. */
   readonly parentNodeId: string | null
   readonly label: string
@@ -147,9 +150,9 @@ function spanKind(span: OtlpSpan): string | null {
 /**
  * Is this span an agent boundary — the start of a new node?
  *
- * Five signals, every one of them a key some real emitter already writes:
+ * Boundary signals, every one of them a key some real emitter already writes:
  * the trace root; a span with nothing enclosing it; an OpenInference `AGENT`
- * span; a GenAI `invoke_agent` / `invoke_workflow` operation; or a span whose
+ * or workflow `CHAIN` span; a GenAI `invoke_agent` / `invoke_workflow` operation; or a span whose
  * agent name differs from the agent name of the node enclosing it. The last
  * rule is what places a Claude subagent, which this repo folds in under the
  * spawning tool span WITHOUT a span of kind AGENT — only a changed `agent.name`
@@ -167,6 +170,9 @@ function isNodeBoundary(
 ): boolean {
   if (span.parent_span_id === null || enclosingNodeId === null) return true
   if (spanKind(span) === 'AGENT') return true
+  // Native readers also use CHAIN for observations inside an agent, not
+  // execution phases. Keep those messages/receipts in their enclosing node.
+  if (spanKind(span) === 'CHAIN' && !/^(?:user\.prompt|message\.|session\.compacted|file\.change|command\.execution|source\.corruption\.receipt)/.test(span.name)) return true
   if (AGENT_OPERATIONS.has(String(span.attributes[OPERATION_ATTR_KEY] ?? ''))) return true
   const agent = firstStringAttr(span.attributes, AGENT_NAME_ATTR_KEYS)
   return agent !== null && enclosingAgent !== null && agent !== enclosingAgent
@@ -208,6 +214,7 @@ interface Building {
   endMs: number
   readonly errors: string[]
   readonly childNodeIds: string[]
+  readonly spanIds: string[]
 }
 
 /**
@@ -273,6 +280,7 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
         endMs: epoch(span.end_time),
         errors: [],
         childNodeIds: [],
+        spanIds: [],
       }
       building.set(key, node)
       order.push(key)
@@ -284,6 +292,7 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
 
     const host = nodeId === null ? undefined : building.get(nodeId)
     if (host !== undefined) {
+      host.spanIds.push(span.span_id)
       const kind = spanKind(span)
       if (kind === 'LLM') {
         host.driver = addSpend(host.driver, spanSpend(span))
@@ -330,6 +339,8 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
     return {
       traceId: node.span.trace_id,
       spanId: node.span.span_id,
+      kind: spanKind(node.span),
+      spanIds: node.spanIds,
       parentNodeId: node.parentNodeId === null ? null : building.get(node.parentNodeId)!.span.span_id,
       label: node.agent ?? node.span.name,
       depth: node.depth,

@@ -1,3 +1,4 @@
+import { stampUnreadableSourceRows } from './source-unreadable.js'
 /**
  * The INBOUND path: read OTLP that some other system emitted and hand it to
  * the same analysis pipeline the adapters feed. Three shapes are read: the
@@ -161,21 +162,6 @@ export const SUBSTITUTED_FIELDS_ATTR = 'traces.substituted_fields'
  */
 export const TRACE_ID_MINTED_ATTR = 'traces.trace_id_minted'
 
-/**
- * How many rows of the ORIGINAL source could not be represented as spans, and
- * which kinds — carried on every span of an export so the count survives any
- * number of re-exports.
- *
- * These exist because a dropped row CANNOT be re-emitted. The artifact this
- * package writes is also the store its analysts read, so a line that is not a
- * span would be garbage fed to the analysis, and a repaired one would be
- * invented work. What the artifact can do is refuse to pass itself off as the
- * source: it states, in its own resource attributes, exactly how much of the
- * source is missing from it, so `validate` on a re-export cannot read as a
- * clean bill of health for a file that never was one.
- */
-const SOURCE_UNREADABLE_ROWS_ATTR = 'traces.source.unreadable_rows'
-const SOURCE_UNREADABLE_KINDS_ATTR = 'traces.source.unreadable_row_kinds'
 
 export interface OtlpInputFile {
   readonly path: string
@@ -310,12 +296,11 @@ export interface ResolvedOtlpInput {
 /**
  * Resolve a file or directory to the OTLP files it names.
  *
- * A named FILE is read as OTLP whatever it contains — the caller pointed at it,
- * and reporting its rows as unreadable is more useful than refusing it. A
- * DIRECTORY is a guess about which files were meant, so its non-OTLP JSONL is
- * skipped and named rather than ingested.
+ * A named file is read as OTLP and unreadable rows are reported. Directories
+ * select OTLP and name skipped files. allowEmptyDirectory lets the Runtime run
+ * reader use its journal only when no retained OTLP file was selected.
  */
-export async function resolveOtlpInputFiles(path: string): Promise<ResolvedOtlpInput> {
+export async function resolveOtlpInputFiles(path: string, allowEmptyDirectory = false): Promise<ResolvedOtlpInput> {
   let info: Awaited<ReturnType<typeof stat>>
   try {
     info = await stat(path)
@@ -332,6 +317,7 @@ export async function resolveOtlpInputFiles(path: string): Promise<ResolvedOtlpI
     ? (await Promise.all(otlpDirs.map(jsonlFilesUnder))).flat()
     : await jsonlFilesUnder(path)
   if (candidates.length === 0) {
+    if (allowEmptyDirectory) return { files: [], skipped: [] }
     throw new Error(`no ${OTLP_FILE_EXTENSIONS.join(' / ')} files under ${path}`)
   }
 
@@ -342,7 +328,7 @@ export async function resolveOtlpInputFiles(path: string): Promise<ResolvedOtlpI
     if (sniff.otlp) files.push(candidate)
     else skipped.push({ path: candidate, reason: sniff.reason })
   }
-  if (files.length === 0) {
+  if (files.length === 0 && !allowEmptyDirectory) {
     throw new Error(
       `no OTLP span files under ${path}: ${skipped.length} JSONL file(s) hold something else ` +
         `(${skipped.slice(0, 3).map((entry) => `${basename(entry.path)} — ${entry.reason}`).join('; ')})`,
@@ -993,8 +979,8 @@ async function* fileRows(file: string, issues: OtlpIngestIssue[]): AsyncGenerato
  * analyses as one body of work while its raw event and stream logs are named
  * and skipped rather than counted as broken spans.
  */
-export async function readOtlpInput(path: string): Promise<OtlpInput> {
-  const { files: paths, skipped } = await resolveOtlpInputFiles(path)
+export async function readOtlpInput(path: string, options: { readonly allowEmptyDirectory?: boolean } = {}): Promise<OtlpInput> {
+  const { files: paths, skipped } = await resolveOtlpInputFiles(path, options.allowEmptyDirectory)
   const files: OtlpInputFile[] = []
   const rows: unknown[] = []
   const spans: OtlpSpan[] = []
@@ -1079,49 +1065,4 @@ export async function readOtlpInput(path: string): Promise<OtlpInput> {
     withheld,
     unreadable,
   }
-}
-
-function positiveInteger(value: unknown): number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0
-}
-
-/**
- * Record on every span how much of the source is NOT in this set, and return
- * the same fact to the caller.
- *
- * A dropped row cannot be put back. It is not a span, so it cannot go in an
- * export that this package's own analysts read as spans, and repairing it into
- * one would put invented work into every total. This is the other half of the
- * only honest choice left: the export does not claim to be the source. It
- * carries the number of rows it is missing, so `traces check --contract conformance` on a
- * re-export reports the loss instead of handing back the clean bill of health
- * the source never earned.
- *
- * The count ACCUMULATES. An export of an export inherits the earlier hops'
- * total (read off the spans, where the previous export left it) and adds its
- * own, so no chain of re-exports launders a defect by length.
- */
-function stampUnreadableSourceRows(
-  spans: readonly OtlpSpan[],
-  issues: readonly OtlpIngestIssue[],
-): UnreadableSourceRows {
-  let inherited = 0
-  const kinds = new Set<OtlpIngestIssueKind>()
-  for (const span of spans) {
-    inherited = Math.max(inherited, positiveInteger(span.attributes[SOURCE_UNREADABLE_ROWS_ATTR]))
-    const declared = span.attributes[SOURCE_UNREADABLE_KINDS_ATTR]
-    if (typeof declared === 'string') {
-      for (const kind of declared.split(',')) if (kind.length > 0) kinds.add(kind as OtlpIngestIssueKind)
-    }
-  }
-  for (const issue of issues) kinds.add(issue.kind)
-  const total = inherited + issues.length
-  const sortedKinds = [...kinds].sort()
-  if (total > 0) {
-    for (const span of spans) {
-      span.attributes[SOURCE_UNREADABLE_ROWS_ATTR] = total
-      span.attributes[SOURCE_UNREADABLE_KINDS_ATTR] = sortedKinds.join(',')
-    }
-  }
-  return { rows: total, kinds: sortedKinds, inherited }
 }

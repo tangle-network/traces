@@ -2,7 +2,7 @@
  * @tangle-network/traces: the SDK.
  *
  * Each name is a function a `traces` command is built on, or the analyst
- * extension point (`analyzeSpans({ registry })`): 25 values and 25 types, each
+ * extension point (`analyzeSpans({ registry })`): named values and types, each
  * exported by name. `tests/sdk-surface.test.ts` fails when `dist/index.js` or
  * `dist/index.d.ts` differs from this list.
  *
@@ -13,6 +13,11 @@
 
 // ── Read: sessions from a harness store, or OTLP from any producer ────────
 export { knownHarnesses } from './registry.js'
+export { collectSessionSelection } from './session-selection.js'
+export type { SessionSeedGroup, SessionSelection, SessionSelectionRow, CollectSessionSelectionOptions } from './session-selection.js'
+export { describeSessionRelationship } from './session-relationship.js'
+export type { SessionRelationship } from './session-relationship.js'
+export type { SessionWorkflowSummary, SessionWorkflowIssue } from './session-workflow.js'
 export { parseSession, scanSessions } from './session-source.js'
 export type { ScanOptions, ScannedSession } from './session-source.js'
 export type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -20,6 +25,9 @@ export { readOtlpInput } from './otlp-input.js'
 export type { OtlpInput } from './otlp-input.js'
 export { writeOtlpFile } from './otlp.js'
 export type { OtlpSpan } from './otlp.js'
+
+export { buildSpanRunTree } from './run-span-tree.js'
+export type { SpanRunSnapshot, SpanRunNode } from './run-span-tree.js'
 
 // ── facts: what happened, exactly, for $0 ─────────────────────────────────
 export { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from './session-facts.js'

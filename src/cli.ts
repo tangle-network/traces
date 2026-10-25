@@ -17,7 +17,6 @@ import { basename, dirname, resolve } from 'node:path'
 import { appendAll } from './arrays.js'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { analystLog } from './analyst-log.js'
-import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
 import { metadataOnly } from './metadata-only.js'
 import { shellWord } from './moved.js'
 import type { TraceStreamEvent, WatchedSession } from './live.js'
@@ -26,13 +25,6 @@ import { DEFAULT_ANALYST_MODEL, DEFAULT_ASK_CONCURRENCY, DEFAULT_QUESTION_MAX_CO
 import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
 import { iterSerializedSpans, writeOtlpFile } from './otlp.js'
-import type {
-  OtlpFieldWithheld,
-  OtlpIngestIssue,
-  OtlpInputFile,
-  SkippedInputFile,
-  UnreadableSourceRows,
-} from './otlp-input.js'
 import { readOtlpInput } from './otlp-input.js'
 import {
   createSessionFactsReportBuilder,
@@ -50,7 +42,6 @@ import { turnFactsJsonl, type TurnSource } from './facts-jsonl.js'
 import { callIdsOf, citeFacts, type RecordLine, type SessionCiting } from './record-lines.js'
 import { sessionIdentityLookup } from './session-identity.js'
 import { conformanceOfSpans, renderValidation } from './conformance.js'
-import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession, readSessionSpans, sessionsInCwd } from './session-source.js'
 import { collectSessionSelection, type SessionSelection, type SessionSelectionRow } from './session-selection.js'
@@ -62,34 +53,16 @@ import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
 import type { ReportSource } from './report.js'
 import { parseSince, parseTimeBound, relativeBoundMs } from './time.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
-import { RefError, resolveRefs, selectSpans, shortestRefs, type ResolvedRef } from './refs.js'
+import { RefError, resolveRefs, shortestRefs, type ResolvedRef } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import type { RefusedSession, UploadPlan } from './upload.js'
-import {
-  buildSkillUsageReport,
-  defaultSkillUsageStorePath,
-  readInstalledSkills,
-  renderSkillUsage,
-  SkillUsageStore,
-} from './skill-usage.js'
+import { cmdSkills } from './skills-command.js'
+import { cmdGraphs } from './graphs-command.js'
+import { collectImportedSpans, collectOtlpSpans, collectRuntimeSpans, type CollectedSpans } from './cli-span-input.js'
+import type { CliArgs, RefSelection } from './cli-selection-types.js'
+
 import { type Args, CliError, type Handler, runTraces, UsageError, writeError } from './commands.js'
 import { type IndexedSession, TurnIndex } from './turn-index.js'
-
-/**
- * What a command's positional refs resolved to. Read once, before the command
- * runs, so every reader below sees the same sessions and files.
- */
-interface RefSelection {
-  /** Harness sessions a ref named: an id, a unique prefix or suffix, or a session file. */
-  readonly sessions: ReadonlyArray<{ readonly adapter: HarnessTraceAdapter; readonly ref: SessionRef }>
-  /** Span sources a ref named: OTLP or trace evidence files and directories, bundles, run directories. */
-  readonly spans: ReadonlyArray<Extract<ResolvedRef, { kind: 'spans' | 'run-dir' }>>
-  /** A store root: selection runs over it instead of HOME. */
-  readonly home?: string
-}
-
-/** A parsed command line, with its refs resolved for the commands that read them. */
-type CliArgs = Args & { selection?: RefSelection }
 
 /** The most spawned children a named session brings with it. */
 const MAX_CHILD_SESSIONS = 100
@@ -402,81 +375,6 @@ async function cmdList(args: CliArgs): Promise<void> {
 
 type SelectedSessionSource = ReportSource
 
-interface CollectedSpans {
-  spans: OtlpSpan[]
-  harness: string
-  sources: SelectedSessionSource[]
-  workflow?: SessionWorkflowSummary
-  /**
-   * Conformance of the SOURCE, present when the spans were read from OTLP.
-   * Absent for adapter output, which is graded from the spans themselves.
-   */
-  conformance?: TraceValidation
-  conformanceSubject?: string
-  conformanceFiles?: readonly OtlpInputFile[]
-  conformanceSkipped?: readonly SkippedInputFile[]
-  conformanceIssues?: readonly OtlpIngestIssue[]
-  conformanceWithheld?: readonly OtlpFieldWithheld[]
-  conformanceUnreadable?: UnreadableSourceRows
-  /** Sessions the selection skipped because they could not be read. */
-  unread?: readonly UnreadSessionFact[]
-}
-
-/**
- * Read OTLP spans a foreign system emitted, skipping the adapter stage
- * entirely: the analysis engine is already OTLP-native, so conforming spans
- * need no translation to be analysed.
- */
-async function collectOtlpSpans(path: string, selector?: string): Promise<CollectedSpans> {
-  const { sessionReportSource } = await import('./report.js')
-  let input: Awaited<ReturnType<typeof readOtlpInput>>
-  try {
-    input = await readOtlpInput(path)
-  } catch (error) {
-    if (!(await stat(path).catch(() => undefined))?.isDirectory()) throw error
-    // A directory that is no run, store root or bundle is read as OTLP: say what else it could have been.
-    throw new Error(
-      `${errorText(error)}. A directory ref is read as OTLP-JSONL unless it is a Runtime run ` +
-        '(spawn-journal.jsonl, observer.jsonl or failure.json), a harness store root, or a bundle (manifest.json)',
-    )
-  }
-  if (input.spans.length === 0) {
-    throw new Error(
-      `no analyzable spans in ${path} (${input.files.length} file(s), ${input.rows.length} row(s), ` +
-        `${input.issues.length} unusable). Run \`traces check ${path} --contract conformance\` for the per-finding reason.`,
-    )
-  }
-  const fileByTrace = new Map<string, string>()
-  for (const file of input.files) {
-    for (const traceId of file.traceIds) if (!fileByTrace.has(traceId)) fileByTrace.set(traceId, file.path)
-  }
-  const selected = selector ? selectSpans(input.spans, selector, path) : input.spans
-  const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of selected) {
-    const grouped = byTrace.get(span.trace_id) ?? []
-    grouped.push(span)
-    byTrace.set(span.trace_id, grouped)
-  }
-  return {
-    spans: [...selected],
-    harness: 'otlp',
-    sources: [...byTrace].map(([traceId, spans]) => sessionReportSource({
-      harness: 'otlp',
-      sessionId: traceId,
-      path: fileByTrace.get(traceId) ?? path,
-      cwd: null,
-      mtimeMs: 0,
-    }, spans, traceId)),
-    conformance: input.validation,
-    conformanceSubject: path,
-    conformanceFiles: input.files,
-    conformanceSkipped: input.skipped,
-    conformanceIssues: input.issues,
-    conformanceWithheld: input.withheld,
-    conformanceUnreadable: input.unreadable,
-  }
-}
-
 async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   if (args.refs.length > 0 && !args.selection) throw new Error(`internal: ${args.command} read its refs before resolving them`)
   const sources = args.selection?.spans ?? []
@@ -488,7 +386,7 @@ async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   const parts: CollectedSpans[] = []
   for (const source of sources) {
     parts.push(source.kind === 'run-dir'
-      ? await collectOtlpSpans(source.path)
+      ? await collectRuntimeSpans(source.path)
       : source.reader === 'otlp'
         ? await collectOtlpSpans(source.path, source.selector)
         : await collectImportedSpans(source.path, source.reader, source.selector))
@@ -1167,35 +1065,6 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
   process.stdout.write(renderAnalysis(result))
 }
 
-async function collectImportedSpans(
-  path: string,
-  format: TraceEvidenceFormatOption,
-  selector?: string,
-): Promise<CollectedSpans> {
-  const { sessionReportSource } = await import('./report.js')
-  const result = await exportTraceEvidenceFile(path, { format })
-  const spans = selector ? selectSpans(result.spans, selector, path) : result.spans
-  const { sessionByTrace } = indexSessionIdsByTrace(spans)
-  const sessions = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
-    const sessionId = sessionByTrace.get(span.trace_id)
-    if (!sessionId) continue
-    const grouped = sessions.get(sessionId) ?? []
-    grouped.push(span)
-    sessions.set(sessionId, grouped)
-  }
-  return {
-    spans,
-    harness: result.format,
-    sources: [...sessions].map(([sessionId, grouped]) => sessionReportSource({
-      harness: result.format,
-      sessionId,
-      path,
-      cwd: null,
-      mtimeMs: 0,
-    }, grouped, sessionId)),
-  }
-}
 
 /**
  * `traces ask`: free-form questions over the selected sessions, the one
@@ -1555,29 +1424,6 @@ function reportRefused(refused: readonly RefusedSession[]): void {
 }
 
 /** The window `traces skills` counts when no `--since` is given. */
-const SKILLS_SINCE = '30d'
-
-/**
- * `traces skills`: skill use across Claude Code, Codex and Kimi Code sessions,
- * with no model call. Each run reads the bytes sessions appended since the
- * last into the store under `$XDG_STATE_HOME/traces`, then counts the window.
- */
-async function cmdSkills(args: CliArgs): Promise<void> {
-  const since = parseSince(args.since ?? SKILLS_SINCE)
-  const storePath = defaultSkillUsageStorePath()
-  const store = await SkillUsageStore.load(storePath)
-  const refreshed = await store.refresh()
-  await store.save()
-  const report = buildSkillUsageReport(store.list(), await readInstalledSkills(), storePath, { since, refresh: refreshed })
-  const json = args.format === 'json'
-  if (args.unused) {
-    if (json) process.stdout.write(`${JSON.stringify(report.unused, null, 2)}\n`)
-    else for (const skill of report.unused) process.stdout.write(`${skill.skill}\t${skill.installedIn.join(',')}\n`)
-    return
-  }
-  process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : `${renderSkillUsage(report)}\n`)
-}
-
 /** `--current` named as a ref, and `--latest-turn` checked against the harness. */
 function prepare(args: Args): CliArgs {
   return validateLatestTurn(applyCurrentSessionSelection(args))
@@ -1617,6 +1463,7 @@ await runTraces(process.argv.slice(2), {
   'bundle verify': cmdBundleVerify,
   convert: reading(cmdConvert),
   upload: reading(cmdUpload),
+  graphs: reading((args) => cmdGraphs(args, { discover: () => discover(args), readSpans: () => collectSpans(args) })),
   skills: cmdSkills,
   mcp: reading(cmdMcp),
 })

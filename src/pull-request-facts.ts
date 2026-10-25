@@ -131,6 +131,10 @@ export interface PullRequestFact {
   readonly identifier: string | null
   readonly number: string | null
   readonly headBranch: string | null
+  /** Explicit command repository or a successful command's PR URL; never the session's cwd. */
+  readonly repository: string | null
+  readonly url: string | null
+  readonly repositoryUnavailable: string | null
   /** The `gh` command, as the scanner read it. */
   readonly command: string
   /** How `identifier` was arrived at, naming the span that supplied it. */
@@ -177,6 +181,9 @@ interface PullRequestEvent {
   action: 'create' | 'merge'
   number: string | null
   headBranch: string | null
+  repository: string | null
+  url: string | null
+  repositoryUnavailable: string | null
   command: string
   evidence: string
   spanIds: string[]
@@ -267,6 +274,8 @@ function parseFlags(
     if (arg.startsWith('--') && arg.includes('=')) {
       const cut = arg.indexOf('=')
       flags.set(arg.slice(0, cut), arg.slice(cut + 1))
+    } else if (arg.startsWith('-R') && arg.length > 2 && valueFlags.has('-R')) {
+      flags.set('-R', arg.slice(2))
     } else if (valueFlags.has(arg)) {
       flags.set(arg, args[index + 1] ?? true)
       index += 1
@@ -288,14 +297,15 @@ function flagValue(flags: Map<string, string | true>, ...names: readonly string[
 }
 
 /** Pull-request URLs `gh` printed on a line of their own, in order. */
-function printedPullRequestNumbers(output: string): string[] {
-  const numbers: string[] = []
+function printedPullRequestReferences(output: string): Array<{ number: string; repository: string; url: string }> {
+  const references: Array<{ number: string; repository: string; url: string }> = []
   for (const raw of output.split('\n')) {
     const line = raw.replace(ANSI, '').split('\r').pop()!.trim()
     const match = PR_URL_LINE.exec(line)
-    if (match) numbers.push(match[1]!)
+    const reference = match ? urlReference(line) : null
+    if (reference) references.push(reference)
   }
-  return numbers
+  return references
 }
 
 /** Every pull-request number one line of text states, by URL or by `#N`. */
@@ -349,6 +359,37 @@ function reachedGh(record: CommandRecord, action: 'create' | 'merge', sawNumber:
 interface Printed {
   readonly number: string
   readonly pollSpanId: string | null
+  readonly repository?: string
+  readonly url?: string
+}
+
+function explicitRepository(value: string | null): string | null {
+  if (!value) return null
+  const raw = value.replace(/^https?:\/\//, '').replace(/\/$/, '')
+  const parts = raw.split('/')
+  if ((parts.length !== 2 && parts.length !== 3) || parts.some((part) => !/^[A-Za-z0-9_.-]+$/.test(part))) return null
+  return parts[0] === 'github.com' ? parts.slice(1).join('/') : raw
+}
+
+function urlReference(value: string): { number: string; repository: string; url: string } | null {
+  try {
+    const url = new URL(value)
+    const match = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)\/?$/.exec(url.pathname)
+    if (!match || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null
+    return { number: match[3]!, repository: `${url.hostname === 'github.com' ? '' : `${url.host}/`}${match[1]}/${match[2]}`,
+      url: `${url.origin}/${match[1]}/${match[2]}/pull/${match[3]}` }
+  } catch { return null }
+}
+
+function repositoryIdentity(repository: string | null, printed: { repository?: string; url?: string } | null): {
+  repository: string | null; url: string | null; repositoryUnavailable: string | null
+} {
+  if (repository && printed?.repository && repository !== printed.repository) return {
+    repository: null, url: null, repositoryUnavailable: 'the command repository and returned PR URL disagree',
+  }
+  const resolved = printed?.repository ?? repository
+  return { repository: resolved, url: printed?.url ?? null,
+    repositoryUnavailable: resolved ? null : 'no explicit --repo/-R, target PR URL, or joined command output establishes the repository' }
 }
 
 function createEvent(
@@ -363,6 +404,7 @@ function createEvent(
   if (flags.has('--help') || flags.has('-h')) return null
   if (!reachedGh(record, 'create', printed !== null)) return null
   const printedNumber = printed?.number ?? null
+  const identity = repositoryIdentity(explicitRepository(flagValue(flags, '--repo', '-R')), printed)
   const headFlag = flagValue(flags, '--head', '-H')
   const headBranch = headFlag ?? inferHeadBranch(commands, commandIndex, record.text)
   const evidence =
@@ -377,6 +419,7 @@ function createEvent(
           : 'none: the command named no head branch and printed no pull-request URL'
   return {
     action: 'create',
+    ...identity,
     number: printedNumber,
     headBranch,
     command: words.join(' '),
@@ -401,6 +444,11 @@ function mergeEvent(
     target === null ? null : (/^#?(\d+)$/.exec(target)?.[1] ?? numbersInLine(target)[0] ?? null)
   const numberInOutput = numberInCommand === null ? (MERGED_NUMBER.exec(record.text)?.[1] ?? null) : null
   const number = numberInCommand ?? numberInOutput
+  const targetReference = target ? urlReference(target) : null
+  const printed = printedPullRequestReferences(record.text).filter((reference) => reference.number === number)
+  const unique = [...new Map(printed.map((reference) => [reference.url, reference])).values()]
+  const printedReference = targetReference ?? (unique.length === 1 ? unique[0]! : null)
+  const identity = repositoryIdentity(explicitRepository(flagValue(flags, '--repo', '-R')), printedReference)
   if (!reachedGh(record, 'merge', number !== null)) return null
   const evidence =
     numberInCommand !== null
@@ -412,6 +460,7 @@ function mergeEvent(
           : 'none: the command named neither a pull request nor a branch'
   return {
     action: 'merge',
+    ...identity,
     number,
     headBranch: number === null ? target : null,
     command: words.join(' '),
@@ -427,7 +476,7 @@ function mergeEvent(
 function eventsFromRecord(record: CommandRecord, recordIndex: number, polled: readonly Printed[]): PullRequestEvent[] {
   if (!/\bpr\b/.test(record.script)) return []
   const commands = shellCommands(record.script)
-  const printed: Printed[] = [...printedPullRequestNumbers(record.text).map((number) => ({ number, pollSpanId: null })), ...polled]
+  const printed: Printed[] = [...printedPullRequestReferences(record.text).map((reference) => ({ ...reference, pollSpanId: null })), ...polled]
   const events: PullRequestEvent[] = []
   let createIndex = 0
   for (let index = 0; index < commands.length; index += 1) {
@@ -481,6 +530,10 @@ function identify(event: PullRequestEvent): PullRequestFact {
     identifier,
     number: event.number,
     headBranch: event.headBranch,
+    repository: event.repository,
+    url: event.url ?? (event.repository && event.number
+      ? `https://${event.repository.split('/').length === 2 ? 'github.com/' : ''}${event.repository}/pull/${event.number}` : null),
+    repositoryUnavailable: event.repositoryUnavailable,
     command: event.command,
     evidence: event.evidence,
     spanIds: [...new Set(event.spanIds)],
@@ -499,8 +552,17 @@ function identify(event: PullRequestEvent): PullRequestFact {
  */
 function distinct(events: readonly PullRequestEvent[]): PullRequestFact[] {
   const groups = new Map<string, PullRequestEvent[]>()
+  const identity = (event: PullRequestEvent): string =>
+    JSON.stringify([event.repository, event.number ?? event.headBranch ?? `command:${event.command}`])
   for (const event of events) {
-    const key = event.number ?? event.headBranch ?? `command:${event.command}`
+    // A failed identical create has no PR of its own. A unique successful retry
+    // supplies the displayed identity; never assign its repository to the failed event.
+    const retries = event.action === 'create' && event.failed && event.number === null && event.headBranch !== null
+      ? events.filter((other) => !other.failed && other.number !== null && other.command === event.command
+          && other.headBranch === event.headBranch && (event.repository === null || other.repository === event.repository))
+      : []
+    const identities = new Set(retries.map(identity))
+    const key = identities.size === 1 ? [...identities][0]! : identity(event)
     groups.set(key, [...(groups.get(key) ?? []), event])
   }
   return [...groups.values()].map((group) => {
@@ -541,9 +603,9 @@ function polledNumbers(spans: readonly OtlpSpan[], record: CommandRecord): Print
       if (input === null || !pollsSession(input, session)) continue
       const output = stringAttribute(span, 'output.value') ?? ''
       const text = [output, ...scriptResults(output).map((result) => result.output)].join('\n')
-      const numbers = new Set(printedPullRequestNumbers(text))
-      if (numbers.size !== 1) continue
-      found.push({ number: [...numbers][0]!, pollSpanId: span.span_id })
+      const references = [...new Map(printedPullRequestReferences(text).map((reference) => [reference.url, reference])).values()]
+      if (references.length !== 1) continue
+      found.push({ ...references[0]!, pollSpanId: span.span_id })
       break
     }
   }
@@ -582,12 +644,12 @@ export function readPullRequests(spans: readonly OtlpSpan[]): PullRequestReading
   const numberByBranch = new Map<string, string>()
   for (const event of events) {
     if (event.action !== 'create' || event.number === null || event.headBranch === null) continue
-    if (!numberByBranch.has(event.headBranch)) numberByBranch.set(event.headBranch, event.number)
+    if (!numberByBranch.has(JSON.stringify([event.repository, event.headBranch]))) numberByBranch.set(JSON.stringify([event.repository, event.headBranch]), event.number)
   }
   let unjoinedTruncated = 0
   for (const event of events) {
     if (event.number !== null || event.headBranch === null) continue
-    const sibling = numberByBranch.get(event.headBranch)
+    const sibling = numberByBranch.get(JSON.stringify([event.repository, event.headBranch]))
     if (sibling !== undefined) {
       event.number = sibling
       event.evidence = `${event.evidence}, resolved to the number another create for this branch printed`
@@ -596,6 +658,10 @@ export function readPullRequests(spans: readonly OtlpSpan[]): PullRequestReading
     const later = numberFromLaterOutput(records, event.recordIndex, event.headBranch)
     if (later !== null) {
       event.number = later.number
+      // The old branch-only join establishes a number, not its repository.
+      event.repository = null
+      event.url = null
+      event.repositoryUnavailable = 'branch-only later output does not establish the PR repository'
       event.spanIds.push(later.spanId)
       event.evidence = `${event.evidence}, resolved to the number a later output states for this branch, in span ${later.spanId}`
       continue

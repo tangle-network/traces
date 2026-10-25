@@ -11,8 +11,7 @@
  * under `workflows/<runId>` and bind to the exact run ID and transcript
  * directory returned by the parent `Workflow` call.
  *
- * Shared by the claudish / openclaw / nanoclaw forks via aliases — they
- * write the same transcript shape.
+ * Shared by the claudish / openclaw / nanoclaw forks via aliases.
  *
  * The same reader takes the `claude -p --output-format stream-json --verbose`
  * output a CI job captures. Its `system`/`init` record lists the tools the
@@ -21,6 +20,9 @@
  * the run failed, which the root span keeps as `run.status`.
  */
 
+import { subagentLifecycleSpan } from './claude-subagent-lifecycle.js'
+import { appendClaudeWorkflowJournals, workflowJournalPaths } from './claude-workflow-journal.js'
+import { foldedChildIdentity } from './native-provenance.js'
 import { createHash } from 'node:crypto'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -65,8 +67,6 @@ import {
   SUBAGENT_SPAWN_ATTR,
   SUBAGENT_SPAWN_TASK_ATTR,
   SUBAGENT_TASK_ATTR,
-  SYNTHESIZED_SOURCE_ATTR,
-  SYNTHESIZED_SPAN_ATTR,
   isSubagentSpan,
 } from './provenance.js'
 import { toolIoAttributes } from './tool-io.js'
@@ -145,9 +145,6 @@ const SPAWN_TYPE_KEY = 'subagent_type'
 /** The Task tool's short name for the work it hands the child. */
 const SPAWN_DESCRIPTION_KEY = 'description'
 
-const SPAWN_TYPE_ATTR = 'traces.claude.subagent_type'
-const SUBAGENT_TRANSCRIPT_ATTR = 'traces.claude.subagent_transcript'
-const SUBAGENT_AGENT_ID_ATTR = 'traces.claude.subagent_agent_id'
 
 const CLAUDE_SOURCE_TRACE_ID = 'traces.claude.source_trace_id'
 const CLAUDE_SOURCE_SPAN_ID = 'traces.claude.source_span_id'
@@ -1293,7 +1290,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       }
     }
     options.signal?.throwIfAborted()
-    return [ref.path, ...sources.files, ...metadataFiles].sort()
+    return [ref.path, ...sources.files, ...metadataFiles, ...await workflowJournalPaths(sources.workflowDirectories)].sort()
   }
 
   async locate(opts: LocateOptions = {}): Promise<SessionRef[]> {
@@ -1635,13 +1632,13 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       const lifecycle = subagentLifecycleSpan(agent, parsed, traceId, parent, task, subDir)
       for (const item of [...parsed.spans, ...(lifecycle ? [lifecycle] : [])]) {
         if (item.parent_span_id === `root:${traceId}` || item === lifecycle) {
-          item.parent_span_id = parent
+          item.parent_span_id = item === lifecycle ? parent : lifecycle?.span_id ?? parent
           item.attributes[ATTR.parentConfidence] = confidence
         }
         // Every span here came from the CHILD's transcript. Marking it says so,
         // which is what keeps the parent's tool count, changed files, human
         // turns and record window from absorbing work the parent never did.
-        item.attributes[SUBAGENT_SPAN_ATTR] = true
+        Object.assign(item.attributes, foldedChildIdentity(traceId, agent.sourceKey))
         if (task) item.attributes[SUBAGENT_TASK_ATTR] = task
         if (agent.parentToolUseId && !parentSpan) {
           item.attributes['traces.claude.parent_tool_missing'] = true
@@ -1655,6 +1652,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       appendAll(out, parsed.spans)
       if (lifecycle) out.push(lifecycle)
     }
+    await appendClaudeWorkflowJournals({ directories: sources.workflowDirectories, bindings: workflowBindings, toolSpans: main.toolSpanByUseId, traceId, spans: out })
   }
 }
 
@@ -1666,67 +1664,4 @@ function subagentTaskName(agent: ClaudeSubagentFile): string | null {
     if (typeof value === 'string' && value.trim().length > 0) return value.trim()
   }
   return null
-}
-
-/**
- * One span standing for a child transcript, so the parent's `Task` call has
- * something to point at.
- *
- * It is synthesized — no model issued it — and it belongs to the subagent's
- * scope, so neither the parent's tool count nor the parent's record window
- * absorbs it. Its value is evidence: it names the transcript the child's spans
- * came from and the window they cover, which is what a reader checking "which
- * subagents ran" needs and what the parent's TOOL span alone cannot say.
- */
-function subagentLifecycleSpan(
-  agent: ClaudeSubagentFile,
-  parsed: ParsedStream,
-  traceId: string,
-  parentSpanId: string,
-  task: string | null,
-  subDir: string,
-): OtlpSpan | undefined {
-  let first: string | undefined
-  let last: string | undefined
-  for (const item of parsed.spans) {
-    for (const stamp of [item.start_time, item.end_time]) {
-      const value = Date.parse(stamp)
-      if (!Number.isFinite(value)) continue
-      if (first === undefined || value < Date.parse(first)) first = stamp
-      if (last === undefined || value > Date.parse(last)) last = stamp
-    }
-  }
-  if (first === undefined || last === undefined) return undefined
-  return span({
-    traceId,
-    // Same prefix as every other span from this transcript, so a reader
-    // grouping spans by source keeps the anchor with the spans it stands for.
-    spanId: `${agent.sourceKey}:lifecycle`,
-    parentSpanId,
-    name: 'subagent.lifecycle',
-    kind: 'AGENT',
-    startTime: first,
-    endTime: last,
-    // The transcript records what the child did, not whether the parent
-    // accepted it; the parent's own tool span carries that status.
-    status: 'UNSET',
-    service: SERVICE,
-    agent: agent.meta.agentType ? `subagent:${agent.meta.agentType}` : 'subagent',
-    extra: {
-      ...toolIoAttributes({
-        input: {
-          agent_id: agent.agentId,
-          ...(agent.meta.agentType ? { subagent_type: agent.meta.agentType } : {}),
-          ...(task ? { task } : {}),
-        },
-      }),
-      [SYNTHESIZED_SPAN_ATTR]: true,
-      [SYNTHESIZED_SOURCE_ATTR]: 'claude.subagent_transcript',
-      [SUBAGENT_SPAN_ATTR]: true,
-      ...(task ? { [SUBAGENT_TASK_ATTR]: task } : {}),
-      ...(agent.meta.agentType ? { [SPAWN_TYPE_ATTR]: agent.meta.agentType } : {}),
-      [SUBAGENT_AGENT_ID_ATTR]: agent.agentId,
-      [SUBAGENT_TRANSCRIPT_ATTR]: relative(subDir, agent.file),
-    },
-  })
 }

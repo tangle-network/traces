@@ -24,13 +24,16 @@ importers:
         version: 5.7.1
       '@tangle-network/agent-runtime':
         specifier: 0.348.1
-        version: 0.348.1(@tangle-network/agent-eval@0.221.3)(@tangle-network/agent-interface@5.7.1)(@tangle-network/sandbox@0.60.49)
+        version: 0.348.1(@tangle-network/agent-eval@0.221.3)(@tangle-network/agent-interface@5.7.1)(@tangle-network/sandbox@0.64.39)
       '@tangle-network/agent-trace-contract':
         specifier: 2.1.0
         version: 2.1.0
       '@tangle-network/harness-sessions':
         specifier: 0.1.7
         version: 0.1.7
+      '@tangle-network/sandbox':
+        specifier: 0.64.39
+        version: 0.64.39
     devDependencies:
       '@types/node':
         specifier: ^22.20.4
@@ -548,8 +551,8 @@ packages:
     engines: {node: '>=22.13.0'}
     hasBin: true
 
-  '@tangle-network/sandbox@0.60.49':
-    resolution: {integrity: sha512-boHCuUIexnkNwv1X/ra2bLGrwpwosyYEpq12c4FbofmKZI3xUpvVB1BMqgPqgaABpbts3JT7AmTcF3XvLg7Gmg==}
+  '@tangle-network/sandbox@0.64.39':
+    resolution: {integrity: sha512-YK/0ICJEKKvgLjIsPovCU5vLvGcU6IA+FwQFi7vgyHu00PWAeEf0jaOchGLSk5HD0CQHEdEOP9xsvcQWDR8FNA==}
     peerDependencies:
       '@mastra/core': ^1.36.0
       '@modelcontextprotocol/sdk': ^1.30.0
@@ -1464,7 +1467,7 @@ snapshots:
     dependencies:
       '@tangle-network/agent-interface': 5.7.1
 
-  '@tangle-network/agent-runtime@0.348.1(@tangle-network/agent-eval@0.221.3)(@tangle-network/agent-interface@5.7.1)(@tangle-network/sandbox@0.60.49)':
+  '@tangle-network/agent-runtime@0.348.1(@tangle-network/agent-eval@0.221.3)(@tangle-network/agent-interface@5.7.1)(@tangle-network/sandbox@0.64.39)':
     dependencies:
       '@earendil-works/pi-codemode': 1.0.4
       '@tangle-network/agent-core': 0.13.2
@@ -1473,7 +1476,7 @@ snapshots:
       '@tangle-network/agent-knowledge': 22.0.16(@tangle-network/agent-eval@0.221.3)(@tangle-network/agent-interface@5.7.1)
       '@tangle-network/agent-profile-materialize': 0.27.4(@tangle-network/agent-interface@5.7.1)
       '@tangle-network/agent-trace-contract': 2.1.0
-      '@tangle-network/sandbox': 0.60.49
+      '@tangle-network/sandbox': 0.64.39
       tar-stream: 3.2.1
       zod: 4.6.5
     transitivePeerDependencies:
@@ -1488,12 +1491,12 @@ snapshots:
     dependencies:
       '@tangle-network/agent-trace-contract': 2.1.0
 
-  '@tangle-network/sandbox@0.60.49':
+  '@tangle-network/sandbox@0.64.39':
     dependencies:
       '@tangle-network/agent-core': 0.11.0
       '@tangle-network/agent-interface': 4.0.0
       tar-stream: 3.2.1
-      zod: 4.6.5
+      zod: 4.6.6
     transitivePeerDependencies:
       - bare-abort-controller
       - bare-buffer

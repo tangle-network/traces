@@ -258,8 +258,12 @@ export async function citeFacts<M extends SessionMatch>(
       const text = id === undefined || match.failed == null ? null : lines.outputText(id)
       citedMatches.set(match, { ...match, record: result(match.spanId), lastLine: text === null ? null : lastLine(text) })
     }
+    // Canonical boundary identity and uncapped classifier counts serve the SDK's
+    // graph projection. The established cited sheet already carries its root,
+    // human turns and actor evidence; do not duplicate graph-only metadata here.
+    const { rootSpanId: _rootSpanId, typedTurnCounts: _typedTurnCounts, ...sheet } = facts
     citedSessions.push({
-      ...facts,
+      ...sheet,
       recordFile: citing.path,
       humanTurns: facts.humanTurns.value === null
         ? facts.humanTurns
