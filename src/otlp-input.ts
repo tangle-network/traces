@@ -24,8 +24,8 @@ import { stampUnreadableSourceRows } from './source-unreadable.js'
  *    describing our own repairs back to them.
  */
 
-import { open, readdir, readFile, stat } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { open, readFile, stat } from 'node:fs/promises'
+import { basename } from 'node:path'
 import {
   ATTR,
   type ContractSpan,
@@ -37,23 +37,12 @@ import {
 } from '@tangle-network/agent-trace-contract'
 import { TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { boundedString, toolArgumentsFromAttributes, toolIoAttributes } from './adapters/tool-io.js'
-import { appendAll } from './arrays.js'
+import { otlpInputCandidates, type ResolvedOtlpInput, type SkippedInputFile } from './otlp-input-files.js'
 import { readJsonValues } from './json-values.js'
 import { readJsonlLines } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpSpanLink, OtlpStatusCode } from './otlp.js'
 import { parseIsoToEpochMs } from './time.js'
-
-/** JSONL extensions a directory scan considers at all. */
-const OTLP_FILE_EXTENSIONS = ['.jsonl', '.ndjson']
-
-/**
- * Directory name a producer puts its OTLP exports in. When one exists, it is
- * the ONLY thing read: a producer that separated its span files from its event
- * files has already answered "which of these are spans", and second-guessing
- * that by also scanning siblings is how a run directory's raw stream logs got
- * counted as broken spans.
- */
-const OTLP_DIRECTORY_NAME = 'otlp'
+export type { ResolvedOtlpInput, SkippedInputFile } from './otlp-input-files.js'
 
 /** Lines sniffed before deciding a file is not OTLP. */
 const SNIFF_LINES = 5
@@ -174,13 +163,6 @@ export interface OtlpInputFile {
   readonly traceIds: readonly string[]
 }
 
-/** A `*.jsonl` in the directory that does not hold OTLP spans, and how we know. */
-export interface SkippedInputFile {
-  readonly path: string
-  /** What the first readable line was instead of a span. */
-  readonly reason: string
-}
-
 /**
  * How much of the original source could not be represented as spans, summed
  * across every export hop that led to this file.
@@ -215,31 +197,6 @@ export interface OtlpInput {
   readonly withheld: readonly OtlpFieldWithheld[]
   /** Source rows absent from `spans`, this hop's and every earlier hop's. */
   readonly unreadable: UnreadableSourceRows
-}
-
-/** Collect `*.jsonl` / `*.ndjson` under a directory, recursively, sorted. */
-async function jsonlFilesUnder(dir: string): Promise<string[]> {
-  const entries = await readdir(dir, { withFileTypes: true })
-  const files: string[] = []
-  for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
-    const path = join(dir, entry.name)
-    if (entry.isDirectory()) appendAll(files, await jsonlFilesUnder(path))
-    else if (OTLP_FILE_EXTENSIONS.some((ext) => entry.name.toLowerCase().endsWith(ext))) files.push(path)
-  }
-  return files
-}
-
-/** Every `otlp/` directory under `dir`, so a results tree of per-cell exports resolves. */
-async function otlpDirectoriesUnder(dir: string): Promise<string[]> {
-  const entries = await readdir(dir, { withFileTypes: true })
-  const dirs: string[] = []
-  for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
-    if (!entry.isDirectory()) continue
-    const path = join(dir, entry.name)
-    if (entry.name === OTLP_DIRECTORY_NAME) dirs.push(path)
-    else appendAll(dirs, await otlpDirectoriesUnder(path))
-  }
-  return dirs
 }
 
 /**
@@ -287,40 +244,12 @@ function describeNonSpanRow(row: unknown): string {
     : `rows carry no span_id (keys: ${keys})`
 }
 
-/** A file or directory resolved to the OTLP files in it, plus the JSONL that is not OTLP. */
-export interface ResolvedOtlpInput {
-  readonly files: readonly string[]
-  readonly skipped: readonly SkippedInputFile[]
-}
-
 /**
- * Resolve a file or directory to the OTLP files it names.
- *
- * A named file is read as OTLP and unreadable rows are reported. Directories
- * select OTLP and name skipped files. allowEmptyDirectory lets the Runtime run
- * reader use its journal only when no retained OTLP file was selected.
+ * Resolve named files or discovered exports; allowEmptyDirectory permits journal fallback.
  */
 export async function resolveOtlpInputFiles(path: string, allowEmptyDirectory = false): Promise<ResolvedOtlpInput> {
-  let info: Awaited<ReturnType<typeof stat>>
-  try {
-    info = await stat(path)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(`no OTLP file or directory at ${path}`)
-    }
-    throw error
-  }
-  if (!info.isDirectory()) return { files: [path], skipped: [] }
-
-  const otlpDirs = basename(path) === OTLP_DIRECTORY_NAME ? [path] : await otlpDirectoriesUnder(path)
-  const candidates = otlpDirs.length > 0
-    ? (await Promise.all(otlpDirs.map(jsonlFilesUnder))).flat()
-    : await jsonlFilesUnder(path)
-  if (candidates.length === 0) {
-    if (allowEmptyDirectory) return { files: [], skipped: [] }
-    throw new Error(`no ${OTLP_FILE_EXTENSIONS.join(' / ')} files under ${path}`)
-  }
-
+  const { candidates, directory } = await otlpInputCandidates(path, allowEmptyDirectory)
+  if (!directory) return { files: [path], skipped: [] }
   const files: string[] = []
   const skipped: SkippedInputFile[] = []
   for (const candidate of candidates) {
