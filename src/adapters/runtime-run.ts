@@ -2,11 +2,13 @@
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR } from '../attributes.js'
 import { span, type OtlpSpan } from '../otlp.js'
-import { SUBSTITUTED_FIELDS_ATTR } from '../otlp-input.js'
+import { readOtlpInput, SUBSTITUTED_FIELDS_ATTR } from '../otlp-input.js'
 
 export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string): Promise<{
   spans: OtlpSpan[]; unknowns: string[]
 }> {
+  const retained = await readOtlpInput(runDir, { allowEmptyDirectory: true })
+  if (retained.files.length > 0) return { spans: [...retained.spans], unknowns: ['Retained OTLP selected; supervisor journal is excluded to avoid duplicate accounting'] }
   const { readRunContextSnapshot } = await import('../supervisor-run-context.js')
   const snapshot = await readRunContextSnapshot(runDir)
   const unknowns = [

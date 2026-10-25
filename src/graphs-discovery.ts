@@ -1,4 +1,5 @@
 /** The user's selected Discovery source: the maintained run index/catalog, once. */
+import { sourceCoverage } from './graph-source-coverage.js'
 import { readRuntimeRunSpans } from './adapters/runtime-run.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { computeSessionFacts } from './session-facts.js'
@@ -50,7 +51,7 @@ export async function importDiscoveryRunIndex(path: string, options: {
             source: { kind: 'discovery', id: row.runId, url: pathToFileURL(resolve(location.path)).href },
             taskType: options.taskType, spanRun: execution, traceRunId: execution.traceIds.length === 1 ? execution.traceIds[0] : undefined,
             observedAt: new Date().toISOString(), evidence: [evidence], complete: false,
-            issues: input.unknowns.map((reason) => ({ kind: 'source-coverage', reason })),
+            issues: [...sourceCoverage(input.spans), ...input.unknowns.map((reason) => ({ kind: 'source-coverage', reason }))],
           })
           await owner.recordStoredGraphRun(registry, observation.graph, observation.record, { preserveLabels: true })
           ingested += 1

@@ -64,10 +64,11 @@
   },
   "dependencies": {
     "@tangle-network/agent-eval": "0.221.3",
-    "@tangle-network/agent-interface": "5.2.0",
-    "@tangle-network/agent-runtime": "0.318.0",
+    "@tangle-network/agent-interface": "5.7.1",
+    "@tangle-network/agent-runtime": "0.348.1",
     "@tangle-network/agent-trace-contract": "2.1.0",
-    "@tangle-network/harness-sessions": "0.1.7"
+    "@tangle-network/harness-sessions": "0.1.7",
+    "@tangle-network/sandbox": "0.64.39"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

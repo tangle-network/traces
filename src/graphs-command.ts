@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { graphOwner, graphRecordObject as object } from './graph-owner.js'
 import { importDiscoveryRunIndex } from './graphs-discovery.js'
+import { sourceCoverage } from './graph-source-coverage.js'
 import { GraphSourceCache } from './graph-source-cache.js'
 import { CliError, UsageError } from './commands.js'
 import type { CliArgs } from './cli-selection-types.js'
@@ -29,21 +30,6 @@ function pullRequestEvidence(facts: readonly SessionFacts[]): Array<{ kind: stri
     return references ? (['created', 'merged'] as const).flatMap((action) => references[action].flatMap((reference) =>
       reference.repository && reference.number && reference.url ? [{ kind: action === 'created' ? 'pr-created-command' : 'pr-merge-command', url: reference.url, at: reference.at }] : [])) : []
   })
-}
-
-function sourceCoverage(spans: readonly OtlpSpan[]): Array<{ kind: string; reason: string }> {
-  const issues = spans.flatMap((span) => {
-    const value = span.attributes['traces.source.unknowns']
-    if (typeof value !== 'string') return []
-    try {
-      const reasons: unknown = JSON.parse(value)
-      return Array.isArray(reasons) ? reasons.filter((reason): reason is string => typeof reason === 'string').map((reason) => ({ kind: 'source-coverage', reason })) : []
-    } catch { return [{ kind: 'source-coverage', reason: 'source coverage metadata was unreadable' }] }
-  })
-  if (spans.some((span) => span.attributes['traces.source.partial_tail'] === true)) issues.push({ kind: 'partial-source-tail', reason: 'Source journal ends in an incomplete record' })
-  const uncertain = new Set(spans.map((span) => span.attributes['agent.parent.confidence']).filter((value) => value === 'heuristic' || value === 'unknown'))
-  for (const confidence of uncertain) issues.push({ kind: 'source-coverage', reason: `Recorded parent binding confidence is ${confidence}; topology includes uncertain source containment` })
-  return issues
 }
 
 function render(report: Record<string, unknown>): string {
