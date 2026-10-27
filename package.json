@@ -1,6 +1,6 @@
 {
   "name": "@tangle-network/traces",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "What your coding agents did, where they wasted time, and whether a run passes: exact facts, ranked findings, one CI gate and a live view over Claude Code, Codex, OpenCode, Pi, Kimi and Factory sessions and any OTLP spans. CLI and SDK.",
   "type": "module",
   "license": "MIT",
@@ -45,7 +45,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
@@ -63,12 +63,12 @@
     "prepublishOnly": "pnpm check:source && pnpm build && pnpm check:package"
   },
   "dependencies": {
-    "@tangle-network/agent-eval": "0.222.1",
-    "@tangle-network/agent-interface": "5.8.1",
-    "@tangle-network/agent-runtime": "0.352.1",
+    "@tangle-network/agent-eval": "1.0.0",
+    "@tangle-network/agent-interface": "5.9.0",
+    "@tangle-network/agent-runtime": "1.0.0",
     "@tangle-network/agent-trace-contract": "2.2.0",
     "@tangle-network/harness-sessions": "1.0.1",
-    "@tangle-network/sandbox": "0.69.13"
+    "@tangle-network/sandbox": "1.0.14"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
