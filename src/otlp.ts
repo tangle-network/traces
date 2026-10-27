@@ -27,7 +27,7 @@ import {
   OPENINFERENCE_SPAN_KIND,
   TOOL_NAME,
 } from '@tangle-network/agent-eval/trace-attributes'
-import type { SpanKind } from '@tangle-network/agent-trace-contract'
+import type { SpanKind, SpanLink } from '@tangle-network/agent-trace-contract'
 import { RAW_FIELD_ATTRIBUTES, SUBSTITUTED_FIELDS_ATTR, type SubstitutedField } from './otlp-input.js'
 import { validateOtlpSpans } from './span-validation.js'
 import { sourceAttributes, type SourceReferences } from './source-location.js'
@@ -48,20 +48,11 @@ export type OtlpSpanKind = SpanKind
 export type OtlpStatusCode = 'OK' | 'ERROR' | 'UNSET'
 
 /**
- * A causal edge that is NOT containment. `parent_span_id` says "this span
- * happened INSIDE that one"; a link says "that one CAUSED this one" — round N's
- * verdict steering round N+1, a retry pointing at the attempt it replaces.
- * Encoding those as a parent would claim a nesting that never existed, so OTLP
- * gives them their own edge and this model keeps it.
- *
- * Matches `SpanLink` in `@tangle-network/agent-trace-contract`.
+ * A causal edge that is NOT containment: round N's verdict steering round N+1,
+ * a retry pointing at the attempt it replaces. An alias of the contract's
+ * `SpanLink`, so the two shapes cannot drift.
  */
-export interface OtlpSpanLink {
-  trace_id: string
-  span_id: string
-  /** e.g. `{ 'agent.link.kind': 'steered_by' }`. */
-  attributes?: Record<string, unknown>
-}
+export type OtlpSpanLink = SpanLink
 
 export interface OtlpSpan {
   trace_id: string
