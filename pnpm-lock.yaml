@@ -190,9 +190,6 @@ importers:
       '@tangle-network/harness-sessions':
         specifier: 1.0.1
         version: 1.0.1
-      '@tangle-network/sandbox':
-        specifier: 1.0.14
-        version: 1.0.14
     devDependencies:
       '@types/node':
         specifier: ^26.6.5
