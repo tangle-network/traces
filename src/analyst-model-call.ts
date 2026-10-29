@@ -28,17 +28,16 @@ export const ANALYST_MAX_OUTPUT_TOKENS = 16_384
 
 /**
  * The PyPI version of `agent-eval-rpc`, the Python bridge, that speaks this
- * package's engine protocol: the version of its `@tangle-network/agent-eval`
- * dependency. The bridge checks its input with exact keys, so any other
- * version fails every question at startup, before a model call.
+ * package's engine protocol: its installed `@tangle-network/agent-eval` version.
+ * Other versions can refuse its exact-key input before a model call.
  */
 export function bridgeVersion(): string {
-  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-    dependencies?: Record<string, unknown>
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.resolve('@tangle-network/agent-eval')), 'utf8')) as {
+    version?: unknown
   }
-  const version = pkg.dependencies?.['@tangle-network/agent-eval']
+  const version = pkg.version
   if (typeof version !== 'string' || !version) {
-    throw new Error('package.json is missing the @tangle-network/agent-eval dependency')
+    throw new Error('installed agent-eval package has no version')
   }
   return version
 }

@@ -8,14 +8,14 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ASK_KEY, type BridgeScript, type EndpointReply, type FakeEndpoint, startEndpoint, writeAskSession, writeStubBridge } from './fixtures/ask.js'
 import { CLI, type CliRun, runCli } from './run-cli.js'
 
-const AGENT_EVAL = (JSON.parse(await readFile(join(dirname(CLI), '..', 'package.json'), 'utf8')) as {
-  dependencies: Record<string, string>
-}).dependencies['@tangle-network/agent-eval']!
+const AGENT_EVAL = (JSON.parse(await readFile(new URL('../package.json', import.meta.resolve('@tangle-network/agent-eval')), 'utf8')) as {
+  version: string
+}).version
 
 interface Answers {
   ok: boolean
