@@ -278,9 +278,7 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
     if (a[k] != null) resourceAttrs[k] = a[k]
   }
   // WHICH traces build exported this hop. Every kind, substitution and finding
-  // in the artifact is that build's reading, and traces pins
-  // `@tangle-network/agent-trace-contract` to one exact version, so this
-  // version also names the contract build. Span attributes stay faithful, so a
+  // in the artifact is that build's reading. Span attributes stay faithful, so a
   // re-export keeps the ORIGINAL producer's stamp there while this hop signs
   // the resource.
   resourceAttrs['traces.version'] = tracesVersion()
