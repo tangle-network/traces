@@ -45,6 +45,10 @@ export type {
   TraceInvestigationResult,
 } from './improvement.js'
 
+// ── behavior: what each agent did per window, for any OTLP producer ───────
+export { behaviorFromSpans, classifySpan, renderBehaviorText } from './behavior.js'
+export type { BehaviorCategory, BehaviorFlag, BehaviorNode, BehaviorOptions, BehaviorResult, BehaviorSpanClass, BehaviorWindow } from './behavior.js'
+
 // ── ask: the one call that spends ─────────────────────────────────────────
 export { runTraceQuestions } from './ask.js'
 export type { TraceQuestion, TraceQuestionsResult } from './ask.js'

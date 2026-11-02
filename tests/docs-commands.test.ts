@@ -21,6 +21,7 @@ const ROOT = join(dirname(CLI), '..')
 const SELECTORS: Readonly<Record<string, readonly string[]>> = {
   facts: ['--current', '--last', '--since'],
   analyze: ['--current', '--last', '--since'],
+  behavior: ['--current', '--last', '--since'],
   ask: ['--current', '--last', '--since'],
   // `check --contract F` with no ref explains F.
   check: ['--current', '--last', '--since', '--contract'],

@@ -22,6 +22,9 @@ Import other packages' names from their owners: `AnalystRegistry`, `makeFinding`
 | `analyzeSpans` | `(spans, AnalyzeOptions?) → Promise<AnalyzeResult>` | agent-eval's deterministic analyst, or yours through `{ registry }`; no model call |
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → Promise<TraceInvestigationResult>` | `traces analyze <ref> --format json`: facts, finding packet, measures, conformance, `cannotAnswer` |
 | `buildTraceFindingPacket` | `(BuildTraceFindingPacketOptions) → TraceFindingPacket` | `findings.json` under `traces analyze <ref> --out <dir>`; renders any `AnalystFinding[]` unchanged |
+| `behaviorFromSpans` | `(spans, BehaviorOptions?) → BehaviorResult` | `traces behavior <ref> --format json`: per-node windows, streaks, stalls, flags, anomalies, mail and the calibration table; throws `code: no-outcome` with no tool span |
+| `classifySpan` | `(span, kind?) → BehaviorSpanClass` | one span's category, record-only flags and detail under the calibrated rules |
+| `renderBehaviorText` | `(BehaviorResult) → string` | `traces behavior` text |
 | `runTraceQuestions` | `(options) → Promise<TraceQuestionsResult>` | `traces ask`: concurrent questions under one cost ledger, citations checked |
 | `analysisEngineFromEnv` | `({ model, maxCostUsd?, timeoutMs?, onPermanentFailure?, env? }) → engine` | the model engine `traces ask` runs |
 | `conformanceOfSpans` | `(spans) → TraceValidation` | `traces check <ref> --contract conformance` |
@@ -37,7 +40,7 @@ Import other packages' names from their owners: `AnalystRegistry`, `makeFinding`
 | `verifySessionBundle` | `(dir) → Promise<verification>` | `traces bundle verify <dir>` |
 | `tracesVersion` | `() → string` | `traces --version` |
 
-**Types:** `SpanRunSnapshot`, `SpanRunNode`, `SessionSeedGroup`, `SessionSelection`, `SessionSelectionRow`, `CollectSessionSelectionOptions`, `SessionRelationship`, `SessionWorkflowSummary`, `SessionWorkflowIssue`, `OtlpSpan`, `SessionRef`, `ScanOptions`, `ScannedSession`, `HarnessTraceAdapter`, `OtlpInput`, `SessionFact`, `SessionFacts`, `SessionFactsReport`, `SessionTurnFact`, `AnalyzeOptions`, `AnalyzeResult`, `TraceInvestigationOptions`, `TraceInvestigationResult`, `TraceFindingPacket`, `BuildTraceFindingPacketOptions`, `TraceQuestion`, `TraceQuestionsResult`, `RunDiffReport`, `TraceStreamEvent`, `TraceLiveFinding`, `UploadPlan`, `UploadBackend`, `VerifySafeResult`, `SessionBundleManifest`.
+**Types:** `SpanRunSnapshot`, `SpanRunNode`, `SessionSeedGroup`, `SessionSelection`, `SessionSelectionRow`, `CollectSessionSelectionOptions`, `SessionRelationship`, `SessionWorkflowSummary`, `SessionWorkflowIssue`, `OtlpSpan`, `SessionRef`, `ScanOptions`, `ScannedSession`, `HarnessTraceAdapter`, `OtlpInput`, `SessionFact`, `SessionFacts`, `SessionFactsReport`, `SessionTurnFact`, `AnalyzeOptions`, `AnalyzeResult`, `TraceInvestigationOptions`, `TraceInvestigationResult`, `TraceFindingPacket`, `BuildTraceFindingPacketOptions`, `TraceQuestion`, `TraceQuestionsResult`, `BehaviorResult`, `BehaviorNode`, `BehaviorWindow`, `BehaviorFlag`, `BehaviorCategory`, `BehaviorSpanClass`, `BehaviorOptions`, `RunDiffReport`, `TraceStreamEvent`, `TraceLiveFinding`, `UploadPlan`, `UploadBackend`, `VerifySafeResult`, `SessionBundleManifest`.
 An options type that is not listed is still in `dist/index.d.ts`; name it as `Parameters<typeof runTraceQuestions>[0]`.
 
 ```ts

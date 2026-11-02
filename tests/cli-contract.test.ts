@@ -231,6 +231,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   list: ['--last', '--since', '--cwd', '--harness', '--format'],
   facts: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--match', '--no-content', '--format', '--out'],
   analyze: ['--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn', '--format', '--out'],
+  behavior: [...SELECT, '--window', '--format'],
   ask: [...SELECT, '--question', '--questions', '--budget', '--model', '--format', '--out'],
   check: ['--contract', '--share-safe', '--known-secret-env', '--current', '--last', '--since', '--cwd', '--harness', '--format', '--out'],
   diff: ['--format'],
@@ -249,7 +250,7 @@ const OPTIONS = [
   '--current', '--last', '--since', '--until', '--cwd', '--harness', '--latest-turn',
   '--format', '--out', '--match', '--no-content',
   '--question', '--questions', '--budget', '--model',
-  '--contract', '--share-safe', '--known-secret-env', '--once', '--spans', '--dry-run', '--yes', '--unused',
+  '--contract', '--share-safe', '--known-secret-env', '--once', '--spans', '--window', '--dry-run', '--yes', '--unused',
 ]
 
 let dir: string

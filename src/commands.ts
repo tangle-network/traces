@@ -28,7 +28,7 @@ import {
 import { findMoved, movedMessage, renderMovedTable, tracesCommand } from './moved.js'
 import { RefError } from './refs.js'
 import { knownHarnesses, resolveAdapter } from './registry.js'
-import { parseTimeBound } from './time.js'
+import { parseTimeBound, relativeBoundMs } from './time.js'
 import { tracesCommit, tracesVersion } from './version.js'
 
 /**
@@ -106,6 +106,8 @@ export interface Args {
   once: boolean
   /** `watch --spans`: emit span deltas in the jsonl stream, reading every second. */
   spans: boolean
+  /** `behavior --window`: the window length in ms (default five minutes). */
+  window?: number
   dryRun: boolean
   yes: boolean
   unused: boolean
@@ -170,6 +172,14 @@ function harnessId(raw: string): string {
   return raw
 }
 
+/** A length: `30s`, `5m`, `1h`, as ms. */
+function lengthMs(flag: string, raw: string): number {
+  const seconds = /^(\d+)s$/u.exec(raw)
+  const ms = seconds ? Number(seconds[1]) * 1000 : relativeBoundMs(raw)
+  if (ms === undefined || ms <= 0) throw new UsageError(`${flag} must be a length: 30s, 5m or 1h, got "${raw}"`)
+  return ms
+}
+
 /** Every flag any command takes, by its long name. */
 const FLAGS: Readonly<Record<string, Flag>> = {
   '--fleet-run': { value: 'ID', help: 'bind one named native session to this exact Fleet run ID', set: (a, v) => { a.fleetRun = v } },
@@ -215,6 +225,7 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   },
   '--once': { help: 'one pass, then exit', set: (a) => { a.once = true } },
   '--spans': { help: 'with --format jsonl: a span event for each new or changed span', set: (a) => { a.spans = true } },
+  '--window': { value: 'T', help: 'the window length: 30s, 5m or 1h (default 5m)', set: (a, v) => { a.window = lengthMs('--window', v) } },
   '--dry-run': { help: 'redact and preview; send nothing', set: (a) => { a.dryRun = true } },
   '--yes': { help: 'skip the confirmation prompt', set: (a) => { a.yes = true } },
   '--unused': { help: 'only installed skills with no use in the window', set: (a) => { a.unused = true } },
@@ -330,6 +341,27 @@ const COMMANDS = [
     ],
     examples: ['traces analyze --current', 'traces analyze 019a3c7e --out analysis', 'traces analyze --since 1d --cwd .'],
     overview: [['Where did it waste time or get interrupted? $0', 'traces analyze <ref>']],
+  },
+  {
+    name: 'behavior',
+    usage: 'behavior <ref…> | --current | --last N | --since T [--window 5m] [--format text|json]',
+    job: 'What each agent did per five-minute window: categories with a calibration certificate, failing streaks, stalls, gaming flags (record-only), anomalies against the run\'s own baseline, and who messaged whom.',
+    notes: [
+      'One node per session id (else per agent boundary). A window is implementing on a code edit, else verifying on a check, else its longest category;',
+      'a failing streak makes it looping, a 10-minute gap idle. Exit 2 when no span is a tool call: categories need acts.',
+    ],
+    flags: [...SELECT, '--window', { flag: '--format', help: 'text (default): a line per node, then flags, anomalies, streaks, mail and the calibration table; json: the result' }],
+    formats: ['text', 'json'],
+    refs: [0, MANY],
+    select: 'required',
+    jq: [
+      ['.nodes[] | {id, label, by_cat, tool_calls, failed, streaks, idle_min}', 'each agent and its minutes per category'],
+      ['.windows[] | select(.category == "looping") | {node, from, span_ids}', 'where an agent looped (or "idle"), with the spans'],
+      ['.flags[] | {kind, node, at, span, detail}', 'the gaming flags: record-only, never a severity'],
+      ['.mail.summary', 'who messaged whom: edges by kind, steers, read latency'],
+    ],
+    examples: ['traces behavior run/otlp/', 'traces behavior run.otlp.jsonl --window 10m --format json | jq \'.windows[] | select(.category == "looping")\''],
+    overview: [['What was each agent doing, and when did it loop or idle? $0', 'traces behavior <ref>']],
   },
   {
     name: 'ask',
