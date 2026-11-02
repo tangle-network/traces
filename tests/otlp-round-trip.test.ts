@@ -162,7 +162,7 @@ const FIXTURES: readonly RoundTripFixture[] = [
         'artifact straight to agent-eval\'s OtlpFileTraceStore, whose projectOtlpFlatLine drops any row with a ' +
         'falsy trace_id and then throws TraceFileMalformed on the drop — so an artifact that omits the id is ' +
         'unreadable by the tool that reads it. The id is minted, the substitution is recorded per span under ' +
-        '`traces.substituted_fields`, and `renderConformance` states it above the findings so a reader of the ' +
+        '`traces.substituted_fields`, and `renderValidation` states it above the findings so a reader of the ' +
         'artifact is told rather than left to assume the source carried one',
     },
     added: {

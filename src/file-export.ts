@@ -8,7 +8,7 @@ import { toolIoAttributes } from './adapters/tool-io.js'
 import { appendAll } from './arrays.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
-import { otlpRowToSpan } from './otlp-input.js'
+import { isObject, otlpRowToSpan } from './otlp-input.js'
 import { span } from './otlp.js'
 import { redactSpans } from './redact.js'
 import { validateOtlpSpans } from './span-validation.js'
@@ -28,10 +28,6 @@ export interface TraceEvidenceExportResult {
   readonly spans: OtlpSpan[]
   readonly redactionCount: number
   readonly redactionsByDetector: Record<string, number>
-}
-
-function isObject(value: unknown): value is JsonObject {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function stringValue(value: unknown): string | undefined {

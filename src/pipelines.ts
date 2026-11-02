@@ -458,7 +458,7 @@ function finding(input: {
   }
 }
 
-const oneLine = (text: string, cap: number): string => {
+export const oneLine = (text: string, cap: number): string => {
   const line = text.replace(/\s+/gu, ' ').trim()
   return line.length > cap ? `${line.slice(0, cap - 1)}…` : line
 }

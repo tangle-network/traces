@@ -338,6 +338,7 @@ const COMMANDS = [
       ['.packet.findings[] | {severity, subject, claim}', 'the findings, HIGH first'],
       ['.cannotAnswer[] | {analysis, reason}', 'what the trace cannot answer, and why'],
       ['.facts.sessions[0].measurements.waste', 'failing streaks, stalls, reverts'],
+      ['.measures.causality.steering.rows[]', 'each steer and the round it caused (span links)'],
     ],
     examples: ['traces analyze --current', 'traces analyze 019a3c7e --out analysis', 'traces analyze --since 1d --cwd .'],
     overview: [['Where did it waste time or get interrupted? $0', 'traces analyze <ref>']],

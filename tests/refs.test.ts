@@ -135,6 +135,9 @@ describe('refs: files and directories are read by their content', () => {
     const claude = await readFile(fx.paths.claude, 'utf8')
     await mkdir(join(tree, 'native', 'exec-0'), { recursive: true })
     await writeFile(join(tree, 'native', 'exec-0', 'claude.jsonl'), claude.slice(0, claude.indexOf('\n') + 1), 'utf8')
+    // A Claude subagent transcript is part of its parent session, never a session of its own (one that had no turns refused the tree).
+    await mkdir(join(tree, 'native', 'exec-1', 'claude', 'subagents'), { recursive: true })
+    await writeFile(join(tree, 'native', 'exec-1', 'claude', 'subagents', 'agent-a1.jsonl'), '{"type":"summary","summary":"x"}\n', 'utf8')
 
     expect((await factsOf(join(fx.root, 'kept'))).sessions).toHaveLength(2)
   })

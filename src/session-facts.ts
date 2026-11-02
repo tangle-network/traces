@@ -58,7 +58,7 @@ export type { SkillUseCount } from './skill-usage.js'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
 import { ACTOR_ATTR, capText } from './adapters/conversation.js'
-import { FACT_TEXT_CAP, rawContent, typedTurnsOf, isOwnAgentMessage, type SessionTurnFact, type TurnSignal, type TurnFoldState, type ExcludedTurn } from './session-turns.js'
+import { FACT_TEXT_CAP, rawContent, typedTurnsOf, isOwnAgentMessage, type SessionTurnFact, type TurnSignal, type TurnFoldState, type ExcludedTurn, stringAttr } from './session-turns.js'
 import {
   INHERITED_SPAN_ATTR,
   SUBAGENT_SPAWN_ATTR,
@@ -400,11 +400,6 @@ export interface SessionFactsReport {
 
 function attr(span: OtlpSpan, key: string): unknown {
   return span.attributes[key]
-}
-
-function stringAttr(span: OtlpSpan, key: string): string | null {
-  const value = span.attributes[key]
-  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 /** Trace order: the adapter's `step` when it recorded one, else start time. */
@@ -1894,23 +1889,6 @@ function compactFirstFailure(failure: FirstFailure): Record<string, unknown> {
     blame: failure.blame,
     message: failure.message,
   }
-}
-
-/**
- * The prepared-context string for one set of spans, or undefined when there is
- * nothing to prepare. Analyst definitions install this through
- * `TraceAnalystDefinition.prepareContext`, which runs before the model does.
- */
-export function sessionFactsContext(
-  spans: readonly OtlpSpan[],
-  options: { byteCeiling?: number; generatedAt?: string } = {},
-): string | undefined {
-  if (spans.length === 0) return undefined
-  const report = buildSessionFactsReport(spans, {
-    ...(options.generatedAt ? { generatedAt: options.generatedAt } : {}),
-  })
-  if (report.sessions.length === 0) return undefined
-  return renderSessionFactsContext(report, options)
 }
 
 /** Only the typed turns and selection evidence, from the same fold as the full facts sheet. */

@@ -31,7 +31,7 @@ import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { detectEvidenceFormat, exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
-import { isOtlpJsonFile, isStandardOtlpRow, readOtlpInput, resolveOtlpInputFiles } from './otlp-input.js'
+import { isObject, isOtlpJsonFile, isStandardOtlpRow, readOtlpInput, resolveOtlpInputFiles } from './otlp-input.js'
 import { listAdapters, resolveAdapter } from './registry.js'
 import { parseSession } from './session-source.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -76,11 +76,7 @@ export interface ResolveRefOptions {
   readonly format?: SpanReader
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function errorText(error: unknown): string {
+export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
@@ -287,7 +283,9 @@ async function directoryRef(path: string, ref: string): Promise<ResolvedRef | Re
   if ((await findSupervisorRunDirs(path)).length > 0) return { kind: 'run-dir', ref, path }
   // A tree with no OTLP in it may hold retained session files, each read by its content.
   const { files, skipped } = await resolveOtlpInputFiles(path, true)
-  const sessionFiles = files.length > 0 ? [] : await withoutEarlierCopies(skipped.map((file) => file.path))
+  // A Claude subagent transcript (`<id>/subagents/**/*.jsonl`, harness-sessions' catalog) is read with its parent `<id>.jsonl`.
+  const paths = new Set(skipped.map((file) => file.path)), folded = (path: string) => paths.has(`${path.split(`${sep}subagents${sep}`)[0]}.jsonl`) && path.includes(`${sep}subagents${sep}`)
+  const sessionFiles = files.length > 0 ? [] : await withoutEarlierCopies([...paths].filter((path) => !folded(path)))
   const refs = await Promise.all(sessionFiles.map((file) => fileRef(file, file, undefined, {})))
   const sessions = refs.filter((found) => found.kind === 'session')
   return sessions.length > 0 ? sessions : { kind: 'spans', ref, path, reader: 'otlp' }

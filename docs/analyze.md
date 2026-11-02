@@ -68,6 +68,7 @@ jq paths (--format json):
   .packet.findings[] | {severity, subject, claim}  the findings, HIGH first
   .cannotAnswer[] | {analysis, reason}             what the trace cannot answer, and why
   .facts.sessions[0].measurements.waste            failing streaks, stalls, reverts
+  .measures.causality.steering.rows[]              each steer and the round it caused (span links)
 
 Examples:
   traces analyze --current

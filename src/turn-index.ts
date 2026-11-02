@@ -38,6 +38,7 @@ import { TURN_FOLD_START, type TurnFoldState } from './session-turns.js'
 import { readSessionSpans, validateOtlpSpans } from './session-source.js'
 import { stampSessionIdentity } from './attributes.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
+import { errorText } from './refs.js'
 
 // ── The per-file byte cursor, shared with the skills store ─────────────
 
@@ -274,10 +275,6 @@ async function markOf(path: string, offset: number): Promise<string> {
   } finally {
     await handle.close()
   }
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 /** The selection's sessions, as the index knows them. Open, `refresh`, read, then `close`. */
