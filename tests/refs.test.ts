@@ -131,6 +131,10 @@ describe('refs: files and directories are read by their content', () => {
     await copyFile(fx.paths.codex, join(tree, 'native', 'exec-2', 'rollout.jsonl'))
     await copyFile(join(liveStreams, 'sandbox-refused-before-codex.jsonl'), join(tree, 'events', 'stream.jsonl'))
     await writeFile(join(tree, 'process-io.jsonl'), '{"stream":"stdout"}\n', 'utf8')
+    // An earlier attempt kept the same session when it was shorter.
+    const claude = await readFile(fx.paths.claude, 'utf8')
+    await mkdir(join(tree, 'native', 'exec-0'), { recursive: true })
+    await writeFile(join(tree, 'native', 'exec-0', 'claude.jsonl'), claude.slice(0, claude.indexOf('\n') + 1), 'utf8')
 
     expect((await factsOf(join(fx.root, 'kept'))).sessions).toHaveLength(2)
   })
