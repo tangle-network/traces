@@ -58,6 +58,7 @@ import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import type { RefusedSession, UploadPlan } from './upload.js'
 import { cmdSkills } from './skills-command.js'
 import { cmdGraphs } from './graphs-command.js'
+import { cmdBehavior } from './behavior-command.js'
 import { collectImportedSpans, collectOtlpSpans, collectRuntimeSpans, type CollectedSpans } from './cli-span-input.js'
 import type { CliArgs, RefSelection } from './cli-selection-types.js'
 
@@ -1423,7 +1424,6 @@ function reportRefused(refused: readonly RefusedSession[]): void {
   }
 }
 
-/** The window `traces skills` counts when no `--since` is given. */
 /** `--current` named as a ref, and `--latest-turn` checked against the harness. */
 function prepare(args: Args): CliArgs {
   return validateLatestTurn(applyCurrentSessionSelection(args))
@@ -1453,9 +1453,9 @@ await runTraces(process.argv.slice(2), {
   list: reading(cmdList),
   facts: reading(cmdFacts),
   analyze: reading(cmdAnalyze),
+  behavior: reading((args) => cmdBehavior(args, () => collectSpans(args))),
   ask: reading(cmdAsk),
-  // check resolves its refs itself, after its contracts load, and --share-safe
-  // reads paths as bytes: a bad contract exits before any trace is read.
+  // check resolves its refs itself, after its contracts load; --share-safe reads paths as bytes: a bad contract exits before any trace is read.
   check: async (args) => cmdCheck(prepare(args)),
   diff: cmdDiff,
   watch: reading(cmdWatch),

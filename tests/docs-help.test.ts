@@ -13,10 +13,10 @@ import { CLI, runCli } from './run-cli.js'
 
 const ROOT = join(dirname(CLI), '..')
 const DOCS = join(ROOT, 'docs')
-const COMMANDS = ['graphs', 'list', 'facts', 'analyze', 'ask', 'check', 'diff', 'watch', 'convert', 'bundle', 'upload', 'skills', 'mcp'] as const
+const COMMANDS = ['graphs', 'list', 'facts', 'analyze', 'behavior', 'ask', 'check', 'diff', 'watch', 'convert', 'bundle', 'upload', 'skills', 'mcp'] as const
 /** The maintained pages of docs/ (spec v2 section 3.3); release notes sit beside them. */
 const PAGES = [
-  'analyze.md', 'ask.md', 'bundle.md', 'check.md', 'convert.md', 'develop.md', 'diff.md', 'facts.md',
+  'analyze.md', 'ask.md', 'behavior.md', 'bundle.md', 'check.md', 'convert.md', 'develop.md', 'diff.md', 'facts.md',
   'graphs.md', 'mcp.md', 'migrate-1.0.md', 'parsers.md', 'sdk.md', 'select.md', 'skills.md', 'upload.md', 'watch.md',
 ]
 

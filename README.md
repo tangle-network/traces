@@ -37,6 +37,7 @@ traces check run.jsonl --contract contract.json  # fail CI when a run took a for
 | Find a session | `list` | [Refs, selection and harnesses](docs/select.md) |
 | What happened, exactly, for $0 | `facts` | [Session facts](docs/facts.md) |
 | What went wrong, ranked, for $0 | `analyze` | [Analyze a session](docs/analyze.md) |
+| What each agent did per window, and when it looped or idled, for $0 | `behavior` | [Behavior windows](docs/behavior.md) |
 | A question facts cannot answer, with checked citations | `ask` | [Ask a question](docs/ask.md) |
 | The one gate: contracts, conformance, share safety | `check` | [Check](docs/check.md) |
 | Where two runs split | `diff` | [Diff two runs](docs/diff.md) |
@@ -58,6 +59,7 @@ Start here for one session: traces facts <ref> (25 lines); one field: add --form
   What happened (turns, PRs, failure, cost)? $0    traces facts <ref> | --current | --since 1d
   Did we already try X / what was said? $0         traces facts <ref> | --since 30d --match '<re>'
   Where did it waste time or get interrupted? $0   traces analyze <ref>
+  What was each agent doing, and when did it loop or idle? $0 traces behavior <ref>
   A question facts can't answer (model, $)         traces ask <ref> --question "…" --budget 1
   Does this run pass? (CI)                         traces check <ref> --contract c.json|conformance
   Is this safe to share?                           traces check <path> --share-safe

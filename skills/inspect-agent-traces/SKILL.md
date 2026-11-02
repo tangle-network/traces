@@ -42,6 +42,7 @@ A count in a command's `failed` is a known non-zero exit; a run `inScripts` has 
 |---|---|
 | This session, or the one that just ended here | `traces facts --current`, or `traces list --cwd . --last 5` |
 | Where it churned, what failed, what it cost | `traces analyze <ref>` |
+| What each agent did per window, did it loop or idle, who messaged whom | `traces behavior <ref>` (`--format json`: `.windows[]`, `.flags[]`, `.mail.summary`) |
 | Where two runs split | `traces diff <a> <b>` |
 | Gate a PR or eval on the path a run took | `traces check <ref> --contract <file>` |
 | Is this safe to share | `traces check <path> --share-safe` |
