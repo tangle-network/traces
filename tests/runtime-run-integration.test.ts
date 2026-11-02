@@ -21,7 +21,9 @@ it('reads a named Runtime run through its owner without summing child-inclusive 
       { kind: 'settled', id: 'child', status: 'done', spent: spend(20, 2), seq: 0, at: at(2) },
       { kind: 'settled', id: root, status: 'done', spent: spend(120, 12), seq: 0, at: at(3) }]
     await writeFile(join(dir, 'spawn-journal.jsonl'), [
-      { kind: 'begin', root, at: at(0) }, ...events.map((event) => ({ kind: 'event', root, event })),
+      { kind: 'begin', root, at: at(0) },
+      { kind: 'events', root, events: events.slice(0, 2) }, // Runtime batches spawns.
+      ...events.slice(2).map((event) => ({ kind: 'event', root, event })),
     ].map((row) => JSON.stringify(row)).join('\n') + '\n')
     const spans = await readRefSpans(dir)
     const tree = buildSpanRunTree(spans, dir)

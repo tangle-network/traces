@@ -107,8 +107,8 @@ export interface RunContextJournal {
 const RETIRED_WAIT_KINDS: ReadonlySet<string> = new Set(['waiting', 'woken'])
 
 /**
- * Unwrap `FileSpawnJournal`'s `{kind:'begin'|'event', root, event}` records.
- * A record whose `kind` is neither is counted as invalid rather than dropped:
+ * Unwrap `FileSpawnJournal`'s `begin`, `event` and batched `events` records.
+ * A record whose `kind` is none of these is counted as invalid rather than dropped:
  * an unrecognized record shape is a finding, not silence.
  */
 export function readRunContextJournal(text: string | null): RunContextJournal {
@@ -125,20 +125,13 @@ export function readRunContextJournal(text: string | null): RunContextJournal {
       if (begunAt === null) begunAt = str(record.at)
       continue
     }
-    if (record.kind !== 'event') {
-      invalidRows += 1
-      continue
+    const rows = record.kind === 'events' ? record.events : record.kind === 'event' ? [record.event] : null
+    for (const row of Array.isArray(rows) ? rows : [null]) {
+      const event = asRecord(row)
+      if (str(event.kind) === null || str(event.id) === null) invalidRows += 1
+      else if (RETIRED_WAIT_KINDS.has(event.kind as string)) retiredWaitRows += 1
+      else events.push(event as unknown as SpawnEvent)
     }
-    const event = asRecord(record.event)
-    if (str(event.kind) === null || str(event.id) === null) {
-      invalidRows += 1
-      continue
-    }
-    if (RETIRED_WAIT_KINDS.has(event.kind as string)) {
-      retiredWaitRows += 1
-      continue
-    }
-    events.push(event as unknown as SpawnEvent)
   }
   const supervisorIds = new Set<string>()
   for (const event of events) {
