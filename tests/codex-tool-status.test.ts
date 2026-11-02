@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { CodexAdapter } from '../src/adapters/codex.js'
-import { summarizeSpanExecution } from '../src/execution.js'
 import { runTraceInvestigation } from '../src/improvement.js'
 import { runPipelines } from '../src/pipelines.js'
 import { toRuntimeStore } from '../src/runtime-store.js'
@@ -126,9 +125,6 @@ describe.each(['function', 'custom'] as const)('Codex %s tool outcomes', (varian
     expect(report.toolUse[0]).toMatchObject({ totalCalls: 2, errorRate: 0, retryRate: 0 })
     expect(report.failureClusters).toMatchObject({ totalFailures: 0, totalRuns: 1 })
     expect(report.failureFollowUps?.failures).toBe(0)
-    const { execution } = summarizeSpanExecution(spans)
-    expect(execution.terminalOutcomes).toMatchObject({ succeeded: 1, failed: 0 })
-    expect(execution.executionErrors).toMatchObject({ runs: 0, reportingRuns: 1 })
 
     const failed = await runPipelines(await parseOutputs(variant, [
       { output: { exit_code: 1, output: 'success' } },

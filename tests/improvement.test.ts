@@ -41,7 +41,7 @@ describe('analyze --format json', () => {
     expect(result).toMatchObject({ schemaVersion: 1, kind: 'traces.analysis' })
     expect(result.facts.kind).toBe('traces.session_facts_report')
     expect(result.packet).toMatchObject({ schemaVersion: 1, kind: 'traces.finding_packet', source: 'traces analyze' })
-    expect(Object.keys(result.measures).sort()).toEqual(['failureClusters', 'failureFollowUps', 'operating', 'stuckLoops', 'toolErrors', 'toolUse'])
+    expect(Object.keys(result.measures).sort()).toEqual(['causality', 'failureClusters', 'failureFollowUps', 'operating', 'stuckLoops', 'toolErrors', 'toolUse'])
     expect(result.conformance.capabilities.length).toBeGreaterThan(0)
     expect(result.cannotAnswer.length).toBeGreaterThanOrEqual(1)
     // claude-opus-5-5 is priced: a number, never 0 for unknown.

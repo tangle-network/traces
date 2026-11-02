@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { parsePiWorkflowRun } from '../src/adapters/pi-workflow.js'
+import { normalizePiWorkflowRun } from '../src/adapters/pi-workflow.js'
 import { exportTraceEvidenceFile } from '../src/file-export.js'
 import { metadataOnly } from '../src/metadata-only.js'
 import { buildSpanRunTree } from '../src/run-span-tree.js'
@@ -15,7 +15,7 @@ const fixture = fileURLToPath(new URL('./fixtures/pi-workflow/run.json', import.
 
 describe('Pi workflow persisted-run ingestion', () => {
   it('round-trips through the shared span reader and facts without inventing phase clocks, calls or usage', async () => {
-    const result = await parsePiWorkflowRun(fixture)
+    const result = normalizePiWorkflowRun(JSON.parse(await readFile(fixture, 'utf8')))
     const dir = await mkdtemp(join(tmpdir(), 'traces-pi-workflow-'))
     try {
       const path = join(dir, 'workflow.otlp.jsonl')
@@ -62,12 +62,10 @@ describe('Pi workflow persisted-run ingestion', () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-pi-workflow-invalid-'))
     try {
       const value = JSON.parse(await readFile(fixture, 'utf8')) as Record<string, unknown>
-      const path = join(dir, 'run.json')
-      await writeFile(path, JSON.stringify({ ...value, startedAt: undefined }))
-      await expect(parsePiWorkflowRun(path)).rejects.toThrow('recorded valid start timestamp')
+      const read = (run: unknown) => () => normalizePiWorkflowRun(JSON.parse(JSON.stringify(run)))
+      expect(read({ ...value, startedAt: undefined })).toThrow('recorded valid start timestamp')
       const agent = (value.agents as unknown[])[0]
-      await writeFile(path, JSON.stringify({ ...value, agents: [agent, agent] }))
-      await expect(parsePiWorkflowRun(path)).rejects.toThrow('duplicate agent call identity')
+      expect(read({ ...value, agents: [agent, agent] })).toThrow('duplicate agent call identity')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -62,7 +62,6 @@ import {
 } from './claude-workflow.js'
 import { ACTOR_ATTR, capText, userPromptSpan, type Actor } from './conversation.js'
 import {
-  SUBAGENT_SPAN_ATTR,
   SUBAGENT_SPAN_COUNT_ATTR,
   SUBAGENT_SPAWN_ATTR,
   SUBAGENT_SPAWN_TASK_ATTR,

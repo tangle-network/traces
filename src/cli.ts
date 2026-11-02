@@ -20,7 +20,7 @@ import { analystLog } from './analyst-log.js'
 import { metadataOnly } from './metadata-only.js'
 import { shellWord } from './moved.js'
 import type { TraceStreamEvent, WatchedSession } from './live.js'
-import type { TraceLiveFinding } from './pipelines.js'
+import { oneLine, type TraceLiveFinding } from './pipelines.js'
 import { DEFAULT_ANALYST_MODEL, DEFAULT_ASK_CONCURRENCY, DEFAULT_QUESTION_MAX_COST_USD, DEFAULT_QUESTION_TIMEOUT_MS } from './ask-defaults.js'
 import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
@@ -53,7 +53,7 @@ import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
 import type { ReportSource } from './report.js'
 import { parseSince, parseTimeBound, relativeBoundMs } from './time.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
-import { RefError, resolveRefs, shortestRefs, type ResolvedRef } from './refs.js'
+import { errorText, RefError, resolveRefs, shortestRefs, type ResolvedRef } from './refs.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import type { RefusedSession, UploadPlan } from './upload.js'
 import { cmdSkills } from './skills-command.js'
@@ -241,10 +241,6 @@ function groupsInOrder(sessions: Discovered['sessions']): { adapter: HarnessTrac
   return groups
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 /**
  * Name the sessions a sweep skipped, in one stderr line that says how to see
  * each with its reason: `command` with the same selection, as JSON.
@@ -285,11 +281,6 @@ interface ListRow {
 }
 
 const PROMPT_CHARS = 80
-
-function oneLine(text: string, chars: number): string {
-  const flat = text.replace(/\s+/gu, ' ').trim()
-  return flat.length <= chars ? flat : `${flat.slice(0, chars - 1)}…`
-}
 
 function formatDuration(ms: number | null): string {
   if (ms === null) return '?'

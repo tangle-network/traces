@@ -26,6 +26,7 @@ import {
 } from './pipelines.js'
 import { parseSession, scanSessions, type ScanOptions } from './session-source.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
+import { errorText } from './refs.js'
 
 /** A session a pass could not read: it is skipped and named, and the watch goes on. */
 export interface TraceStreamUnread {
@@ -124,10 +125,6 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     }, ms)
     signal?.addEventListener('abort', onAbort, { once: true })
   })
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 /**
  * Run `source` pass after pass: emit each session the first time it is seen,

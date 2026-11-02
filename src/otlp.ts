@@ -209,7 +209,7 @@ export type ExportRule = 'faithful' | 'declared-or-analysed' | 'analysed'
  *   unreadable by the tool that reads it, so `missing-trace-id` CANNOT survive
  *   the trip. The
  *   substitution is disclosed instead — the span carries the pairing, and
- *   `renderConformance` states it above the findings so a reader of the artifact
+ *   `renderValidation` states it above the findings so a reader of the artifact
  *   is told the id was minted here rather than left to assume the source had one.
  */
 export const EXPORT_RULE: Readonly<Record<SubstitutedField, ExportRule>> = Object.freeze({

@@ -22,6 +22,7 @@ import type { AnalystFinding } from '@tangle-network/agent-eval/analyst'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { isInheritedSpan } from './adapters/provenance.js'
 import { ATTR, sessionIdFromAttributes } from './attributes.js'
+import type { CausalEnd } from './causality.js'
 import type { CannotAnswer, SessionToolErrors, TraceInvestigationResult } from './improvement.js'
 import type { OtlpSpan } from './otlp.js'
 import { describeSessionRelationship } from './session-relationship.js'
@@ -419,13 +420,34 @@ function sessionTable(result: TraceInvestigationResult): string[] {
   return [head, ...rows, ...(sessions.length > TABLE_SESSIONS ? [`… ${sessions.length - TABLE_SESSIONS} more sessions: --format json | jq .facts.sessions`] : [])]
 }
 
+const minutes = (ms: number): string => (ms < 60_000 ? seconds(ms) : `${(ms / 60_000).toFixed(1)} min`)
+
+const tally = (counts: Readonly<Record<string, number>>): string => Object.entries(counts).map(([key, count]) => `${count} ${key}`).join(', ')
+/** Steering and rounds, from links and loop iterations; nothing when the spans carry neither. */
+function causalityLines(result: TraceInvestigationResult): string[] {
+  const { capped, links, steering: s, rounds: r } = result.measures.causality, other = Object.entries(links).filter(([kind]) => kind !== 'steered_by')
+  return [
+    ...(s.links ? [`steering ${plural(s.steers, 'steer')} caused ${plural(s.turns, 'turn')} (${s.resolved}/${s.links} links resolved${capped ? `, ${capped} spans past the index cap` : ''}${s.medianLagMs === null ? '' : `, median lag ${minutes(s.medianLagMs)}`}); against the round before: ${tally(s.changes)}`] : []),
+    ...(r.rounds ? [`rounds ${r.rounds} over ${plural(r.loops, 'loop')} (${tally(r.outcomes)})${r.outcomes.unscored < r.rounds ? `; round to round ${tally(r.transitions)}; ${r.converged} loops reached pass` : '; none scored'}`] : []),
+    ...(other.length ? [`links ${other.map(([kind, count]) => `${kind} ${count.resolved}/${count.total}`).join(' · ')} resolved`] : []),
+  ]
+}
+
 /** The `traces analyze` text: at most {@link ANALYZE_TEXT_LINES} lines. */
 export function renderAnalysis(result: TraceInvestigationResult): string {
   const sessions = result.facts.sessions
   const operating = sessions.length === 1 ? undefined : operatingLine(result)
-  const body = sessions.length === 1 ? singleSession(result, sessions[0]!) : [...fleetHeader(result), ...sessionTable(result), ...(operating ? [operating] : [])]
+  const body = [...(sessions.length === 1 ? singleSession(result, sessions[0]!) : [...fleetHeader(result), ...sessionTable(result), ...(operating ? [operating] : [])]), ...causalityLines(result)]
   const lines = [...body, ...closingLines(result, body.length)]
   return `${lines.slice(0, ANALYZE_TEXT_LINES).join('\n')}\n`
+}
+
+/** Each resolved steer and the round it caused, oldest first: the rows `--format json | jq .measures.causality` holds. */
+function steeringSection(result: TraceInvestigationResult): string[] {
+  const { steering } = result.measures.causality; if (steering.rows.length === 0) return []
+  const end = (point: CausalEnd): string => `\`${point.sessionId ?? '?'}\` ${point.name ?? '?'}${point.iteration === undefined ? '' : ` round ${point.iteration}`}${point.outcome ? ` (${point.outcome})` : ''}`
+  return [`## Steering (${steering.resolved} of ${steering.links} links resolved)`, '', '| Steer | Caused | Lag | Against the round before |', '|---|---|---|---|',
+    ...steering.rows.map((row) => `| ${end(row.cause)} | ${end(row.effect)} | ${row.lagMs === null ? '?' : minutes(row.lagMs)} | ${row.change ?? 'unscored'} |`), '']
 }
 
 function cannotAnswerLine(entry: CannotAnswer): string {
@@ -444,6 +466,7 @@ export function renderAnalysisReport(result: TraceInvestigationResult): string {
     '## Findings',
     ...result.packet.report.split('\n').filter((line) => !/^#{1,2} /u.test(line)),
     '',
+    ...steeringSection(result),
     `## What these traces cannot answer (${result.cannotAnswer.length})`,
     '',
     ...(result.cannotAnswer.length > 0 ? result.cannotAnswer.map(cannotAnswerLine) : ['Nothing: every analysis had what it reads.']),

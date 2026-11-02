@@ -220,8 +220,6 @@ export interface ConformanceRenderOptions {
   readonly unreadable?: UnreadableSourceRows
   /** The spans that were analysed, for the hierarchy summary. */
   readonly spans?: readonly OtlpSpan[]
-  /** Markdown heading level for the section title (default 2). */
-  readonly headingLevel?: number
 }
 
 /**
@@ -363,7 +361,7 @@ function conformanceBody(
   validation: TraceValidation,
   opts: ConformanceRenderOptions,
 ): string {
-  const heading = '#'.repeat(opts.headingLevel ?? 2)
+  const heading = '##'
   const lines: string[] = []
   const errors = validation.findings.filter((finding) => finding.severity === 'error').length
   const warnings = validation.findings.filter((finding) => finding.severity === 'warn').length
@@ -420,19 +418,6 @@ function conformanceBody(
 }
 
 /**
- * The conformance section of an analysis report: findings, the capability
- * table, and — the part that makes a thin report honest — the named analyses
- * that produced nothing and why.
- */
-export function renderConformance(
-  validation: TraceValidation,
-  opts: ConformanceRenderOptions,
-): string {
-  const heading = '#'.repeat(opts.headingLevel ?? 2)
-  return `${heading} trace conformance — ${opts.subject}\n\n${conformanceBody(validation, opts)}`
-}
-
-/**
  * The `traces check --contract conformance` report. Same body, plus a verdict
  * line a reader (or a CI job reading the exit code) can act on.
  *
@@ -458,5 +443,5 @@ export function renderValidation(
         'capability table, not the exit code.'
       : 'CONFORMS — analysable. Every finding below is a degradation of a readable trace, not a bar to ' +
         'reading it; each one names the capability it costs.'
-  return `# trace conformance — ${opts.subject}\n\n**${verdict}**\n\n${conformanceBody(validation, { ...opts, headingLevel: 2 })}`
+  return `# trace conformance — ${opts.subject}\n\n**${verdict}**\n\n${conformanceBody(validation, opts)}`
 }

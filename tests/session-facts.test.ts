@@ -22,7 +22,6 @@ import {
   PREPARED_CONTEXT_BYTE_CEILING,
   renderSessionFacts,
   renderSessionFactsContext,
-  sessionFactsContext,
 } from '../src/session-facts.js'
 import { SYNTHESIZED_SPAN_ATTR } from '../src/adapters/provenance.js'
 import { serializeSpans } from '../src/otlp.js'
@@ -176,7 +175,7 @@ describe('session facts', () => {
 describe('session facts as prepared context', () => {
   it('stays inside its byte bound and keeps the counts when it must shed', async () => {
     const spans = await fixtureSpans(400)
-    const context = sessionFactsContext(spans)!
+    const context = renderSessionFactsContext(buildSessionFactsReport(spans))
     expect(Buffer.byteLength(context)).toBeLessThanOrEqual(PREPARED_CONTEXT_BYTE_CEILING)
     // Under the documented per-call ceiling the analyst tools work to.
     expect(Buffer.byteLength(context)).toBeLessThanOrEqual(VIEW_TRACE_BYTE_CEILING)
@@ -211,13 +210,9 @@ describe('session facts as prepared context', () => {
 
   it('tells the reader the sheet is not citable', async () => {
     const spans = await fixtureSpans()
-    const context = sessionFactsContext(spans)!
+    const context = renderSessionFactsContext(buildSessionFactsReport(spans))
     expect(context).toContain('cite those spans, never this sheet')
     expect(context).toContain('no model call')
-  })
-
-  it('prepares nothing when there are no spans', () => {
-    expect(sessionFactsContext([])).toBeUndefined()
   })
 })
 

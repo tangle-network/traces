@@ -17,7 +17,7 @@ import {
   resolveOtlpInputFiles,
 } from '../src/otlp-input.js'
 import { serializeSpans, toOpenInferenceSpan } from '../src/otlp.js'
-import { renderConformance, summarizeSpanStructure } from '../src/conformance.js'
+import { renderValidation, summarizeSpanStructure } from '../src/conformance.js'
 import { exportTraceEvidenceText } from '../src/file-export.js'
 
 // Wire ids are hex, as OTLP and W3C `traceparent` require; the readable name
@@ -201,7 +201,7 @@ describe('readOtlpInput', () => {
     expect(reread.spans.map((span) => span.span_id)).toContain('backwards')
     expect(reread.validation.capabilities.find((c) => c.name === 'latency-analysis')?.available).toBe(false)
 
-    const rendered = renderConformance(input.validation, {
+    const rendered = renderValidation(input.validation, {
       subject: 'x',
       spans: input.spans,
       withheld: input.withheld,
@@ -269,7 +269,7 @@ describe('readOtlpInput', () => {
       kinds: ['missing-span-id', 'unparseable-line'],
       inherited: 2,
     })
-    expect(renderConformance(reread.validation, {
+    expect(renderValidation(reread.validation, {
       subject: hop1,
       spans: reread.spans,
       unreadable: reread.unreadable,
@@ -518,7 +518,7 @@ describe('summarizeSpanStructure', () => {
     // One parented span suppresses the contract's per-trace flat finding; the
     // report still has to say that 7 of 10 spans attach to nothing.
     expect(input.validation.findings.some((finding) => finding.code === 'flat-hierarchy')).toBe(false)
-    const rendered = renderConformance(input.validation, { subject: 'x', spans: input.spans })
+    const rendered = renderValidation(input.validation, { subject: 'x', spans: input.spans })
     expect(rendered).toContain('8/10 (80.0%) carry no parent edge')
     expect(rendered).toContain('7 span(s) attribute to nothing')
   })
@@ -541,7 +541,7 @@ describe('summarizeSpanStructure', () => {
     expect(structure.rootless).toBe(1)
     expect(structure.extraRoots).toBe(0)
     expect(structure.tracesWithoutRoot).toBe(0)
-    const rendered = renderConformance(input.validation, { subject: 'x', spans: input.spans })
+    const rendered = renderValidation(input.validation, { subject: 'x', spans: input.spans })
     expect(rendered).not.toContain('attribute to nothing')
     expect(rendered).not.toContain('Every span is its own root')
     expect(rendered).not.toContain('have no root at all')
@@ -556,7 +556,7 @@ describe('summarizeSpanStructure', () => {
   })
 })
 
-describe('renderConformance', () => {
+describe('renderValidation', () => {
   it('names the analysis each unavailable capability empties', async () => {
     const path = await writeTrace([
       {
@@ -571,7 +571,7 @@ describe('renderConformance', () => {
       },
     ])
     const input = await readOtlpInput(path)
-    const rendered = renderConformance(input.validation, { subject: path, spans: input.spans })
+    const rendered = renderValidation(input.validation, { subject: path, spans: input.spans })
 
     expect(rendered).toContain('analyses skipped, and why')
     expect(rendered).toContain('Direct model usage')

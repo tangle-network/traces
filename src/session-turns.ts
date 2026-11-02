@@ -5,7 +5,7 @@ import { ACTOR_ATTR, capText } from './adapters/conversation.js'
 import { INHERITED_SOURCE_ATTR, INHERITED_SPAN_ATTR, isSubagentSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
 
-function stringAttr(span: OtlpSpan, key: string): string | null {
+export function stringAttr(span: OtlpSpan, key: string): string | null {
   const value = span.attributes[key]
   return typeof value === 'string' && value.length > 0 ? value : null
 }

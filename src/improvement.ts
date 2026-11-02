@@ -17,6 +17,7 @@ import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { type AnalystFinding, type AnalystRegistry, makeFinding } from '@tangle-network/agent-eval/analyst'
 import { createSpanAnalysis } from './analyze.js'
 import { appendAll } from './arrays.js'
+import { type CausalityMeasure, createCausalityAccumulator } from './causality.js'
 import { conformanceOfSpans, skippedAnalyses } from './conformance.js'
 import type { OtlpSpan } from './otlp.js'
 import {
@@ -115,6 +116,7 @@ export interface OperatingMeasures {
 export interface AnalysisMeasures extends PipelineReport {
   readonly toolErrors: readonly SessionToolErrors[]
   readonly operating: OperatingMeasures
+  readonly causality: CausalityMeasure
 }
 
 export interface TraceInvestigationResult {
@@ -445,7 +447,7 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
   })
   const rules = new Map<string, { findings: AnalystFinding[]; toolErrors: SessionToolErrors }>()
   const failedRoots: OtlpSpan[] = []
-  const conformanceSpans: OtlpSpan[] = []
+  const conformanceSpans: OtlpSpan[] = [], causality = createCausalityAccumulator()
   let spanCount = 0
   let empty = true
   return {
@@ -458,6 +460,7 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
       for (const [traceId, group] of groups) {
         selected = undefined
         builder.add(group)
+        causality.add(group)
         const sheet = selected as SessionFacts | undefined
         const failed = group.find((item) => item.parent_span_id === null && item.status.code === 'ERROR')
         if (failed) failedRoots.push({ ...failed, attributes: {} })
@@ -552,6 +555,7 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
         measures: {
           ...measures,
           toolErrors,
+          causality: causality.report(),
           operating: {
             modelCalls: modelCallMeasurement({ contextTokens: contexts, latencyMs: latencies }),
             guardRefusals: guardRefusalRates(toolCalls, byGuard),

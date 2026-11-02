@@ -32,6 +32,7 @@ import type { OtlpSpan } from './otlp.js'
 import { redactSpans } from './redact.js'
 import { parseIsoToEpochMs } from './time.js'
 import { formatVerdict, type VerifySafeResult } from './verify-safe.js'
+import { errorText } from './refs.js'
 
 /** The built-in contract: the trace's conformance, named where a contract file would be. */
 export const CONFORMANCE = 'conformance'
@@ -451,6 +452,3 @@ function ghProperty(value: string): string {
   return ghData(value).replace(/:/g, '%3A').replace(/,/g, '%2C')
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}

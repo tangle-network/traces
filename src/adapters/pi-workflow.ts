@@ -4,7 +4,6 @@
  * compact history. Preserve those limits rather than manufacture native IDs,
  * phase clocks, provider calls or usage from the extension's scalar estimate.
  */
-import { readFile } from 'node:fs/promises'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import {
   SOURCE_MISSING_CHANNELS_ATTR,
@@ -160,17 +159,6 @@ function coverageReasons(run: RecordValue, phases: number, missing: Missing): st
   if (missing.toolTimes) unknowns.push(`${missing.toolTimes} tool-call history entries lack a recorded tool name or timestamp and are unplaced.`)
   if (missing.histories) unknowns.push(`${missing.histories} agent records have no retained tool history.`)
   return unknowns
-}
-
-/** Read one extension run into the same contract spans every Traces input uses. */
-export async function parsePiWorkflowRun(path: string): Promise<PiWorkflowRunInput> {
-  let value: unknown
-  try {
-    value = JSON.parse(await readFile(path, 'utf8'))
-  } catch {
-    throw new Error('Pi workflow run JSON could not be read')
-  }
-  return normalizePiWorkflowRun(value)
 }
 
 /** The same projection for file refs and the existing text/row input boundary. */
