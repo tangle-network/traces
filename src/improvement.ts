@@ -447,8 +447,7 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
   })
   const rules = new Map<string, { findings: AnalystFinding[]; toolErrors: SessionToolErrors }>()
   const failedRoots: OtlpSpan[] = []
-  const conformanceSpans: OtlpSpan[] = []
-  const causality = createCausalityAccumulator()
+  const conformanceSpans: OtlpSpan[] = [], causality = createCausalityAccumulator()
   let spanCount = 0
   let empty = true
   return {

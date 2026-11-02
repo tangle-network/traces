@@ -425,10 +425,10 @@ const minutes = (ms: number): string => (ms < 60_000 ? seconds(ms) : `${(ms / 60
 const tally = (counts: Readonly<Record<string, number>>): string => Object.entries(counts).map(([key, count]) => `${count} ${key}`).join(', ')
 /** Steering and rounds, from links and loop iterations; nothing when the spans carry neither. */
 function causalityLines(result: TraceInvestigationResult): string[] {
-  const { links, steering: s, rounds: r } = result.measures.causality, other = Object.entries(links).filter(([kind]) => kind !== 'steered_by')
+  const { capped, links, steering: s, rounds: r } = result.measures.causality, other = Object.entries(links).filter(([kind]) => kind !== 'steered_by')
   return [
-    ...(s.links ? [`steering ${plural(s.steers, 'steer')} caused ${plural(s.turns, 'turn')} (${s.resolved}/${s.links} links resolved${s.medianLagMs === null ? '' : `, median lag ${minutes(s.medianLagMs)}`}); against the round before: ${tally(s.changes)}`] : []),
-    ...(r.rounds ? [`rounds ${r.rounds} over ${plural(r.loops, 'loop')} (${tally(r.outcomes)}); round to round ${tally(r.transitions)}; ${r.converged} loops reached pass`] : []),
+    ...(s.links ? [`steering ${plural(s.steers, 'steer')} caused ${plural(s.turns, 'turn')} (${s.resolved}/${s.links} links resolved${capped ? `, ${capped} spans past the index cap` : ''}${s.medianLagMs === null ? '' : `, median lag ${minutes(s.medianLagMs)}`}); against the round before: ${tally(s.changes)}`] : []),
+    ...(r.rounds ? [`rounds ${r.rounds} over ${plural(r.loops, 'loop')} (${tally(r.outcomes)})${r.outcomes.unscored < r.rounds ? `; round to round ${tally(r.transitions)}; ${r.converged} loops reached pass` : '; none scored'}`] : []),
     ...(other.length ? [`links ${other.map(([kind, count]) => `${kind} ${count.resolved}/${count.total}`).join(' · ')} resolved`] : []),
   ]
 }
@@ -444,8 +444,7 @@ export function renderAnalysis(result: TraceInvestigationResult): string {
 
 /** Each resolved steer and the round it caused, oldest first: the rows `--format json | jq .measures.causality` holds. */
 function steeringSection(result: TraceInvestigationResult): string[] {
-  const { steering } = result.measures.causality
-  if (steering.rows.length === 0) return []
+  const { steering } = result.measures.causality; if (steering.rows.length === 0) return []
   const end = (point: CausalEnd): string => `\`${point.sessionId ?? '?'}\` ${point.name ?? '?'}${point.iteration === undefined ? '' : ` round ${point.iteration}`}${point.outcome ? ` (${point.outcome})` : ''}`
   return [`## Steering (${steering.resolved} of ${steering.links} links resolved)`, '', '| Steer | Caused | Lag | Against the round before |', '|---|---|---|---|',
     ...steering.rows.map((row) => `| ${end(row.cause)} | ${end(row.effect)} | ${row.lagMs === null ? '?' : minutes(row.lagMs)} | ${row.change ?? 'unscored'} |`), '']

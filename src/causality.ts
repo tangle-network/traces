@@ -13,30 +13,31 @@ export interface SteeringRow { readonly cause: CausalEnd; readonly effect: Causa
 /** One loop: outcomes by iteration (p pass, f fail, e error, ? unscored) and how many rounds a steer caused. */
 export interface LoopRounds { readonly loopId: string; readonly sessionId: string; readonly outcomes: string; readonly steered: number }
 type Tally<K extends string> = Record<K, number>
-/** `steers` caused `turns`, rows the first {@link ROWS_KEPT} by the caused round's start; `converged`: loops whose last scored round passed after one that did not. */
+/** `capped`: spans past the index cap, a link to which counts unresolved (an unknown, not a producer defect); `steers` caused `turns`, rows the first {@link ROWS_KEPT} by the caused round's start; `converged`: loops whose last scored round passed after one that did not. */
 export interface CausalityMeasure {
+  readonly capped: number
   readonly links: Readonly<Record<string, { readonly total: number; readonly resolved: number }>>
   readonly steering: { readonly links: number; readonly resolved: number; readonly steers: number; readonly turns: number; readonly medianLagMs: number | null; readonly changes: Tally<Change | 'unscored'>; readonly rows: readonly SteeringRow[] }
   readonly rounds: { readonly loops: number; readonly rounds: number; readonly outcomes: Tally<'pass' | 'fail' | 'error' | 'unscored'>; readonly transitions: Tally<Change>; readonly converged: number; readonly rows: readonly LoopRounds[] }
 }
 export function createCausalityAccumulator(): { add(spans: readonly OtlpSpan[]): void; report(): CausalityMeasure } {
-  const index = new Map<string, Indexed>(), links: { from: string; to: string; kind: string }[] = [], rounds: string[] = []
+  const index = new Map<string, Indexed>(), linked = new Map<string, { from: string; to: string; kind: string }>(), rounds = new Set<string>(), count = { capped: 0 }
   return {
     add(spans) {
       const traceSession = spans.map((span) => sessionIdFromAttributes(span.attributes)).find(Boolean)
       for (const span of spans) {
         const at = `${span.trace_id}${SEP}${span.span_id}`, { [ATTR.iteration]: iteration, [ATTR.loopId]: loopId, [ATTR.outcome]: outcome } = span.attributes
         const round = typeof iteration === 'number' && Number.isFinite(iteration)
-        for (const link of span.links ?? []) links.push({ from: at, to: `${link.trace_id}${SEP}${link.span_id}`, kind: String(link.attributes?.[LINK_KIND_ATTR] ?? 'unnamed') })
-        if (!round && !span.links?.length && index.size >= INDEXED_SPANS) continue
+        for (const link of span.links ?? []) { const to = `${link.trace_id}${SEP}${link.span_id}`, kind = String(link.attributes?.[LINK_KIND_ATTR] ?? 'unnamed'); linked.set(`${at}${SEP}${to}${SEP}${kind}`, { from: at, to, kind }) }
+        if (!round && !span.links?.length && index.size >= INDEXED_SPANS && !index.has(at)) { count.capped += 1; continue }
         index.set(at, { sessionId: sessionIdFromAttributes(span.attributes) ?? traceSession ?? span.trace_id, name: span.name, at: span.start_time,
           ...(round ? { loopId: typeof loopId === 'string' && loopId ? loopId : span.trace_id, iteration } : {}), ...(typeof outcome === 'string' ? { outcome } : {}) })
-        if (round) rounds.push(at)
+        if (round) rounds.add(at)
       }
     },
     report() {
       const end = (at: string): CausalEnd => { const [traceId, spanId] = at.split(SEP) as [string, string]; return { traceId, spanId, ...index.get(at) } }
-      const byKind: Record<string, { total: number; resolved: number }> = {}
+      const links = [...linked.values()], byKind: Record<string, { total: number; resolved: number }> = {}
       for (const link of links) { const entry = (byKind[link.kind] ??= { total: 0, resolved: 0 }); entry.total += 1; entry.resolved += index.has(link.to) ? 1 : 0 }
       const loops = new Map<string, { at: string; span: Indexed }[]>(), before = new Map<string, Indexed>()
       for (const at of rounds) { const span = index.get(at)!, list = loops.get(span.loopId!) ?? []; list.push({ at, span }); loops.set(span.loopId!, list) }
@@ -67,10 +68,11 @@ export function createCausalityAccumulator(): { add(spans: readonly OtlpSpan[]):
         return { loopId, sessionId: list[0]!.span.sessionId, outcomes: list.map(({ span }) => letter(span.outcome)).join(''), steered: list.filter(({ at }) => turns.has(at)).length }
       }).sort((a, b) => b.outcomes.length - a.outcomes.length || a.loopId.localeCompare(b.loopId))
       return {
+        capped: count.capped,
         links: byKind,
         steering: { links: steering.length, resolved: resolved.length, steers: new Set(resolved.map((link) => link.to)).size, turns: turns.size,
           medianLagMs: lags.length === 0 ? null : lags.length % 2 ? lags[mid]! : (lags[mid - 1]! + lags[mid]!) / 2, changes, rows: rows.slice(0, ROWS_KEPT) },
-        rounds: { loops: loops.size, rounds: rounds.length, outcomes, transitions, converged, rows: loopRows.slice(0, ROWS_KEPT) },
+        rounds: { loops: loops.size, rounds: rounds.size, outcomes, transitions, converged, rows: loopRows.slice(0, ROWS_KEPT) },
       }
     },
   }

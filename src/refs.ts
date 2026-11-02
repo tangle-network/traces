@@ -284,7 +284,7 @@ async function directoryRef(path: string, ref: string): Promise<ResolvedRef | Re
   // A tree with no OTLP in it may hold retained session files, each read by its content.
   const { files, skipped } = await resolveOtlpInputFiles(path, true)
   // A Claude subagent transcript (`<id>/subagents/**/*.jsonl`, harness-sessions' catalog) is read with its parent `<id>.jsonl`.
-  const paths = new Set(skipped.map((file) => file.path)), folded = (path: string) => paths.has(`${path.split(`${sep}subagents${sep}`)[0]}.jsonl`) && path.includes(`${sep}subagents${sep}`)
+  const paths = new Set(skipped.map((file) => file.path)), parts = (path: string) => path.split(`${sep}subagents${sep}`), folded = (path: string) => parts(path).slice(1).some((_, i) => paths.has(`${parts(path).slice(0, i + 1).join(`${sep}subagents${sep}`)}.jsonl`))
   const sessionFiles = files.length > 0 ? [] : await withoutEarlierCopies([...paths].filter((path) => !folded(path)))
   const refs = await Promise.all(sessionFiles.map((file) => fileRef(file, file, undefined, {})))
   const sessions = refs.filter((found) => found.kind === 'session')
