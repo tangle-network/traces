@@ -86,10 +86,12 @@ interface FileCursor {
   /** Byte offset just past the last complete line read. */
   offset: number
   pending?: PendingSlash[]
-  kimiCalls?: Record<string, { name: string; args: string; ts: string | null }>
+  /** Read and shell calls (Kimi ReadFile and Shell, Claude Code Read and Bash) waiting for their result record. */
+  calls?: Record<string, PendingCall>
   kimiLastCall?: string
 }
 
+interface PendingCall { name: string; args: string; ts: string | null; session?: string }
 type StoredEvent = [SkillUsageHarness, SkillUsageKind, string, string | null, string | null, string, string]
 
 interface StoreV1 {
@@ -105,6 +107,7 @@ const MAX_PENDING = 16
 const READ_CONCURRENCY = 8
 
 const CLAUDE_NEEDLES = [
+  'SKILL.md',
   '"commandName":"',
   'Launching skill: ',
   ' (forked execution',
@@ -175,15 +178,14 @@ const TYPED_SLASH = /^\/([A-Za-z0-9][\w:.-]*)(?:\s|$)/u
 /**
  * The skills one session's own agent used, read from its spans with the rules
  * the store applies to raw records: a Skill tool call that completed (`model`),
- * a `/name` turn whose next prompt is its expansion (`slash`), and, on a
- * harness with no skill event (every one but Claude Code), a completed command
- * or read tool that opened a skill document (`read`). One command that reads
+ * a `/name` turn whose next prompt is its expansion (`slash`), and a completed
+ * command or read tool that opened a skill document (`read`), on every harness: a
+ * Claude Code agent told to read skills/<name>/SKILL.md never loads it. One command that reads
  * `sweepThreshold` or more skills is a catalog sweep and counts for none.
  * `spans` are the session's own records in trace order.
  */
 export function skillUseOfSpans(
   spans: readonly OtlpSpan[],
-  harness: string | null,
   sweepThreshold: number = DEFAULT_SWEEP_THRESHOLD,
 ): Record<string, SkillUseCount> {
   const counts: Record<string, SkillUseCount> = {}
@@ -222,11 +224,7 @@ export function skillUseOfSpans(
       if (named) add(skillName(named), 'model')
       continue
     }
-    // Claude Code records a skill when it loads one, so reading the document is not a use there.
-    if (harness === 'claude-code') continue
-    const command = commandTextFromInput(input)
-    const path = tool === 'ReadFile' && span.status.code === 'OK' ? pathArgument(input) : null
-    const reads = command !== undefined ? skillDocumentReads(command, output) : path ? skillDocumentReads(path, output, { path: true }) : []
+    const reads = documentReads(tool, input, output, span.status.code !== 'OK')
     if (reads.length >= sweepThreshold) continue
     for (const read of reads) add(read.skill, 'read')
   }
@@ -249,9 +247,14 @@ function skillArgument(input: string): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
-function pathArgument(input: string): string | null {
-  const value = jsonObject(input)?.path
-  return typeof value === 'string' ? value : null
+/** The skill documents a completed command, or a read tool that did not fail, opened: the one rule the facts and the store apply. */
+function documentReads(tool: string, input: string, output: string, failed: boolean): Array<{ readonly skill: string; readonly directory: string }> {
+  const command = commandTextFromInput(input)
+  if (command !== undefined) return skillDocumentReads(command, output)
+  // Kimi's ReadFile names `path`; Claude Code's Read names `file_path`.
+  const args = (tool === 'ReadFile' || tool === 'Read') && !failed ? jsonObject(input) : null
+  const path = args?.path ?? args?.file_path
+  return typeof path === 'string' ? skillDocumentReads(path, output, { path: true }) : []
 }
 
 export function defaultSkillUsageSources(): SkillUsageSources {
@@ -398,9 +401,23 @@ export class SkillUsageStore {
       if (outcome === 'confirmed') added += 1
       else if (outcome === 'pending') cursor.pending.push(command)
     }
+    const calls = cursor.calls ?? {}
+    // Read calls that ended the previous refresh find their results among this read's lines.
+    for (const id of Object.keys(calls)) added += this.resolveClaudeCall(buffer, lines, 0, id, calls)
     for (const start of hitLineStarts(buffer, CLAUDE_NEEDLES)) {
       const end = lines.endOf(start)
       const record = parseLine(buffer, start, end)
+      if (record?.type === 'assistant') {
+        const content = (record.message as Record<string, unknown> | undefined)?.content
+        for (const part of Array.isArray(content) ? content as Array<Record<string, unknown>> : []) {
+          const args = JSON.stringify(part?.input ?? {})
+          if (part?.type !== 'tool_use' || typeof part.id !== 'string' || (part.name !== 'Bash' && part.name !== 'Read') || !args.includes('SKILL.md')) continue
+          calls[part.id] = { name: part.name, args, ts: typeof record.timestamp === 'string' ? record.timestamp : null,
+            session: typeof record.sessionId === 'string' ? record.sessionId : fileSession }
+          added += this.resolveClaudeCall(buffer, lines, end + 1, part.id, calls)
+        }
+        continue
+      }
       if (!record || record.type !== 'user') continue
       const session = typeof record.sessionId === 'string' ? record.sessionId : fileSession
       const ts = typeof record.timestamp === 'string' ? record.timestamp : null
@@ -424,6 +441,28 @@ export class SkillUsageStore {
       const outcome = this.resolveSlash(buffer, lines, end + 1, command)
       if (outcome === 'confirmed') added += 1
       else if (outcome === 'pending' && cursor.pending.length < MAX_PENDING) cursor.pending.push(command)
+    }
+    cursor.calls = calls
+    return added
+  }
+
+  /** Count a Claude Code read call once its tool_result record is in `buffer`. */
+  private resolveClaudeCall(buffer: Buffer, lines: LineIndex, from: number, id: string, calls: Record<string, PendingCall>): number {
+    const at = buffer.indexOf(`"tool_use_id":"${id}"`, from)
+    if (at === -1) return 0
+    const call = calls[id]!
+    delete calls[id]
+    const start = buffer.lastIndexOf(NEWLINE, at) + 1
+    const content = (parseLine(buffer, start, lines.endOf(start))?.message as Record<string, unknown> | undefined)?.content
+    const part = Array.isArray(content) ? (content as Array<Record<string, unknown>>).find((block) => block?.type === 'tool_result' && block.tool_use_id === id) : undefined
+    return part ? this.addReads('claude-code', call, resultText(part.content), part.is_error === true, id, call.session ?? '') : 0
+  }
+
+  /** Count the skill documents a completed call opened. */
+  private addReads(harness: SkillUsageHarness, call: PendingCall, output: string, failed: boolean, id: string, session: string): number {
+    let added = 0
+    for (const { skill, directory } of documentReads(call.name, call.args, output, failed)) {
+      if (this.add({ harness, kind: 'read', skill, root: rootOfDirectory(directory), ts: call.ts, session, id: `${id}#${directory}` })) added += 1
     }
     return added
   }
@@ -485,7 +524,7 @@ export class SkillUsageStore {
 
   private scanKimi(buffer: Buffer, cursor: FileCursor, session: string): number {
     let added = 0
-    const calls = cursor.kimiCalls ?? {}
+    const calls = cursor.calls ?? {}
     const lines = new LineIndex(buffer)
     for (const start of hitLineStarts(buffer, KIMI_NEEDLES)) {
       const record = parseLine(buffer, start, lines.endOf(start))
@@ -508,20 +547,10 @@ export class SkillUsageStore {
         delete calls[id]
         if (!call) continue
         const result = payload.return_value as Record<string, unknown> | undefined
-        if (result?.is_error !== false) continue
-        let args: Record<string, unknown>
-        try { args = JSON.parse(call.args) as Record<string, unknown> } catch { continue }
-        const output = typeof result.output === 'string' ? result.output : ''
-        const reads = call.name === 'ReadFile' && typeof args.path === 'string'
-          ? skillDocumentReads(args.path, output, { path: true })
-          : call.name === 'Shell' && typeof args.command === 'string' ? skillDocumentReads(args.command, output) : []
-        for (const { skill, directory } of reads) {
-          if (this.add({ harness: 'kimi-code', kind: 'read', skill, root: rootOfDirectory(directory),
-            ts: call.ts, session, id: `${session}:${id}#${directory}` })) added += 1
-        }
+        if (result) added += this.addReads('kimi-code', call, typeof result.output === 'string' ? result.output : '', result.is_error !== false, `${session}:${id}`, session)
       }
     }
-    cursor.kimiCalls = calls
+    cursor.calls = calls
     return added
   }
 }
@@ -578,13 +607,15 @@ function loadedSkill(record: Record<string, unknown>): { skill: string; id: stri
   for (const part of content as Array<Record<string, unknown>>) {
     if (part?.type !== 'tool_result' || typeof part.tool_use_id !== 'string' || part.is_error === true) continue
     if (result?.success === true && typeof result.commandName === 'string') return { skill: result.commandName, id: part.tool_use_id }
-    const text = typeof part.content === 'string'
-      ? part.content
-      : Array.isArray(part.content) ? String((part.content[0] as Record<string, unknown> | undefined)?.text ?? '') : ''
-    const skill = skillLaunchedBy(text)
+    const skill = skillLaunchedBy(resultText(part.content))
     if (skill) return { skill, id: part.tool_use_id }
   }
   return null
+}
+
+/** A tool_result's text: a string, or its first text block. */
+function resultText(content: unknown): string {
+  return typeof content === 'string' ? content : Array.isArray(content) ? String((content[0] as Record<string, unknown> | undefined)?.text ?? '') : ''
 }
 
 function skillName(value: string): string {
@@ -652,42 +683,21 @@ export function defaultSkillCatalogRoots(): SkillCatalogRoots {
   }
 }
 
-async function skillFolders(directory: string, prefix = ''): Promise<Array<{ name: string; path: string }>> {
-  let entries
-  try {
-    entries = await readdir(directory)
-  } catch {
-    return []
-  }
-  const found: Array<{ name: string; path: string }> = []
-  for (const entry of entries.sort()) {
-    if (entry.startsWith('.')) continue
+async function skillFolders(directory: string, harness: SkillUsageHarness, prefix = ''): Promise<InstalledSkill[]> {
+  const found: InstalledSkill[] = []
+  for (const entry of (await readdir(directory).catch(() => [] as string[])).sort()) {
     const path = join(directory, entry)
-    try {
-      await stat(join(path, 'SKILL.md'))
-      found.push({ name: `${prefix}${entry}`, path })
-    } catch {
-      // Not a skill folder, or a link whose target is gone.
-    }
+    // A folder without SKILL.md, or a link whose target is gone, is not a skill.
+    if (!entry.startsWith('.') && await stat(join(path, 'SKILL.md')).then(() => true, () => false)) found.push({ name: `${prefix}${entry}`, path, harness })
   }
   return found
 }
 
-async function readJsonObject(path: string): Promise<Record<string, unknown> | null> {
-  try {
-    const value: unknown = JSON.parse(await readFile(path, 'utf8'))
-    return value && typeof value === 'object' ? (value as Record<string, unknown>) : null
-  } catch {
-    return null
-  }
-}
+const readJsonObject = async (path: string): Promise<Record<string, unknown> | null> => jsonObject(await readFile(path, 'utf8').catch(() => ''))
 
 /** Skills each harness would list now. Claude plugin skills are named `<plugin>:<skill>`. */
 export async function readInstalledSkills(roots: SkillCatalogRoots = defaultSkillCatalogRoots()): Promise<InstalledSkill[]> {
-  const installed: InstalledSkill[] = []
-  for (const skill of await skillFolders(join(roots.claudeHome, 'skills'))) {
-    installed.push({ ...skill, harness: 'claude-code' })
-  }
+  const installed = await skillFolders(join(roots.claudeHome, 'skills'), 'claude-code')
   const settings = await readJsonObject(join(roots.claudeHome, 'settings.json'))
   const enabled = (settings?.enabledPlugins ?? {}) as Record<string, unknown>
   const plugins = await readJsonObject(join(roots.claudeHome, 'plugins', 'installed_plugins.json'))
@@ -697,14 +707,10 @@ export async function readInstalledSkills(roots: SkillCatalogRoots = defaultSkil
     const plugin = key.split('@', 1)[0]!
     for (const install of (Array.isArray(value) ? value : [value]) as Array<Record<string, unknown>>) {
       if (typeof install?.installPath !== 'string') continue
-      for (const skill of await skillFolders(join(install.installPath, 'skills'), `${plugin}:`)) {
-        installed.push({ ...skill, harness: 'claude-code' })
-      }
+      installed.push(...await skillFolders(join(install.installPath, 'skills'), 'claude-code', `${plugin}:`))
     }
   }
-  for (const directory of roots.codexSkillDirs) {
-    for (const skill of await skillFolders(directory)) installed.push({ ...skill, harness: 'codex' })
-  }
+  for (const directory of roots.codexSkillDirs) installed.push(...await skillFolders(directory, 'codex'))
   return installed
 }
 
@@ -792,11 +798,7 @@ export function buildSkillUsageReport(
   }
 
   const installedBySkill = new Map<string, Set<SkillUsageHarness>>()
-  for (const skill of installed) {
-    const harnesses = installedBySkill.get(skill.name) ?? new Set<SkillUsageHarness>()
-    harnesses.add(skill.harness)
-    installedBySkill.set(skill.name, harnesses)
-  }
+  for (const skill of installed) installedBySkill.set(skill.name, (installedBySkill.get(skill.name) ?? new Set<SkillUsageHarness>()).add(skill.harness))
   const result: SkillUsageRow[] = []
   for (const { sessionSet, ...row } of rows.values()) {
     result.push({ ...row, sessions: sessionSet.size, installedIn: [...(installedBySkill.get(row.skill) ?? [])].sort() })
@@ -807,20 +809,14 @@ export function buildSkillUsageReport(
     .map(([skill, harnesses]) => ({ skill, installedIn: [...harnesses].sort() }))
     .sort((a, b) => a.skill.localeCompare(b.skill))
 
-  let firstEvent: string | null = null
-  let lastEvent: string | null = null
-  for (const event of events) {
-    if (event.ts === null) continue
-    if (firstEvent === null || event.ts < firstEvent) firstEvent = event.ts
-    if (lastEvent === null || event.ts > lastEvent) lastEvent = event.ts
-  }
+  const times = events.flatMap((event) => (event.ts === null ? [] : [event.ts])).sort()
   return {
     since: sinceIso,
     storePath,
     refresh: options.refresh ?? null,
     storedEvents: events.length,
-    firstEvent,
-    lastEvent,
+    firstEvent: times[0] ?? null,
+    lastEvent: times.at(-1) ?? null,
     rows: result,
     unused,
     sweepThreshold,
@@ -828,10 +824,6 @@ export function buildSkillUsageReport(
     sweepReadsExcluded,
     notIndexed: ['opencode', 'pi', 'gemini', 'factory', 'other harnesses'],
   }
-}
-
-function day(ts: string | null): string {
-  return ts === null ? '-' : ts.slice(0, 10)
 }
 
 /**
@@ -851,7 +843,7 @@ export function renderSkillUsage(report: SkillUsageReport): string {
   for (const row of report.rows) {
     lines.push(
       `${row.skill.padEnd(width)}  ${String(row.model).padStart(5)}  ${String(row.slash).padStart(5)}  ${String(row.read).padStart(5)}`
-      + `  ${String(row.sessions).padStart(8)}  ${day(row.lastUsed)}  ${row.installedIn.join(',') || '-'}`,
+      + `  ${String(row.sessions).padStart(8)}  ${row.lastUsed?.slice(0, 10) ?? '-'}  ${row.installedIn.join(',') || '-'}`,
     )
   }
   return lines.join('\n')

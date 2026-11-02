@@ -618,7 +618,7 @@ export function computeSessionMeasurements(input: {
 }): SessionMeasurements {
   const { spans, records, tools, sessionId, harness } = input
   return {
-    skills: skillUseOfSpans(spans.filter((span) => !isInherited(span)), harness),
+    skills: skillUseOfSpans(spans.filter((span) => !isInherited(span))),
     ...measureTime(spans, records, tools),
     relationship: describeSessionRelationship({
       sessionId: sessionId ?? spans[0]?.trace_id ?? '', harness: harness ?? '', path: '', cwd: null, mtimeMs: 0,
