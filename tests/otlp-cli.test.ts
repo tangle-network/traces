@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
-import { deriveHexId, llmSpan, loopSpan, steeredBy, toolSpan } from '@tangle-network/agent-trace-contract'
+import { contractSpan, deriveHexId, llmSpan, loopSpan, steeredBy, toolSpan } from '@tangle-network/agent-trace-contract'
 
 const execFileAsync = promisify(execFile)
 
@@ -483,5 +483,26 @@ describe('traces analyze <otlp file>', () => {
     const result = await runCli(['analyze', path])
     expect(result.code).toBe(2)
     expect(result.stderr).toContain('--contract conformance')
+  })
+
+  // harness-sessions and sdk-telemetry write OpenInference keys: a message's text in input.value/output.value, a child's parent in tangle.harness_session.parent.
+  it('reads the text and parent session an OpenInference producer writes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-otlp-openinference-'))
+    const [trace, root] = [deriveHexId('child-session', 16), deriveHexId('child-root', 8)]
+    const at = (second: number) => `2026-11-01T16:00:0${second}.000Z`
+    const span = (name: string, second: number, attributes: Record<string, unknown>) => contractSpan({
+      traceId: trace, spanId: deriveHexId(name, 8), parentSpanId: root, name, kind: 'CHAIN', startTime: at(second), endTime: at(second),
+      status: { code: 'STATUS_CODE_OK' }, attributes: { 'session.id': 'run:s0', ...attributes },
+    })
+    const path = await writeRows(dir, 'run-s0.jsonl', [
+      contractSpan({ traceId: trace, spanId: root, parentSpanId: null, name: 'session', kind: 'AGENT', startTime: at(0), endTime: at(3),
+        status: { code: 'STATUS_CODE_OK' }, attributes: { 'session.id': 'run:s0', 'service.name': 'codex', 'tangle.harness_session.parent': 'run' } }),
+      span('user.prompt', 1, { 'tangle.actor': 'agent', 'input.value': 'Measure the prover rate.' }),
+      span('message.assistant', 2, { 'output.value': 'Measured 1.87 ms per cycle at 2^20.' }),
+    ])
+    const facts = JSON.parse((await runCli(['facts', path, '--format', 'json'])).stdout) as {
+      sessions: Array<{ parentSessionId: string | null; finalMessages: { value: Array<{ text: string }> } }>
+    }
+    expect(facts.sessions[0]).toMatchObject({ parentSessionId: 'run', finalMessages: { value: [{ text: 'Measured 1.87 ms per cycle at 2^20.' }] } })
   })
 })

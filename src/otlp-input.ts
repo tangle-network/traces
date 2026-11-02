@@ -533,26 +533,20 @@ function readLinks(value: unknown, traceId: string): OtlpSpanLink[] {
 }
 
 /**
- * `agent-eval`'s tool-name reader accepts `tool.name` and
- * `inference.tool.name`, not the semantic-convention `gen_ai.tool.name` the
- * contract writes. Every other contract key (model, tokens, cost) is already in
- * agent-eval's candidate lists, so this single alias is the whole bridge —
- * without it a conforming TOOL span analyses as an unnamed tool call.
+ * Fill the keys every reader here takes from the ones a conforming producer writes instead: agent-eval reads a tool's
+ * name as `tool.name`, not the contract's `gen_ai.tool.name`, and OpenInference producers (harness-sessions,
+ * sdk-telemetry) write a message's text as `input.value` or `output.value` and a child session's parent as
+ * `tangle.harness_session.parent`. Without them a conforming span reads as an unnamed tool call or a silent message.
  */
-function bridgeContractAttributes(attributes: Record<string, unknown>): void {
-  const toolName = nonEmptyString(attributes[ATTR.toolName])
-  if (toolName !== null && nonEmptyString(attributes[TOOL_NAME]) === null) {
-    attributes[TOOL_NAME] = toolName
-  }
+function bridgeContractAttributes(name: string, attributes: Record<string, unknown>): void {
+  const text = name === 'user.prompt' ? 'input.value' : name.startsWith('message.') ? 'output.value' : null
+  const keys: Array<[string, string]> = [[TOOL_NAME, ATTR.toolName], ['traces.parent_session_id', 'tangle.harness_session.parent'], ...(text ? [['content', text] as [string, string]] : [])]
+  for (const [key, from] of keys) if (nonEmptyString(attributes[key]) === null && nonEmptyString(attributes[from]) !== null) attributes[key] = attributes[from]
 }
 
 function parseTime(value: unknown): number | null {
   if (typeof value !== 'string' || value.trim().length === 0) return null
-  try {
-    return parseIsoToEpochMs(value)
-  } catch {
-    return null
-  }
+  try { return parseIsoToEpochMs(value) } catch { return null }
 }
 
 /**
@@ -653,7 +647,7 @@ export function otlpRowToSpan(row: unknown, fallbackTraceId: string): OtlpRowCon
     : undefined
 
   const name = nonEmptyString(row.name) ?? 'span'
-  bridgeContractAttributes(attributes)
+  bridgeContractAttributes(name, attributes)
   // Foreign producers coin their own words (GUARDRAIL, EMBEDDING). One of those
   // is re-derived from the span itself rather than discarded, and the
   // producer's own word is kept verbatim so nothing is lost.
