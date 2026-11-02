@@ -20,6 +20,8 @@ const START = Date.parse('2026-10-14T10:00:00.000Z')
 const at = (minute: number, second = 0): string => new Date(START + minute * 60_000 + second * 1000).toISOString()
 
 type Row = Record<string, unknown>
+/** What the Claude session's attachments put in the model's context, by the source facts names it with. */
+const CONTEXT = { 'Project CLAUDE.md': 'You are the prover.\nKeep it fast.', 'skill listing': '- verify: Run the checks.\n- reflect: Review the work.', 'system prompt': 'You are Claude Code.\nUse the tools.' }
 const jsonl = (rows: readonly Row[]): string => `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`
 
 /** A Claude Code session that loops on a failing test, rolls back, waits, uses skills and idles. */
@@ -36,7 +38,11 @@ function claudeSession(): Row[] {
   const result = (time: string, id: string, text: string, isError = false): Row =>
     user(time, [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError ? { is_error: true } : {}) }])
   const say = (time: string, text: string): Row => assistant(time, [{ type: 'text', text }])
+  const attachment = (content: Row): Row => ({ ...base, type: 'attachment', uuid: `c${++n}`, parentUuid: null, timestamp: at(0), attachment: content })
   return [
+    attachment({ type: 'instructions', files: [{ path: `${CWD}/CLAUDE.md`, type: 'Project', content: CONTEXT['Project CLAUDE.md'] }] }),
+    attachment({ type: 'skill_listing', content: CONTEXT['skill listing'], skillCount: 2 }),
+    attachment({ type: 'prompt_snapshot', systemPrompt: CONTEXT['system prompt'].split('\n') }),
     user(at(0), 'Fix the tests.'),
     call(at(1), 't1', 'Bash', { command: 'pnpm test' }), result(at(2), 't1', 'FAIL a.test.ts', true),
     call(at(3), 'e1', 'Edit', { file_path: `${CWD}/a.ts`, old_string: 'a', new_string: 'b' }), result(at(3, 30), 'e1', 'ok'),
@@ -205,6 +211,12 @@ describe('facts waste measures', () => {
     expect(run.stdout).toContain('\nwaste 55 min: `pnpm test` failed 3× in a row (6 min) · 3 stalls ≥ 10 min (49 min) · reverts 2\n')
     expect(run.stdout).toMatch(/ · active 1\.3 h$/mu)
     expect(run.stdout).toContain('\nskills reflect 1, simplify 1, verify 1\n')
+  })
+
+  it('measures what Claude Code put in the model context: each CLAUDE.md, the skill listing and the system prompt', async () => {
+    const { contextFootprints } = (await measured([claudeFile])).measurements as unknown as { contextFootprints: Array<{ source: string | null; bytes: number; lines: number }> }
+    const measuredContext = contextFootprints.filter(({ source }) => source !== null).map(({ source, bytes, lines }) => [source, { bytes, lines }])
+    expect(Object.fromEntries(measuredContext)).toEqual(Object.fromEntries(Object.entries(CONTEXT).map(([source, text]) => [source, { bytes: Buffer.byteLength(text), lines: 2 }])))
   })
 
   it('withholds a streak command under --no-content and keeps its counts', async () => {

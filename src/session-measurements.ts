@@ -41,6 +41,8 @@ export interface ContentFootprint {
   readonly bytes: number
   readonly lines: number
   readonly entries: number | null
+  /** What the harness recorded it as (`system prompt`, `skill listing`, `Project CLAUDE.md`), when it says. */
+  readonly source: string | null
   /** Source representation, not the reconstructed full model request. */
   readonly scope: 'captured-attribute'
 }
@@ -377,7 +379,8 @@ function contextFootprints(spans: readonly OtlpSpan[]): ContentFootprint[] {
       if (typeof value === 'string') {
         try { const parsed: unknown = JSON.parse(value); if (Array.isArray(parsed)) entries = parsed.length } catch { /* text */ }
       }
-      out.push({ spanId: span.span_id, field, bytes: Buffer.byteLength(text), lines: text.split('\n').length, entries, scope: 'captured-attribute' })
+      const source = typeof span.attributes['traces.context.source'] === 'string' ? String(span.attributes['traces.context.source']) : null
+      out.push({ spanId: span.span_id, field, bytes: Buffer.byteLength(text), lines: text.split('\n').length, entries, source, scope: 'captured-attribute' })
     }
   }
   return out

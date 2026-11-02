@@ -228,6 +228,10 @@ interface ClaudeEvent {
     prompt?: unknown
     origin?: { kind?: unknown }
     timestamp?: string
+    /** `instructions`, `skill_listing` and `prompt_snapshot`: what the harness puts in the model's context. */
+    files?: Array<{ path?: string; type?: string; content?: unknown }>
+    content?: unknown
+    systemPrompt?: unknown
   }
   toolUseResult?: {
     runId?: unknown
@@ -414,8 +418,17 @@ type ClaudeEventProjection =
       contentSource?: SourceReferences
     }
   | { kind: 'file-change'; timestamp: string; path: string; contentSource?: SourceReferences }
+  | { kind: 'context'; timestamp: string; parts: Array<{ source: string; text: string }> }
   | { kind: 'compaction'; timestamp: string; metadata: NonNullable<ClaudeEvent['compactMetadata']>; parentToolUseId?: string | null }
   | { kind: 'ignored' }
+
+/** What Claude Code puts in the model's context: each CLAUDE.md or memory file, the skill listing, the system prompt. */
+function contextParts(attachment: ClaudeEvent['attachment']): Array<{ source: string; text: string }> {
+  if (attachment?.type === 'instructions') return (attachment.files ?? []).flatMap((file) => typeof file.content === 'string' ? [{ source: `${file.type ?? 'file'} ${file.path?.split('/').pop() ?? ''}`.trim(), text: file.content }] : [])
+  if (attachment?.type === 'skill_listing' && typeof attachment.content === 'string') return [{ source: 'skill listing', text: attachment.content }]
+  const prompt = attachment?.type === 'prompt_snapshot' && Array.isArray(attachment.systemPrompt) ? attachment.systemPrompt.filter((part) => typeof part === 'string') : []
+  return prompt.length > 0 ? [{ source: 'system prompt', text: prompt.join('\n') }] : []
+}
 
 function projectToolResult(
   toolUseId: string,
@@ -529,6 +542,8 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       ),
     }
   }
+  const context = event.type === 'attachment' ? contextParts(event.attachment) : []
+  if (context.length > 0) return { kind: 'context', timestamp, parts: context }
   if (event.type === 'attachment' && event.attachment?.type === 'queued_command') {
     // The queued text is a message body, so it arrives in either shape a
     // message body takes: a string, or the content blocks of a message that
@@ -875,30 +890,9 @@ function consumeClaudeEvent(
         isFirstUserTurn: !state.sawUserTurn,
       }))
       state.sawUserTurn = true
-      if (event.originKind) state.sawRecordedOrigin = true
       const userParent = inStreamParent(event.parentToolUseId, state)
-      const prompt = userPromptSpan({
-        traceId: ctx.traceId,
-        spanId: `${ctx.idPrefix}${uid}:user`,
-        parentSpanId: userParent ? userParent.span.span_id : ctx.rootParent,
-        startTime: event.timestamp,
-        service: SERVICE,
-        agent: ctx.agent,
-        step: state.step,
-        content: actor === 'human' ? claudeTypedPromptText(event.prompt) : event.prompt,
-        contentSource: event.contentSource,
-        actor,
-      })
-      if (machine) prompt.attributes[MACHINE_RECORD_ATTR] = true
-      if (event.originKind) {
-        prompt.attributes[ORIGIN_RECORDED_ATTR] = true
-        prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
-      }
+      const prompt = pushPrompt(ctx, state, uid, 'user', userParent ? userParent.span.span_id : ctx.rootParent, { ...event, prompt: event.prompt }, actor, machine)
       if (userParent) prompt.attributes[ATTR.parentConfidence] = userParent.confidence
-      state.spans.push(prompt)
-      state.promptSpans.push(prompt)
-      state.promptSpanByUid.set(uid, prompt)
-      state.step += 1
     }
     for (const result of event.results) {
       backfillResult(state.toolSpanByUseId.get(result.toolUseId), event.timestamp, result)
@@ -908,45 +902,44 @@ function consumeClaudeEvent(
   } else if (event.kind === 'queued-prompt') {
     const machine = claudeRecordIsMachine({ text: event.prompt })
     const actor = machine ? 'injected' : claudeActorFromOrigin(event.originKind, () => 'injected')
-    if (event.originKind) state.sawRecordedOrigin = true
-    const prompt = userPromptSpan({
-      traceId: ctx.traceId,
-      spanId: `${ctx.idPrefix}${uid}:queued`,
-      parentSpanId: ctx.rootParent,
-      startTime: event.timestamp,
-      service: SERVICE,
-      agent: ctx.agent,
-      step: state.step,
-      content: actor === 'human' ? claudeTypedPromptText(event.prompt) : event.prompt,
-      contentSource: event.contentSource,
-      actor,
-    })
-    prompt.attributes['traces.claude.queued'] = true
-    if (machine) prompt.attributes[MACHINE_RECORD_ATTR] = true
-    if (event.originKind) {
-      prompt.attributes[ORIGIN_RECORDED_ATTR] = true
-      prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
+    pushPrompt(ctx, state, uid, 'queued', ctx.rootParent, event, actor, machine).attributes['traces.claude.queued'] = true
+  } else if (event.kind === 'context') {
+    // Verbatim, so its size is the size the model was given (session-measurements contextFootprints).
+    for (const [index, part] of event.parts.entries()) {
+      state.spans.push(span({
+        traceId: ctx.traceId, spanId: `${ctx.idPrefix}${uid}:context-${index}`, parentSpanId: ctx.rootParent, name: 'message.system', kind: 'CHAIN',
+        startTime: event.timestamp, endTime: event.timestamp, service: SERVICE, agent: ctx.agent, step: state.step,
+        content: part.text, extra: { 'traces.context.source': part.source },
+      }))
     }
-    state.spans.push(prompt)
-    state.promptSpans.push(prompt)
-    state.promptSpanByUid.set(uid, prompt)
-    state.step += 1
   } else if (event.kind === 'file-change') {
     state.spans.push(span({
-      traceId: ctx.traceId,
-      spanId: `${ctx.idPrefix}${uid}:file-change`,
-      parentSpanId: ctx.rootParent,
-      name: 'file.change',
-      kind: 'CHAIN',
-      startTime: event.timestamp,
-      endTime: event.timestamp,
-      service: SERVICE,
-      agent: ctx.agent,
-      step: state.step,
+      traceId: ctx.traceId, spanId: `${ctx.idPrefix}${uid}:file-change`, parentSpanId: ctx.rootParent, name: 'file.change', kind: 'CHAIN',
+      startTime: event.timestamp, endTime: event.timestamp, service: SERVICE, agent: ctx.agent, step: state.step,
       extra: toolIoAttributes({ input: { path: event.path }, inputSource: event.contentSource }),
     }))
     state.step += 1
   }
+}
+
+/** A turn sent in as a `user.prompt` span, with its machine and recorded-origin marks, added to the prompt lists. */
+function pushPrompt(ctx: ClaudeStreamContext, state: ClaudeStreamState, uid: string, suffix: string, parentSpanId: string | null,
+  event: { timestamp: string; prompt: string; originKind?: string | null; contentSource?: SourceReferences }, actor: Actor, machine: boolean): OtlpSpan {
+  const prompt = userPromptSpan({
+    traceId: ctx.traceId, spanId: `${ctx.idPrefix}${uid}:${suffix}`, parentSpanId, startTime: event.timestamp, service: SERVICE, agent: ctx.agent, step: state.step,
+    content: actor === 'human' ? claudeTypedPromptText(event.prompt) : event.prompt, contentSource: event.contentSource, actor,
+  })
+  if (machine) prompt.attributes[MACHINE_RECORD_ATTR] = true
+  if (event.originKind) {
+    state.sawRecordedOrigin = true
+    prompt.attributes[ORIGIN_RECORDED_ATTR] = true
+    prompt.attributes[ORIGIN_KIND_ATTR] = event.originKind
+  }
+  state.spans.push(prompt)
+  state.promptSpans.push(prompt)
+  state.promptSpanByUid.set(uid, prompt)
+  state.step += 1
+  return prompt
 }
 
 /**
