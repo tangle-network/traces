@@ -31,7 +31,7 @@ import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { detectEvidenceFormat, exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
-import { isOtlpJsonFile, isStandardOtlpRow, readOtlpInput } from './otlp-input.js'
+import { isOtlpJsonFile, isStandardOtlpRow, readOtlpInput, resolveOtlpInputFiles } from './otlp-input.js'
 import { listAdapters, resolveAdapter } from './registry.js'
 import { parseSession } from './session-source.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -94,17 +94,9 @@ async function statOf(path: string): Promise<Stats | null> {
   }
 }
 
-async function isDirectory(path: string): Promise<boolean> {
-  return (await statOf(path))?.isDirectory() ?? false
-}
-
-async function isFile(path: string): Promise<boolean> {
-  return (await statOf(path))?.isFile() ?? false
-}
-
-function ownHome(): string {
-  return process.env.HOME || homedir()
-}
+const isDirectory = async (path: string): Promise<boolean> => (await statOf(path))?.isDirectory() ?? false
+const isFile = async (path: string): Promise<boolean> => (await statOf(path))?.isFile() ?? false
+const ownHome = (): string => process.env.HOME || homedir()
 
 // ── Files ─────────────────────────────────────────────────────────────
 
@@ -264,7 +256,7 @@ export async function isStoreRoot(dir: string): Promise<boolean> {
 /** Where a bundle keeps its spans: 1.0's layout, then a 0.x bundle's, which stays readable as evidence. */
 const BUNDLE_SPAN_FILES = ['spans.otlp.jsonl', join('derived', 'trace.otlp.jsonl')]
 
-async function directoryRef(path: string, ref: string): Promise<ResolvedRef> {
+async function directoryRef(path: string, ref: string): Promise<ResolvedRef | ResolvedRef[]> {
   if (await isFile(join(path, 'manifest.json'))) {
     for (const file of BUNDLE_SPAN_FILES) {
       if (await isFile(join(path, file))) return { kind: 'spans', ref, path: join(path, file), reader: 'otlp' }
@@ -276,7 +268,11 @@ async function directoryRef(path: string, ref: string): Promise<ResolvedRef> {
   if (await isRuntimeSupervisorRunDir(path)) return { kind: 'run-dir', ref, path }
   if (await isStoreRoot(path)) return { kind: 'store-root', ref, path: resolve(path) }
   if ((await findSupervisorRunDirs(path)).length > 0) return { kind: 'run-dir', ref, path }
-  return { kind: 'spans', ref, path, reader: 'otlp' }
+  // A tree with no OTLP in it may hold retained session files, each read by its content.
+  const { files, skipped } = await resolveOtlpInputFiles(path, true)
+  const refs = files.length > 0 ? [] : await Promise.all(skipped.map((file) => fileRef(file.path, file.path, undefined, {})))
+  const sessions = refs.filter((found) => found.kind === 'session')
+  return sessions.length > 0 ? sessions : { kind: 'spans', ref, path, reader: 'otlp' }
 }
 
 // ── Session ids ───────────────────────────────────────────────────────
@@ -291,9 +287,7 @@ interface Found {
   readonly session: SessionRef
 }
 
-function candidate({ adapter, session }: Found): RefCandidate {
-  return { harness: adapter.harness, sessionId: session.sessionId, path: session.path }
-}
+const candidate = ({ adapter, session }: Found): RefCandidate => ({ harness: adapter.harness, sessionId: session.sessionId, path: session.path })
 
 /** Shorter than this, a ref is a prefix or suffix: no harness writes ids this short. */
 const COMPLETE_ID_CHARS = 20
@@ -423,7 +417,7 @@ async function splitSelector(ref: string): Promise<{ path: string; selector?: st
   return (await statOf(path)) === null ? { path: ref } : { path, selector: ref.slice(hash + 1) }
 }
 
-async function pathRef(ref: string, options: ResolveRefOptions): Promise<ResolvedRef | undefined> {
+async function pathRef(ref: string, options: ResolveRefOptions): Promise<ResolvedRef | ResolvedRef[] | undefined> {
   const { path, selector } = await splitSelector(ref)
   const info = await statOf(path)
   if (info === null) {
@@ -444,13 +438,13 @@ async function pathRef(ref: string, options: ResolveRefOptions): Promise<Resolve
  */
 export async function resolveRefs(refs: readonly string[], options: ResolveRefOptions = {}): Promise<ResolvedRef[]> {
   const byPath = await Promise.all(refs.map((ref) => pathRef(ref, options)))
-  const roots = byPath.filter((ref): ref is Extract<ResolvedRef, { kind: 'store-root' }> => ref?.kind === 'store-root')
+  const roots = byPath.flat().filter((ref): ref is Extract<ResolvedRef, { kind: 'store-root' }> => ref?.kind === 'store-root')
   if (roots.length > 1) {
     throw new RefError(`name one store root per command, not ${roots.length}: ${roots.map((root) => root.ref).join(', ')}`, 'usage')
   }
   const resolved: ResolvedRef[] = []
   for (const [index, ref] of refs.entries()) {
-    resolved.push(byPath[index] ?? await lookupSession(ref, options, roots[0]?.path))
+    resolved.push(...[byPath[index] ?? await lookupSession(ref, options, roots[0]?.path)].flat())
   }
   return resolved
 }
@@ -520,9 +514,11 @@ export function selectSpans(spans: readonly OtlpSpan[], selector: string, path: 
   return picked
 }
 
-/** Every span one ref names. A store root names many sessions, not one run. */
+/** Every span one ref names. A store root or a tree of session files names many sessions, not one run. */
 export async function readRefSpans(ref: string, options: ResolveRefOptions = {}): Promise<OtlpSpan[]> {
-  const resolved = (await resolveRefs([ref], options))[0]!
+  const found = await resolveRefs([ref], options)
+  if (found.length > 1) throw new RefError(`${ref} holds ${found.length} sessions; name one of them`, 'usage')
+  const resolved = found[0]!
   switch (resolved.kind) {
     case 'session':
       return parseSession(resolved.adapter, resolved.session)

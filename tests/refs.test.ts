@@ -122,6 +122,19 @@ describe('refs: files and directories are read by their content', () => {
     }
   })
 
+  it('reads a tree of retained session files and skips the logs beside them', async () => {
+    const tree = join(fx.root, 'kept', 'box-1', 'session-1')
+    await mkdir(join(tree, 'native', 'exec-1'), { recursive: true })
+    await mkdir(join(tree, 'native', 'exec-2'), { recursive: true })
+    await mkdir(join(tree, 'events'), { recursive: true })
+    await copyFile(fx.paths.claude, join(tree, 'native', 'exec-1', 'claude.jsonl'))
+    await copyFile(fx.paths.codex, join(tree, 'native', 'exec-2', 'rollout.jsonl'))
+    await copyFile(join(liveStreams, 'sandbox-refused-before-codex.jsonl'), join(tree, 'events', 'stream.jsonl'))
+    await writeFile(join(tree, 'process-io.jsonl'), '{"stream":"stdout"}\n', 'utf8')
+
+    expect((await factsOf(join(fx.root, 'kept'))).sessions).toHaveLength(2)
+  })
+
   it('reads OTLP files and directories, and picks one run with #<trace id>', async () => {
     const dir = join(fx.root, 'otlp')
     await mkdir(dir, { recursive: true })

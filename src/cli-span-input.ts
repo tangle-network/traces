@@ -45,7 +45,7 @@ export async function collectOtlpSpans(path: string, selector?: string, retained
     // A directory that is no run, store root or bundle is read as OTLP: say what else it could have been.
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}. A directory ref is read as OTLP-JSONL unless it is a Runtime run ` +
-        '(spawn-journal.jsonl, observer.jsonl or failure.json), a harness store root, or a bundle (manifest.json)',
+        '(spawn-journal.jsonl, observer.jsonl or failure.json), a harness store root, a tree of session files, or a bundle (manifest.json)',
     )
   }
   if (input.spans.length === 0) {
