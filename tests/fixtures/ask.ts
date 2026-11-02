@@ -79,7 +79,7 @@ export async function writeStubBridge(path: string, questions: readonly BridgeSc
  * `pricing` (an unknown model on a key with no allow-list, a 503) and
  * `substituted` (a completion from a model other than the one asked for).
  */
-export type EndpointReply = 'ok' | 'billing' | 'payment' | 'pricing' | 'substituted'
+export type EndpointReply = 'ok' | 'billing' | 'payment' | 'pricing' | 'substituted' | 'dropped' | 'stream-rate-limit'
 
 const REFUSALS: Readonly<Record<'billing' | 'payment' | 'pricing', readonly [number, Record<string, string>]>> = {
   billing: [503, { message: 'Billing is temporarily unavailable. Retry shortly.', type: 'server_error', code: 'billing_unavailable' }],
@@ -116,6 +116,12 @@ export async function startEndpoint(replies: readonly EndpointReply[]): Promise<
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model: string }
       requests.push({ model: body.model, authorized: req.headers.authorization === `Bearer ${ASK_KEY}` })
       const reply = replies[Math.min(requests.length, replies.length) - 1]!
+      if (reply === 'dropped' || reply === 'stream-rate-limit') {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        if (reply === 'dropped') res.write(': open\n\n', () => res.destroy())
+        else res.end(`data: ${JSON.stringify({ error: { message: 'Upstream at zai is rate limiting this model. Retry shortly.' } })}\n\n`)
+        return
+      }
       if (reply !== 'ok' && reply !== 'substituted') {
         const [status, error] = REFUSALS[reply]
         res.writeHead(status, { 'content-type': 'application/json' })

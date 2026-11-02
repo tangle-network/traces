@@ -229,6 +229,15 @@ describe('traces ask: a model endpoint that refuses', () => {
     expect(run.stdout).toContain('**1 answered, 0 failed.**')
   }, 60_000)
 
+  it('retries a stream the endpoint drops or rate limits after it opened', async () => {
+    const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '1'], {
+      replies: ['dropped', 'stream-rate-limit', 'ok'],
+    })
+    expect(run.code, run.stderr).toBe(0)
+    expect(run.endpoint.requests).toHaveLength(3)
+    expect(run.stdout).toContain('**1 answered, 0 failed.**')
+  }, 60_000)
+
   it.each([
     ['a key that cannot pay', 'payment', 'gpt-5.6-luna', 'auth', 'the model endpoint refused the key (402: Inference requires verified paid access.'],
     ['a model the key cannot use, refused with a 503', 'pricing', 'gpt-6-luna', 'model', 'cannot serve --model gpt-6-luna (503: Trusted pricing is unavailable'],

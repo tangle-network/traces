@@ -149,7 +149,7 @@ function classifyModelFailure(error: string, model: string): ModelFailure {
   }
   const refused = /\brouter (\d{3}): (.*)$/su.exec(error)
   if (!refused) {
-    return /router network failure|router request timeout|ECONNRESET|ETIMEDOUT|socket hang up|fetch failed/u.test(error)
+    return /router network failure|router request timeout|transport failed|router stream error: .*rate limit|ECONNRESET|ETIMEDOUT|socket hang up|fetch failed/u.test(error)
       ? { kind: 'transient', reason: 'the endpoint could not be reached' }
       : { kind: 'other' }
   }
@@ -201,8 +201,8 @@ type ModelCall = ReturnType<typeof profileOptimizerModelCall>
  * One model call, retried while the endpoint is busy, rate limited or
  * briefly down: a router billing outage or a provider's rate limit that
  * outlasts a few seconds otherwise fails the whole question. A retried refusal
- * was never served, so it costs nothing, and the wait ends when the
- * question's deadline aborts the call. A permanent refusal (the key, or the
+ * was never served, so it costs nothing; a dropped stream may have been billed,
+ * and the budget bounds that. The wait ends when the question's deadline aborts the call. A permanent refusal (the key, or the
  * model) is reported at once, so the run stops before it spends more.
  */
 function retryingModelCall(
