@@ -164,8 +164,8 @@ describe('parseIsoToEpochMs', () => {
 })
 
 describe('environment identity attributes', () => {
-  it('round-trips a SessionEnvironment through span attributes without clobbering adapter values', async () => {
-    const { environmentFromSpanAttributes, stampEnvironmentAttrs } = await import('../src/attributes.js')
+  it('stamps a SessionEnvironment onto spans without clobbering adapter values', async () => {
+    const { stampEnvironmentAttrs } = await import('../src/attributes.js')
     const environment = {
       image: 'ghcr.io/tangle-network/sandbox:base',
       imageDigest: `sha256:${'d'.repeat(64)}`,
@@ -179,11 +179,5 @@ describe('environment identity attributes', () => {
     stampEnvironmentAttrs(spans, environment)
     expect(spans[0]!.attributes['container.image.name']).toBe('adapter-set:keep')
     expect(spans[1]!.attributes['container.image.name']).toBe('ghcr.io/tangle-network/sandbox:base')
-    expect(environmentFromSpanAttributes([spans[1]!])).toEqual(environment)
-  })
-
-  it('returns null when no environment identity was ever recorded', async () => {
-    const { environmentFromSpanAttributes } = await import('../src/attributes.js')
-    expect(environmentFromSpanAttributes([{ attributes: { unrelated: 'x' } }])).toBeNull()
   })
 })

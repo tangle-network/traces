@@ -23,7 +23,7 @@
 import type { Stats } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import { CODEX_HOME_RULE, STORES, codexHomes, isCodexHome } from '@tangle-network/harness-sessions'
 import { ATTR } from '@tangle-network/agent-trace-contract'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
@@ -256,6 +256,23 @@ export async function isStoreRoot(dir: string): Promise<boolean> {
 /** Where a bundle keeps its spans: 1.0's layout, then a 0.x bundle's, which stays readable as evidence. */
 const BUNDLE_SPAN_FILES = ['spans.otlp.jsonl', join('derived', 'trace.otlp.jsonl')]
 
+/**
+ * A retained tree can hold one session at several points in its life, one copy per attempt: the same
+ * file name, each a byte prefix of the longest. Only the longest is the session; a different file
+ * that happens to share the name stays.
+ */
+async function withoutEarlierCopies(paths: readonly string[]): Promise<string[]> {
+  const byName = new Map<string, string[]>()
+  for (const path of paths) byName.set(basename(path), [...byName.get(basename(path)) ?? [], path])
+  const kept: string[] = []
+  for (const copies of byName.values()) {
+    const bytes = await Promise.all(copies.map(async (path) => ({ path, body: copies.length > 1 ? await readFile(path) : Buffer.alloc(0) })))
+    const longest = bytes.reduce((best, copy) => (copy.body.length > best.body.length ? copy : best))
+    kept.push(...bytes.filter(({ path, body }) => path === longest.path || !longest.body.subarray(0, body.length).equals(body)).map(({ path }) => path))
+  }
+  return kept
+}
+
 async function directoryRef(path: string, ref: string): Promise<ResolvedRef | ResolvedRef[]> {
   if (await isFile(join(path, 'manifest.json'))) {
     for (const file of BUNDLE_SPAN_FILES) {
@@ -270,7 +287,8 @@ async function directoryRef(path: string, ref: string): Promise<ResolvedRef | Re
   if ((await findSupervisorRunDirs(path)).length > 0) return { kind: 'run-dir', ref, path }
   // A tree with no OTLP in it may hold retained session files, each read by its content.
   const { files, skipped } = await resolveOtlpInputFiles(path, true)
-  const refs = files.length > 0 ? [] : await Promise.all(skipped.map((file) => fileRef(file.path, file.path, undefined, {})))
+  const sessionFiles = files.length > 0 ? [] : await withoutEarlierCopies(skipped.map((file) => file.path))
+  const refs = await Promise.all(sessionFiles.map((file) => fileRef(file, file, undefined, {})))
   const sessions = refs.filter((found) => found.kind === 'session')
   return sessions.length > 0 ? sessions : { kind: 'spans', ref, path, reader: 'otlp' }
 }

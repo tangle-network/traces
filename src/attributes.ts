@@ -139,36 +139,6 @@ export function stampEnvironmentAttrs(
   }
 }
 
-/**
- * Recover a `SessionEnvironment` from stamped span attributes — the read
- * counterpart of `stampEnvironmentAttrs`, for consumers that hold only the
- * OTLP artifact (replay-environment resolution reads the exported spans, not
- * the source session). Returns null when no environment identity was
- * recorded — "not captured" stays distinguishable from any captured value.
- */
-export function environmentFromSpanAttributes(
-  spans: readonly { attributes: Readonly<Record<string, unknown>> }[],
-): import('./types.js').SessionEnvironment | null {
-  const first = (key: string): string | undefined => {
-    for (const span of spans) {
-      const value = span.attributes[key]
-      if (typeof value === 'string' && value.length > 0) return value
-    }
-    return undefined
-  }
-  const image = first(ATTR.CONTAINER_IMAGE)
-  const imageDigest = first(ATTR.CONTAINER_IMAGE_DIGEST)
-  const sandboxId = first(ATTR.SANDBOX_ID)
-  const cwd = first(ATTR.ENVIRONMENT_CWD)
-  if (!image && !imageDigest && !sandboxId && !cwd) return null
-  return {
-    ...(image ? { image } : {}),
-    ...(imageDigest ? { imageDigest } : {}),
-    ...(sandboxId ? { sandboxId } : {}),
-    cwd: cwd ?? null,
-  }
-}
-
 const SESSION_ID_ATTRIBUTE_KEYS = [ATTR.SESSION_ID, 'session.id', 'traces.session.id'] as const
 
 export function sessionIdFromAttributes(
