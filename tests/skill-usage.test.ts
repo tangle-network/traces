@@ -2,6 +2,8 @@ import { appendFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { ClaudeAdapter } from '../src/adapters/claude.js'
+import { computeSessionFacts } from '../src/session-facts.js'
 import {
   buildSkillUsageReport,
   readInstalledSkills,
@@ -216,6 +218,49 @@ describe('SkillUsageStore', () => {
     const restored = await SkillUsageStore.load(f.store)
     const [, , unchanged] = await restored.refresh(f.sources)
     expect(unchanged).toMatchObject({ bytesRead: 0, eventsAdded: 0 })
+  })
+
+  // A Discovery agent told to "read skills/<name>/SKILL.md" reads the file and never loads the skill.
+  it('counts Claude Code Bash and Read calls that open a skill document, as the session facts do', async () => {
+    const f = await fixture()
+    const call = (id: string, name: string, input: Record<string, unknown>, ts: string): string => line({
+      type: 'assistant', uuid: `a-${id}`, sessionId: SESSION, timestamp: ts,
+      message: { id: `m-${id}`, role: 'assistant', model: 'test-model', content: [{ type: 'tool_use', id, name, input }] },
+    })
+    const first = [
+      line({ type: 'user', uuid: 'task', sessionId: SESSION, timestamp: '2026-11-02T10:00:00Z', message: { role: 'user', content: 'Read the skills, then build.' } }),
+      call('toolu_r1', 'Bash', { command: 'cat skills/research-director/SKILL.md' }, '2026-11-02T10:00:01Z'),
+      skillResult('toolu_r1', '2026-11-02T10:00:02Z', { text: '# Research director' }),
+      call('toolu_r2', 'Read', { file_path: '/home/agent/skills/be-ambitious/SKILL.md' }, '2026-11-02T10:00:03Z'),
+    ].join('')
+    const tail = [
+      skillResult('toolu_r2', '2026-11-02T10:00:04Z', { text: '# Be ambitious' }),
+      call('toolu_r3', 'Read', { file_path: '/home/agent/skills/missing/SKILL.md' }, '2026-11-02T10:00:05Z'),
+      skillResult('toolu_r3', '2026-11-02T10:00:06Z', { text: 'File does not exist.', error: true }),
+      call('toolu_r4', 'Bash', { command: 'grep -rn SKILL.md docs' }, '2026-11-02T10:00:07Z'),
+      skillResult('toolu_r4', '2026-11-02T10:00:08Z', { text: 'docs/a.md: see skills/ship/SKILL.md' }),
+    ].join('')
+    await writeFile(f.claudeFile, first)
+    const store = await SkillUsageStore.load(f.store)
+    const [initial] = await store.refresh(f.sources)
+    expect(initial).toMatchObject({ harness: 'claude-code', eventsAdded: 1 })
+    await store.save()
+
+    // The Read call's result lands in the next refresh, through the saved cursor.
+    await appendFile(f.claudeFile, tail)
+    const reloaded = await SkillUsageStore.load(f.store)
+    const [later] = await reloaded.refresh(f.sources)
+    expect(later).toMatchObject({ eventsAdded: 1 })
+    expect(reloaded.list().map((e) => [e.harness, e.kind, e.skill, e.root, e.id])).toEqual([
+      ['claude-code', 'read', 'research-director', 'skills', 'toolu_r1#skills/research-director'],
+      ['claude-code', 'read', 'be-ambitious', '/home/agent/skills', 'toolu_r2#/home/agent/skills/be-ambitious'],
+    ])
+
+    const spans = await new ClaudeAdapter().parse({ harness: 'claude-code', sessionId: SESSION, path: f.claudeFile, cwd: null, mtimeMs: 0 })
+    expect(computeSessionFacts(spans)[0]!.measurements.skills).toEqual({
+      'research-director': { model: 0, slash: 0, read: 1 },
+      'be-ambitious': { model: 0, slash: 0, read: 1 },
+    })
   })
 })
 
