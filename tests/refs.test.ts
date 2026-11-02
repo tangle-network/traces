@@ -122,6 +122,18 @@ describe('refs: files and directories are read by their content', () => {
     }
   })
 
+  it('reads a harness store in a retained tree over the event stream recorded beside it', async () => {
+    const box = join(fx.root, 'kept-store', 'box-1', 'session-1')
+    const rollout = join(box, 'native', 'exec-1', '1', '.codex', 'sessions', '2026', '11', '01', 'rollout.jsonl')
+    await mkdir(dirname(rollout), { recursive: true })
+    await mkdir(join(box, 'events'), { recursive: true })
+    await copyFile(fx.paths.codex, rollout)
+    await copyFile(join(liveStreams, 'codex-director-in-progress.jsonl'), join(box, 'events', 'stream.ndjson'))
+
+    const facts = await factsOf(join(fx.root, 'kept-store'))
+    expect({ harness: facts.harness, sessions: facts.sessions.length }).toEqual({ harness: 'codex', sessions: 1 })
+  })
+
   it('reads a tree of retained session files and skips the logs beside them', async () => {
     const tree = join(fx.root, 'kept', 'box-1', 'session-1')
     await mkdir(join(tree, 'native', 'exec-1'), { recursive: true })

@@ -143,12 +143,8 @@ async function headRows(path: string): Promise<unknown[]> {
   // A pretty-printed JSON document reads as no JSONL at all.
   const info = await stat(path)
   if (info.size > MAX_WHOLE_JSON_BYTES) return rows
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(await readFile(path, 'utf8'))
-  } catch {
-    return rows
-  }
+  const parsed: unknown = await readFile(path, 'utf8').then((text) => JSON.parse(text) as unknown).catch(() => undefined)
+  if (parsed === undefined) return rows
   if (Array.isArray(parsed)) return parsed
   if (isObject(parsed) && Array.isArray(parsed.events)) return parsed.events
   return [parsed]
@@ -287,8 +283,9 @@ async function directoryRef(path: string, ref: string): Promise<ResolvedRef | Re
   const paths = new Set(skipped.map((file) => file.path)), parts = (path: string) => path.split(`${sep}subagents${sep}`), folded = (path: string) => parts(path).slice(1).some((_, i) => paths.has(`${parts(path).slice(0, i + 1).join(`${sep}subagents${sep}`)}.jsonl`))
   const sessionFiles = files.length > 0 ? [] : await withoutEarlierCopies([...paths].filter((path) => !folded(path)))
   const refs = await Promise.all(sessionFiles.map((file) => fileRef(file, file, undefined, {})))
-  const sessions = refs.filter((found) => found.kind === 'session')
-  return sessions.length > 0 ? sessions : { kind: 'spans', ref, path, reader: 'otlp' }
+  // A harness's own store is the session; a recording beside it, such as a Sandbox event stream, is a derived copy.
+  const sessions = refs.filter((found) => found.kind === 'session'), stored = sessions.filter((found) => harnessOfStorePath(found.session.path))
+  return stored.length > 0 ? stored : sessions.length > 0 ? sessions : { kind: 'spans', ref, path, reader: 'otlp' }
 }
 
 // ── Session ids ───────────────────────────────────────────────────────
