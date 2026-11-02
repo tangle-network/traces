@@ -48,7 +48,7 @@ function claudeSession(): Row[] {
     // Fifteen minutes on one command: a stall the command's result ends.
     call(at(12), 'w1', 'Bash', { command: 'sleep 900 && pnpm build' }), result(at(27), 'w1', 'built'),
     call(at(28), 's1', 'Skill', { skill: 'verify' }), result(at(28, 5), 's1', 'Launching skill: verify'),
-    // Claude Code records a skill when it loads one: reading the document is not a use there.
+    // A skill document read through Bash counts in the read column, as a Codex read does.
     call(at(29), 'd1', 'Bash', { command: 'cat /h/.claude/skills/simplify/SKILL.md' }), result(at(29, 5), 'd1', '# Simplify'),
     say(at(31), 'Done: the tests pass.'),
     // Two hours later the person writes: their time, not a stall.
@@ -204,7 +204,7 @@ describe('facts waste measures', () => {
     expect(run.code).toBe(0)
     expect(run.stdout).toContain('\nwaste 55 min: `pnpm test` failed 3× in a row (6 min) · 3 stalls ≥ 10 min (49 min) · reverts 2\n')
     expect(run.stdout).toMatch(/ · active 1\.3 h$/mu)
-    expect(run.stdout).toContain('\nskills reflect 1, verify 1\n')
+    expect(run.stdout).toContain('\nskills reflect 1, simplify 1, verify 1\n')
   })
 
   it('withholds a streak command under --no-content and keeps its counts', async () => {
@@ -234,33 +234,34 @@ describe('facts waste measures', () => {
 })
 
 describe('facts skill counts', () => {
-  it('counts what traces skills counts for the same session: a loaded skill and an expanded slash command', async () => {
+  it('counts what traces skills counts for the same session: a loaded skill, an expanded slash command and a read skill document', async () => {
     const facts = await measured([claudeFile])
     expect(facts.measurements.skills).toEqual({
       verify: { model: 1, slash: 0, read: 0 },
       reflect: { model: 0, slash: 1, read: 0 },
+      simplify: { model: 0, slash: 0, read: 1 },
     })
     const skills = await runCli(['skills', '--since', '2026-10-01T00:00:00Z', '--format', 'json'], { env })
     expect(skills.code).toBe(0)
     const rows = (JSON.parse(skills.stdout) as { rows: Array<{ skill: string; model: number; slash: number; read: number }> }).rows
-    const claudeRows = Object.fromEntries(rows.filter((row) => row.skill !== 'simplify').map(({ skill, model, slash, read }) => [skill, { model, slash, read }]))
-    expect(claudeRows).toEqual(facts.measurements.skills)
+    const storeRows = Object.fromEntries(rows.map(({ skill, model, slash, read }) => [skill, { model, slash, read }]))
+    expect(storeRows).toEqual(facts.measurements.skills)
   })
 
   it('prints skills as one header line and the table; the bookkeeping is in JSON, and the window defaults to 30 days', async () => {
     const text = await runCli(['skills', '--since', '2026-10-01T00:00:00Z'], { env })
     expect(text.code).toBe(0)
     const lines = text.stdout.trimEnd().split('\n')
-    expect(lines[0]).toBe('2 skills used since 2026-10-01 · 0 installed with no use (traces skills --unused) · no model call')
+    expect(lines[0]).toBe('3 skills used since 2026-10-01 · 0 installed with no use (traces skills --unused) · no model call')
     expect(lines[1]).toMatch(/^skill\s+model\s+slash\s+read\s+sessions\s+last\s+installed$/u)
-    expect(lines).toHaveLength(4)
+    expect(lines).toHaveLength(5)
     expect(text.stdout).not.toMatch(/stored events|not indexed|sweep|read \d|MB/u)
     const json = await runCli(['skills', '--format', 'json'], { env })
     const report = JSON.parse(json.stdout) as { since: string; refresh: unknown[]; storedEvents: number; notIndexed: string[] }
     expect(Date.now() - Date.parse(report.since)).toBeGreaterThanOrEqual(30 * 86_400_000 - 60_000)
     expect(Date.now() - Date.parse(report.since)).toBeLessThan(30 * 86_400_000 + 60_000)
     expect(report.refresh).toHaveLength(3)
-    expect(report.storedEvents).toBe(2)
+    expect(report.storedEvents).toBe(3)
     expect(report.notIndexed.length).toBeGreaterThan(0)
   })
 
