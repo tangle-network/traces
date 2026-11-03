@@ -41,6 +41,8 @@ export interface ContentFootprint {
   readonly bytes: number
   readonly lines: number
   readonly entries: number | null
+  /** What the harness recorded it as (`system prompt`, `skill listing`, `Project CLAUDE.md`), when it says. */
+  readonly source: string | null
   /** Source representation, not the reconstructed full model request. */
   readonly scope: 'captured-attribute'
 }
@@ -377,7 +379,10 @@ function contextFootprints(spans: readonly OtlpSpan[]): ContentFootprint[] {
       if (typeof value === 'string') {
         try { const parsed: unknown = JSON.parse(value); if (Array.isArray(parsed)) entries = parsed.length } catch { /* text */ }
       }
-      out.push({ spanId: span.span_id, field, bytes: Buffer.byteLength(text), lines: text.split('\n').length, entries, scope: 'captured-attribute' })
+      // A context span's content is cut to 8,000 characters; its uncut size travels beside it.
+      const source = typeof span.attributes['traces.context.source'] === 'string' ? String(span.attributes['traces.context.source']) : null
+      const counted = (name: string, fallback: number): number => (field === 'content' && typeof span.attributes[name] === 'number' ? Number(span.attributes[name]) : fallback)
+      out.push({ spanId: span.span_id, field, bytes: counted('traces.context.bytes', Buffer.byteLength(text)), lines: counted('traces.context.lines', text.split('\n').length), entries, source, scope: 'captured-attribute' })
     }
   }
   return out
