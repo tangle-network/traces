@@ -379,8 +379,10 @@ function contextFootprints(spans: readonly OtlpSpan[]): ContentFootprint[] {
       if (typeof value === 'string') {
         try { const parsed: unknown = JSON.parse(value); if (Array.isArray(parsed)) entries = parsed.length } catch { /* text */ }
       }
+      // A context span's content is cut to 8,000 characters; its uncut size travels beside it.
       const source = typeof span.attributes['traces.context.source'] === 'string' ? String(span.attributes['traces.context.source']) : null
-      out.push({ spanId: span.span_id, field, bytes: Buffer.byteLength(text), lines: text.split('\n').length, entries, source, scope: 'captured-attribute' })
+      const counted = (name: string, fallback: number): number => (field === 'content' && typeof span.attributes[name] === 'number' ? Number(span.attributes[name]) : fallback)
+      out.push({ spanId: span.span_id, field, bytes: counted('traces.context.bytes', Buffer.byteLength(text)), lines: counted('traces.context.lines', text.split('\n').length), entries, source, scope: 'captured-attribute' })
     }
   }
   return out

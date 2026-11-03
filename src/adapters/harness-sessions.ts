@@ -102,24 +102,20 @@ function messageText(message: HarnessSession['messages'][number]): string {
 function presentationSpans(session: HarnessSession, root: OtlpSpan): OtlpSpan[] {
   const spans = new Map<string, OtlpSpan>()
   for (const message of session.messages) {
-    if (message.role !== 'user' && message.role !== 'assistant') continue
-    if (!message.at) continue
+    if (message.role === 'tool' || !message.at) continue
     const text = messageText(message)
     if (!text) continue
-    const isPrompt = message.role === 'user'
+    // A system message is context the harness put in front of the model; its size is the uncut text's.
+    const context = message.role === 'system' ? { 'traces.context.source': message.source ?? 'system', 'traces.context.bytes': Buffer.byteLength(text), 'traces.context.lines': text.split('\n').length } : {}
     const item = contractSpan({
       traceId: root.trace_id,
       spanId: deriveHexId(`${session.harness}:${session.nativeSessionId}:message:${message.id}`, 8),
       parentSpanId: root.span_id,
-      name: isPrompt ? 'user.prompt' : 'message.assistant',
+      name: message.role === 'user' ? 'user.prompt' : `message.${message.role}`,
       kind: 'CHAIN',
       startTime: message.at,
       endTime: message.at,
-      attributes: {
-        'service.name': session.harness,
-        'tangle.actor': message.actor,
-        content: text.slice(0, 8000),
-      },
+      attributes: { 'service.name': session.harness, 'tangle.actor': message.actor, content: text.slice(0, 8000), ...context },
     })
     // Claude can re-emit a message with the same native ID after a resumed
     // subagent turn. The later copy can carry stronger actor attribution.

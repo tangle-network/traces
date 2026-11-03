@@ -188,8 +188,8 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0
       '@tangle-network/harness-sessions':
-        specifier: ^1.0.1
-        version: 1.0.2
+        specifier: ^1.0.9
+        version: 1.0.9
     devDependencies:
       '@types/node':
         specifier: ^26.6.5
@@ -691,8 +691,8 @@ packages:
   '@tangle-network/agent-trace-contract@2.2.0':
     resolution: {integrity: sha512-M7UrrKmaQIvrW2S1PCIsTOHBqP/hKiSjIAbV/Shso78zTYet0bzhJ/vfwfCEs0bfAl1oDsh/tQlZZp66o+YgPg==}
 
-  '@tangle-network/harness-sessions@1.0.2':
-    resolution: {integrity: sha512-1xnPrMlAkIIQENs/U2D98jpl4VjWWAvcgMUcLyMYYgSkuH/EhMXkqtDBALHsP2v/tLnh/K6cF9yGVM5el978tA==}
+  '@tangle-network/harness-sessions@1.0.9':
+    resolution: {integrity: sha512-dGnmSV8NDwximhAN1FotggcZX2QmxktRqVSJbJtHWJpQ/0XkPlZs5S5Ps9OGwdc2MAlIJ2Qs4ZJy8dbyaPAdWg==}
     engines: {node: '>=22.13.0'}
     hasBin: true
 
@@ -1554,7 +1554,7 @@ snapshots:
       '@tangle-network/agent-core': 1.0.1
       '@tangle-network/agent-interface': 5.10.7
       '@tangle-network/agent-trace-contract': 2.2.0
-      '@tangle-network/harness-sessions': 1.0.2
+      '@tangle-network/harness-sessions': 1.0.9
       hono: 4.13.14
       linear-sum-assignment: 1.0.9
       re2js: 2.9.0
@@ -1602,7 +1602,7 @@ snapshots:
 
   '@tangle-network/agent-trace-contract@2.2.0': {}
 
-  '@tangle-network/harness-sessions@1.0.2':
+  '@tangle-network/harness-sessions@1.0.9':
     dependencies:
       '@tangle-network/agent-core': 1.0.1
       '@tangle-network/agent-trace-contract': 2.2.0

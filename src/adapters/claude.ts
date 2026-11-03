@@ -228,10 +228,6 @@ interface ClaudeEvent {
     prompt?: unknown
     origin?: { kind?: unknown }
     timestamp?: string
-    /** `instructions`, `skill_listing` and `prompt_snapshot`: what the harness puts in the model's context. */
-    files?: Array<{ path?: string; type?: string; content?: unknown }>
-    content?: unknown
-    systemPrompt?: unknown
   }
   toolUseResult?: {
     runId?: unknown
@@ -418,17 +414,8 @@ type ClaudeEventProjection =
       contentSource?: SourceReferences
     }
   | { kind: 'file-change'; timestamp: string; path: string; contentSource?: SourceReferences }
-  | { kind: 'context'; timestamp: string; parts: Array<{ source: string; text: string }> }
   | { kind: 'compaction'; timestamp: string; metadata: NonNullable<ClaudeEvent['compactMetadata']>; parentToolUseId?: string | null }
   | { kind: 'ignored' }
-
-/** What Claude Code puts in the model's context: each CLAUDE.md or memory file, the skill listing, the system prompt. */
-function contextParts(attachment: ClaudeEvent['attachment']): Array<{ source: string; text: string }> {
-  if (attachment?.type === 'instructions') return (attachment.files ?? []).flatMap((file) => typeof file.content === 'string' ? [{ source: `${file.type ?? 'file'} ${file.path?.split('/').pop() ?? ''}`.trim(), text: file.content }] : [])
-  if (attachment?.type === 'skill_listing' && typeof attachment.content === 'string') return [{ source: 'skill listing', text: attachment.content }]
-  const prompt = attachment?.type === 'prompt_snapshot' && Array.isArray(attachment.systemPrompt) ? attachment.systemPrompt.filter((part) => typeof part === 'string') : []
-  return prompt.length > 0 ? [{ source: 'system prompt', text: prompt.join('\n') }] : []
-}
 
 function projectToolResult(
   toolUseId: string,
@@ -542,8 +529,6 @@ function projectClaudeEvent(event: ClaudeEvent): ClaudeEventProjection {
       ),
     }
   }
-  const context = event.type === 'attachment' ? contextParts(event.attachment) : []
-  if (context.length > 0) return { kind: 'context', timestamp, parts: context }
   if (event.type === 'attachment' && event.attachment?.type === 'queued_command') {
     // The queued text is a message body, so it arrives in either shape a
     // message body takes: a string, or the content blocks of a message that
@@ -903,15 +888,6 @@ function consumeClaudeEvent(
     const machine = claudeRecordIsMachine({ text: event.prompt })
     const actor = machine ? 'injected' : claudeActorFromOrigin(event.originKind, () => 'injected')
     pushPrompt(ctx, state, uid, 'queued', ctx.rootParent, event, actor, machine).attributes['traces.claude.queued'] = true
-  } else if (event.kind === 'context') {
-    // Verbatim, so its size is the size the model was given (session-measurements contextFootprints).
-    for (const [index, part] of event.parts.entries()) {
-      state.spans.push(span({
-        traceId: ctx.traceId, spanId: `${ctx.idPrefix}${uid}:context-${index}`, parentSpanId: ctx.rootParent, name: 'message.system', kind: 'CHAIN',
-        startTime: event.timestamp, endTime: event.timestamp, service: SERVICE, agent: ctx.agent, step: state.step,
-        content: part.text, extra: { 'traces.context.source': part.source },
-      }))
-    }
   } else if (event.kind === 'file-change') {
     state.spans.push(span({
       traceId: ctx.traceId, spanId: `${ctx.idPrefix}${uid}:file-change`, parentSpanId: ctx.rootParent, name: 'file.change', kind: 'CHAIN',
