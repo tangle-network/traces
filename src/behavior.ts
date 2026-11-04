@@ -3,11 +3,11 @@
  * producer emits. One node per `session.id` (the M9 producer's shape); a producer with one trace for the whole
  * run is split at its agent boundaries (`buildSpanRunTree`). A port of dl-ui's analytics.py, policy
  * `dl-ui-behavior-windows@1`, calibrated on 508 labeled windows (2026-11-02): its PARITY.md proves the rules and
- * the output shape, so a rule changes only with a new policy version. A call the calibrated rules leave as
- * `running` falls back to `pipelines.ts`'s verify/edit/read kinds, so a Claude Code `Edit` or a `pnpm test` reads
- * as a Codex `file_change` or `cargo test` does. Every gaming flag and every class the calibration does not cover
- * is record-only: never a severity above info. Times are epoch seconds.
+ * the output shape, so a rule changes only with a new policy version. Any producer's model and edit spans read as
+ * `llm.turn` and `file_change` do; a call the rules leave as `running` falls back to `pipelines.ts`'s kinds. Every
+ * gaming flag and uncalibrated class is record-only: never a severity above info. Times are epoch seconds.
  */
+import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
 import type { OtlpSpan } from './otlp.js'
 import { SUBSTITUTED_FIELDS_ATTR } from './otlp-input.js'
 import { classifyLiveActions, type TraceLiveActionKind } from './pipelines.js'
@@ -35,6 +35,7 @@ const CAP_RE = /--cycles\s+(\d+)|--skip(?!-)\b|\bhead -n\s*\d+\b.*cargo test/
 /** The id of a spawned worker, inside the tool's (possibly JSON-escaped) output text. */
 const WORKER_ID_RE = /workerId\\?":\\?"([^"\\]+)/
 const COORDINATION_PREFIX = 'mcp__agent-runtime-coordination__'
+const FILE_EDIT_TOOLS = new Set(['edit', 'write', 'multiedit'])
 const REVIEW_TOOLS = new Set(['observe_agent', 'read_journal'])
 const EXPLORE_TOOLS = new Set(['knowledge_read', 'knowledge_search', 'knowledge_resolve', 'websearch', 'webfetch', 'read', 'glob', 'grep'])
 const COMMUNICATE_TOOLS = new Set(['steer_agent', 'spawn_worker', 'report_blocked', 'knowledge_record', 'send_message', 'reply'])
@@ -145,7 +146,6 @@ function classifyCommand(cmd: string, flags: SpanFlag[], kind: TraceLiveActionKi
 export function classifySpan(span: Pick<OtlpSpan, 'name' | 'attributes'>, kind?: TraceLiveActionKind): BehaviorSpanClass {
   const { name, attributes: a } = span
   const flags: SpanFlag[] = []
-  if (name === 'llm.turn') return { category: 'thinking', flags, detail: str(a['gen_ai.request.model']) ?? '' }
   if (name === 'message.assistant') {
     const text = String(a['output.value'] || '')
     if (CLAIM_RE.test(text)) flags.push('claim')
@@ -153,10 +153,13 @@ export function classifySpan(span: Pick<OtlpSpan, 'name' | 'attributes'>, kind?:
   }
   if (name === 'user.prompt') return { category: 'inbound', flags, detail: cut(a['tangle.task.ref'] ?? '', 80) }
   if (name === 'node.settled') return { category: 'settled', flags, detail: str(a['tangle.node.state']) ?? '' }
+  if (resolveSpanKind(span) === 'LLM') return { category: 'thinking', flags, detail: str(a['gen_ai.request.model']) ?? '' }
   const live = kind ?? ('status' in span ? classifyLiveActions([span as OtlpSpan])[0]?.kind ?? 'other' : 'other')
   const tool = str(a['gen_ai.tool.name']) ?? str(a['tool.name']) ?? name.replace(/^tool\./u, '')
   const j = parseInput(a['input.value'])
   if (tool === 'file_change') return classifyFileChange(j, flags)
+  const edited = FILE_EDIT_TOOLS.has(tool.toLowerCase()) ? str(j.file_path) ?? str(j.filePath) ?? str(j.path) : null
+  if (edited) return classifyFileChange({ changes: [{ path: edited }] }, flags)
   const t = tool.replaceAll(COORDINATION_PREFIX, '')
   if (REVIEW_TOOLS.has(t)) return { category: 'reviewing', flags, detail: String(j.workerId ?? '') }
   if (EXPLORE_TOOLS.has(t)) return { category: 'exploring', flags, detail: cut(j.query || j.id || j.path || '', 120) }
