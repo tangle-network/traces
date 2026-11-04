@@ -99,6 +99,7 @@ describe('traces behavior', () => {
     expect(classifySpan(whole('tool.Edit', 'Edit', { file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' })).category).toBe('implementing')
     expect(classifySpan(whole('tool.Bash', 'Bash', { command: 'pnpm test --filter pkg' })).category).toBe('verifying')
     expect(classifySpan(whole('tool.Bash', 'Bash', { command: 'pnpm test --filter pkg' }), 'other').category).toBe('running')
+    for (const tool of ['WebFetch', 'web_search', 'mcp__knowledge__knowledge_read']) expect(classifySpan(whole(`tool.${tool}`, tool, { query: 'q' }), 'other').category).toBe('exploring')
   })
 
   it('through the CLI: JSON and text on the fixture, exit 2 with one {error, code} object when no span is a tool call', async () => {
