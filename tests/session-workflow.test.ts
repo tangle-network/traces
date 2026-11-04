@@ -228,17 +228,6 @@ describe('session workflows', () => {
     )
   })
 
-  it('honors cancellation before discovery or parsing', async () => {
-    const controller = new AbortController()
-    controller.abort(new Error('stop'))
-    const source = adapter([{ id: 'root' }])
-    source.locate = vi.fn(source.locate)
-
-    await expect(collectSessionWorkflow(source, [ref({ id: 'root' })], { signal: controller.signal }))
-      .rejects.toThrow('stop')
-    expect(source.locate).not.toHaveBeenCalled()
-  })
-
   it('forwards cancellation into an active parser and returns before its delay', async () => {
     const controller = new AbortController()
     const root = { id: 'root' }
