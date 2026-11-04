@@ -3,9 +3,9 @@
  * producer emits. One node per `session.id` (the M9 producer's shape); a producer with one trace for the whole
  * run is split at its agent boundaries (`buildSpanRunTree`). A port of dl-ui's analytics.py, policy
  * `dl-ui-behavior-windows@1`, calibrated on 508 labeled windows (2026-11-02): its PARITY.md proves the rules and
- * the output shape, so a rule changes only with a new policy version. Any producer's model and edit spans read as
- * `llm.turn` and `file_change` do; a call the rules leave as `running` falls back to `pipelines.ts`'s kinds. Every
- * gaming flag and uncalibrated class is record-only: never a severity above info. Times are epoch seconds.
+ * the output shape, so a rule changes only with a new policy version. Any producer's model, edit and tool spans read
+ * as `llm.turn`, `file_change` and the rules' tool names do; a call left `running` falls back to `pipelines.ts`'s
+ * kinds. Gaming flags and uncalibrated classes are record-only, never above info. Times are epoch seconds.
  */
 import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
 import type { OtlpSpan } from './otlp.js'
@@ -35,10 +35,13 @@ const CAP_RE = /--cycles\s+(\d+)|--skip(?!-)\b|\bhead -n\s*\d+\b.*cargo test/
 /** The id of a spawned worker, inside the tool's (possibly JSON-escaped) output text. */
 const WORKER_ID_RE = /workerId\\?":\\?"([^"\\]+)/
 const COORDINATION_PREFIX = 'mcp__agent-runtime-coordination__'
+/** A tool as the rules name it, whatever the harness's case, separators or MCP server: `Bash` is `bash`, `WebFetch` and `web_fetch` are `webfetch`. */
+const toolKey = (tool: string): string => tool.split('__').pop()!.replace(/[-_]/gu, '').toLowerCase()
+const toolOf = ({ name, attributes: a }: Pick<OtlpSpan, 'name' | 'attributes'>): string => str(a['gen_ai.tool.name']) ?? str(a['tool.name']) ?? name.replace(/^tool\./u, '')
 const FILE_EDIT_TOOLS = new Set(['edit', 'write', 'multiedit'])
-const REVIEW_TOOLS = new Set(['observe_agent', 'read_journal'])
-const EXPLORE_TOOLS = new Set(['knowledge_read', 'knowledge_search', 'knowledge_resolve', 'websearch', 'webfetch', 'read', 'glob', 'grep'])
-const COMMUNICATE_TOOLS = new Set(['steer_agent', 'spawn_worker', 'report_blocked', 'knowledge_record', 'send_message', 'reply'])
+const REVIEW_TOOLS = new Set(['observe_agent', 'read_journal'].map(toolKey))
+const EXPLORE_TOOLS = new Set(['knowledge_read', 'knowledge_search', 'knowledge_resolve', 'websearch', 'webfetch', 'read', 'glob', 'grep'].map(toolKey))
+const COMMUNICATE_TOOLS = new Set(['steer_agent', 'spawn_worker', 'report_blocked', 'knowledge_record', 'send_message', 'reply'].map(toolKey))
 const MAIL_TOOLS = new Set(['steer_agent', 'spawn_worker', 'observe_agent', 'report_blocked'])
 const ANOMALY_METRICS = ['calls_per_hour', 'fail_rate', 'idle_min', 'streaks', 'tokens_in'] as const
 const FALLBACK: Partial<Record<TraceLiveActionKind, BehaviorCategory>> = { verify: 'verifying', edit: 'implementing', read: 'exploring' }
@@ -155,17 +158,15 @@ export function classifySpan(span: Pick<OtlpSpan, 'name' | 'attributes'>, kind?:
   if (name === 'node.settled') return { category: 'settled', flags, detail: str(a['tangle.node.state']) ?? '' }
   if (resolveSpanKind(span) === 'LLM') return { category: 'thinking', flags, detail: str(a['gen_ai.request.model']) ?? '' }
   const live = kind ?? ('status' in span ? classifyLiveActions([span as OtlpSpan])[0]?.kind ?? 'other' : 'other')
-  const tool = str(a['gen_ai.tool.name']) ?? str(a['tool.name']) ?? name.replace(/^tool\./u, '')
-  const j = parseInput(a['input.value'])
-  if (tool === 'file_change') return classifyFileChange(j, flags)
-  const edited = FILE_EDIT_TOOLS.has(tool.toLowerCase()) ? str(j.file_path) ?? str(j.filePath) ?? str(j.path) : null
+  const [k, j] = [toolKey(toolOf(span)), parseInput(a['input.value'])]
+  if (k === 'filechange') return classifyFileChange(j, flags)
+  const edited = FILE_EDIT_TOOLS.has(k) ? str(j.file_path) ?? str(j.filePath) ?? str(j.path) : null
   if (edited) return classifyFileChange({ changes: [{ path: edited }] }, flags)
-  const t = tool.replaceAll(COORDINATION_PREFIX, '')
-  if (REVIEW_TOOLS.has(t)) return { category: 'reviewing', flags, detail: String(j.workerId ?? '') }
-  if (EXPLORE_TOOLS.has(t)) return { category: 'exploring', flags, detail: cut(j.query || j.id || j.path || '', 120) }
-  if (COMMUNICATE_TOOLS.has(t)) return { category: 'communicating', flags, detail: cut(j.workerId || (isObject(j.profile) ? j.profile.name : null) || j.reason || '', 120) }
-  if (tool === 'bash' || typeof j.command === 'string') return classifyCommand(String(j.command ?? ''), flags, live)
-  return { category: FALLBACK[live] ?? 'running', flags, detail: t }
+  if (REVIEW_TOOLS.has(k)) return { category: 'reviewing', flags, detail: String(j.workerId ?? '') }
+  if (EXPLORE_TOOLS.has(k)) return { category: 'exploring', flags, detail: cut(j.query || j.id || j.path || '', 120) }
+  if (COMMUNICATE_TOOLS.has(k)) return { category: 'communicating', flags, detail: cut(j.workerId || (isObject(j.profile) ? j.profile.name : null) || j.reason || '', 120) }
+  if (k === 'bash' || typeof j.command === 'string') return classifyCommand(String(j.command ?? ''), flags, live)
+  return { category: FALLBACK[live] ?? 'running', flags, detail: toolOf(span).replaceAll(COORDINATION_PREFIX, '') }
 }
 
 const isToolSpan = (s: OtlpSpan): boolean => s.attributes['openinference.span.kind'] === 'TOOL' || s.name.startsWith('tool.')
@@ -200,13 +201,13 @@ function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
   })
 }
 
-type Event = BehaviorSpanClass & { readonly t: number; readonly e: number; readonly cat: BehaviorCategory; readonly name: string; readonly span: string; readonly ok: boolean; readonly tokens_in: number | null; readonly tokens_out: number | null; readonly output: unknown }
+type Event = BehaviorSpanClass & { readonly t: number; readonly e: number; readonly cat: BehaviorCategory; readonly name: string; readonly tool: string; readonly span: string; readonly ok: boolean; readonly tokens_in: number | null; readonly tokens_out: number | null; readonly output: unknown }
 
 function nodeEvents(n: RawNode): Event[] {
   const kinds = new Map(classifyLiveActions(n.spans).map((act) => [act.spanId, act.kind]))
   return n.spans.filter((s) => s.name !== 'session').map((s): Event => {
     const cls = classifySpan(s, kinds.get(s.span_id) ?? 'other')
-    return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, span: s.span_id, ok: !failed(s),
+    return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, tool: toolKey(toolOf(s)), span: s.span_id, ok: !failed(s),
       tokens_in: num(s.attributes['gen_ai.usage.input_tokens']), tokens_out: num(s.attributes['gen_ai.usage.output_tokens']), output: s.attributes['output.value'] }
   }).sort((x, y) => x.t - y.t)
 }
@@ -237,7 +238,7 @@ function failingStreaks(ev: readonly Event[], nid: string): BehaviorStreak[] {
     open.set(command, { n: 0, spans: [], at: null })
   }
   for (const e of ev) {
-    if (e.name !== 'tool.bash') continue
+    if (e.tool !== 'bash') continue
     if (e.ok) close(e.detail)
     else {
       const st = open.get(e.detail) ?? { n: 0, spans: [], at: null }
@@ -254,7 +255,7 @@ function gamingFlags(ev: readonly Event[], nid: string): BehaviorFlag[] {
   const flag = (kind: BehaviorFlagKind, e: Event, extra: { edits?: string[] } = {}): void => { out.push({ kind, node: nid, at: e.t, span: e.span, detail: cut(e.detail, 160), ...extra }) }
   // test edited to pass: a verify command fails, a test file changes, the same command passes with no non-test edit between
   for (const e of ev) {
-    if (e.name === 'tool.file_change') {
+    if (e.tool === 'filechange' || FILE_EDIT_TOOLS.has(e.tool)) {
       const bucket = e.flags.includes('test_edit') ? testEdits : codeEdits
       for (const k of lastFail.keys()) (bucket.get(k) ?? bucket.set(k, []).get(k)!).push(e.span)
     } else if (e.cat === 'verifying' && !e.ok) { lastFail.set(e.detail, e.span); testEdits.set(e.detail, []); codeEdits.set(e.detail, []) }
@@ -267,7 +268,7 @@ function gamingFlags(ev: readonly Event[], nid: string): BehaviorFlag[] {
   ev.forEach((e, i) => {
     if (e.flags.includes('claim')) {
       let recent = false
-      for (let k = i - 1; k >= 0 && ev[k]!.t >= e.t - CLAIM_LOOKBACK_S && !recent; k--) recent = ev[k]!.cat === 'verifying' || ev[k]!.cat === 'reviewing' || ev[k]!.name.endsWith('knowledge_read')
+      for (let k = i - 1; k >= 0 && ev[k]!.t >= e.t - CLAIM_LOOKBACK_S && !recent; k--) recent = ev[k]!.cat === 'verifying' || ev[k]!.cat === 'reviewing' || ev[k]!.tool === 'knowledgeread'
       if (!recent) flag('claim_without_reading', e)
     }
     for (const f of e.flags) if (f !== 'claim' && f !== 'test_edit') flag(f, e)
@@ -408,7 +409,8 @@ function analyzeNode(n: RawNode, t0: number, W: number, nwin: number, spawned: R
 }
 
 /** The behavior of every node in `spans`. Throws (`code: no-outcome`) when no span is a tool call: categories need acts. */
-export function behaviorFromSpans(spans: readonly OtlpSpan[], { windowMs = 300_000, now = Date.now() / 1000 }: BehaviorOptions = {}): BehaviorResult {
+export function behaviorFromSpans(all: readonly OtlpSpan[], { windowMs = 300_000, now = Date.now() / 1000 }: BehaviorOptions = {}): BehaviorResult {
+  const spans = all.filter((s) => ts(s.start_time) > 0) // OTLP's zero time is unknown; one such span opened millions of windows back to 1970
   const nodes = spans.some(isToolSpan) ? groupNodes(spans, now) : []
   if (nodes.length === 0) throw Object.assign(new Error('no tool spans; categories unavailable'), { code: 'no-outcome' })
   const W = windowMs / 1000
