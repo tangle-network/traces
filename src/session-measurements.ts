@@ -101,11 +101,6 @@ export interface SessionWaste {
   readonly repeatedCommands: SessionFact<RepeatedCommands>
 }
 
-/**
- * Measures beside the sheet's counts. Token counts and cost are the sheet's own
- * `tokens` and `cost` (`execution.ts`), and spawns are its `subagents`; none is
- * measured a second way here.
- */
 export interface SessionMeasurements {
   /** Skills used, by name and kind, counted by `skill-usage.ts`'s classifier, the one `traces skills` uses. */
   readonly skills: Readonly<Record<string, SkillUseCount>>
@@ -116,7 +111,7 @@ export interface SessionMeasurements {
   readonly tools: readonly ToolMeasurement[]
   readonly compactions: SessionFact<readonly CompactionMeasurement[]>
   readonly contextFootprints: readonly ContentFootprint[]
-  /** The context each of the session's own model calls read, and how long the model took to answer by context size. */
+  /** The context each model call on this sheet read, and how long that call took to answer by context size. */
   readonly modelCalls: ModelCallMeasurement
   /** The session's tool calls (`toolCalls`) a PreToolUse hook (a guard) refused, by guard. */
   readonly guardRefusals: GuardRefusals
@@ -179,33 +174,42 @@ export function contextBandLabel(index: number): string {
   return index >= CONTEXT_BANDS - 1 ? `${CONTEXT_BANDS - 1}00k+` : `${index * 100 === 0 ? 0 : `${index}00`}-${index + 1}00k`
 }
 
-/** The value at rank floor(n·q) of the sorted values: the hand scripts' p50 and p90. */
 export function rankPercentile(sorted: readonly number[], q: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]!
 }
 
-/** Each of the session's own model calls' context, and its latency after a tool result, by band. */
+function childSession(span: OtlpSpan): string {
+  const id = span.attributes['traces.span.subagent_session_id']
+  return typeof id === 'string' && id.length > 0 ? id : ''
+}
+
+/** Each model call's context, and its latency after a tool result of the same child, by band. */
 export function operatingSamplesOf(spans: readonly OtlpSpan[], tools: readonly OtlpSpan[]): OperatingSamples {
   const calls = spans
     .filter((span) => !isInherited(span))
     .map((span) => ({ span, context: modelCallContextTokens(span) }))
     .filter((call): call is { span: OtlpSpan; context: number } => call.context !== null)
-    .map((call) => ({ ...call, start: Date.parse(call.span.start_time), end: Date.parse(call.span.end_time) }))
-    .sort((a, b) => a.start - b.start)
+    .map((call) => ({ ...call, child: childSession(call.span), start: Date.parse(call.span.start_time), end: Date.parse(call.span.end_time) }))
+    .sort((left, right) => (left.child < right.child ? -1 : left.child > right.child ? 1 : left.start - right.start))
   const results = tools
     .filter((span) => !isInherited(span) && span.status.code !== 'UNSET')
-    .map((span) => Date.parse(span.end_time))
-    .filter((at) => Number.isFinite(at))
-    .sort((a, b) => a - b)
+    .map((span) => ({ child: childSession(span), at: Date.parse(span.end_time) }))
+    .filter((result) => Number.isFinite(result.at))
+    .sort((left, right) => (left.child < right.child ? -1 : left.child > right.child ? 1 : left.at - right.at))
   const latencyMs: number[][] = Array.from({ length: CONTEXT_BANDS }, () => [])
   let next = 0
   let previousEnd = Number.NEGATIVE_INFINITY
+  let child = ''
   for (const call of calls) {
     if (!Number.isFinite(call.start)) continue
-    // The last tool result after the previous reply and at or before this one.
+    if (call.child !== child) {
+      child = call.child
+      previousEnd = Number.NEGATIVE_INFINITY
+      while (next < results.length && results[next]!.child < child) next++
+    }
     let result: number | undefined
-    while (next < results.length && results[next]! <= call.start) {
-      if (results[next]! > previousEnd) result = results[next]
+    while (next < results.length && results[next]!.child === child && results[next]!.at <= call.start) {
+      if (results[next]!.at > previousEnd) result = results[next]!.at
       next++
     }
     const elapsed = result === undefined ? NaN : call.start - result
@@ -607,11 +611,6 @@ function measureTime(spans: readonly OtlpSpan[], records: readonly OtlpSpan[], t
   }
 }
 
-/**
- * Called by the session facts sheet; no filesystem or inference. `spans` are
- * the session's own spans in trace order, `records` the ones built from its
- * records (no root, no integrity receipt), and `tools` its own agent's calls.
- */
 export function computeSessionMeasurements(input: {
   readonly spans: readonly OtlpSpan[]
   readonly records: readonly OtlpSpan[]

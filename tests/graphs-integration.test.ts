@@ -83,15 +83,18 @@ describe('graph observations through maintained readers', () => {
     const tree = buildSpanRunTree(session.spans, session.ref.path)
     expect(tree.nodes).toHaveLength(2)
     expect(tree.nodes.filter((node) => node.parentNodeId !== null)).toHaveLength(1)
-    expect(facts.find((fact) => fact.sessionId === parent!.sessionId)).toEqual(parent)
-    expect(parent!.tokens.input).toBe(3960)
-    expect(parent!.tokens.output).toBe(75)
+    const exclusive = facts.find((fact) => fact.sessionId === parent!.sessionId)!
+    expect(exclusive.tokens.input).toBe(3960)
+    expect(exclusive.tokens.output).toBe(75)
+    expect(parent!.tokens.input).toBe(3981)
+    expect(parent!.tokens.output).toBe(80)
     const child = facts.find((fact) => fact.sessionId !== parent!.sessionId)!
     expect(child.parentSessionId).toBe(TOKEN_IDS.claude)
     expect(child.tokens.input).toBe(21)
     expect(child.tokens.output).toBe(5)
     expect(Date.parse(child.firstRecordAt.value!)).toBe(Date.parse('2026-10-14T11:00:04Z'))
-    expect(parent!.tokens.input! + child.tokens.input!).toBe(3981)
+    expect(exclusive.tokens.input! + child.tokens.input!).toBe(parent!.tokens.input)
+    expect(parent!.tokens.modelCalls).toBe(exclusive.tokens.modelCalls + child.tokens.modelCalls)
     expect(computeSessionFacts(session.spans)).toEqual([parent])
   })
 

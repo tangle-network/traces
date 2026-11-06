@@ -1,22 +1,12 @@
 /**
  * The one owner of a session's token counts and their price.
  *
- * Every harness reader writes a model call's usage in agent-eval's vocabulary,
- * whose prompt categories are mutually exclusive: fresh input
- * (`llm.token_count.prompt`), cache reads and cache writes. `tokens.input` is
- * their sum, the whole prompt, on every harness: Claude's
- * `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, and
- * Codex's own `input_tokens`, which already holds its cached tokens. That is
- * what agent-runtime's `priceTokens` takes as `inputTokens`.
- *
- * A harness that keeps a cumulative counter (Codex's `total_token_usage`) has
- * it copied onto the session's root span by its reader, and that counter is
- * the session's tokens: summing the per-call deltas would miss what the
- * harness counted outside the recorded calls. Otherwise the tokens are the sum
- * of the session's model calls (Claude Code, OpenCode, a Sandbox live stream).
- *
- * `facts` computes these per session; `analyze` and `bundle` render facts'
- * numbers, so the two read paths and every command print one number.
+ * `tokens.input` is the whole prompt: `tangle.llm.context_tokens` when set,
+ * else `llm.token_count.prompt` plus the cache categories. A bare
+ * `gen_ai.usage.input_tokens` is that whole when the cache fits inside it, and
+ * the fresh tail when the cache is larger. A root cumulative counter, when the
+ * reader copied one, is the session total; otherwise the total is the sum of
+ * model calls. `facts` owns the number.
  */
 import type { TokenWork } from '@tangle-network/agent-runtime'
 import {
@@ -82,13 +72,7 @@ export type TokenPricer = (work: TokenWork) => number | undefined
 
 let routerPricer: Promise<TokenPricer> | undefined
 
-/**
- * agent-runtime's `priceTokens`, the one price table (generated from the
- * Router's catalog). Its package root loads agent-core, agent-knowledge and
- * sandbox, 0.3 s or more, so it is imported only when a session has tokens to
- * price (`priceReport`); `list`, `--match`, jsonl rows and a session with no
- * usage never load it.
- */
+/** The Router price table, loaded only once a session has tokens to price. */
 export function routerPrices(): Promise<TokenPricer> {
   routerPricer ??= import('@tangle-network/agent-runtime').then((runtime) => runtime.priceTokens)
   return routerPricer
@@ -114,13 +98,20 @@ interface CallUsage extends ModelTokens {
 
 const UNRECORDED_MODEL = '(model not recorded)'
 
-/**
- * The context one model call read: its whole prompt, fresh input plus cache
- * reads plus cache writes, the `tokens.input` share of that call. Null when
- * the span is not a model call or reports no usage.
- */
+/** Whole prompt of one model call, or null when the span reports no usage. */
 export function modelCallContextTokens(span: OtlpSpan): number | null {
   return callUsage(span)?.input ?? null
+}
+
+function wholePrompt(span: OtlpSpan, cacheRead: number, cacheWrite: number): number {
+  const context = count(span.attributes['tangle.llm.context_tokens'])
+  if (context !== null) return context
+  const classified = cacheRead + cacheWrite
+  const exclusiveFresh = count(span.attributes['llm.token_count.prompt'])
+  if (exclusiveFresh !== null) return exclusiveFresh + classified
+  const reported = count(firstNumberAttr(span.attributes, LLM_INPUT_TOKEN_ATTR_KEYS))
+  if (reported === null) return classified
+  return classified > reported ? reported + classified : reported
 }
 
 /** A model call's usage, or null when the span reports none. */
@@ -128,17 +119,17 @@ function callUsage(span: OtlpSpan): CallUsage | null {
   if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'LLM') return null
   // Its calls carry the usage; counting the turn too would double every total.
   if (isUsageAggregate(span.attributes)) return null
-  const fresh = count(firstNumberAttr(span.attributes, LLM_INPUT_TOKEN_ATTR_KEYS))
   const output = count(firstNumberAttr(span.attributes, LLM_OUTPUT_TOKEN_ATTR_KEYS))
   const cacheRead = count(firstNumberAttr(span.attributes, LLM_CACHED_TOKEN_ATTR_KEYS)) ?? 0
   const cacheWrite = count(firstNumberAttr(span.attributes, LLM_CACHE_WRITE_TOKEN_ATTR_KEYS)) ?? 0
+  const input = wholePrompt(span, cacheRead, cacheWrite)
   // A call that used no tokens (Claude Code's `<synthetic>` notices) is not a model call to count or price.
-  if ((fresh ?? 0) + (output ?? 0) + cacheRead + cacheWrite === 0) return null
+  if (input + (output ?? 0) === 0) return null
   const model = modelOf(span)
   return {
     model: model ?? UNRECORDED_MODEL,
     modelRecorded: model !== null,
-    input: (fresh ?? 0) + cacheRead + cacheWrite,
+    input,
     output: output ?? 0,
     cacheRead,
     cacheWrite,
@@ -167,15 +158,13 @@ function sum(values: readonly (number | null)[]): number | null {
   return present.length === 0 ? null : present.reduce((total, value) => total + value, 0)
 }
 
-/**
- * The tokens of one session from its own spans: a subagent folded into its
- * trace is not this session's agent, as every other fact of the sheet says.
- */
-export function sessionTokens(own: readonly OtlpSpan[]): SessionTokens {
+/** The tokens of one session from the spans the caller hands it. */
+export function sessionTokens(own: readonly OtlpSpan[], honorRoot = true): SessionTokens {
   const calls = own.map(callUsage).filter((call): call is CallUsage => call !== null)
   const root = own.find((span) => span.parent_span_id === null
     && count(span.attributes[SESSION_TOTAL_INPUT_ATTR]) !== null && count(span.attributes[SESSION_TOTAL_OUTPUT_ATTR]) !== null)
-  if (root) {
+  // A pool of several children passes false: one child's counter must not replace the others.
+  if (honorRoot && root) {
     const input = count(root.attributes[SESSION_TOTAL_INPUT_ATTR])!
     const output = count(root.attributes[SESSION_TOTAL_OUTPUT_ATTR])!
     const cacheRead = count(root.attributes[SESSION_TOTAL_CACHED_INPUT_ATTR]) ?? (sourceChannelUnavailable(own, 'cache-read') ? null : 0)
@@ -225,6 +214,84 @@ export function sessionTokens(own: readonly OtlpSpan[]): SessionTokens {
     spanIds: calls.map((call) => call.spanId),
     unavailable: null,
   }
+}
+
+function mergeModelTokens(left: readonly ModelTokens[], right: readonly ModelTokens[]): ModelTokens[] {
+  const models = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>()
+  for (const entry of [...left, ...right]) {
+    const row = models.get(entry.model) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    row.input += entry.input
+    row.output += entry.output
+    row.cacheRead += entry.cacheRead
+    row.cacheWrite += entry.cacheWrite
+    models.set(entry.model, row)
+  }
+  return [...models]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([model, entry]) => ({ model, ...entry }))
+}
+
+function hasUsage(tokens: SessionTokens): boolean {
+  return tokens.modelCalls > 0 || tokens.byModel.length > 0 || (tokens.input ?? 0) + (tokens.output ?? 0) > 0
+}
+
+/** Sum two readings. A side with no usage is ignored. An empty `byModel` on a side that has usage blanks the split. */
+export function addSessionTokens(left: SessionTokens, right: SessionTokens): SessionTokens {
+  if (left.input === null) return right
+  if (right.input === null || !hasUsage(right)) return left
+  if (!hasUsage(left)) return right
+  const cacheRead = left.cacheRead === null || right.cacheRead === null ? null : left.cacheRead + right.cacheRead
+  const cacheWrite = left.cacheWrite === null || right.cacheWrite === null ? null : left.cacheWrite + right.cacheWrite
+  const priced = left.byModel.length > 0 && right.byModel.length > 0 && cacheRead !== null && cacheWrite !== null
+  return {
+    input: left.input + right.input,
+    output: (left.output ?? 0) + (right.output ?? 0),
+    cacheRead,
+    cacheWrite,
+    reasoning: left.reasoning === null && right.reasoning === null ? null : (left.reasoning ?? 0) + (right.reasoning ?? 0),
+    modelCalls: left.modelCalls + right.modelCalls,
+    byModel: priced ? mergeModelTokens(left.byModel, right.byModel) : [],
+    spanIds: [...left.spanIds, ...right.spanIds],
+    unavailable: null,
+  }
+}
+
+function subagentTokens(spans: readonly OtlpSpan[]): SessionTokens {
+  const groups = new Map<string, OtlpSpan[]>()
+  const loose: OtlpSpan[] = []
+  for (const span of spans) {
+    const id = span.attributes['traces.span.subagent_session_id']
+    if (typeof id === 'string' && id.length > 0) (groups.get(id) ?? groups.set(id, []).get(id)!).push(span)
+    else loose.push(span)
+  }
+  let total = sessionTokens([])
+  for (const group of groups.values()) total = addSessionTokens(total, sessionTokens(group))
+  return loose.length === 0 ? total : addSessionTokens(total, sessionTokens(loose, false))
+}
+
+/** True when the parent's cumulative counter already equals its own calls plus `extra`. */
+function rootAlreadyIncludes(ownSpans: readonly OtlpSpan[], extra: SessionTokens): boolean {
+  const root = ownSpans.find((span) => span.parent_span_id === null
+    && count(span.attributes[SESSION_TOTAL_INPUT_ATTR]) !== null && count(span.attributes[SESSION_TOTAL_OUTPUT_ATTR]) !== null)
+  if (!root || extra.input === null) return false
+  let input = extra.input
+  let output = extra.output ?? 0
+  for (const span of ownSpans) {
+    const call = callUsage(span)
+    if (call) { input += call.input; output += call.output }
+  }
+  return count(root.attributes[SESSION_TOTAL_INPUT_ATTR]) === input && count(root.attributes[SESSION_TOTAL_OUTPUT_ATTR]) === output
+}
+
+/** Parent tokens plus each folded child, once. A counter that already matches both is kept.
+ * `apart` is the exclusive child sheet: the parent reports only its own calls.
+ */
+export function foldSubagentTokens(ownSpans: readonly OtlpSpan[], subagentSpans: readonly OtlpSpan[], apart = false): SessionTokens {
+  if (subagentSpans.length === 0) return sessionTokens(ownSpans)
+  const extra = subagentTokens(subagentSpans)
+  const covered = rootAlreadyIncludes(ownSpans, extra)
+  if (apart) return sessionTokens(ownSpans, !covered)
+  return covered ? sessionTokens(ownSpans) : addSessionTokens(sessionTokens(ownSpans), extra)
 }
 
 /** True when `sessionCost` needs the price table for these tokens: they are known, non-zero and name a model. */

@@ -1,42 +1,11 @@
 /**
- * The deterministic session-facts sheet.
+ * The deterministic session-facts sheet. No model call: the same spans always
+ * give the same numbers. Every field names its span ids, or is null with the
+ * reason, never a guess and never a silent zero.
  *
- * A handful of facts about a session decide most audit questions — how many
- * tools ran, which subagents were spawned, which pull requests were opened and
- * merged, what the human actually typed, what the agent said last, which files
- * changed, when the session started and ended, and how many tokens it burned.
- * Every one of them is already carried by the normalized
- * spans, but no trace tool returns any of them: `viewTrace` degrades to a
- * 20-entry name histogram above its byte ceiling, `countTraces` counts traces
- * rather than spans, `viewSpans` needs span ids the reader does not have, and
- * `searchTrace` stops at 500 hits. A model asked for a tool-call total therefore
- * adds up a capped histogram and decides by eye which names count.
- *
- * This module computes those facts mechanically instead. No model call, no
- * budget, no byte ceiling: it reads the spans directly, so a session far above
- * the tool ceiling still yields exact numbers.
- *
- * Two rules make the sheet auditable:
- *
- *   1. Every field carries the span ids it was computed from, so a reader can
- *      open those spans and check the number.
- *   2. A field the spans cannot support is `null` with a stated `unavailable`
- *      reason. It is never guessed, and never silently zero. A value the sheet
- *      filtered — a `user.prompt` turn that is not a human turn of this session
- *      — is reported beside the count with the reason, never silently dropped.
- *
- * Every fact below is about THE SESSION'S OWN AGENT. Some harnesses fold a
- * spawned agent's transcript into the parent's trace (Claude Code writes one
- * file per subagent under the session directory and the adapter reads them
- * all), so a trace can hold two kinds of record: what this session's agent did,
- * and what a child agent it spawned did. The child's work is the child's: it is
- * excluded from this sheet's counts, named in `subagents` and counted in
- * `subagentTools`, never added to the parent's totals. A trace with no
- * subagent records is unaffected — every one of those counts is zero.
- *
- * The sheet is NOT a span and cannot be cited. It is prepared context, and
- * `trace://` citations still resolve against the raw spans — which is why every
- * fact names its span ids rather than asking the reader to trust the sheet.
+ * Counts other than tokens are about this session's own agent. Folded model
+ * calls join the one sheet for the trace; an exclusive child sheet keeps them.
+ * Tools stay in `subagentTools`. The sheet is prepared context, not a citable span.
  */
 
 import { createHash } from 'node:crypto'
@@ -70,7 +39,8 @@ import {
 import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
 import { groupByTrace, type TraceGroup } from './session-scopes.js'
-import { needsPrice, routerPrices, sessionCost, sessionTokens, type SessionCost, type SessionTokens } from './execution.js'
+import { buildSpanRunTree } from './run-span-tree.js'
+import { foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
 import {
@@ -118,12 +88,7 @@ export interface SessionFactsOptions {
   readonly agentIdentity?: AgentIdentityLookup
 }
 
-/**
- * The first marker an adapter used for a span it created to describe a
- * lifecycle rather than an invocation the agent made. The current marker is
- * `traces.span.synthesized` (see `adapters/provenance.ts`); this one is still
- * recognized so a trace exported before the rename keeps counting correctly.
- */
+/** Legacy synthesized-span marker, still read so an export from before the rename counts. */
 export const SPAN_SYNTHESIZED_ATTR = 'traces.codex.span_synthesized'
 
 /** Records the session reader could not parse, stamped on the session span. */
@@ -135,17 +100,7 @@ const CORRUPTION_RECEIPT_VERSION_ATTR = 'traces.session.corruption.receipt_versi
 /** Entries kept per list field before the sheet reports the rest as omitted. */
 export const FACT_LIST_CAP = 200
 
-/**
- * Entries kept for {@link SessionFacts.changedFiles}.
- *
- * The cap above bounds the sheet's size against lists whose entries carry up to
- * {@link FACT_TEXT_CAP} characters of message or prompt text. A changed-file
- * entry is a path and two short arrays, two orders of magnitude smaller, and a
- * session that edits hundreds of files is the one whose file list a reader most
- * needs whole — the rendered context prints only the count either way. So this
- * list gets its own ceiling, still finite so a runaway session cannot make the
- * sheet unbounded.
- */
+/** Changed-file paths. Larger than {@link FACT_LIST_CAP}: an entry is a path, and a big edit is the list a reader needs. */
 export const CHANGED_FILE_LIST_CAP = 5000
 
 /**
@@ -196,12 +151,7 @@ export interface TurnActorCount {
   readonly spanIds: readonly string[]
 }
 
-/**
- * `user.prompt` turns {@link SessionFacts.humanTurns} did not count, grouped by
- * the reason they were not counted. Nothing is dropped silently: every excluded
- * span is named here, so a reader who disagrees with a reason can open the span
- * and count it back in.
- */
+/** Turns `humanTurns` left out, by reason and author, so none are dropped silently. */
 export interface ExcludedTurnFact {
   readonly reason: string
   /** Who wrote these turns: the reader's actor label, or the author the sheet assigned (`fleet`, `relay`). */
@@ -469,26 +419,11 @@ const PATCH_OPERATION: Readonly<Record<string, string>> = {
   'Move to': 'move',
 }
 
-/**
- * A span the harness wrote for one path its own patch machinery changed.
- *
- * Codex's adapter emits one `file.change` span per changed path from the
- * `FileChange` item the harness records after it applies a patch, carrying the
- * path the edit actually reached and the kind of change. That is a better
- * source than the patch text below: the harness resolved the path, so a patch a
- * script generated is named correctly even when its header still held the
- * script's own variable.
- */
+/** One `file.change` span per path the harness's patch machinery changed. It beats patch text: the harness resolved the path. */
 const FILE_CHANGE_SPAN = 'file.change'
 const FILE_CHANGE_KIND_ATTR = 'traces.codex.file_change_kind'
 
-/**
- * A path that still holds an unexpanded variable: `${path}` from a template
- * literal, or `$FILE` from a shell. A script that builds a patch writes its own
- * text into the header, so the header can name a variable rather than a file.
- * It names no file, so it is dropped and counted rather than emitted as a path
- * the session never touched.
- */
+/** A path that still holds `$` or `${...}` names no file, so it is counted and dropped. */
 const UNRESOLVED_PATH = /(?:^|\/)\$/
 
 /** Tools whose arguments name one edited file directly rather than in a patch. */
@@ -546,19 +481,7 @@ function harnessChangedPaths(span: OtlpSpan): { path: string; operation: string 
   ]
 }
 
-/**
- * Record a path recovered from a tool's own arguments, deferring to the
- * harness's record of the same edit.
- *
- * A header that names a file the harness already recorded joins that entry
- * rather than opening a second one, so an edit both sources saw is one changed
- * file carrying both spans as evidence — including when the header wrote the
- * path relative to the directory the harness resolved it against. When several
- * recorded paths end that way, the harness has the edit and which of them this
- * header names cannot be decided, so no entry claims the span.
- *
- * Returns false when the path was dropped for holding an unexpanded variable.
- */
+/** Join a tool-argument path onto the harness record of that edit. Several matches leave the span unclaimed. False when the path still holds a variable. */
 function recordRecoveredPath(
   into: Map<string, ChangedPath>,
   resolved: readonly string[],
@@ -933,6 +856,24 @@ export interface SessionReading {
   readonly operating: OperatingSamples
 }
 
+/** Parent tools stay with parent calls. Each folded child's latency stays inside that child. */
+function operatingOf(
+  own: readonly OtlpSpan[],
+  sub: readonly OtlpSpan[],
+  tools: readonly OtlpSpan[],
+  subTools: readonly OtlpSpan[],
+  apart: boolean,
+): OperatingSamples {
+  const parent = operatingSamplesOf(own, tools)
+  if (apart || sub.length === 0) return parent
+  const child = operatingSamplesOf(sub, subTools)
+  if (child.contextTokens.length === 0) return parent
+  return {
+    contextTokens: [...parent.contextTokens, ...child.contextTokens],
+    latencyMs: parent.latencyMs.map((band, index) => [...band, ...(child.latencyMs[index] ?? [])]),
+  }
+}
+
 function readSession(
   traceId: string,
   sessionId: string | null,
@@ -943,10 +884,10 @@ function readSession(
   const spans = [...unordered].sort(byTraceOrder)
   const harness = spans.map((span) => stringAttr(span, 'service.name')).find((name) => name !== null) ?? null
 
-  // The session's own records. A spawned subagent's transcript may be folded
-  // into this trace; what it did is reported as the subagent's, never added to
-  // the totals below.
+  // Tools stay with this agent. Folded model calls join this sheet unless an
+  // exclusive child sheet already carries them.
   const ownSpans = spans.filter((span) => !isSubagentSpan(span.attributes))
+  const subagentSpans = spans.filter((span) => isSubagentSpan(span.attributes))
   const toolSpans = spans.filter(isToolSpan)
   const synthesized = toolSpans.filter(isSynthesizedSpan)
   const invoked = ownSpans.filter((span) => isToolSpan(span) && !isSynthesizedSpan(span))
@@ -986,8 +927,10 @@ function readSession(
     null,
   )
 
-  const tokens = sessionTokens(ownSpans)
-  const operating = operatingSamplesOf(ownSpans, invoked)
+  const apart = options.includeSubagents === true && subagentSpans.length > 0
+    && buildSpanRunTree(spans, 'session-facts').nodes.length > 1
+  const tokens = foldSubagentTokens(ownSpans, subagentSpans, apart)
+  const operating = operatingOf(ownSpans, subagentSpans, invoked, subagentTools, apart)
   const receipts = spans.filter((span) => span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] !== undefined)
   const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
@@ -1650,14 +1593,7 @@ export function renderFirstFailure(failure: SessionFirstFailure): string {
   return `${when}${failure.name}${message} (blame ${failure.blame}, span ${failure.spanId})`
 }
 
-/**
- * The byte ceiling one prepared-context string stays under.
- *
- * `DEFAULT_TRACE_ANALYST_BUDGETS.perCallByteCeiling` is 150,000 — the size one
- * trace-tool result may return. Prepared context is read by the same model in
- * the same turn as those results, so the sheet claims a fifth of that ceiling
- * and leaves the rest for the tool calls the model still has to make.
- */
+/** A fifth of one trace-tool result (150,000 bytes), so the sheet leaves room for the calls the model still makes. */
 export const PREPARED_CONTEXT_BYTE_CEILING = 30_000
 
 /**
