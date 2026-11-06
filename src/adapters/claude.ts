@@ -1510,21 +1510,9 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     const ambiguousAgentIds = new Set<string>()
     const childrenByParent = new Map<string, ClaudeSubagentFile[]>()
     for (const agent of agents) {
-      // `agentId` is a FILE BASENAME, so the same id legitimately reaches one parse from two
-      // directories — two workflow transcript dirs, or a subagent continued across sessions.
-      // Three such collisions exist on one developer machine, and this used to THROW, taking the
-      // whole tool down before it printed anything.
-      //
-      // Throwing was protecting a real invariant: a `parentAgentId` pointing at a duplicated id is
-      // genuinely ambiguous, and picking one silently attaches a transcript under the wrong
-      // parent. That must not happen. But refusing to start is not the only way to avoid it, and
-      // it is the worst one — an observability tool that crashes on the data it exists to read
-      // helps nobody, and the ambiguity is in TWO agents' parentage, not in the whole run.
-      //
-      // So: record the collision, keep every transcript, and refuse only the thing that is
-      // actually unresolvable — the parent EDGE. A child pointing at an ambiguous id is left to
-      // default parenting rather than bound to a guess. Nothing is silently mis-parented and
-      // nothing is lost.
+      // `agentId` is a file basename, so two transcripts can share it. Keep both.
+      // A parentAgentId that names that id is ambiguous, so the edge is dropped
+      // rather than attached to a guess. One bad edge must not hide the session.
       if (agentsById.has(agent.agentId)) ambiguousAgentIds.add(agent.agentId)
       else agentsById.set(agent.agentId, agent)
       // An edge into an ambiguous id names two possible parents, so it names none. Skipping it
@@ -1545,11 +1533,11 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
     } else {
       const pending: ClaudeSubagentFile[] = []
       for (const agent of agents) {
-        if (
-          !agent.meta.parentAgentId
-          && agent.parentToolUseId
-          && main.toolSpanByUseId.has(agent.parentToolUseId)
-        ) pending.push(agent)
+        if (agent.meta.parentAgentId) continue
+        // No spawn id stays: it cannot be placed on an older turn. Same for a descendant.
+        // A spawn id outside this turn stays out.
+        if (agent.parentToolUseId !== undefined && !main.toolSpanByUseId.has(agent.parentToolUseId)) continue
+        pending.push(agent)
       }
       for (let cursor = 0; cursor < pending.length; cursor += 1) {
         options.signal?.throwIfAborted()
@@ -1558,10 +1546,8 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         const parsed = await parseClaudeSubagent(ref, traceId, agent, options)
         selectedAgentIds.add(agent.agentId)
         for (const child of childrenByParent.get(agent.agentId) ?? []) {
-          if (
-            child.parentToolUseId
-            && parsed.toolSpanByUseId.has(child.parentToolUseId)
-          ) pending.push(child)
+          if (child.parentToolUseId !== undefined && !parsed.toolSpanByUseId.has(child.parentToolUseId)) continue
+          pending.push(child)
         }
       }
       const skipped = agents
