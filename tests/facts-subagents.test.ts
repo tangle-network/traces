@@ -20,7 +20,7 @@ interface ToolCount { name: string; calls: number; failed: number }
 interface Facts {
   toolCalls: { value: number; spanIds: string[] }
   subagentTools: { value: ToolCount[] | null; spanIds: string[] }
-  subagents: { value: Array<{ taskName: string | null; agentType: string | null; status: string }> }
+  subagents: { value: Array<{ taskName: string | null; agentType: string | null; model: string | null; status: string }> }
 }
 
 /** The content blocks of one transcript, read straight from its bytes. */
@@ -47,6 +47,8 @@ let session: string
 let env: Record<string, string>
 let theirs: ToolCount[]
 let tasks: Array<{ description: string; type: string }>
+/** The model each subagent's own replies name, read from its transcript. */
+let models: string[]
 
 beforeAll(async () => {
   const root = await mkdtemp(join(tmpdir(), 'traces-facts-subagents-'))
@@ -54,7 +56,9 @@ beforeAll(async () => {
   session = join(root, 'tree', bench.manifest.sessions.find((entry) => entry.id === 'claude')!.path)
   env = { HOME: join(root, 'home'), XDG_STATE_HOME: join(root, 'state') }
   const subagents = join(session.replace(/\.jsonl$/u, ''), 'subagents')
-  theirs = await toolCounts((await readdir(subagents)).filter((file) => file.endsWith('.jsonl')).map((file) => join(subagents, file)))
+  const transcripts = (await readdir(subagents)).filter((file) => file.endsWith('.jsonl')).map((file) => join(subagents, file))
+  theirs = await toolCounts(transcripts)
+  models = await Promise.all(transcripts.map(async (path) => /"role":"assistant","model":"([^"]+)"/u.exec(await readFile(path, 'utf8'))![1]!))
   tasks = (await blocks(session))
     .filter((block) => block.type === 'tool_use' && block.name === 'Task')
     .map((block) => ({ description: String(block.input!.description), type: String(block.input!.subagent_type) }))
@@ -76,10 +80,20 @@ describe("facts on a Claude Code session's subagents", () => {
     for (const id of sheet.subagentTools.spanIds) expect(sheet.toolCalls.spanIds).not.toContain(id)
   })
 
-  it('names the subagent type each Task call asked for', async () => {
+  it('names the subagent type each Task call asked for, and the model each subagent ran on', async () => {
     const sheet = await facts([])
     expect(new Set(tasks.map((task) => task.type)).size).toBeGreaterThan(1)
     expect(sheet.subagents.value.map((spawn) => [spawn.taskName, spawn.agentType])).toEqual(tasks.map((task) => [task.description, task.type]))
+    expect(sheet.subagents.value.map((spawn) => spawn.model).sort()).toEqual([...models].sort())
+  })
+
+  it('behavior names the harness and model of the session and of each subagent node', async () => {
+    const run = await runCli(['behavior', session, '--format', 'json'], { env })
+    expect(run.code, run.stderr).toBe(0)
+    const nodes = (JSON.parse(run.stdout) as { nodes: Array<{ depth: number; harness: string | null; model: string | null }> }).nodes
+    expect(nodes.filter((node) => node.depth > 0).map((node) => node.model).sort()).toEqual([...models].sort())
+    for (const node of nodes) expect(node.harness).toBe('claude-code')
+    expect(nodes.find((node) => node.depth === 0)?.model).toEqual(expect.any(String))
   })
 
   it('prints both on the text sheet', async () => {

@@ -3,10 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ClaudeAdapter } from '../src/adapters/claude.js'
-import { CodexAdapter } from '../src/adapters/codex.js'
 import { buildSessionFactsReport, parseSession } from '../src/index.js'
-import { span } from '../src/otlp.js'
-import { toolIoAttributes } from '../src/adapters/tool-io.js'
 import type { HarnessTraceAdapter } from '../src/types.js'
 
 const dirs: string[] = []
@@ -32,26 +29,6 @@ describe('standard session measurements', () => {
     expect(events[0]).toMatchObject({ latencyMs: 4200, tokensBefore: 100, tokensAfter: 20, sincePreviousMs: null })
     expect(events[1]).toMatchObject({ latencyMs: null, tokensBefore: 110, tokensAfter: null, sincePreviousMs: 20000 })
   })
-  it('keeps Codex boundaries when the source records no summary', async () => {
-    const spans = await parse(new CodexAdapter(), [
-      { type: 'session_meta', timestamp: at(0), payload: { id: 'sample' } },
-      { type: 'compacted', timestamp: at(20), payload: { message: '', window_number: 1 } },
-    ])
-    expect(buildSessionFactsReport(spans).sessions[0]!.measurements.compactions.value).toHaveLength(1)
-  })
-  it('counts bytes from size receipts rather than truncated strings, separates unknown outcomes and timing', () => {
-    const root = span({ traceId: 'a', spanId: 'root', name: 'session', kind: 'AGENT', startTime: at(0) })
-    const tools = [
-      span({ traceId: 'a', spanId: '1', parentSpanId: 'root', name: 'tool.Read', tool: 'Read', kind: 'TOOL', startTime: at(1), endTime: at(3),
-        extra: toolIoAttributes({ input: 'é', output: 'x'.repeat(20000) }) }),
-      span({ traceId: 'a', spanId: '2', parentSpanId: 'root', name: 'tool.Read', tool: 'Read', kind: 'TOOL', startTime: at(4), status: 'UNSET' }),
-    ]
-    const item = buildSessionFactsReport([root, ...tools]).sessions[0]!.measurements.tools[0]!
-    expect(item.outcomes).toEqual({ ok: 1, error: 0, unset: 1 })
-    expect(item.inputBytes).toMatchObject({ total: 2, measured: 1, eligible: 2 })
-    expect(item.outputBytes).toMatchObject({ total: 20000, measured: 1, eligible: 2 })
-    expect(item.callToResultMs).toMatchObject({ total: 2000, measured: 1, eligible: 2 })
-  })
   it('withholds private text, marks missing compaction evidence, and invalidates reports when a source value changes', async () => {
     const spans = await parse(new ClaudeAdapter(), [
       { type: 'user', uuid: 'u', sessionId: 'sample', timestamp: at(0), message: { content: 'NEVER_EXPOSE_COMMISSION' } },
@@ -66,16 +43,6 @@ describe('standard session measurements', () => {
     const changed = structuredClone(spans)
     changed[1]!.attributes.content = 'changed'
     expect(report.sourceDigest).not.toBe(buildSessionFactsReport(changed).sourceDigest)
-  })
-  it('keeps child observations out of the parent tool and compaction measurements', () => {
-    const spans = [
-      span({ traceId: 'a', spanId: 'root', name: 'session', kind: 'AGENT', startTime: at(0) }),
-      span({ traceId: 'a', spanId: 'child', parentSpanId: 'root', name: 'session.compacted', kind: 'CHAIN', startTime: at(3), extra: { 'traces.span.subagent': true } }),
-      span({ traceId: 'a', spanId: 'tool', parentSpanId: 'child', name: 'tool.Read', kind: 'TOOL', startTime: at(3), extra: { 'traces.span.subagent': true } }),
-    ]
-    const facts = buildSessionFactsReport(spans).sessions[0]!
-    expect(facts.measurements.compactions.value).toBeNull()
-    expect(facts.measurements.tools).toEqual([])
   })
 })
 

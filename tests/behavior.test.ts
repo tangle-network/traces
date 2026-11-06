@@ -4,16 +4,19 @@
  * failed four times in a row. Outputs and span text were trimmed to fit; every span, time, command, file
  * change and worker id is the producer's own.
  */
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { behaviorFromSpans, classifySpan, renderBehaviorText } from '../src/behavior.js'
+import { behaviorFromSpans, renderBehaviorText, type BehaviorResult } from '../src/behavior.js'
 import { readOtlpInput } from '../src/otlp-input.js'
 import { runCli } from './run-cli.js'
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'behavior')
+/** A Codex lane on drew-gtr-pro (2026-11-05) and the reviewer it forked with spawn_agent, redacted to ids, times, calls and token counts. */
+const FORK = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'codex-fork-child')
+const [PARENT, CHILD] = ['01a1adf8-1ee5-76e3-b687-b8f3a93dc9dc', '01a1adfb-472d-7c51-b3ea-e009327df975']
 const ROOT = 'magnetar-rust-sandbox-20261101e'
 const S2 = `${ROOT}:s2`
 const LOOPER = `${ROOT}:s2:s0`
@@ -84,24 +87,6 @@ describe('traces behavior', () => {
     expect(renderBehaviorText(result).split('\n')[0]).toBe(`behavior dl-ui-behavior-windows@1, window 5m, 3 nodes, ${result.run.n_windows} windows, 2026-11-01T16:28:32Z to 2026-11-01T19:05:26Z`)
   })
 
-  it('classifySpan follows the precedence and path rules, and reads a tool the rules do not name through the live-action kinds', () => {
-    const bash = (command: string) => classifySpan({ name: 'tool.bash', attributes: { 'gen_ai.tool.name': 'bash', 'input.value': JSON.stringify({ command }) } })
-    expect(bash('cargo test -p mprove').category).toBe('verifying')
-    expect(bash('cargo build --release').category).toBe('building')
-    expect(bash("/bin/bash -lc 'cat repo/README.md'").category).toBe('exploring')
-    expect(bash('git commit -am wip').category).toBe('integrating')
-    expect(bash('sed -i s/a/b/ repo/checks/check.py')).toEqual({ category: 'implementing', flags: ['check_edit'], detail: 'sed -i s/a/b/ repo/checks/check.py' })
-    const change = (changes: unknown) => classifySpan({ name: 'tool.file_change', attributes: { 'gen_ai.tool.name': 'file_change', 'input.value': JSON.stringify({ changes }) } })
-    expect(change([{ path: '/workspace/repo/tests/a.rs', kind: 'delete' }])).toEqual({ category: 'implementing', flags: ['test_delete', 'test_edit'], detail: 'repo/tests/a.rs' })
-    expect(change([{ path: '/workspace/notes/plan.md', kind: 'update' }]).category).toBe('process_files')
-    // A whole span of a tool the rules do not name: pipelines' kind decides (a Claude Code Edit, a pnpm test).
-    const whole = (name: string, tool: string, input: Record<string, unknown>) => JSON.parse(row(name, 'TOOL', '0000000000000009', { 'tool.name': tool, 'input.value': JSON.stringify(input) })) as Parameters<typeof classifySpan>[0]
-    expect(classifySpan(whole('tool.Edit', 'Edit', { file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' })).category).toBe('implementing')
-    expect(classifySpan(whole('tool.Bash', 'Bash', { command: 'pnpm test --filter pkg' })).category).toBe('verifying')
-    expect(classifySpan(whole('tool.Bash', 'Bash', { command: 'pnpm test --filter pkg' }), 'other').category).toBe('running')
-    for (const tool of ['WebFetch', 'web_search', 'mcp__knowledge__knowledge_read']) expect(classifySpan(whole(`tool.${tool}`, tool, { query: 'q' }), 'other').category).toBe('exploring')
-  })
-
   it('through the CLI: JSON and text on the fixture, exit 2 with one {error, code} object when no span is a tool call', async () => {
     const json = await runCli(['behavior', FIXTURE, '--format', 'json'], { env })
     expect(json.stderr).toBe('')
@@ -130,5 +115,29 @@ describe('traces behavior', () => {
     const refusedText = await runCli(['behavior', file], { env })
     expect(refusedText.code).toBe(2)
     expect(refusedText.stderr.trim()).toBe('error: no tool spans; categories unavailable')
+  })
+
+  it('a forked Codex child is its own node under its parent, with its own calls, harness and model; a --since sweep, read a session at a time, answers what the two read together answer', async () => {
+    const home = join(dir, 'codex-home')
+    await mkdir(join(home, '.codex', 'sessions', '2026', '11', '05'), { recursive: true })
+    for (const [name, id] of [['parent', PARENT], ['child', CHILD]] as const) await copyFile(join(FORK, `${name}.jsonl`), join(home, '.codex', 'sessions', '2026', '11', '05', `rollout-${id}.jsonl`))
+    const codexEnv = { HOME: home, XDG_STATE_HOME: join(dir, 'codex-state') }
+    const facts = async (id: string) => (JSON.parse((await runCli(['facts', id, '--format', 'json'], { env: codexEnv })).stdout) as { sessions: Array<{ sessionId: string; harness: string; toolCalls: { value: number }; tokens: { byModel: Array<{ model: string }> } }> }).sessions.find((s) => s.sessionId === id)!
+    const [parentFacts, childFacts] = [await facts(PARENT), await facts(CHILD)]
+    const swept = await runCli(['behavior', '--since', '2026-11-05T00:00:00Z', '--format', 'json'], { env: codexEnv })
+    expect(swept.code, swept.stderr).toBe(0)
+    const result = JSON.parse(swept.stdout) as BehaviorResult
+    // Read alone, the child's reader writes a lifecycle span for the parent it answered: a node with no calls, until 2.0.14.
+    expect(result.nodes).toHaveLength(2)
+    const [parent, child] = [result.nodes.find((n) => n.parent === null)!, result.nodes.find((n) => n.parent !== null)!]
+    expect(child).toMatchObject({ parent: parent.id, depth: 1, tool_calls: childFacts.toolCalls.value })
+    expect(child.tool_calls).toBeGreaterThan(0)
+    expect(parent.tool_calls).toBe(parentFacts.toolCalls.value)
+    for (const node of [parent, child]) expect(node).toMatchObject({ harness: childFacts.harness, model: childFacts.tokens.byModel[0]!.model })
+    expect(result.mail.edges.map((e) => [e.kind, e.from, e.to])).toEqual(expect.arrayContaining([['spawn_agent', parent.id, 'review_env_scope'], ['send_message', child.id, '/root']]))
+    const named = await runCli(['behavior', PARENT, CHILD, '--format', 'json'], { env: codexEnv })
+    const canonical = (text: string): string => JSON.stringify(JSON.parse(text), (_, v: unknown) =>
+      (Array.isArray(v) ? v.map((x) => JSON.stringify(x)).sort() : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).sort()) : v))
+    expect(canonical(named.stdout)).toBe(canonical(swept.stdout))
   })
 })

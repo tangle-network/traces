@@ -74,8 +74,21 @@ describe('facts --match', () => {
     expect(run.stdout.trimEnd().split('\n').map((line) => (JSON.parse(line) as Match).kind)).toEqual(['human', 'agent'])
   })
 
-  it('refuses a pattern that is not a regular expression, and --no-content', async () => {
-    for (const argv of [['--match', '(unclosed'], ['--match', 'x', '--no-content']]) {
+  it('--count gives each value of the first capture group its rows, first and last time, and nothing else', async () => {
+    const argv = ['--since', '2026-10-14T00:00:00Z', '--until', '2026-10-15T00:00:00Z', '--match', '^(traces|tangle|rm) ']
+    const rows = (await matches(argv)).matches.map((match) => ({ group: /^(\w+) /u.exec(match.text)![1]!, at: match.at }))
+    const counted = await runCli(['facts', ...argv, '--count', '--format', 'json'], { env: fx.env })
+    expect(counted.code, counted.stderr).toBe(0)
+    const groups = (JSON.parse(counted.stdout) as { groups: Array<{ group: string; count: number; first: string; last: string }> }).groups
+    expect(groups.map((entry) => entry.group).sort()).toEqual(['rm', 'tangle', 'traces'])
+    for (const entry of groups) {
+      const own = rows.filter((row) => row.group === entry.group).map((row) => row.at).sort()
+      expect(entry).toEqual({ group: entry.group, count: own.length, first: own[0], last: own.at(-1) })
+    }
+  })
+
+  it('refuses a pattern that is not a regular expression, --no-content, and --count without --match', async () => {
+    for (const argv of [['--match', '(unclosed'], ['--match', 'x', '--no-content'], ['--count']]) {
       const run = await runCli(['facts', fx.paths.claude, ...argv, '--format', 'json'], { env: fx.env })
       expect(run.code).toBe(2)
       expect(run.stdout).toBe('')
