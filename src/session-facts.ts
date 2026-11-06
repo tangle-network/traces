@@ -40,7 +40,7 @@ import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.j
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
 import { groupByTrace, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
-import { foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
+import { childModelBySpawn, foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { readPullRequests, type PullRequestFacts } from './pull-request-facts.js'
 import {
@@ -132,6 +132,8 @@ export interface SubagentSpawnFact {
   readonly startedAt: string
   /** The spawn span's status: `OK`, `ERROR`, or `UNSET` while still open. */
   readonly status: string
+  /** The model the child's own calls ran on, when its transcript is folded into this trace (Claude Code); null for a child read as its own session (Codex). */
+  readonly model: string | null
   /** The spawn call span, plus the subagent lifecycle span when one joined it. */
   readonly spanIds: readonly string[]
 }
@@ -548,19 +550,15 @@ function changedFilesOf(toolSpans: readonly OtlpSpan[], spans: readonly OtlpSpan
  * lifecycle span a spawn joins to lives in the child's scope.
  */
 function subagentsOf(ownSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]): SubagentSpawnFact[] {
-  // A lifecycle span records the subagent's own path; joining it to the spawn
-  // call by that path gives the reader both spans to check the task name with.
+  // A lifecycle span joins its spawn call by the child's path, or, for a folded child, by hanging under the
+  // call itself: an exact join that needs no name, since two spawns may carry the same task name.
   const lifecycleByPath = new Map<string, string[]>()
-  // An adapter that folds the child's transcript in parents the child's
-  // lifecycle span under the spawn call itself, which is an exact join and
-  // needs no name: two spawns may legitimately carry the same task name.
   const lifecycleByParent = new Map<string, string[]>()
+  const modelOf = childModelBySpawn(spans)
   for (const span of spans) {
     if (!isSynthesizedSpan(span)) continue
     const path = stringAttr(span, 'traces.codex.subagent_path')
-    if (path !== null) {
-      lifecycleByPath.set(path, [...(lifecycleByPath.get(path) ?? []), span.span_id])
-    }
+    if (path !== null) lifecycleByPath.set(path, [...(lifecycleByPath.get(path) ?? []), span.span_id])
     const parent = span.parent_span_id
     if (parent !== null && span.attributes[SUBAGENT_TASK_ATTR] !== undefined) {
       lifecycleByParent.set(parent, [...(lifecycleByParent.get(parent) ?? []), span.span_id])
@@ -583,6 +581,7 @@ function subagentsOf(ownSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]):
       agentType: agentType === undefined ? null : decodeJsonString(agentType),
       startedAt: span.start_time,
       status: span.status.code,
+      model: modelOf(span.span_id),
       spanIds: [
         span.span_id,
         ...(taskName ? lifecycleByPath.get(taskName) ?? [] : []),
@@ -1763,6 +1762,7 @@ function compactFacts(facts: SessionFacts): CompactFacts {
         task_name: entry.taskName,
         ...(entry.taskNameUnavailable ? { task_name_unavailable: entry.taskNameUnavailable } : {}),
         ...(entry.agentType ? { agent_type: entry.agentType } : {}),
+        ...(entry.model ? { model: entry.model } : {}),
         started_at: entry.startedAt,
         status: entry.status,
         span_ids: entry.spanIds,

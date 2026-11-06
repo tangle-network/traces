@@ -44,7 +44,7 @@ control should emit the contract and pass its file as a ref, never get a new ada
 - **`parent_span_id` is containment; `links` is causality.** A span's parent is what it happened
   inside. A `links` entry is what caused it (e.g. a verdict that triggered a retry round). Never encode
   a causal edge as a parent pointer — it claims a nesting that never existed and cannot round-trip.
-- **0 yes, 1 no, 2 could not answer, on every command; error objects on stderr** (1.0.0 major note).
+- **0 yes, 1 no, 2 could not answer, on every command; error objects on stderr**.
   Under `--format json|jsonl` an error is one JSON object `{error, code}` on stderr and stdout stays
   empty (`tests/cli-contract.test.ts`). Scripts and CI gates branch on exact exit codes; do not
   repurpose a code's meaning.

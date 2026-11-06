@@ -34,12 +34,12 @@ import {
   sessionMatches,
   type SessionFactsReport,
   type SessionFactsWindow,
-  type SessionMatch,
   type SessionReading,
   type UnreadSessionFact,
 } from './session-facts.js'
 import { turnFactsJsonl, type TurnSource } from './facts-jsonl.js'
-import { callIdsOf, citeFacts, type RecordLine, type SessionCiting } from './record-lines.js'
+import { callIdsOf, citeFacts, type SessionCiting } from './record-lines.js'
+import { renderMatchCounts, renderMatches, type SourcedMatch } from './match-output.js'
 import { sessionIdentityLookup } from './session-identity.js'
 import { conformanceOfSpans, renderValidation } from './conformance.js'
 import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
@@ -766,6 +766,7 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   if (args.noContent && (pattern !== undefined || format === 'jsonl')) {
     throw new UsageError(`${pattern ? '--match searches' : '--format jsonl rows carry'} turn text, which --no-content withholds; drop one of them`)
   }
+  if (args.count && pattern === undefined) throw new UsageError('--count counts the rows of --match RE; add one')
   const window = factsWindow(args)
   // Rows need where each session was read from, which the facts do not carry.
   const sourceOf = new Map<string, string>()
@@ -925,9 +926,6 @@ async function writeOutput(args: CliArgs, rendered: string, summary: string): Pr
   process.stdout.write(rendered)
 }
 
-/** A match row, the file its session was read from, and for a command its record and output's last line (see `citeFacts`). */
-type SourcedMatch = SessionMatch & { readonly source: string | null; readonly record?: RecordLine | null; readonly lastLine?: string | null }
-
 /** The hits of `facts --match`, oldest first, in `format`. */
 async function writeMatches(
   args: CliArgs,
@@ -935,6 +933,10 @@ async function writeMatches(
   found: { readonly generatedAt: string; readonly sessions: number; readonly selection: unknown; readonly matches: SourcedMatch[] },
 ): Promise<void> {
   const matches = [...found.matches].sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+  if (args.count) {
+    const counted = renderMatchCounts(args.match!, found.sessions, matches, format)
+    return writeOutput(args, counted.rendered, `match counts → ${args.out}  (${counted.groups} group(s), ${matches.length} match(es) in ${found.sessions} session(s), $0, no model call)`)
+  }
   const document = {
     schemaVersion: 1,
     kind: 'traces.session_matches',
@@ -1001,18 +1003,6 @@ async function searchWindow(args: CliArgs, pattern: RegExp, window: SessionFacts
     },
     matches,
   })
-}
-
-/** `facts --match` as text: one line per hit, oldest first; a command's line says `ok`, `failed`, or `?` when its call's status is not its own. */
-function renderMatches(pattern: string, sessions: number, matches: readonly SourcedMatch[]): string {
-  const lines = [`${matches.length} match(es) for /${pattern}/ in ${sessions} session(s), deterministic, $0`]
-  for (const match of matches) {
-    const outcome = match.kind !== 'command' ? '' : `${(match.failed === true ? 'failed' : match.failed === false ? 'ok' : '?').padEnd(6)}  `
-    lines.push(`${match.at}  ${(match.sessionId ?? '?').slice(0, 8)}  ${match.kind.padEnd(7)}  ${outcome}${match.text}`)
-    // The record to cite, and the output's last line, which no clipped row shows.
-    if (match.record) lines.push(`  ${match.record.file}:${match.record.line}${match.lastLine == null ? '' : `  last: ${match.lastLine.slice(0, 300)}`}`)
-  }
-  return `${lines.join('\n')}\n`
 }
 
 /**
@@ -1444,7 +1434,7 @@ await runTraces(process.argv.slice(2), {
   list: reading(cmdList),
   facts: reading(cmdFacts),
   analyze: reading(cmdAnalyze),
-  behavior: reading((args) => cmdBehavior(args, () => collectSpans(args))),
+  behavior: reading((args) => cmdBehavior(args, (onBatch) => forEachSpanBatch(args, onBatch))),
   ask: reading(cmdAsk),
   // check resolves its refs itself, after its contracts load; --share-safe reads paths as bytes: a bad contract exits before any trace is read.
   check: async (args) => cmdCheck(prepare(args)),

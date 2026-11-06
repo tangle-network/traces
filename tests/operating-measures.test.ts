@@ -162,13 +162,31 @@ describe('operating measures', () => {
       { t: 0.5, type: 'turn_context', payload: { cwd: '/workspace/demo', model: 'gpt-fixture' } },
       userItem(0.6, [{ type: 'input_text', text: 'Ship the fix.' }]),
       task(1, 'task_started', 'turn-1'),
-      { t: 2, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: null, error: { message: 'You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits.' } } },
+      { t: 2, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: null, error: { message: 'You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at 3:52 PM.' } } },
     ])
     const run = await runCli(['analyze', ref.path, '--harness', 'codex', '--format', 'json'], { env })
     expect(run.code, run.stderr).toBe(0)
     const analysis = JSON.parse(run.stdout) as Analysis & { measures: { failureClusters: { totalFailures: number } } }
     expect(analysis.measures.failureClusters.totalFailures).toBe(1)
-    expect(analysis.facts.sessions[0]!.measurements.limitStop).toMatchObject({ kind: 'usage', at: expect.any(String) })
-    expect(analysis.measures.operating).toMatchObject({ limitStops: { sessions: 1, byKind: { usage: 1 }, terminalFailures: 1, terminalFailuresAtLimit: 1 } })
+    expect(analysis.facts.sessions[0]!.measurements.limitStop).toMatchObject({ kind: 'credits', at: expect.any(String) })
+    expect(analysis.measures.operating).toMatchObject({ limitStops: { sessions: 1, byKind: { credits: 1 }, terminalFailures: 1, terminalFailuresAtLimit: 1 } })
+  })
+
+  // Every limit notice Claude Code and OpenCode printed as a session's last reply on drew-gtr-pro and the Mac, 2026-10-30 to 11-06 (`traces facts --match`).
+  it.each([
+    ['monthly', "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc_cli_limit_message · your weekly limit resets Nov 7, 4pm (America/Los_Angeles)"],
+    ['monthly', "You've hit your monthly spend limit. Run /usage-credits to manage your limit and keep using Fable 5.1 or switch models to continue this chat."],
+    ['credits', "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model."],
+    ['weekly', "Prompt is too long · automatic compaction failed: You've hit your weekly limit · resets Oct 30, 7am (America/Los_Angeles)"],
+    ['session', "You've hit your session limit · resets 10pm (America/Los_Angeles)"],
+    ['5-hour', "You've hit your 5-hour limit · resets 3pm (America/Los_Angeles)"],
+    ['5-hour', 'Usage limit reached for 5 hour. Your limit will reset at 2026-11-06 20:57:43'],
+  ])('a last reply of "%s" limit is a limit stop of that kind, at its time', async (kind, notice) => {
+    const { user, reply } = records(LIMITED)
+    const path = join(await mkdtemp(join(tmpdir(), 'traces-operating-notice-')), `${LIMITED}.jsonl`)
+    await writeFile(path, jsonl([user(at(0), 'Keep going.'), reply(at(5), 0, [{ type: 'text', text: notice }], '<synthetic>')]))
+    const run = await runCli(['facts', path, '--harness', 'claude-code', '--format', 'json'], { env })
+    expect(run.code, run.stderr).toBe(0)
+    expect((JSON.parse(run.stdout) as Analysis['facts']).sessions[0]!.measurements.limitStop).toMatchObject({ kind, text: notice, at: at(5) })
   })
 })

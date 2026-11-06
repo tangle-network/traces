@@ -95,6 +95,8 @@ export interface Args {
   noContent: boolean
   /** `facts --match`: a regular expression over human turns, agent messages and shell commands. */
   match?: string
+  /** `facts --match --count`: the rows per value of the pattern's first capture group, not the rows. */
+  count?: boolean
   questions: string[]
   questionsFile?: string
   budget?: number
@@ -214,6 +216,7 @@ const FLAGS: Readonly<Record<string, Flag>> = {
       a.match = v
     },
   },
+  '--count': { help: "with --match: per value of RE's first capture group (else per hit), how many rows and when first and last", set: (a) => { a.count = true } },
   '--question': { value: 'TEXT', help: `a question (repeatable, at most ${MAX_TRACE_QUESTION_CHARS} characters)`, freeText: true, set: (a, v) => { a.questions.push(v) } },
   '--questions': { value: 'FILE', help: 'a JSON array of questions: strings or {id?, question, answerSchema?}', set: (a, v) => { a.questionsFile = v } },
   '--budget': { value: 'USD', help: 'required: the most the run may spend, shared by every question', set: (a, v) => { a.budget = positiveNumber('--budget', v, 'USD') } },
@@ -302,7 +305,7 @@ const COMMANDS = [
     usage: 'facts <ref…> | --current | --last N | --since T [flags]',
     job: 'What happened, exactly, for $0: who acted, turns, tools, commands, PRs, first failure, tokens, cost, time lost.',
     flags: [
-      ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--match', '--no-content',
+      ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--match', '--count', '--no-content',
       { flag: '--format', help: 'text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn' },
       { flag: '--out', help: 'write the sheet to PATH; stdout gets one summary line' },
     ],
@@ -315,7 +318,7 @@ const COMMANDS = [
       ['.sessions[0].measurements.tools[] | {name, calls, failed: .outcomes.error}', 'tool calls by name, and failures'],
       ['.sessions[0] | {firstFailure, tokens, cost, agent: .agent.value}', 'first failure, tokens, cost, who acted'],
     ],
-    examples: ['traces facts --current', "traces facts 019a3c7e --format json | jq '.sessions[0].measurements.waste'", "traces facts --since 30d --match '^gh pr merge'"],
+    examples: ['traces facts --current', "traces facts --since 30d --match '^gh pr merge'"],
     overview: [
       ['What happened (turns, PRs, failure, cost)? $0', 'traces facts <ref> | --current | --since 1d'],
       ['Did we already try X / what was said? $0', "traces facts <ref> | --since 30d --match '<re>'"],

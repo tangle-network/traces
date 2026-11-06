@@ -652,6 +652,8 @@ interface ClaudeTool {
   input: Record<string, unknown>
   result: string | Array<{ type: 'text'; text: string }>
   isError?: boolean
+  /** The record's `toolUseResult`, where Claude Code names the subagent a `Task` call ran. */
+  details?: Record<string, unknown>
 }
 
 class ClaudeWriter {
@@ -725,6 +727,7 @@ class ClaudeWriter {
             ...(tool.isError ? { is_error: true } : {}),
           })),
         },
+        ...(items.length === 1 && items[0]!.tool.details ? { toolUseResult: items[0]!.tool.details } : {}),
       }),
       at,
     }
@@ -771,7 +774,7 @@ function claudeSession(random: Random): { files: BenchFile[]; session: BenchSess
   w.assistant('Splitting the investigation across three subagents.', tasks.map((input, index) => ({ id: taskIds[index]!, name: 'Task', input })))
 
   const subagentFiles: BenchFile[] = []
-  const summaries: string[] = []
+  const taskResults: Array<{ id: string; tool: ClaudeTool }> = []
   const subagentScripts: Array<Array<{ command: string; result: string; isError?: boolean }>> = [
     [
       { command: 'rg -l "importRow" src', result: 'src/import.ts\nsrc/rows.ts\nsrc/parse-date.ts' },
@@ -799,14 +802,14 @@ function claudeSession(random: Random): { files: BenchFile[]; session: BenchSess
     ][index]!
     sub.assistant(summary)
     subagentsDoneAt = Math.max(subagentsDoneAt, subClock.now)
-    summaries.push(summary)
+    taskResults.push({ id: taskIds[index]!, tool: { name: 'Task', input: {}, result: [{ type: 'text', text: summary }], details: { agentId, status: 'completed' } } })
     const subPath = `${dir}/${sessionId}/subagents/agent-${agentId}.jsonl`
     subagentFiles.push({ path: subPath, content: sub.out.text() })
     subagentFiles.push({ path: subPath.replace(/\.jsonl$/, '.meta.json'), content: `${JSON.stringify({ agentType: task.subagent_type, toolUseId: taskIds[index] })}\n` })
   }
-  // The Task results arrive after every child has finished.
+  // The Task results arrive after every child has finished, one record each, naming the subagent that ran.
   clock.passAt(subagentsDoneAt)
-  w.results(tasks.map((_, index) => ({ id: taskIds[index]!, tool: { name: 'Task', input: {}, result: [{ type: 'text', text: summaries[index]! }] } })))
+  for (const result of taskResults) w.results([result])
   bash(w, 'pnpm test --filter import -- -t "March"', 'Exit code 1\nFAIL src/import.test.ts > rejects 2026-02-30\nexpected parseDate to return null', true)
   w.tool({ name: 'Edit', input: { file_path: '/work/ledger/src/parse-date.ts', old_string: 'return new Date(value).toISOString()', new_string: 'const date = new Date(value)\n  return Number.isNaN(date.getTime()) ? null : date.toISOString()' }, result: 'The file has been updated.' })
   bash(w, 'pnpm test --filter import', 'Test Files 4 passed (4)')

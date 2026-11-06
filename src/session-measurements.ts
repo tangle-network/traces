@@ -115,7 +115,7 @@ export interface SessionMeasurements {
   readonly modelCalls: ModelCallMeasurement
   /** The session's tool calls (`toolCalls`) a PreToolUse hook (a guard) refused, by guard. */
   readonly guardRefusals: GuardRefusals
-  /** The usage or weekly limit notice the session's last reply is; null when its last reply is not one. */
+  /** The limit notice the session stopped on, its run's error or else its last reply; null when neither is one. */
   readonly limitStop: LimitStop | null
 }
 
@@ -150,7 +150,7 @@ export interface GuardRefusals {
 }
 
 export interface LimitStop {
-  /** The limit the notice names: `weekly`, `session`, `5-hour`, …, or `usage`. */
+  /** The window the notice names (`weekly`, `monthly`, `session`, `5-hour`), else `credits` when it offers credits to go on, else `usage`. */
   readonly kind: string
   /** The notice; null when content was not requested. */
   readonly text: string | null
@@ -263,33 +263,34 @@ export function guardRefusalsOf(tools: readonly OtlpSpan[]): GuardRefusals {
 }
 
 /**
- * The notice a harness writes in place of a reply when the account is out:
- * "You've hit your weekly limit · resets …", "Claude AI usage limit
- * reached|…", "5-hour limit reached ∙ resets …". It is the whole reply, so a
- * reply that only quotes one (a fix to limit detection, say) is not one.
+ * The notice Claude Code, Codex or OpenCode writes in place of a reply when the
+ * account is out ("You've hit your monthly spend limit · …"; the tests hold each
+ * one seen). It is the whole reply, so a reply that only quotes one is not one.
  */
-const LIMIT_TEXT = /^(?:you['’]ve hit your ([\w-]+) limit|claude ai (usage) limit reached|([\w-]+) limit reached\b|you['’]ve reached your ([\w-]+) limit)/iu
+const LIMIT_TEXT = /^(?:prompt is too long · automatic compaction failed: )?(?:you['’]ve (?:hit|reached) your ([\w-]+)(?: spend)? limit|claude ai (usage) limit reached|([\w-]+) limit reached(?: for (\d+) hours?)?\b)/iu
+const LIMIT_WINDOW = /^(?:weekly|monthly|daily|session|\d+-hour)$/u
 const LIMIT_NOTICE_MAX_CHARS = 300
 const REPLY_SPANS = new Set(['message.assistant', 'llm.turn'])
 
-/** The limit the session's last reply reports: the session stopped because its account ran out. */
+function limitNotice(span: OtlpSpan | undefined, text: string): LimitStop | null {
+  const match = span && text.length <= LIMIT_NOTICE_MAX_CHARS ? LIMIT_TEXT.exec(text) : null
+  if (!span || !match) return null
+  const named = (match[4] ? `${match[4]}-hour` : match[1] ?? match[2] ?? match[3]!).toLowerCase()
+  const kind = LIMIT_WINDOW.test(named) ? named : /credits/iu.test(text) ? 'credits' : 'usage'
+  return { kind, text, at: span.end_time, spanId: span.span_id }
+}
+
+/** The limit the session's run error, else its last reply, reports: the session stopped because its account ran out. */
 function limitStopOf(spans: readonly OtlpSpan[]): LimitStop | null {
-  // A run that ended in error says why on its root: Codex's "You’ve hit your usage limit".
   const root = spans.find((span) => span.parent_span_id === null && span.status.code === 'ERROR')
-  const notice = root?.status.message?.trim() ?? ''
-  const rootMatch = notice.length <= LIMIT_NOTICE_MAX_CHARS ? LIMIT_TEXT.exec(notice) : null
-  if (root && rootMatch) {
-    return { kind: (rootMatch[1] ?? rootMatch[2] ?? rootMatch[3] ?? rootMatch[4] ?? 'usage').toLowerCase(), text: notice, at: root.end_time, spanId: root.span_id }
-  }
+  const atRoot = limitNotice(root, root?.status.message?.trim() ?? '')
+  if (atRoot) return atRoot
   let last: OtlpSpan | undefined
   for (const span of spans) {
     if (isInherited(span) || !REPLY_SPANS.has(span.name) || typeof span.attributes.content !== 'string') continue
     if (!last || Date.parse(span.end_time) >= Date.parse(last.end_time)) last = span
   }
-  const text = typeof last?.attributes.content === 'string' ? last.attributes.content.trim() : ''
-  const match = last && text.length <= LIMIT_NOTICE_MAX_CHARS ? LIMIT_TEXT.exec(text) : null
-  if (!last || !match) return null
-  return { kind: (match[1] ?? match[2] ?? match[3] ?? match[4] ?? 'usage').toLowerCase(), text, at: last.end_time, spanId: last.span_id }
+  return limitNotice(last, typeof last?.attributes.content === 'string' ? last.attributes.content.trim() : '')
 }
 
 const number = (value: unknown): number | null =>

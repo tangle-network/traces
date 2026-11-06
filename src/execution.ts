@@ -153,6 +153,27 @@ function byModel(calls: readonly CallUsage[]): ModelTokens[] {
     .map(([model, entry]) => ({ model, ...entry }))
 }
 
+/** The model most of these spans' token-reporting calls went to, as `tokens.byModel` prices them; null when no call names one. */
+export function dominantModel(spans: readonly OtlpSpan[]): string | null {
+  const models = byModel(spans.map(callUsage).filter((call): call is CallUsage => call?.modelRecorded === true))
+  return models.reduce<ModelTokens | null>((best, entry) => (best && best.input + best.output >= entry.input + entry.output ? best : entry), null)?.model ?? null
+}
+
+/** The model a folded-in child's own calls ran on, by the span its records hang under: a bound Claude Code subagent's spawn call. */
+export function childModelBySpawn(spans: readonly OtlpSpan[]): (spawnSpanId: string) => string | null {
+  const childUnder = new Map<string, string>()
+  const own = new Map<string, OtlpSpan[]>()
+  for (const span of spans) {
+    const child = span.attributes['traces.span.subagent_session_id']
+    if (typeof child !== 'string') continue
+    const list = own.get(child)
+    if (list) list.push(span)
+    else own.set(child, [span])
+    if (span.parent_span_id !== null && !childUnder.has(span.parent_span_id)) childUnder.set(span.parent_span_id, child)
+  }
+  return (spawnSpanId) => dominantModel(own.get(childUnder.get(spawnSpanId) ?? '') ?? [])
+}
+
 function sum(values: readonly (number | null)[]): number | null {
   const present = values.filter((value): value is number => value !== null)
   return present.length === 0 ? null : present.reduce((total, value) => total + value, 0)

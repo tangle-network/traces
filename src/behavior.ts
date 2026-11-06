@@ -8,9 +8,13 @@
  * kinds. Gaming flags and uncalibrated classes are record-only, never above info. Times are epoch seconds.
  */
 import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
+import { isInheritedSpan, SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './adapters/provenance.js'
+import { sessionIdFromAttributes } from './attributes.js'
+import { dominantModel } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import { SUBSTITUTED_FIELDS_ATTR } from './otlp-input.js'
 import { classifyLiveActions, type TraceLiveActionKind } from './pipelines.js'
+import { resolveAdapter } from './registry.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { STALL_MINUTES, STREAK_RUNS } from './session-measurements.js'
 
@@ -42,7 +46,9 @@ const FILE_EDIT_TOOLS = new Set(['edit', 'write', 'multiedit'])
 const REVIEW_TOOLS = new Set(['observe_agent', 'read_journal'].map(toolKey))
 const EXPLORE_TOOLS = new Set(['knowledge_read', 'knowledge_search', 'knowledge_resolve', 'websearch', 'webfetch', 'read', 'glob', 'grep'].map(toolKey))
 const COMMUNICATE_TOOLS = new Set(['steer_agent', 'spawn_worker', 'report_blocked', 'knowledge_record', 'send_message', 'reply'].map(toolKey))
-const MAIL_TOOLS = new Set(['steer_agent', 'spawn_worker', 'observe_agent', 'report_blocked'])
+/** A shell call that runs `fleet send [flags] <target>`: a message to another lane. */
+const FLEET_SEND_RE = /\bfleet send(?:\s+--?(?:id|reason)[= ]\S+|\s+--?[\w-]+)*\s+([\w.@:/-]+)/u
+const SHELL_TOOLS = new Set(['bash', 'execcommand', 'exec', 'shell'])
 const ANOMALY_METRICS = ['calls_per_hour', 'fail_rate', 'idle_min', 'streaks', 'tokens_in'] as const
 const FALLBACK: Partial<Record<TraceLiveActionKind, BehaviorCategory>> = { verify: 'verifying', edit: 'implementing', read: 'exploring' }
 
@@ -175,47 +181,77 @@ const failed = (s: OtlpSpan): boolean => String(s.status?.code).endsWith('ERROR'
 const endOf = (s: OtlpSpan, now: number): number => (String(s.attributes[SUBSTITUTED_FIELDS_ATTR] ?? '').split(',').includes('end_time') ? now : ts(s.end_time))
 const byStart = (x: OtlpSpan, y: OtlpSpan): number => ts(x.start_time) - ts(y.start_time)
 
-type RawNode = Pick<BehaviorNode, 'id' | 'label' | 'parent' | 'depth' | 'state' | 'profile' | 'model' | 'start' | 'end' | 'span_id'> & { readonly spans: OtlpSpan[] }
-const modelOf = (a: Record<string, unknown>): string | null => str(a['agent.model']) ?? str(a['gen_ai.request.model'])
+type RawNode = Pick<BehaviorNode, 'id' | 'label' | 'parent' | 'depth' | 'state' | 'profile' | 'model' | 'harness' | 'start' | 'end' | 'span_id'> & {
+  readonly spans: OtlpSpan[]
+  /** The root of the tree this node was read in; the harness session that root opens and the one that spawned it; the Codex child thread a lifecycle span stands for. */
+  readonly top: string; readonly session: string | null; readonly parentSession: string | null; readonly thread: string | null
+}
+/** The model and harness that acted: the root's `agent.*` identity, else the model its own calls name (facts' `tokens.byModel`) and the harness whose reader wrote it. */
+const identity = (a: Record<string, unknown>, own: readonly OtlpSpan[]): Pick<RawNode, 'model' | 'harness'> => ({
+  model: str(a['agent.model']) ?? str(a['gen_ai.request.model']) ?? dominantModel(own),
+  harness: str(a['agent.harness']) ?? str(a['tangle.harness']) ?? resolveAdapter(String(a['service.name'] ?? ''))?.harness ?? null,
+})
 
 /** One node per `session.id`, its `session` span (else its earliest root) the node's own; without session ids, one per agent boundary. */
 function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
   const bySession = new Map<string, OtlpSpan[]>()
   for (const s of spans) {
     const sid = s.attributes['session.id']
-    if (sid != null) bySession.set(String(sid), [...(bySession.get(String(sid)) ?? []), s])
+    if (sid != null) (bySession.get(String(sid)) ?? bySession.set(String(sid), []).get(String(sid))!).push(s)
   }
   if (bySession.size === 0) {
     const byId = new Map(spans.map((s) => [s.span_id, s]))
+    const tops = new Map<string, string>()
     return buildSpanRunTree(spans, 'behavior').nodes.map((n) => {
       const root = byId.get(n.spanId)!
-      return { id: n.spanId, label: n.label, parent: n.parentNodeId, depth: n.depth, state: n.status, profile: str(root.attributes['agent.profile.name']),
-        model: modelOf(root.attributes), start: n.startMs / 1000, end: endOf(root, now), span_id: n.spanId, spans: n.spanIds.map((id) => byId.get(id)!) }
+      const own = n.spanIds.map((id) => byId.get(id)!)
+      const top = n.parentNodeId === null ? n.spanId : tops.get(n.parentNodeId) ?? n.spanId
+      tops.set(n.spanId, top)
+      return { id: n.spanId, label: n.label, parent: n.parentNodeId, depth: n.depth, state: n.status, profile: str(root.attributes['agent.profile.name']), ...identity(root.attributes, own),
+        start: n.startMs / 1000, end: endOf(root, now), span_id: n.spanId, spans: own, top, session: top === n.spanId ? sessionIdFromAttributes(root.attributes) ?? null : null,
+        parentSession: str(root.attributes['traces.parent_session_id']), thread: str(root.attributes['traces.codex.subagent_thread_id']) }
     })
   }
   return [...bySession].map(([id, own]) => {
     const root = own.find((s) => s.name === 'session') ?? [...own].sort(byStart).find((s) => s.parent_span_id === null) ?? [...own].sort(byStart)[0]!
     const a = root.attributes
     return { id, label: str(a['tangle.node.label']) ?? str(a['gen_ai.agent.name']) ?? id, parent: str(a['tangle.harness_session.parent']), depth: num(a['tangle.node.depth']) ?? 0,
-      state: str(a['tangle.node.state']), profile: str(a['agent.profile.name']), model: modelOf(a), start: ts(root.start_time), end: endOf(root, now), span_id: root.span_id, spans: own }
+      state: str(a['tangle.node.state']), profile: str(a['agent.profile.name']), ...identity(a, own), start: ts(root.start_time), end: endOf(root, now), span_id: root.span_id, spans: own,
+      top: id, session: null, parentSession: null, thread: null }
   })
 }
 
-type Event = BehaviorSpanClass & { readonly t: number; readonly e: number; readonly cat: BehaviorCategory; readonly name: string; readonly tool: string; readonly span: string; readonly ok: boolean; readonly tokens_in: number | null; readonly tokens_out: number | null; readonly output: unknown }
+type Mail = { readonly kind: string; readonly to: string | null }
+type Event = BehaviorSpanClass & { readonly t: number; readonly e: number; readonly cat: BehaviorCategory; readonly name: string; readonly tool: string; readonly span: string; readonly ok: boolean; readonly llm: boolean; readonly tokens_in: number | null; readonly tokens_out: number | null; readonly mail: Mail | null }
 
+/** Whom a call messaged or started: a coordination call, a harness's own spawn or message (Codex `spawn_agent`, `send_message`, `followup_task`; a Claude Code subagent), or a `fleet send`. */
+function mailOf(span: OtlpSpan, cls: BehaviorSpanClass, parent: string | null): Mail | null {
+  const a = span.attributes
+  const kind = toolOf(span).split('__').pop()!
+  const key = toolKey(kind)
+  if (key === 'spawnworker') return { kind, to: WORKER_ID_RE.exec(String(a['output.value'] ?? ''))?.[1] ?? null }
+  if (key === 'reportblocked') return { kind, to: parent }
+  if (key === 'steeragent' || key === 'observeagent') return { kind, to: cls.detail }
+  if (key === 'spawnagent' || key === 'sendmessage' || key === 'followuptask') { const j = parseInput(a['input.value']); return { kind, to: str(j.target) ?? str(j.task_name) ?? str(j.to) } }
+  if (a[SUBAGENT_SPAWN_ATTR] === true) return { kind: 'spawn', to: str(a[SUBAGENT_SPAWN_TASK_ATTR]) }
+  const sent = SHELL_TOOLS.has(key) ? FLEET_SEND_RE.exec(String(a['input.value'] ?? '')) : null
+  return sent ? { kind: 'fleet_send', to: sent[1]! } : null
+}
+
+/** The node's own events: a span a fork or compaction carried in (`traces.session.inherited`) is the parent's work, as in facts. */
 function nodeEvents(n: RawNode): Event[] {
   const kinds = new Map(classifyLiveActions(n.spans).map((act) => [act.spanId, act.kind]))
-  return n.spans.filter((s) => s.name !== 'session').map((s): Event => {
+  return n.spans.filter((s) => s.name !== 'session' && !isInheritedSpan(s.attributes)).map((s): Event => {
     const cls = classifySpan(s, kinds.get(s.span_id) ?? 'other')
-    return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, tool: toolKey(toolOf(s)), span: s.span_id, ok: !failed(s),
-      tokens_in: num(s.attributes['gen_ai.usage.input_tokens']), tokens_out: num(s.attributes['gen_ai.usage.output_tokens']), output: s.attributes['output.value'] }
+    return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, tool: toolKey(toolOf(s)), span: s.span_id, ok: !failed(s), llm: resolveSpanKind(s) === 'LLM',
+      tokens_in: num(s.attributes['gen_ai.usage.input_tokens']), tokens_out: num(s.attributes['gen_ai.usage.output_tokens']), mail: mailOf(s, cls, n.parent) }
   }).sort((x, y) => x.t - y.t)
 }
 
 interface Segment { readonly a: number; readonly b: number; readonly cat: BehaviorCategory; readonly span: string }
 
 /** An event explains the time until the next event (capped); a longer gap is idle, and a stall. */
-function segments(ev: readonly Event[], n: RawNode, stalls: BehaviorStall[]): Segment[] {
+function segments(ev: readonly Event[], n: Pick<RawNode, 'id' | 'end'>, stalls: BehaviorStall[]): Segment[] {
   const segs: Segment[] = []
   ev.forEach((e, i) => {
     const nxt = i + 1 < ev.length ? ev[i + 1]!.t : n.end
@@ -277,7 +313,7 @@ function gamingFlags(ev: readonly Event[], nid: string): BehaviorFlag[] {
 }
 
 /** The calibrated precedence rule: a code edit makes the window implementing, else a verify command makes it verifying, else the category with the most seconds; a failing streak makes its window looping. */
-function windowCategories(ev: readonly Event[], segs: readonly Segment[], streaks: readonly BehaviorStreak[], t0: number, W: number, nwin: number): { cats: Array<BehaviorCategory | null>; spans: Array<Set<string>> } {
+function windowCategories(ev: readonly Mark[], segs: readonly Segment[], streaks: readonly BehaviorStreak[], t0: number, W: number, nwin: number): { cats: Array<BehaviorCategory | null>; spans: Array<Set<string>> } {
   const sec = Array.from({ length: nwin }, () => new Map<BehaviorCategory, number>())
   const seen = Array.from({ length: nwin }, () => new Set<BehaviorCategory>())
   const spans = Array.from({ length: nwin }, () => new Set<string>())
@@ -303,32 +339,21 @@ function windowCategories(ev: readonly Event[], segs: readonly Segment[], streak
 }
 
 type Spawn = { harness: string | null; model: string | null }
-/** Harness and model per child, from the parents' spawn_worker calls. */
-function spawnedHarness(nodes: readonly RawNode[]): Map<string, Spawn> {
-  const byWorker = new Map<string, Spawn>()
-  for (const s of nodes.flatMap((n) => n.spans)) {
+/** Harness and model per worker a node's spawn_worker calls started. */
+function spawnsOf(spans: readonly OtlpSpan[]): Array<[string, Spawn]> {
+  return spans.flatMap((s): Array<[string, Spawn]> => {
     const m = s.name.endsWith('spawn_worker') ? WORKER_ID_RE.exec(String(s.attributes['output.value'] ?? '')) : null
-    if (!m) continue
-    const p = parseInput(s.attributes['input.value']).profile
-    byWorker.set(m[1]!, { harness: isObject(p) ? str(p.harness) : null, model: isObject(p) && isObject(p.model) ? str(p.model.default) : null })
-  }
-  return byWorker
+    const p = m ? parseInput(s.attributes['input.value']).profile : null
+    return m ? [[m[1]!, { harness: isObject(p) ? str(p.harness) : null, model: isObject(p) && isObject(p.model) ? str(p.model.default) : null }]] : []
+  })
 }
 
-function mailEdges(ev: readonly Event[], n: RawNode): BehaviorMailEdge[] {
-  const edges: BehaviorMailEdge[] = []
-  for (const e of ev) {
-    const kind = e.name.split('__').pop()!
-    if (!MAIL_TOOLS.has(kind)) continue
-    const to = kind === 'spawn_worker' ? WORKER_ID_RE.exec(String(e.output ?? ''))?.[1] ?? null : kind === 'report_blocked' ? n.parent : e.detail
-    edges.push({ kind, from: n.id, to, at: e.t, span: e.span, ok: e.ok, detail: cut(e.detail, 120), read_latency_min: null })
-  }
-  return edges
+function mailEdges(ev: readonly Event[], n: Pick<RawNode, 'id'>): BehaviorMailEdge[] {
+  return ev.flatMap((e) => (e.mail ? [{ kind: e.mail.kind, from: n.id, to: e.mail.to, at: e.t, span: e.span, ok: e.ok, detail: cut(e.detail, 120), read_latency_min: null }] : []))
 }
 
 /** Read latency: a steer at t to W is read at W's next model turn starting at or after t. */
-function readLatency(edges: BehaviorMailEdge[], nodes: readonly RawNode[]): void {
-  const turnStarts = new Map(nodes.map((n) => [n.id, n.spans.filter((s) => s.name === 'llm.turn').map((s) => ts(s.start_time)).sort((a, b) => a - b)]))
+function readLatency(edges: BehaviorMailEdge[], turnStarts: ReadonlyMap<string, readonly number[]>): void {
   for (const e of edges) {
     const next = e.kind === 'steer_agent' && e.to !== null ? turnStarts.get(e.to)?.find((t) => t >= e.at) : undefined
     if (next !== undefined) e.read_latency_min = round((next - e.at) / 60, 1)
@@ -366,65 +391,112 @@ function anomalies(outNodes: readonly BehaviorNode[]): BehaviorAnomaly[] {
   return found
 }
 
-function drift(nodes: readonly RawNode[], cats: ReadonlyMap<string, ReadonlyArray<BehaviorCategory | null>>, t0: number, W: number, nwin: number): BehaviorDrift[] {
+function drift(read: readonly ReadNode[], cats: ReadonlyMap<string, ReadonlyArray<BehaviorCategory | null>>, t0: number, W: number, nwin: number): BehaviorDrift[] {
   const rows: BehaviorDrift[] = Array.from({ length: nwin }, (_, w) => ({ w, from: t0 + w * W, to: t0 + (w + 1) * W, calls: 0, failed: 0, active: 0 }))
-  for (const s of nodes.flatMap((n) => n.spans)) {
-    const w = Math.floor((ts(s.start_time) - t0) / W)
-    if (!s.name.startsWith('tool.') || w < 0 || w >= nwin) continue
-    rows[w]!.calls += 1; rows[w]!.failed += failed(s) ? 1 : 0
+  for (const m of read.flatMap((r) => r.marks)) {
+    const w = Math.floor((m.t - t0) / W)
+    if (m.ok === undefined || w < 0 || w >= nwin) continue
+    rows[w]!.calls += 1; rows[w]!.failed += m.ok ? 0 : 1
   }
   for (const c of cats.values()) c.forEach((cat, w) => { if (cat != null && cat !== 'idle') rows[w]!.active += 1 })
   return rows
 }
 
-interface Accumulator { windows: BehaviorWindow[]; flags: BehaviorFlag[]; streaks: BehaviorStreak[]; stalls: BehaviorStall[]; edges: BehaviorMailEdge[]; cats: Map<string, Array<BehaviorCategory | null>> }
+/** What the run-wide pass needs of an event once its node is read: when, its category, and a tool call's outcome (`ok`). */
+interface Mark { readonly t: number; readonly cat: BehaviorCategory; readonly span: string; readonly ok?: boolean }
+/** A node once its spans are read: its row as read alone, and what the run's windows, links and read latency need. */
+interface ReadNode { readonly node: BehaviorNode; readonly n: Omit<RawNode, 'spans'>; readonly marks: Mark[]; readonly segs: Segment[]; readonly streaks: BehaviorStreak[]; readonly turns: number[] }
+interface Accumulator { flags: BehaviorFlag[]; streaks: BehaviorStreak[]; stalls: BehaviorStall[]; edges: BehaviorMailEdge[]; spawned: Map<string, Spawn> }
 
-function analyzeNode(n: RawNode, t0: number, W: number, nwin: number, spawned: ReadonlyMap<string, Spawn>, acc: Accumulator): BehaviorNode {
-  const ev = nodeEvents(n)
+function readNode({ spans, ...n }: RawNode, acc: Accumulator): ReadNode {
+  const ev = nodeEvents({ ...n, spans })
   const segs = segments(ev, n, acc.stalls)
   const streaks = failingStreaks(ev, n.id)
-  const { cats, spans } = windowCategories(ev, segs, streaks, t0, W, nwin)
-  acc.streaks.push(...streaks); acc.flags.push(...gamingFlags(ev, n.id)); acc.edges.push(...mailEdges(ev, n)); acc.cats.set(n.id, cats)
-  cats.forEach((category, w) => {
-    if (category != null) acc.windows.push({ node: n.id, w, from: t0 + w * W, to: t0 + (w + 1) * W, category, span_ids: [...spans[w]!], calibrated: isCalibrated(category) })
-  })
+  acc.streaks.push(...streaks); acc.flags.push(...gamingFlags(ev, n.id)); acc.edges.push(...mailEdges(ev, n))
+  for (const [worker, spawn] of spawnsOf(spans)) acc.spawned.set(worker, spawn)
   const byCat: Record<string, number> = {}
   for (const s of segs) byCat[s.cat] = (byCat[s.cat] || 0) + (s.b - s.a)
   const calls = ev.filter((e) => e.name.startsWith('tool.'))
   const failedCalls = calls.filter((e) => !e.ok)
   const hours = Math.max((n.end - n.start) / 3600, 1 / 60)
   const known = ev.filter((e) => e.tokens_in != null)
-  const spawn = spawned.get(n.id)
   const lastActive = [...segs].reverse().find((s) => s.cat !== 'idle')
-  return {
-    id: n.id, label: n.label, parent: n.parent, depth: n.depth, state: n.state, profile: n.profile,
-    model: n.model ?? spawn?.model ?? null, harness: spawn?.harness ?? (String(n.model ?? '').startsWith('gpt') ? 'codex' : null),
+  const node: BehaviorNode = {
+    id: n.id, label: n.label, parent: n.parent, depth: n.depth, state: n.state, profile: n.profile, model: n.model, harness: n.harness,
     start: n.start, end: n.end, hours: round(hours, 2), by_cat: Object.fromEntries(Object.entries(byCat).map(([k, v]) => [k, round(v / 60, 1)])),
     tool_calls: calls.length, failed: failedCalls.length, fail_rate: calls.length ? round(failedCalls.length / calls.length, 3) : null,
-    calls_per_hour: round(calls.length / hours, 1), idle_min: round((byCat.idle || 0) / 60, 1), streaks: streaks.length, llm_turns: ev.filter((e) => e.name === 'llm.turn').length,
+    calls_per_hour: round(calls.length / hours, 1), idle_min: round((byCat.idle || 0) / 60, 1), streaks: streaks.length, llm_turns: ev.filter((e) => e.llm).length,
     tokens_in: known.length ? known.reduce((a, e) => a + e.tokens_in!, 0) : null, tokens_out: known.length ? ev.reduce((a, e) => a + (e.tokens_out || 0), 0) : null,
     tokens_known_turns: known.length, last_cat: lastActive ? lastActive.cat : null, span_id: n.span_id,
     claims: ev.filter((e) => e.flags.includes('claim')).length, test_edits: ev.filter((e) => e.flags.includes('test_edit')).length, z: {},
   }
+  return { node, n, segs, streaks, marks: ev.map(({ t, cat, span, name, ok }) => (name.startsWith('tool.') ? { t, cat, span, ok } : { t, cat, span })), turns: ev.filter((e) => e.llm).map((e) => e.t) }
+}
+
+/** The run's nodes, a session read on its own hung under the session that spawned it (`traces.parent_session_id`); then the windows on the run's clock. */
+function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanCount: number): BehaviorResult {
+  const bySession = new Map(read.flatMap((r) => (r.n.session ? [[r.n.session, r.node.id] as const] : [])))
+  const byId = new Map(read.map((r) => [r.node.id, r]))
+  const links = new Map<string, string>()
+  for (const { n } of read) {
+    const parent = n.session === null || n.parentSession === null ? undefined : bySession.get(n.parentSession)
+    if (parent !== undefined) links.set(n.id, parent)
+  }
+  const depthOf = (r: ReadNode, hops = 0): number => {
+    const up = hops < read.length ? byId.get(links.get(r.n.top) ?? '') : undefined
+    return r.n.depth + (up ? depthOf(up, hops + 1) + 1 : 0)
+  }
+  const outNodes = read.map(({ node, n }) => {
+    const spawn = acc.spawned.get(node.id)
+    const model = node.model ?? spawn?.model ?? null
+    return { ...node, parent: links.get(node.id) ?? node.parent, depth: depthOf(byId.get(node.id)!), model, harness: node.harness ?? spawn?.harness ?? (String(model ?? '').startsWith('gpt') ? 'codex' : null) }
+  })
+  const [t0, t1] = [Math.min(...outNodes.map((n) => n.start)), Math.max(...outNodes.map((n) => n.end))]
+  const nwin = Math.floor((t1 - t0) / W) + 1
+  const windows: BehaviorWindow[] = []
+  const cats = new Map<string, Array<BehaviorCategory | null>>()
+  for (const r of read) {
+    const { cats: nodeCats, spans } = windowCategories(r.marks, r.segs, r.streaks, t0, W, nwin)
+    cats.set(r.node.id, nodeCats)
+    nodeCats.forEach((category, w) => {
+      if (category != null) windows.push({ node: r.node.id, w, from: t0 + w * W, to: t0 + (w + 1) * W, category, span_ids: [...spans[w]!], calibrated: isCalibrated(category) })
+    })
+  }
+  readLatency(acc.edges, new Map(read.map((r) => [r.node.id, r.turns])))
+  return {
+    policy: { ...BEHAVIOR_POLICY, window_s: W }, run: { t0, t1, n_windows: nwin, spans: spanCount }, nodes: outNodes, windows,
+    flags: acc.flags, streaks: acc.streaks, stalls: acc.stalls, anomalies: anomalies(outNodes), drift: drift(read, cats, t0, W, nwin),
+    mail: { edges: acc.edges, summary: mailSummary(acc.edges) }, calibration: BEHAVIOR_CALIBRATION,
+  }
+}
+
+/** Behavior over spans handed in a session at a time: each `add` reads its nodes and keeps only what the run-wide pass needs, so a week of sessions is never held at once. */
+export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: BehaviorOptions = {}): { add(spans: readonly OtlpSpan[]): void; result(): BehaviorResult } {
+  const acc: Accumulator = { flags: [], streaks: [], stalls: [], edges: [], spawned: new Map() }
+  const read: ReadNode[] = []
+  let spanCount = 0
+  let tools = false
+  return {
+    add(all) {
+      const spans = all.filter((s) => ts(s.start_time) > 0) // OTLP's zero time is unknown; one such span opened millions of windows back to 1970
+      spanCount += spans.length
+      tools ||= spans.some(isToolSpan)
+      // A Codex lifecycle span stands for another session's thread (a child it spawned, or the parent it answered),
+      // whose records are in that session's file: that session is the node, never a callless stand-in.
+      for (const n of groupNodes(spans, now)) if (n.thread === null) read.push(readNode(n, acc))
+    },
+    result() {
+      if (!tools || read.length === 0) throw Object.assign(new Error('no tool spans; categories unavailable'), { code: 'no-outcome' })
+      return runResult(read, acc, windowMs / 1000, spanCount)
+    },
+  }
 }
 
 /** The behavior of every node in `spans`. Throws (`code: no-outcome`) when no span is a tool call: categories need acts. */
-export function behaviorFromSpans(all: readonly OtlpSpan[], { windowMs = 300_000, now = Date.now() / 1000 }: BehaviorOptions = {}): BehaviorResult {
-  const spans = all.filter((s) => ts(s.start_time) > 0) // OTLP's zero time is unknown; one such span opened millions of windows back to 1970
-  const nodes = spans.some(isToolSpan) ? groupNodes(spans, now) : []
-  if (nodes.length === 0) throw Object.assign(new Error('no tool spans; categories unavailable'), { code: 'no-outcome' })
-  const W = windowMs / 1000
-  const [t0, t1] = [Math.min(...nodes.map((n) => n.start)), Math.max(...nodes.map((n) => n.end))]
-  const nwin = Math.floor((t1 - t0) / W) + 1
-  const acc: Accumulator = { windows: [], flags: [], streaks: [], stalls: [], edges: [], cats: new Map() }
-  const spawned = spawnedHarness(nodes)
-  const outNodes = nodes.map((n) => analyzeNode(n, t0, W, nwin, spawned, acc))
-  readLatency(acc.edges, nodes)
-  return {
-    policy: { ...BEHAVIOR_POLICY, window_s: W }, run: { t0, t1, n_windows: nwin, spans: spans.length }, nodes: outNodes, windows: acc.windows,
-    flags: acc.flags, streaks: acc.streaks, stalls: acc.stalls, anomalies: anomalies(outNodes), drift: drift(nodes, acc.cats, t0, W, nwin),
-    mail: { edges: acc.edges, summary: mailSummary(acc.edges) }, calibration: BEHAVIOR_CALIBRATION,
-  }
+export function behaviorFromSpans(all: readonly OtlpSpan[], options: BehaviorOptions = {}): BehaviorResult {
+  const reader = behaviorReader(options)
+  reader.add(all)
+  return reader.result()
 }
 
 const iso = (t: number): string => new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
