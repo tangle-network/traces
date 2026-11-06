@@ -856,7 +856,7 @@ export interface SessionReading {
   readonly operating: OperatingSamples
 }
 
-/** Parent samples stay paired with parent tools. Folded calls add their own context and latency. */
+/** Parent tools stay with parent calls. Each folded child's latency stays inside that child. */
 function operatingOf(
   own: readonly OtlpSpan[],
   sub: readonly OtlpSpan[],
