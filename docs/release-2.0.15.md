@@ -14,7 +14,7 @@ Publishes [#265](https://github.com/tangle-network/traces/pull/265). `traces beh
 - Behavior nodes carry `harness` and `model`, and `facts.subagents[]` entries carry `model`.
 - A Codex child hangs under its parent's node.
 - Mail edges come from Codex `spawn_agent`, `send_message` and `followup_task`, from Claude Code subagent spawns and `SendMessage`, and from `fleet send` commands.
-- New: `traces facts --match RE --count` gives each value of RE's first capture group its count and its first and last time. For example, `--match '^fleet ([a-z-]+)' --count` counts fleet verbs.
+- New: `traces facts --since 30d --match '^fleet ([a-z-]+)' --count` counts fleet verbs. `--count` gives each value of the pattern's first capture group its count and its first and last time.
 
 Two gaps remain, both in the producers rather than in traces:
 
