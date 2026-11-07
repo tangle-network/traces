@@ -18,10 +18,7 @@ concurrency:
 jobs:
   prepare:
     uses: tangle-network/traces/.github/workflows/qualify-release.yml@4829b1a2f838684521ca8bdcc959ae4df9efdd40
-    # A ceiling, not a grant: GitHub checks every job of the called workflow
-    # against it, skipped ones included, and qualify-release's github-release
-    # job asks for contents: write, so read here fails the run at startup.
-    # The prepare job itself declares contents: read and gets only that.
+    # The caller ceiling permits the GitHub-release job; prepare keeps contents: read.
     permissions:
       contents: write
     with:
@@ -43,6 +40,26 @@ jobs:
         with:
           name: traces-release
           path: ${{ runner.temp }}/release
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: tangle-network/agent-runtime
+          ref: e562074c43e12066fdb02e10e239cfd716760b9c
+          path: release-policy
+          sparse-checkout: |
+            /scripts/
+            /package.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Admit the qualified npm artifact
+        run: |
+          cd "$RUNNER_TEMP/release"
+          sha256sum --check SHA256SUMS
+          parser_range=$(node -p "require(process.env.GITHUB_WORKSPACE + '/release-policy/package.json').devDependencies['oxc-parser']")
+          admission_deps=$(mktemp -d "$RUNNER_TEMP/admission-deps.XXXXXX")
+          trap 'rm -rf "$admission_deps"' EXIT
+          npm install --prefix "$admission_deps" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund "oxc-parser@$parser_range"
+          ln -s "$admission_deps/node_modules" "$GITHUB_WORKSPACE/release-policy/node_modules"
+          node "$GITHUB_WORKSPACE/release-policy/scripts/check-version-bump.mjs" --archive "$RUNNER_TEMP/release/package.tgz"
       - name: Publish the verified npm artifact
         env:
           NPM_CONFIG_PROVENANCE: 'true'
