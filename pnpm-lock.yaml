@@ -176,17 +176,17 @@ importers:
   .:
     dependencies:
       '@tangle-network/agent-eval':
-        specifier: ^1.0.0
-        version: 1.0.7
+        specifier: ^1.0.21
+        version: 1.0.21
       '@tangle-network/agent-interface':
-        specifier: ^5.10.5
-        version: 5.10.7
+        specifier: ^5.10.19
+        version: 5.10.20
       '@tangle-network/agent-runtime':
-        specifier: ^3.0.5
-        version: 3.0.5(@tangle-network/agent-eval@1.0.7)(@tangle-network/agent-interface@5.10.7)(@tangle-network/sandbox@1.0.73)
+        specifier: ^7.0.0
+        version: 7.0.0(@tangle-network/agent-eval@1.0.21)(@tangle-network/agent-interface@5.10.20)(@tangle-network/sandbox@1.0.264)
       '@tangle-network/agent-trace-contract':
-        specifier: ^2.2.0
-        version: 2.2.0
+        specifier: ^2.2.2
+        version: 2.2.2
       '@tangle-network/harness-sessions':
         specifier: ^1.0.11
         version: 1.0.11
@@ -650,21 +650,26 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@tangle-network/agent-core@1.0.1':
-    resolution: {integrity: sha512-crp4uGjCbMnmeAJ/hd2mHHP7rx5iSeoRWKfB3jft6c1mcl8iSXzPigaybklSgKuiJroPfd6tJP99OGr+rjxwug==}
+  '@tangle-network/agent-core@1.0.3':
+    resolution: {integrity: sha512-XEYUcGi2XZTCBcVKb6OK8PFbtW2xcI/0VtvRPWQtuVuBZWTb5PeI4HQ+r+rZB9IBuJpFzfm9wWfWum3zjWbsyQ==}
     peerDependencies:
       '@modelcontextprotocol/sdk': ^1.30.0
     peerDependenciesMeta:
       '@modelcontextprotocol/sdk':
         optional: true
 
-  '@tangle-network/agent-eval@1.0.7':
-    resolution: {integrity: sha512-TUbKyFaypvHcL82aC18nsZmg7/yPbLgzizH5oZ3gt35AJOfPoqruux4dusEsXVc+d8EHNvhPHIimnpmHEVfdcQ==}
+  '@tangle-network/agent-eval@1.0.21':
+    resolution: {integrity: sha512-FEJ7fOy4FIDjg4akqt+M0AYniFWW3/P9n+bBgcnwGRwHytF6sH6TrunPtT6dbw7xrSaOTMti/tDZFwTkL9ZW6Q==}
     engines: {node: '>=20.19.0'}
     hasBin: true
+    peerDependencies:
+      playwright: '>=1.64.1'
+    peerDependenciesMeta:
+      playwright:
+        optional: true
 
-  '@tangle-network/agent-interface@5.10.7':
-    resolution: {integrity: sha512-+nidFgIDju6oo7fPEE3rn2f0v/NL+cNP7+9hgqrvj7wH4IRFQsS1chdmVsuZzQZN6pvHQR7Ygja0TyJ379UzEw==}
+  '@tangle-network/agent-interface@5.10.20':
+    resolution: {integrity: sha512-aEzAfS8iatWo/nX8dyTeZnQx+okHlumBZQyUCFLhQ6VoV+/byrRaQZzeVhMTtm3Yn89kvtOofZz4fZ5GH+vD/A==}
 
   '@tangle-network/agent-knowledge@23.0.0':
     resolution: {integrity: sha512-o5xhoRIuc6qzxAn2+7ZT/vpDcV00oS4b4499GDTbxf7ZYMBqmQnKPXh5fijLg3KJXo+you3n+din2MMopFRC1A==}
@@ -679,25 +684,25 @@ packages:
     peerDependencies:
       '@tangle-network/agent-interface': ^5.10.2
 
-  '@tangle-network/agent-runtime@3.0.5':
-    resolution: {integrity: sha512-HQrg1rhntrdB/2Ta8aOAYJDfJCdfbKiqdtOwM6bjjWygvlVKvUZKiLqup2sAA/VsauGfKH6NV0omU4bggCEtpw==}
+  '@tangle-network/agent-runtime@7.0.0':
+    resolution: {integrity: sha512-b6q5EARAX6sPuok/KD01UrcYTXKOLvXen0S6ipA7jtTKA55NESCpAqoAYA4jva91pOZ5yBuNrrg1kdWVXwB/dg==}
     engines: {node: '>=22.19.0'}
     hasBin: true
     peerDependencies:
       '@tangle-network/agent-eval': ^1.0.0
-      '@tangle-network/agent-interface': ^5.10.5
-      '@tangle-network/sandbox': ^1.0.1
+      '@tangle-network/agent-interface': ^5.10.19
+      '@tangle-network/sandbox': ^1.0.233
 
-  '@tangle-network/agent-trace-contract@2.2.0':
-    resolution: {integrity: sha512-M7UrrKmaQIvrW2S1PCIsTOHBqP/hKiSjIAbV/Shso78zTYet0bzhJ/vfwfCEs0bfAl1oDsh/tQlZZp66o+YgPg==}
+  '@tangle-network/agent-trace-contract@2.2.2':
+    resolution: {integrity: sha512-46CGFTHw1E+Fvykjdf3tS0ysQugv+DdM9TptHjALVeFzO+Z4Baiw6XWJLYiP3fx/UEk3QCIiITD1qoPi8XfgkA==}
 
   '@tangle-network/harness-sessions@1.0.11':
     resolution: {integrity: sha512-fE/tlWBf/sWGpa2KIc9ONI8sF8f/eOeFDneuu6XVHfMeR0V8aig64CFlIlE7GZVNpSy6VyeA5doSf+u2QYdj/Q==}
     engines: {node: '>=22.13.0'}
     hasBin: true
 
-  '@tangle-network/sandbox@1.0.73':
-    resolution: {integrity: sha512-breL6pKayoqhGY7ncGSnixCbDZPlDbm0B0fyiwp/rhZWpFTe1EMfZMX86nmDxVbtjVO/J2WVSuOCCbALu3S2fA==}
+  '@tangle-network/sandbox@1.0.264':
+    resolution: {integrity: sha512-apuRQxPnm5igWxyBwpxo+DYPukAV1l2z75EoI+ez+vVC1VlTvKNbJBtxk+mKnDvqpbFPAid7cNjujPCEv/xQUA==}
     peerDependencies:
       '@mastra/core': ^1.36.0
       '@modelcontextprotocol/sdk': ^1.30.0
@@ -1541,19 +1546,19 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.65.0':
     optional: true
 
-  '@tangle-network/agent-core@1.0.1':
+  '@tangle-network/agent-core@1.0.3':
     dependencies:
-      '@tangle-network/agent-interface': 5.10.7
-      '@tangle-network/agent-trace-contract': 2.2.0
+      '@tangle-network/agent-interface': 5.10.20
+      '@tangle-network/agent-trace-contract': 2.2.2
       zod: 4.6.7
 
-  '@tangle-network/agent-eval@1.0.7':
+  '@tangle-network/agent-eval@1.0.21':
     dependencies:
       '@asteasolutions/zod-to-openapi': 9.1.0(zod@4.6.7)
       '@hono/node-server': 2.1.5(hono@4.13.14)
-      '@tangle-network/agent-core': 1.0.1
-      '@tangle-network/agent-interface': 5.10.7
-      '@tangle-network/agent-trace-contract': 2.2.0
+      '@tangle-network/agent-core': 1.0.3
+      '@tangle-network/agent-interface': 5.10.20
+      '@tangle-network/agent-trace-contract': 2.2.2
       '@tangle-network/harness-sessions': 1.0.11
       hono: 4.13.14
       linear-sum-assignment: 1.0.9
@@ -1563,34 +1568,34 @@ snapshots:
     transitivePeerDependencies:
       - '@modelcontextprotocol/sdk'
 
-  '@tangle-network/agent-interface@5.10.7':
+  '@tangle-network/agent-interface@5.10.20':
     dependencies:
       '@noble/hashes': 2.4.0
       spdx-expression-parse: 5.0.0
       zod: 4.6.7
 
-  '@tangle-network/agent-knowledge@23.0.0(@tangle-network/agent-eval@1.0.7)(@tangle-network/agent-interface@5.10.7)':
+  '@tangle-network/agent-knowledge@23.0.0(@tangle-network/agent-eval@1.0.21)(@tangle-network/agent-interface@5.10.20)':
     dependencies:
-      '@tangle-network/agent-eval': 1.0.7
-      '@tangle-network/agent-interface': 5.10.7
+      '@tangle-network/agent-eval': 1.0.21
+      '@tangle-network/agent-interface': 5.10.20
       '@types/proper-lockfile': 4.1.4
       proper-lockfile: 4.1.2
       zod: 4.6.7
 
-  '@tangle-network/agent-profile-materialize@1.1.7(@tangle-network/agent-interface@5.10.7)':
+  '@tangle-network/agent-profile-materialize@1.1.7(@tangle-network/agent-interface@5.10.20)':
     dependencies:
-      '@tangle-network/agent-interface': 5.10.7
+      '@tangle-network/agent-interface': 5.10.20
 
-  '@tangle-network/agent-runtime@3.0.5(@tangle-network/agent-eval@1.0.7)(@tangle-network/agent-interface@5.10.7)(@tangle-network/sandbox@1.0.73)':
+  '@tangle-network/agent-runtime@7.0.0(@tangle-network/agent-eval@1.0.21)(@tangle-network/agent-interface@5.10.20)(@tangle-network/sandbox@1.0.264)':
     dependencies:
       '@earendil-works/pi-codemode': 1.4.0
-      '@tangle-network/agent-core': 1.0.1
-      '@tangle-network/agent-eval': 1.0.7
-      '@tangle-network/agent-interface': 5.10.7
-      '@tangle-network/agent-knowledge': 23.0.0(@tangle-network/agent-eval@1.0.7)(@tangle-network/agent-interface@5.10.7)
-      '@tangle-network/agent-profile-materialize': 1.1.7(@tangle-network/agent-interface@5.10.7)
-      '@tangle-network/agent-trace-contract': 2.2.0
-      '@tangle-network/sandbox': 1.0.73
+      '@tangle-network/agent-core': 1.0.3
+      '@tangle-network/agent-eval': 1.0.21
+      '@tangle-network/agent-interface': 5.10.20
+      '@tangle-network/agent-knowledge': 23.0.0(@tangle-network/agent-eval@1.0.21)(@tangle-network/agent-interface@5.10.20)
+      '@tangle-network/agent-profile-materialize': 1.1.7(@tangle-network/agent-interface@5.10.20)
+      '@tangle-network/agent-trace-contract': 2.2.2
+      '@tangle-network/sandbox': 1.0.264
       tar-stream: 3.2.2
       yaml: 2.9.1
       zod: 4.6.7
@@ -1600,20 +1605,20 @@ snapshots:
       - bare-buffer
       - react-native-b4a
 
-  '@tangle-network/agent-trace-contract@2.2.0': {}
+  '@tangle-network/agent-trace-contract@2.2.2': {}
 
   '@tangle-network/harness-sessions@1.0.11':
     dependencies:
-      '@tangle-network/agent-core': 1.0.1
-      '@tangle-network/agent-trace-contract': 2.2.0
+      '@tangle-network/agent-core': 1.0.3
+      '@tangle-network/agent-trace-contract': 2.2.2
     transitivePeerDependencies:
       - '@modelcontextprotocol/sdk'
 
-  '@tangle-network/sandbox@1.0.73':
+  '@tangle-network/sandbox@1.0.264':
     dependencies:
-      '@tangle-network/agent-core': 1.0.1
-      '@tangle-network/agent-interface': 5.10.7
-      '@tangle-network/agent-trace-contract': 2.2.0
+      '@tangle-network/agent-core': 1.0.3
+      '@tangle-network/agent-interface': 5.10.20
+      '@tangle-network/agent-trace-contract': 2.2.2
       tar-stream: 3.2.1
       zod: 4.6.7
     transitivePeerDependencies:
