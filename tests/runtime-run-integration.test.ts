@@ -12,25 +12,32 @@ it('reads a named Runtime run through its owner without summing child-inclusive 
   const dir = await mkdtemp(join(tmpdir(), 'traces-runtime-graph-'))
   const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, '0')}Z`
   const root = 'runtime-fixture'
-  const spawn = (id: string, parent?: string) => ({ kind: 'spawned', id, parent, label: 'PRIVATE_LABEL', budget: { maxTokens: 1000 }, runtime: 'pi', seq: 0, at: at(0) })
+  const spawn = (id: string, parent?: string, budget: object = parent ? { maxTokens: 1000 } : {}) => ({ kind: 'spawned', id, parent, label: 'PRIVATE_LABEL', budget, runtime: 'pi', seq: 0, at: at(0) })
   const spend = (input: number, output: number) => ({ tokens: { input, output }, usd: 0, usdKnown: false, ms: 1 })
   try {
-    const events = [spawn(root), spawn('child', root),
+    const events = [spawn(root), spawn('child', root), spawn('resource-cap', root, { resources: { gpu: { unit: 'ms', limit: 5000 } } }),
       { kind: 'metered', id: root, spend: spend(100, 10), seq: 0, at: at(1) },
       { kind: 'metered', id: 'child', spend: spend(20, 2), seq: 0, at: at(1) },
       { kind: 'settled', id: 'child', status: 'done', spent: spend(20, 2), seq: 0, at: at(2) },
+      { kind: 'settled', id: 'resource-cap', status: 'done', spent: spend(0, 0), seq: 0, at: at(2) },
       { kind: 'settled', id: root, status: 'done', spent: spend(120, 12), seq: 0, at: at(3) }]
     await writeFile(join(dir, 'spawn-journal.jsonl'), [
       { kind: 'begin', root, at: at(0) },
       { kind: 'events', root, events: events.slice(0, 2) }, // Runtime batches spawns.
       ...events.slice(2).map((event) => ({ kind: 'event', root, event })),
     ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+    const watched = await runCli(['watch', dir, '--once'], { timeoutMs: 15_000 })
+    expect(watched.code, watched.stderr).toBe(0)
+    expect(watched.stdout).toContain('budget unbounded')
+    expect(watched.stdout).toContain('budget 1,000tok')
+    expect(watched.stdout).toContain('budget gpu 5,000ms')
+    expect(watched.stdout).not.toMatch(/NaN|Infinity|% it/)
     const spans = await readRefSpans(dir)
     const tree = buildSpanRunTree(spans, dir)
-    expect(tree.nodes).toHaveLength(2)
-    expect(tree.nodes.filter((node) => node.parentNodeId !== null)).toHaveLength(1)
+    expect(tree.nodes).toHaveLength(3)
+    expect(tree.nodes.filter((node) => node.parentNodeId !== null)).toHaveLength(2)
     const facts = computeSessionFacts(spans, { includeSubagents: true })
-    expect(facts).toHaveLength(2)
+    expect(facts).toHaveLength(3)
     expect(facts.reduce((total, fact) => total + (fact.tokens.input ?? 0), 0)).toBe(120)
     expect(facts.reduce((total, fact) => total + (fact.tokens.output ?? 0), 0)).toBe(12)
     expect(JSON.stringify(spans)).not.toContain('PRIVATE_LABEL')
