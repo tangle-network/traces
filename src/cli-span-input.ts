@@ -86,9 +86,11 @@ export async function collectOtlpSpans(path: string, selector?: string, retained
 }
 
 export async function collectRuntimeSpans(path: string): Promise<CollectedSpans> {
-  const input = await readOtlpInput(path, { allowEmptyDirectory: true })
-  if (input.files.length > 0) return collectOtlpSpans(path, undefined, input)
-  return { spans: await (await import('./adapters/runtime-run.js')).readRuntimeRunDirectory(path), harness: 'agent-runtime', sources: [] }
+  const reader = await import('./adapters/runtime-run.js')
+  const { isRuntimeSupervisorRunDir } = await import('@tangle-network/agent-eval/supervisor-run')
+  const input = await isRuntimeSupervisorRunDir(path) ? await reader.readRuntimeRunSpans(path) : undefined
+  if (input?.retained) return collectOtlpSpans(path, undefined, input.retained)
+  return { spans: input?.spans ?? await reader.readRuntimeRunDirectory(path), harness: 'agent-runtime', sources: [] }
 }
 
 export async function collectImportedSpans(
