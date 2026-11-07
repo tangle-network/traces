@@ -49,7 +49,7 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
         artifact: { schemaVersion: 1, harness: 'codex', binding, files: [{ path: 'sessions/rollout.jsonl', content, bytes: Buffer.byteLength(content) }], skipped: [] },
       }, blobs)
       await appendMetadata(journal, binding, index * 4 + 1)
-      await journal.appendEvent(root, { kind: 'settled', id, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 999, output: 999 }, usd: 0, ms: 0 }, seq: index * 4 + 4, at })
+      await journal.appendEvent(root, { kind: 'settled', id, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 999, output: 999 }, usd: 0, ms: 0, iterations: 0 }, seq: index * 4 + 4, at })
     }
     // The baseline CLI selects these parentless request summaries and refuses zero record spans.
     await writeFile(join(dir, 'bridge.otlp.jsonl'), serializeSpans([span({
@@ -96,7 +96,7 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
         status: 'captured', fileCount: 1, totalBytes: Buffer.byteLength(text), skippedCount: 0, coverageComplete: negative.coverage,
         artifact: { schemaVersion: 1, harness: 'codex', binding: negative.binding, files: [{ path: 'sessions/rollout.jsonl', content: text, bytes: Buffer.byteLength(text) }], skipped: [] },
       }, blobs)
-      await negativeJournal.appendEvent(root, { kind: 'settled', id: valid.node!.nodeId, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 0, output: 0 }, usd: 0, ms: 0 }, seq: 4, at })
+      await negativeJournal.appendEvent(root, { kind: 'settled', id: valid.node!.nodeId, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 0, output: 0 }, usd: 0, ms: 0, iterations: 0 }, seq: 4, at })
       const refused = await runCli(['facts', dir, '--format', 'json', '--no-content'])
       expect(refused.code, refused.stderr).toBe(2)
       expect(refused.stdout).toBe('')
