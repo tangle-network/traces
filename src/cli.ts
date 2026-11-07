@@ -837,8 +837,8 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   // integrity receipt for the bytes that failed to parse. Printing a sheet of
   // zeros for it would state, in the sheet's own voice, that the session did
   // nothing — which is the one thing the sheet must never do. A sweep names
-  // such a session in selection.unreadSessions instead.
-  const unread = report.sessions.filter((facts) => facts.recordSpans === 0)
+  // such a session in selection.unreadSessions instead; a failed root is its record.
+  const unread = report.sessions.filter((facts) => facts.recordSpans === 0 && facts.firstFailure.status !== 'found')
   if (unread.length > 0) {
     throw new RefError(
       `no records could be read from ${unread.length} selected session(s): ` +

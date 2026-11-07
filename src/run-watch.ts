@@ -1,28 +1,7 @@
 /**
- * `traces watch <target>` — the live terminal view, over whichever sources the
- * target actually has.
- *
- * Two sources, one verb:
- *
- *  - **General** — `run-span-tree.ts`, over OTLP spans. `trace_id` /
- *    `span_id` / `parent_span_id` reconstruct the tree for ANY emitter, so a
- *    system nobody has written yet is watchable the day it emits its first
- *    span. It cannot report an authored budget, because no span vocabulary
- *    carries one.
- *  - **Specific** — `supervisor-run-context.ts`, over agent-runtime's durable
- *    spawn journal. It carries the exact budget, spend, and settlement the
- *    telemetry does not.
- *
- * When a run has both, the output shows both and LABELS which number came from
- * which: the journal section first, because its numbers are the authoritative
- * ones, then the span section for the shape and the per-turn detail. They are
- * never merged into one column, because a merged column cannot be audited —
- * and the numbers legitimately differ (a driver's spans price each turn; the
- * journal's `settled` re-homes a whole subtree onto its parent).
- *
- * Plain stdout, no dependency, no cursor control: it works over SSH, in a CI
- * log, and through a pipe. A block prints only when the rendered view changed,
- * so a long idle stretch never scrolls the last real event away.
+ * Read-only Runtime-journal and OTLP views; usage lives in docs/watch.md.
+ * Journal settlements include child spend; spans price individual turns.
+ * Label each source, never merge their totals, and print only changed blocks.
  */
 
 import { stat } from 'node:fs/promises'
