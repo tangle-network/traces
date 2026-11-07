@@ -24,7 +24,7 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
   const materialization = (binding: HarnessTranscriptBinding): ProfileMaterializationReceipt => ({
     status: 'known', authoredProfileDigest: identity.profileDigest, effectiveProfileDigest: binding.profileDigest as `sha256:${string}`,
     materializationPlanDigest: digest({ fixture: 'plan' }), runtime: 'cli', backend: 'bridge',
-    model: { status: 'unknown', reason: 'fixture-unreported' },
+    model: { status: 'unknown', reason: 'fixture-unreported' }, resources: { status: 'unknown', reason: 'fixture-unreported' },
     execution: { kind: 'session', id: binding.sessionId }, materializer: 'cli-bridge-agent-profile',
   })
   const appendMetadata = async (store: FileSpawnJournal, binding: HarnessTranscriptBinding, seq: number) => {
@@ -51,7 +51,6 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
       await appendMetadata(journal, binding, index * 4 + 1)
       await journal.appendEvent(root, { kind: 'settled', id, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 999, output: 999 }, usd: 0, ms: 0, iterations: 0 }, seq: index * 4 + 4, at })
     }
-    // The baseline CLI selects these parentless request summaries and refuses zero record spans.
     await writeFile(join(dir, 'bridge.otlp.jsonl'), serializeSpans([span({
       traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'bridge.request', kind: 'LLM', startTime: at, inputTokens: 999, outputTokens: 999,
     })]))
