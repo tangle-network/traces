@@ -182,8 +182,8 @@ importers:
         specifier: ^5.10.19
         version: 5.10.20
       '@tangle-network/agent-runtime':
-        specifier: ^7.0.0
-        version: 7.0.0(@tangle-network/agent-eval@1.0.22)(@tangle-network/agent-interface@5.10.20)(@tangle-network/sandbox@1.0.264)
+        specifier: ^8.0.0
+        version: 8.0.0(@tangle-network/agent-eval@1.0.22)(@tangle-network/agent-interface@5.10.20)(@tangle-network/sandbox@1.0.264)
       '@tangle-network/agent-trace-contract':
         specifier: ^2.2.2
         version: 2.2.2
@@ -684,8 +684,8 @@ packages:
     peerDependencies:
       '@tangle-network/agent-interface': ^5.10.2
 
-  '@tangle-network/agent-runtime@7.0.0':
-    resolution: {integrity: sha512-b6q5EARAX6sPuok/KD01UrcYTXKOLvXen0S6ipA7jtTKA55NESCpAqoAYA4jva91pOZ5yBuNrrg1kdWVXwB/dg==}
+  '@tangle-network/agent-runtime@8.0.0':
+    resolution: {integrity: sha512-Uc3GdXlo7uuvo1WddBmfM61uqLOdVkwXOJfTcJZzpiEQgW+dop6fE62X7negKSm3XvMyF1L01f4E5ioc9mJoLQ==}
     engines: {node: '>=22.19.0'}
     hasBin: true
     peerDependencies:
@@ -1586,7 +1586,7 @@ snapshots:
     dependencies:
       '@tangle-network/agent-interface': 5.10.20
 
-  '@tangle-network/agent-runtime@7.0.0(@tangle-network/agent-eval@1.0.22)(@tangle-network/agent-interface@5.10.20)(@tangle-network/sandbox@1.0.264)':
+  '@tangle-network/agent-runtime@8.0.0(@tangle-network/agent-eval@1.0.22)(@tangle-network/agent-interface@5.10.20)(@tangle-network/sandbox@1.0.264)':
     dependencies:
       '@earendil-works/pi-codemode': 1.4.0
       '@tangle-network/agent-core': 1.0.3
