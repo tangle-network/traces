@@ -1,23 +1,4 @@
-/**
- * `traces watch <runDir>` — a live terminal view of a supervised run written by
- * agent-runtime's `createFileRunContext`.
- *
- * Plain stdout, no dependency, no cursor control: it works over SSH, in a CI
- * log, and through a pipe, and it prints a new block only when something
- * changed, so a long idle stretch does not scroll away the last real event.
- *
- * The whole view model comes from `readRunContextSnapshot`; this file only
- * formats. Two formatting rules carry the weight:
- *
- *  - **Driver inference and child work never merge.** A supervisor's own
- *    thinking and the work it spawned are separate lines on the same node,
- *    because a single total cannot answer "which half spent the budget" — the
- *    decisive question in three real runs, where a root burned its pool on its
- *    own turns while its one child cost almost nothing.
- *  - **Unknown is never rendered as zero.** `Spend.usdKnown === false` means
- *    the harness did not price that inference; it does not mean the inference
- *    was free. Those records are counted and named, never summed into `$0.00`.
- */
+/** Keep driver/child spend separate and unknown pricing explicit in Runtime snapshots. */
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -41,10 +22,14 @@ import {
 } from './run-view-format.js'
 
 function budget(node: RunContextNode): string {
-  const parts = [`${int(node.budget.maxIterations)}it`, `${int(node.budget.maxTokens)}tok`]
+  const parts: string[] = []
+  if (node.budget.maxIterations !== undefined) parts.push(`${int(node.budget.maxIterations)}it`)
+  if (node.budget.maxTokens !== undefined) parts.push(`${int(node.budget.maxTokens)}tok`)
   if (node.budget.maxUsd !== undefined) parts.push(`$${node.budget.maxUsd.toFixed(2)}`)
   if (node.budget.deadlineMs !== undefined) parts.push(ms(node.budget.deadlineMs))
-  return parts.join('/')
+  for (const [name, resource] of Object.entries(node.budget.resources ?? {}))
+    parts.push(`${name} ${int(resource.limit)}${resource.unit}`)
+  return parts.length > 0 ? parts.join('/') : 'unbounded'
 }
 
 /**
@@ -54,12 +39,13 @@ function budget(node: RunContextNode): string {
  */
 function budgetUse(node: RunContextNode, spent: SpendRoll): string {
   const parts: string[] = []
-  if (node.budget.maxIterations > 0 && spent.iterations > 0) {
-    parts.push(`${Math.round((spent.iterations / node.budget.maxIterations) * 100)}% it`)
+  const { maxIterations, maxTokens } = node.budget
+  if (maxIterations !== undefined && maxIterations > 0 && spent.iterations > 0) {
+    parts.push(`${Math.round((spent.iterations / maxIterations) * 100)}% it`)
   }
   const used = spent.tokensIn + spent.tokensOut
-  if (node.budget.maxTokens > 0 && used > 0) {
-    parts.push(`${Math.round((used / node.budget.maxTokens) * 100)}% tok`)
+  if (maxTokens !== undefined && maxTokens > 0 && used > 0) {
+    parts.push(`${Math.round((used / maxTokens) * 100)}% tok`)
   }
   return parts.length === 0 ? '' : ` · ${parts.join(', ')} of budget`
 }
