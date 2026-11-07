@@ -1,3 +1,5 @@
 # Runtime 7 budget CLI evidence
 
 Before: npm @tangle-network/traces@2.0.15, provenance source 39f0a0d8cb64ef51ba9c5da8c0137c7b3170ee34, Beelink2, 1440×1000. The labelled QA journal has an uncapped root, a token-only child and a resource-only child. It performs no model execution. The actual CLI fails with undefined.toLocaleString, exit 2. Uncut recording: before-uncut-video.zip; 1× preview: before-uncut.gif; final screen: before-after.png. Original PTY capture retained privately. Candidate and published-after proof will be added after their checks.
+
+Published after: npm2.0.16, source23fc85962970966a705a4aa0705f46c9506e97cb, Beelink2, open synthetic QA journal/no result seal/no model execution; actual CLI exit0, all three cap cases,120 input/12 output settled tokens. [Uncut original9.96s video+QA input](published-2.0.16-uncut-video.zip), [1× preview](published-2.0.16-uncut.gif), [screenshot](published-2.0.16.png). Complete browser replay1× ended9.96s with no error; full screenshot and every1s frame inspected.
