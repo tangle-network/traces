@@ -1,16 +1,3 @@
-/**
- * @tangle-network/traces: the SDK.
- *
- * Each name is a function a `traces` command is built on, or the analyst
- * extension point (`analyzeSpans({ registry })`): named values and types, each
- * exported by name. `tests/sdk-surface.test.ts` fails when `dist/index.js` or
- * `dist/index.d.ts` differs from this list.
- *
- * Import other packages' names from their owners: `AnalystRegistry`,
- * `makeFinding` and the redaction core from `@tangle-network/agent-eval`, and
- * the span builders and vocabulary from `@tangle-network/agent-trace-contract`.
- */
-
 // ── Read: sessions from a harness store, or OTLP from any producer ────────
 export { knownHarnesses } from './registry.js'
 export { collectSessionSelection } from './session-selection.js'
