@@ -24,7 +24,7 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
   const materialization = (binding: HarnessTranscriptBinding): ProfileMaterializationReceipt => ({
     status: 'known', authoredProfileDigest: identity.profileDigest, effectiveProfileDigest: binding.profileDigest as `sha256:${string}`,
     materializationPlanDigest: digest({ fixture: 'plan' }), runtime: 'cli', backend: 'bridge',
-    model: { status: 'unknown', reason: 'fixture-unreported' },
+    model: { status: 'unknown', reason: 'fixture-unreported' }, resources: { status: 'unknown', reason: 'fixture-unreported' },
     execution: { kind: 'session', id: binding.sessionId }, materializer: 'cli-bridge-agent-profile',
   })
   const appendMetadata = async (store: FileSpawnJournal, binding: HarnessTranscriptBinding, seq: number) => {
