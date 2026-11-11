@@ -157,8 +157,8 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
       continue
     }
     const artifact = await harnessTranscriptArtifact(evidence, blobs)
-    if (artifact && !artifact.binding) {
-      unbound.add(`A Runtime ${artifact.harness} transcript names no native session or request, so its records are not read as native facts.`)
+    if (artifact && !artifact.binding && artifact.harness === evidence.harness) {
+      unbound.add(`A Runtime ${artifact.harness} transcript carries no binding to a node, native session and request, so its records are not read as native facts.`)
       continue
     }
     available = true
