@@ -130,6 +130,8 @@ export function readRunContextJournal(text: string | null): RunContextJournal {
       const event = asRecord(row)
       if (str(event.kind) === null || str(event.id) === null) invalidRows += 1
       else if (RETIRED_WAIT_KINDS.has(event.kind as string)) retiredWaitRows += 1
+      // A node's own attempt tree (another `root`) re-declares it parentless; the run tree's spawn places it.
+      else if (recordRoot !== null && recordRoot !== root && event.kind === 'spawned' && !event.parent) continue
       else events.push(event as unknown as SpawnEvent)
     }
   }
