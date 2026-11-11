@@ -1,0 +1,1 @@
+traces facts reads a Runtime run whose transcripts carry no native-session binding (opencode on a retained Sandbox provider) instead of refusing it, and a Runtime journal sheet no longer reports its root node's usage as the whole run's.
