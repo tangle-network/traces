@@ -182,10 +182,12 @@ function sum(values: readonly (number | null)[]): number | null {
 /** The tokens of one session from the spans the caller hands it. */
 export function sessionTokens(own: readonly OtlpSpan[], honorRoot = true): SessionTokens {
   const calls = own.map(callUsage).filter((call): call is CallUsage => call !== null)
-  const root = own.find((span) => span.parent_span_id === null
-    && count(span.attributes[SESSION_TOTAL_INPUT_ATTR]) !== null && count(span.attributes[SESSION_TOTAL_OUTPUT_ATTR]) !== null)
+  const counted = (span: OtlpSpan) => count(span.attributes[SESSION_TOTAL_INPUT_ATTR]) !== null && count(span.attributes[SESSION_TOTAL_OUTPUT_ATTR]) !== null
+  const root = own.find((span) => span.parent_span_id === null && counted(span))
+  // A nested span with its own counter is another agent's total (a Runtime child node), so the root's counter is not this sheet's.
+  const nested = root !== undefined && own.some((span) => span !== root && counted(span))
   // A pool of several children passes false: one child's counter must not replace the others.
-  if (honorRoot && root) {
+  if (honorRoot && root && !nested) {
     const input = count(root.attributes[SESSION_TOTAL_INPUT_ATTR])!
     const output = count(root.attributes[SESSION_TOTAL_OUTPUT_ATTR])!
     const cacheRead = count(root.attributes[SESSION_TOTAL_CACHED_INPUT_ATTR]) ?? (sourceChannelUnavailable(own, 'cache-read') ? null : 0)
@@ -221,7 +223,8 @@ export function sessionTokens(own: readonly OtlpSpan[], honorRoot = true): Sessi
       modelCalls: 0,
       byModel: [],
       spanIds: [],
-      unavailable: "no model call of this session's own records reports token usage, and no root span carries the harness's cumulative counter",
+      unavailable: nested ? 'several agents in this trace each carry their own usage counter, and no record states their sum'
+        : "no model call of this session's own records reports token usage, and no root span carries the harness's cumulative counter",
     }
   }
   return {
