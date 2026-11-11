@@ -118,6 +118,7 @@ export function readRunContextJournal(text: string | null): RunContextJournal {
   const events: SpawnEvent[] = []
   let invalidRows = parsed.invalidRows
   let retiredWaitRows = 0
+  const owners = new Set<string>(), owned = new Set<string>()
   for (const record of parsed.rows) {
     const recordRoot = str(record.root)
     if (root === null && recordRoot !== null) root = recordRoot
@@ -130,9 +131,17 @@ export function readRunContextJournal(text: string | null): RunContextJournal {
       const event = asRecord(row)
       if (str(event.kind) === null || str(event.id) === null) invalidRows += 1
       else if (RETIRED_WAIT_KINDS.has(event.kind as string)) retiredWaitRows += 1
-      // A node's own attempt tree (another `root`) re-declares it parentless; the run tree's spawn places it.
-      else if (recordRoot !== null && recordRoot !== root && event.kind === 'spawned' && !event.parent) continue
-      else events.push(event as unknown as SpawnEvent)
+      // A node that owns its attempt tree (`ownedTreeRoot`, Runtime's spawn forest) is placed by its owner's spawn and
+      // metered by its own tree: its parentless re-spawn there and the owner tree's summary meter would count it twice.
+      else if (event.kind === 'spawned' && !event.parent && owned.has(`${recordRoot}\0${event.id}`)) continue
+      else if (event.kind === 'metered' && owners.has(`${recordRoot}\0${event.id}`)) continue
+      else {
+        if (event.kind === 'spawned' && typeof event.ownedTreeRoot === 'string') {
+          owners.add(`${recordRoot}\0${event.id}`)
+          owned.add(`${event.ownedTreeRoot}\0${event.id}`)
+        }
+        events.push(event as unknown as SpawnEvent)
+      }
     }
   }
   const supervisorIds = new Set<string>()
