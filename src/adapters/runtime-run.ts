@@ -1,7 +1,7 @@
 /** Runtime runs select bound native captures before request-only OTLP or journal summaries. */
 import { join } from 'node:path'
 import { readSessionInput } from '@tangle-network/harness-sessions'
-import { FileResultBlobStore, captureBoundHarnessTranscript, contentAddress, harnessTranscriptArtifact, materializeTreeView, readSpawnJournal, type HarnessTranscriptBinding, type HarnessTranscriptEvidence, type SpawnEvent } from '@tangle-network/agent-runtime/kernel'
+import { FileResultBlobStore, captureBoundHarnessTranscript, contentAddress, harnessTranscriptArtifact, materializeTreeView, readSpawnJournal, type HarnessTranscriptArtifact, type HarnessTranscriptBinding, type HarnessTranscriptEvidence, type SpawnEvent } from '@tangle-network/agent-runtime/kernel'
 import { HarnessSessionsAdapter } from './harness-sessions.js'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR } from '../attributes.js'
@@ -11,16 +11,17 @@ import { readOtlpInput, SUBSTITUTED_FIELDS_ATTR, type OtlpInput } from '../otlp-
 export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string): Promise<{
   spans: OtlpSpan[]; unknowns: string[]; retained?: OtlpInput
 }> {
-  const captured = await readRuntimeCaptures(runDir, expectedRunId)
-  if (captured) return captured
+  const { selected, unbound } = await readRuntimeCaptures(runDir, expectedRunId)
+  if (selected) return selected
   const retained = await readOtlpInput(runDir, { allowEmptyDirectory: true })
-  if (retained.files.length > 0) return { spans: [...retained.spans], retained, unknowns: ['Retained OTLP selected; supervisor journal is excluded to avoid duplicate accounting'] }
+  if (retained.files.length > 0) return { spans: [...retained.spans], retained, unknowns: ['Retained OTLP selected; supervisor journal is excluded to avoid duplicate accounting', ...unbound] }
   const { readRunContextSnapshot } = await import('../supervisor-run-context.js')
   const snapshot = await readRunContextSnapshot(runDir)
   const unknowns = [
     'Runtime parent relationships establish containment, not delegation.',
     'Journal driver usage is retained once per node; child-inclusive settlement totals are excluded.',
     'Human messages, tool calls and workflow phases are unavailable from the supervisor journal.',
+    ...unbound,
   ]
   if (!snapshot.present) return { spans: [], unknowns: ['Runtime supervisor journal unavailable at catalog location'] }
   if (snapshot.treeError) return { spans: [], unknowns: ['Runtime supervisor journal could not be folded by its owner'] }
@@ -69,8 +70,7 @@ interface RuntimeNativeCapture {
   text: string; path: string; refs: Set<string>; bindings: HarnessTranscriptBinding[]
 }
 
-async function readRuntimeCapture(evidence: Extract<HarnessTranscriptEvidence, { status: 'available' }>, blobs: FileResultBlobStore, root: string, nodeId: string, events: readonly SpawnEvent[]) {
-  const artifact = await harnessTranscriptArtifact(evidence, blobs)
+async function readRuntimeCapture(evidence: Extract<HarnessTranscriptEvidence, { status: 'available' }>, artifact: HarnessTranscriptArtifact | undefined, root: string, nodeId: string, events: readonly SpawnEvent[]) {
   const binding = artifact?.binding
   if (!artifact || artifact.harness !== evidence.harness || artifact.harness !== 'codex' || !binding || binding.kind !== 'bridge'
     || binding.node?.rootId !== root || binding.node.nodeId !== nodeId) {
@@ -126,10 +126,10 @@ function assertRuntimeCaptureBinding(binding: HarnessTranscriptBinding, events: 
   }
 }
 
-/** Keep native session containment; Bridge request spans and journal spend would count it twice. */
+/** Keep native session containment; Bridge request spans and journal spend would count it twice. An unbound capture is left to the run's other sources. */
 async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Promise<{
-  spans: OtlpSpan[]; unknowns: string[]
-} | undefined> {
+  selected?: { spans: OtlpSpan[]; unknowns: string[] }; unbound: string[]
+}> {
   const journal = await readSpawnJournal(runDir, { invalid: 'skip' })
   const blobs = new FileResultBlobStore(join(runDir, 'blobs'))
   const sessions = new Map<string, RuntimeNativeCapture>()
@@ -138,6 +138,7 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
     'Bound native sessions selected; Bridge request spans and supervisor journal usage are excluded to avoid duplicate accounting.',
     'Capture bindings identify whole native sessions; per-request record scope is unavailable.',
   ])
+  const unbound = new Set<string>()
   let available = false
   for (const row of journal.records) {
     if (expectedRunId && row.root !== expectedRunId) throw new Error('Catalog run ID disagrees with Runtime journal root')
@@ -155,8 +156,13 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
       unknowns.add(`Runtime transcript unavailable: ${evidence.reason}`)
       continue
     }
+    const artifact = await harnessTranscriptArtifact(evidence, blobs)
+    if (artifact && !artifact.binding) {
+      unbound.add(`A Runtime ${artifact.harness} transcript names no native session or request, so its records are not read as native facts.`)
+      continue
+    }
     available = true
-    const { binding, files } = await readRuntimeCapture(evidence, blobs, row.root, row.event.id, events)
+    const { binding, files } = await readRuntimeCapture(evidence, artifact, row.root, row.event.id, events)
     for (const file of files) {
       const text = file.text
       const previous = sessions.get(file.nativeSessionId)
@@ -173,13 +179,14 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
       })
     }
   }
-  if (!available) return undefined
+  if (!available) return { unbound: [...unbound] }
   // Journal summaries retain their historical recovery; a capture join requires an intact binding log.
   const verified = await readSpawnJournal(runDir)
   if (verified.cursor?.file !== journal.cursor?.file || verified.cursor?.offset !== journal.cursor?.offset
     || verified.cursor?.boundary !== journal.cursor?.boundary) throw new Error('Runtime binding journal changed during capture read')
   if (journal.remainingBytes || journal.truncated) throw new Error('Runtime capture journal has an unread tail')
-  return { spans: await projectRuntimeCaptures(sessions, unknowns), unknowns: [...unknowns] }
+  for (const reason of unbound) unknowns.add(reason)
+  return { selected: { spans: await projectRuntimeCaptures(sessions, unknowns), unknowns: [...unknowns] }, unbound: [...unbound] }
 }
 
 async function projectRuntimeCaptures(sessions: Map<string, RuntimeNativeCapture>, unknowns: Set<string>): Promise<OtlpSpan[]> {
