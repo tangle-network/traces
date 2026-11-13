@@ -893,8 +893,8 @@ packages:
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
 
-  hono@4.13.14:
-    resolution: {integrity: sha512-yhRLQ21U6qa9Hsu2N7Qcbh8tE+WKEcoErjIo56LeSGiGXGp9sA7UpE86Ui9uexb61KakiGwuHMn2QdV7w6i6kQ==}
+  hono@4.13.18:
+    resolution: {integrity: sha512-H9q/E1XizaWstJxUW881dmLxEj+t/TrGGnyxINkm4+sK0qUwsMtFdo2BWI9Vs3cIS19MU6b6iCijoUoEf4f3DA==}
     engines: {node: '>=16.9.0'}
 
   is-any-array@3.0.0:
@@ -1399,9 +1399,9 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
-  '@hono/node-server@2.1.5(hono@4.13.14)':
+  '@hono/node-server@2.1.5(hono@4.13.18)':
     dependencies:
-      hono: 4.13.14
+      hono: 4.13.18
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -1555,12 +1555,12 @@ snapshots:
   '@tangle-network/agent-eval@1.0.22':
     dependencies:
       '@asteasolutions/zod-to-openapi': 9.1.0(zod@4.6.7)
-      '@hono/node-server': 2.1.5(hono@4.13.14)
+      '@hono/node-server': 2.1.5(hono@4.13.18)
       '@tangle-network/agent-core': 1.0.3
       '@tangle-network/agent-interface': 5.10.20
       '@tangle-network/agent-trace-contract': 2.2.2
       '@tangle-network/harness-sessions': 1.0.11
-      hono: 4.13.14
+      hono: 4.13.18
       linear-sum-assignment: 1.0.9
       re2js: 2.9.0
       smol-toml: 1.9.1
@@ -1780,7 +1780,7 @@ snapshots:
 
   graceful-fs@4.2.11: {}
 
-  hono@4.13.14: {}
+  hono@4.13.18: {}
 
   is-any-array@3.0.0: {}
 
