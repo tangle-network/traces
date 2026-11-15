@@ -8,6 +8,7 @@
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { zstdCompressSync } from 'node:zlib'
 import { deriveHexId, llmSpan, toolSpan } from '@tangle-network/agent-trace-contract'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { IDS, makeFixtureHome } from './fixtures/home.js'
@@ -202,6 +203,24 @@ describe('--share-safe', () => {
     const result = await runCli(['check', notes, '--share-safe', '--known-secret-env', 'PLANTED_SECRET'], { env: { ...env, PLANTED_SECRET: SECRET } })
     expect(result.code).toBe(1)
     expect(`${result.stdout}${result.stderr}`).not.toContain(SECRET)
+  })
+
+  it('reads the lines of a zstd-compressed events file, and cannot vouch for one that does not decompress', async () => {
+    // Discovery keeps session events as events/<execution>.ndjson.zst (disco#3729); the check reads the inner .ndjson.
+    const tree = join(dir, 'zst-run')
+    await mkdir(join(tree, 'events'), { recursive: true })
+    await writeFile(join(tree, 'events', 'x.ndjson.zst'), zstdCompressSync(`{"type":"ok"}\n${JSON.stringify({ note: EMAIL })}\n`))
+    const read = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
+    expect(read.code, read.stdout).toBe(1)
+    const verdict = verdictOf(read.stdout).gates[0]!.verdict!
+    expect(verdict.status).toBe('UNSAFE')
+    expect(verdict.findings.flatMap((finding) => finding.paths).some((path) => path.startsWith('events/x.ndjson.zst:2'))).toBe(true)
+    expect(`${read.stdout}${read.stderr}`).not.toContain(EMAIL)
+
+    await writeFile(join(tree, 'events', 'torn.ndjson.zst'), Buffer.from('not a zstd frame'))
+    await writeFile(join(tree, 'events', 'x.ndjson.zst'), zstdCompressSync('{"type":"ok"}\n'))
+    const torn = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
+    expect(torn.code, torn.stdout).toBe(2)
   })
 
   it('does not read number-only values under content-named keys as content', async () => {
