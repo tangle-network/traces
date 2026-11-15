@@ -107,6 +107,7 @@ const STORE_PATHS: ReadonlyArray<{ readonly harness: string; readonly root: stri
   { harness: 'pi', root: STORES['pi.session-jsonl'].root },
   { harness: 'kimi', root: STORES['kimi.session-dir'].root },
   { harness: 'factory', root: STORES['factory.session-jsonl'].root },
+  { harness: 'grok', root: STORES['grok.acp-session-dir'].root },
 ]
 
 /** The harness whose store holds `path`, from the path alone. */
@@ -234,6 +235,7 @@ const HOME_STORES = [
   STORES['pi.session-jsonl'].root,
   STORES['kimi.session-dir'].root,
   STORES['factory.session-jsonl'].root,
+  STORES['grok.acp-session-dir'].root,
 ]
 
 /** True when `dir` holds harness stores the way a home does. */

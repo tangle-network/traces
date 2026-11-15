@@ -40,7 +40,7 @@ In a window, `--last` or a machine-wide selection, a session that cannot be read
 | `codex` | every Codex home: `~/.codex` and `~/.codex-*` siblings, `$CODEX_HOME`, and `~/.config/agent-accounts/codex/<account>`, each with `sessions/` and `archived_sessions/` |
 | `codex-exec` | a `codex exec --json` file or a Sandbox live stream (a file ref) |
 | `opencode` | `~/.local/share/opencode/opencode.db`, read in place, and older `storage/` JSON sessions |
-| `pi`, `kimi`, `factory` | their session stores under the home |
+| `pi`, `kimi`, `factory`, `grok` | their session stores under the home |
 
 Native stores are read through [`@tangle-network/harness-sessions`](https://github.com/tangle-network/agent-sdk/tree/main/packages/harness-sessions); `--latest-turn` uses traces' own Claude Code and Codex readers until one parser lands (1.1), and `tests/dual-path.test.ts` holds the two equal.
 Claude Code subagent files fold into their parent trace; Codex workers are sessions of their own, joined by the session id or task path a child records.
