@@ -258,9 +258,7 @@ async function codexForkPrefix(path: string): Promise<boolean> {
   }
 }
 
-function ownHome(): string {
-  return process.env.HOME || homedir()
-}
+const ownHome = (): string => process.env.HOME || homedir()
 
 /** A user-role message record of a rollout: a turn typed into it. */
 function isCodexUserMessage(row: CodexHead): boolean {
@@ -1032,4 +1030,5 @@ export const SHARED_SESSION_ADAPTERS: readonly HarnessTraceAdapter[] = [
   new HarnessSessionsAdapter('pi'),
   new HarnessSessionsAdapter('kimi-code', 'kimi', ['kimi-code']),
   new HarnessSessionsAdapter('factory-droids', 'factory', ['factory-droids', 'droid']),
+  new HarnessSessionsAdapter('grok', 'grok', ['grok-build']),
 ]
