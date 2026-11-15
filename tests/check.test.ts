@@ -8,7 +8,7 @@
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { zstdCompressSync } from 'node:zlib'
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 import { deriveHexId, llmSpan, toolSpan } from '@tangle-network/agent-trace-contract'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { IDS, makeFixtureHome } from './fixtures/home.js'
@@ -221,6 +221,18 @@ describe('--share-safe', () => {
     await writeFile(join(tree, 'events', 'x.ndjson.zst'), zstdCompressSync('{"type":"ok"}\n'))
     const torn = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
     expect(torn.code, torn.stdout).toBe(2)
+  })
+
+  it('never calls a multi-frame .zst clean, on a runtime that reads one frame or every frame', async () => {
+    // Node 22.23.4's zstdDecompressSync returns the first frame of a two-frame file and no error; Node 24.22.1 returns both.
+    const tree = join(dir, 'zst-frames')
+    await mkdir(join(tree, 'events'), { recursive: true })
+    const frames = Buffer.concat([zstdCompressSync('{"type":"ok"}\n'), zstdCompressSync(`${JSON.stringify({ note: EMAIL })}\n`)])
+    await writeFile(join(tree, 'events', 'x.ndjson.zst'), frames)
+    const result = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
+    const everyFrame = zstdDecompressSync(frames).toString().includes(EMAIL)
+    expect(result.code, `${process.version}: ${result.stdout}`).toBe(everyFrame ? 1 : 2)
+    expect(`${result.stdout}${result.stderr}`).not.toContain(EMAIL)
   })
 
   it('does not read number-only values under content-named keys as content', async () => {
