@@ -23,7 +23,7 @@
 import type { Stats } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { CODEX_HOME_RULE, STORES, codexHomes, isCodexHome } from '@tangle-network/harness-sessions'
 import { ATTR } from '@tangle-network/agent-trace-contract'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
@@ -215,14 +215,16 @@ async function fileRef(path: string, ref: string, selector: string | undefined, 
   if (sniffed.kind === 'spans') return { kind: 'spans', ref, path, reader: sniffed.reader, ...(selector ? { selector } : {}) }
   if (selector) throw new RefError(`${ref}: a #selector picks a run from a span file; ${path} is a ${sniffed.harness} session`, 'usage')
   const adapter = adapterFor(sniffed.harness)
-  const info = await stat(path)
+  // A Grok session is a directory whose record is updates.jsonl, whichever of its files the ref names.
+  const session = adapter.harness === 'grok' ? join(dirname(path), 'updates.jsonl') : path
+  const info = await stat(session)
   // The same ref an explicit session path has always produced, so a session
   // reads the same whichever way it is named.
   return {
     kind: 'session',
     ref,
     adapter,
-    session: { harness: adapter.harness, sessionId: ref, path, cwd: null, mtimeMs: info.mtimeMs },
+    session: { harness: adapter.harness, sessionId: ref, path: session, cwd: null, mtimeMs: info.mtimeMs },
   }
 }
 
@@ -286,7 +288,9 @@ async function directoryRef(path: string, ref: string): Promise<ResolvedRef | Re
   const sessionFiles = files.length > 0 ? [] : await withoutEarlierCopies([...paths].filter((path) => !folded(path)))
   const refs = await Promise.all(sessionFiles.map((file) => fileRef(file, file, undefined, {})))
   // A harness's own store is the session; a recording beside it, such as a Sandbox event stream, is a derived copy.
-  const sessions = refs.filter((found) => found.kind === 'session'), stored = sessions.filter((found) => harnessOfStorePath(found.session.path))
+  // Sibling files of one Grok session resolve to the same record; each session is read once.
+  const sessions = [...new Map(refs.filter((found) => found.kind === 'session').map((found) => [found.session.path, found])).values()]
+  const stored = sessions.filter((found) => harnessOfStorePath(found.session.path))
   return stored.length > 0 ? stored : sessions.length > 0 ? sessions : { kind: 'spans', ref, path, reader: 'otlp' }
 }
 
