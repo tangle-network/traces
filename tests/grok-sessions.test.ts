@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -29,7 +29,7 @@ async function grokHome(): Promise<{ home: string; dir: string }> {
 describe('Grok Build sessions', () => {
   it('answers facts for a Grok session named by id, by its directory files, and by its update log', async () => {
     const { home, dir } = await grokHome()
-    for (const ref of [ID, join(dir, 'events.jsonl'), join(dir, 'updates.jsonl')]) {
+    for (const ref of [ID, dir, join(dir, 'events.jsonl'), join(dir, 'updates.jsonl')]) {
       const run = await runCli(['facts', ref, '--format', 'json'], { env: { HOME: home } })
       expect(run.code, `${ref}: ${run.stderr}${run.stdout}`).toBe(0)
       const report = JSON.parse(run.stdout) as { harness: string; spanCount: number; sessions: Array<{ sessionId: string }> }
@@ -38,5 +38,14 @@ describe('Grok Build sessions', () => {
       expect(report.spanCount).toBeGreaterThanOrEqual(3)
       expect(run.stdout).toContain('run_terminal_cmd')
     }
+  })
+
+  it('retains the update log as the session source when a sibling file names the session', async () => {
+    const { home, dir } = await grokHome()
+    const out = join(home, 'bundle')
+    const run = await runCli(['bundle', join(dir, 'events.jsonl'), '--out', out], { env: { HOME: home } })
+    expect(run.code, run.stderr).toBe(0)
+    expect(await readFile(join(out, 'session', 'transcript.jsonl'), 'utf8'))
+      .toBe(await readFile(join(dir, 'updates.jsonl'), 'utf8'))
   })
 })
