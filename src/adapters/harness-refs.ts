@@ -1,11 +1,9 @@
 /** Ref conversion at the native-reader boundary; shared-store resolution stays with the adapter. */
-import { basename, dirname, join } from 'node:path'
+import { join } from 'node:path'
 import {
   claudeCodeRefForFile, codexRefForFile, factoryRefForFile, grokRefForFile, kimiRefForFile, piRefForFile, type SessionRef as NativeRef,
 } from '@tangle-network/harness-sessions'
 import type { SessionRef } from '../types.js'
-
-const GROK_UPDATES = 'updates.jsonl'
 
 export type SupportedHarness = 'claude-code' | 'codex' | 'opencode' | 'pi' | 'kimi-code' | 'factory-droids' | 'grok'
 
@@ -20,8 +18,7 @@ export function nativeRef(harness: SupportedHarness, ref: SessionRef): NativeRef
     case 'pi': return selected(piRefForFile(ref.path))
     case 'kimi-code': return selected(kimiRefForFile(ref.path.endsWith('wire.jsonl') ? ref.path : join(ref.path, 'wire.jsonl')))
     case 'factory-droids': return selected(factoryRefForFile(ref.path))
-    // A Grok session is a directory; its record is updates.jsonl whichever of its files the ref names.
-    case 'grok': return selected(grokRefForFile(basename(ref.path) === GROK_UPDATES ? ref.path : join(dirname(ref.path), GROK_UPDATES)))
+    case 'grok': return selected(grokRefForFile(ref.path))
     case 'opencode': throw new Error('OpenCode SQLite sessions must be selected from its session catalog')
   }
 }
