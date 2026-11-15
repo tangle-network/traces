@@ -5,7 +5,8 @@
  * issue draft and a span export are all just files.
  *
  * A `.json` file is parsed whole and a `.jsonl` or `.ndjson` file line by
- * line; any other file is scanned as UTF-8 text. A file that cannot be read, a
+ * line; a `.zst` file is read decompressed, by its inner extension; any other
+ * file is scanned as UTF-8 text. A file that cannot be read or decompressed, a
  * line that is not JSON, a symlink, or bytes that are not UTF-8 text make the
  * verdict UNKNOWN, because an unread part could hold anything. Findings name
  * the file and JSON Pointer, never the matched value.
@@ -13,6 +14,7 @@
 
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, extname, join, relative } from 'node:path'
+import { zstdDecompressSync } from 'node:zlib'
 import {
   assessShareSafety,
   classifyKey,
@@ -43,11 +45,15 @@ export async function verifySafe(target: string, options: VerifySafeOptions = {}
   const files = await listFiles(target, unreadable)
   for (const file of files) {
     const label = relative(target, file) || basename(file)
+    // A `.zst` file (Discovery keeps session events as `<x>.ndjson.zst`) is checked as its decompressed bytes, by its
+    // inner extension; one that does not decompress is unreadable, never clean.
+    const compressed = extname(file).toLowerCase() === '.zst'
     let bytes: Buffer
     try {
       bytes = await readFile(file)
+      if (compressed) bytes = zstdDecompressSync(bytes)
     } catch (error) {
-      unreadable.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
+      unreadable.push(`${label}: ${compressed ? 'not a readable zstd frame: ' : ''}${error instanceof Error ? error.message : String(error)}`)
       continue
     }
     const text = decodeUtf8(bytes)
@@ -55,7 +61,7 @@ export async function verifySafe(target: string, options: VerifySafeOptions = {}
       unreadable.push(`${label}: not UTF-8 text`)
       continue
     }
-    const extension = extname(file).toLowerCase()
+    const extension = extname(compressed ? file.slice(0, -'.zst'.length) : file).toLowerCase()
     if (JSON_LINES.has(extension)) {
       text.split('\n').forEach((line, index) => {
         if (!line.trim()) return
