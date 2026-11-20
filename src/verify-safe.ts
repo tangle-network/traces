@@ -14,7 +14,8 @@
 
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, extname, join, relative } from 'node:path'
-import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+import { zstdDecompressSync } from 'node:zlib'
+import { readsEveryZstdFrame } from './zstd.js'
 import {
   assessShareSafety,
   classifyKey,
@@ -37,23 +38,6 @@ export interface VerifySafeResult extends ShareSafetyVerdict {
 
 const JSON_LINES = new Set(['.jsonl', '.ndjson'])
 
-/**
- * Whether this runtime's zstdDecompressSync returns every frame of a multi-frame file. Node 22.23.4 returns only the
- * first frame and no error (Node 24.22.1 returns all), so a check there could call a file clean without reading its
- * later frames. Measured once on a known two-frame value; where it fails, every `.zst` file is unreadable.
- */
-let everyFrame: boolean | undefined
-const readsEveryFrame = (): boolean => {
-  if (everyFrame === undefined) {
-    try {
-      everyFrame = zstdDecompressSync(Buffer.concat([zstdCompressSync('a'), zstdCompressSync('b')])).toString() === 'ab'
-    } catch {
-      everyFrame = false
-    }
-  }
-  return everyFrame
-}
-
 export async function verifySafe(target: string, options: VerifySafeOptions = {}): Promise<VerifySafeResult> {
   const assess = (value: unknown): ShareSafetyVerdict =>
     assessShareSafety(numbersAreNotContent(value), { profile: PROFILE, knownSecrets: options.knownSecrets })
@@ -65,7 +49,7 @@ export async function verifySafe(target: string, options: VerifySafeOptions = {}
     // A `.zst` file (Discovery keeps session events as `<x>.ndjson.zst`) is checked as its decompressed bytes, by its
     // inner extension; one that does not decompress is unreadable, never clean.
     const compressed = extname(file).toLowerCase() === '.zst'
-    if (compressed && !readsEveryFrame()) {
+    if (compressed && !readsEveryZstdFrame()) {
       unreadable.push(`${label}: Node ${process.version} reads only the first frame of a multi-frame zstd file`)
       continue
     }

@@ -982,7 +982,7 @@ export async function readOtlpInput(path: string, options: { readonly allowEmpty
   // ambiguity nothing can resolve: parent lookups pick one arbitrarily and any
   // total that sums both counts the same work twice. The later row is dropped
   // and the conflict is reported.
-  const seenIdentities = new Map<string, string>()
+  const seenIdentities = new Map<string, OtlpSpan>()
 
   for (const file of paths) {
     // A file with no trace_id anywhere still needs a grouping key; its own name
@@ -999,10 +999,9 @@ export async function readOtlpInput(path: string, options: { readonly allowEmpty
       if (converted.withheld) withheld.push({ ...converted.withheld, file, line })
       if (converted.span) {
         const identity = spanKey(converted.span.trace_id, converted.span.span_id)
-        const content = canonicalJson(converted.span)
         const seen = seenIdentities.get(identity)
         if (seen !== undefined) {
-          if (seen === content) {
+          if (canonicalJson(seen) === canonicalJson(converted.span)) {
             repeatsFromFile += 1
             traceIds.add(converted.span.trace_id)
             continue
@@ -1017,7 +1016,7 @@ export async function readOtlpInput(path: string, options: { readonly allowEmpty
           })
           continue
         }
-        seenIdentities.set(identity, content)
+        seenIdentities.set(identity, converted.span)
         spans.push(converted.span)
         traceIds.add(converted.span.trace_id)
         spansFromFile += 1

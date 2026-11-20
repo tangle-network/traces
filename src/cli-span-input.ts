@@ -4,7 +4,10 @@ import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
-import { readOtlpInput, type OtlpFieldWithheld, type OtlpIngestIssue, type OtlpInputFile, type SkippedInputFile, type UnreadableSourceRows } from './otlp-input.js'
+import type {
+  OtlpInput, OtlpFieldWithheld, OtlpIngestIssue, OtlpInputFile, SkippedInputFile, UnreadableSourceRows,
+} from './otlp-input.js'
+import { readConsistentOtlpInput } from './otlp-measurement.js'
 import type { ReportSource } from './report.js'
 import { distinctSpans } from './span-identity.js'
 import { selectSpans } from './refs.js'
@@ -56,11 +59,11 @@ export function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans
  * entirely: the analysis engine is already OTLP-native, so conforming spans
  * need no translation to be analysed.
  */
-export async function collectOtlpSpans(path: string, selector?: string, retained?: Awaited<ReturnType<typeof readOtlpInput>>): Promise<CollectedSpans> {
+export async function collectOtlpSpans(path: string, selector?: string, retained?: OtlpInput): Promise<CollectedSpans> {
   const { sessionReportSource } = await import('./report.js')
-  let input: Awaited<ReturnType<typeof readOtlpInput>>
+  let input: OtlpInput
   try {
-    input = retained ?? await readOtlpInput(path)
+    input = retained ?? await readConsistentOtlpInput(path)
   } catch (error) {
     if (!(await stat(path).catch(() => undefined))?.isDirectory()) throw error
     // A directory that is no run, store root or bundle is read as OTLP: say what else it could have been.

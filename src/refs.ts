@@ -31,7 +31,8 @@ import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { detectEvidenceFormat, exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
-import { isObject, isOtlpJsonFile, isStandardOtlpRow, readOtlpInput, resolveOtlpInputFiles } from './otlp-input.js'
+import { isObject, isOtlpJsonFile, isStandardOtlpRow, resolveOtlpInputFiles } from './otlp-input.js'
+import { readConsistentOtlpInput } from './otlp-measurement.js'
 import { listAdapters, resolveAdapter } from './registry.js'
 import { parseSession } from './session-source.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -555,7 +556,7 @@ export async function readRefSpans(ref: string, options: ResolveRefOptions = {})
       throw new RefError(`${ref} is a store root, which holds many sessions; name one session in it`, 'usage')
     case 'spans': {
       const spans = resolved.reader === 'otlp'
-        ? [...(await readOtlpInput(resolved.path)).spans]
+        ? [...(await readConsistentOtlpInput(resolved.path)).spans]
         : (await exportTraceEvidenceFile(resolved.path, { format: resolved.reader })).spans
       return resolved.selector ? selectSpans(spans, resolved.selector, resolved.path) : spans
     }

@@ -6,14 +6,15 @@ import { HarnessSessionsAdapter } from './harness-sessions.js'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR, sessionIdFromAttributes } from '../attributes.js'
 import { span, type OtlpSpan } from '../otlp.js'
-import { readOtlpInput, SUBSTITUTED_FIELDS_ATTR, type OtlpInput } from '../otlp-input.js'
+import { SUBSTITUTED_FIELDS_ATTR, type OtlpInput } from '../otlp-input.js'
+import { readConsistentOtlpInput } from '../otlp-measurement.js'
 import { spanKey } from '../span-identity.js'
 
 export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string): Promise<{
   spans: OtlpSpan[]; unknowns: string[]; retained?: OtlpInput
 }> {
   const { selected, unbound, materialized, meteredSessions } = await readRuntimeCaptures(runDir, expectedRunId)
-  const retained = await readOtlpInput(runDir, { allowEmptyDirectory: true })
+  const retained = await readConsistentOtlpInput(runDir, { allowEmptyDirectory: true })
   // Preserve the raw OTLP integrity report and avoid an extra journal fold when there is no possible node join.
   if (!selected && retained.files.length && !retained.spans.some(({ attributes }) =>
     attributes['traces.runtime.node_id'] || attributes['tangle.node.id'] ||

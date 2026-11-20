@@ -592,6 +592,10 @@ describe('traces watch CLI', () => {
     const evidence = await readOtlpInput(conflicting)
     expect(evidence.issues.map((issue) => issue.kind)).toEqual(['conflicting-span-id'])
     expect(evidence.validation.findings.some((finding) => finding.code === 'duplicate-span-id')).toBe(true)
+    const measurement = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'facts', conflicting, '--format', 'json'], {
+      cwd: process.cwd(), timeout: 60_000,
+    }).then(() => null, (error: { stderr: string }) => error.stderr)
+    expect(measurement).toContain('conflicting span bodies')
 
     const retained = join(dir, 'retained')
     await mkdir(retained)

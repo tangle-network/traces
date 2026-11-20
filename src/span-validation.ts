@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises'
-import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+import { zstdDecompressSync } from 'node:zlib'
+import { readsEveryZstdFrame } from './zstd.js'
+import { spanKey } from './span-identity.js'
 import { canonicalJson } from './adapters/tool-io.js'
 import type { OtlpSpan, OtlpStatusCode } from './otlp.js'
 import { parseIsoToEpochMs } from './time.js'
@@ -7,22 +9,10 @@ import { parseIsoToEpochMs } from './time.js'
 const COMPRESSED_JSONL = /\.(?:jsonl|ndjson)\.zst$/iu
 export const isCompressedJsonlFile = (path: string): boolean => COMPRESSED_JSONL.test(path)
 
-let everyFrame: boolean | undefined
-function readsEveryFrame(): boolean {
-  if (everyFrame === undefined) {
-    try {
-      everyFrame = zstdDecompressSync(Buffer.concat([zstdCompressSync('a'), zstdCompressSync('b')])).toString() === 'ab'
-    } catch {
-      everyFrame = false
-    }
-  }
-  return everyFrame
-}
-
 /** Decode only retained JSONL; Node versions that silently truncate later zstd frames cannot read it. */
 export async function readCompressedJsonlText(path: string): Promise<string> {
   if (!isCompressedJsonlFile(path)) throw new TypeError(`not a .jsonl.zst or .ndjson.zst source: ${path}`)
-  if (!readsEveryFrame()) {
+  if (!readsEveryZstdFrame()) {
     throw new Error(`cannot decode compressed OTLP ${path}: Node ${process.version} reads only the first frame of a multi-frame zstd file`)
   }
   try {
@@ -66,7 +56,7 @@ export function validateOtlpSpans(
   if (!Array.isArray(input)) throw new TypeError(`${source} must be an array`)
 
   const spans: OtlpSpan[] = []
-  const identities = new Map<string, string>()
+  const identities = new Map<string, Record<string, unknown>>()
   for (const [index, value] of input.entries()) {
     const path = `${source}[${index}]`
     const record = requireObject(value, path)
@@ -97,14 +87,13 @@ export function validateOtlpSpans(
     requireObject(record.attributes, `${path}.attributes`)
     requireLinks(record.links, `${path}.links`)
 
-    const identity = JSON.stringify([traceId, spanId])
-    const content = canonicalJson(record)
+    const identity = spanKey(traceId, spanId)
     const prior = identities.get(identity)
     if (prior !== undefined) {
-      if (repeatedIdentity === 'coalesce-identical' && prior === content) continue
+      if (repeatedIdentity === 'coalesce-identical' && (prior === record || canonicalJson(prior) === canonicalJson(record))) continue
       throw new Error(`${source} contains duplicate span identity (${traceId}, ${spanId})`)
     }
-    identities.set(identity, content)
+    identities.set(identity, record)
     spans.push(value as OtlpSpan)
   }
   return spans
