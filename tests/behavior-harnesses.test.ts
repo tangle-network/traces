@@ -1,4 +1,5 @@
-import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,7 +55,7 @@ const RECORDINGS: readonly Recording[] = [
   recording('Native Pi', 'pi', 'pi-example', join(FIXTURES, 'native-tools/pi/pi-example.jsonl'), 1),
   recording('Kimi v1 wire', 'kimi', 'kimi-v1', join(FIXTURES, 'native-tools/kimi/kimi-v1/wire.jsonl'), 1),
   recording('Kimi v2 wire', 'kimi', 'kimi-v2', join(FIXTURES, 'native-tools/kimi/kimi-v2/wire.jsonl'), 1),
-  recording('OpenCode SQLite store', 'opencode', 'ses_opencodeexample', join(FIXTURES, 'native-tools/opencode/opencode.db'), 2),
+  recording('OpenCode SQLite store', 'opencode', 'ses_opencodeexample', join(FIXTURES, 'native-tools/opencode/opencode.sql'), 2),
   recording('Claude reentry', 'claude-code', 'origin-reemission', join(FIXTURES, 'claude-origin-reemission', 'origin-reemission.jsonl'), 1),
   recording('Codex parent', 'codex', PARENT, join(FIXTURES, 'codex-fork-child', 'parent.jsonl'), 2),
   recording('Codex inherited fork', 'codex', CHILD, join(FIXTURES, 'codex-fork-child', 'child.jsonl'), 3),
@@ -78,8 +79,14 @@ const nodeSummary = (result: BehaviorResult): unknown => result.nodes.map((node)
   harness: node.harness,
 })).sort((a, b) => a.id.localeCompare(b.id))
 
-function refFor(rec: Recording): SessionRef {
-  return { harness: rec.harness, sessionId: rec.sessionId, path: rec.path, cwd: null, mtimeMs: 0 }
+async function refFor(rec: Recording, temp: string): Promise<SessionRef> {
+  let path = rec.path
+  if (path.endsWith('.sql')) {
+    path = join(temp, 'opencode.db')
+    const db = new DatabaseSync(path)
+    try { db.exec(await readFile(rec.path, 'utf8')) } finally { db.close() }
+  }
+  return { harness: rec.harness, sessionId: rec.sessionId, path, cwd: null, mtimeMs: 0 }
 }
 
 describe('recorded harness behavior coverage', () => {
@@ -88,16 +95,16 @@ describe('recorded harness behavior coverage', () => {
   let replayDir: string | undefined
 
   beforeAll(async () => {
+    replayDir = await mkdtemp(join(tmpdir(), 'traces-behavior-harnesses-'))
     for (const rec of RECORDINGS) {
       const adapter = resolveAdapter(rec.harness)
       expect(adapter, rec.harness).toBeDefined()
-      converted.set(rec.name, await parseSession(adapter!, refFor(rec)))
+      converted.set(rec.name, await parseSession(adapter!, await refFor(rec, replayDir)))
     }
     for (const rec of EVIDENCE_RECORDINGS) {
       converted.set(rec.name, (await exportTraceEvidenceFile(rec.path)).spans)
     }
     existing = await readOtlpInput(join(FIXTURES, 'behavior'))
-    replayDir = await mkdtemp(join(tmpdir(), 'traces-behavior-harnesses-'))
     const otlp = join(replayDir, 'otlp')
     await mkdir(otlp, { recursive: true })
     for (const [index, rec] of ALL_RECORDINGS.entries()) {
