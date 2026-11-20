@@ -228,7 +228,16 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     const byId = new Map(trace.map((s) => [s.span_id, s]))
     const missingParents = trace.reduce((count, span) => count + Number(Boolean(span.parent_span_id && !byId.has(span.parent_span_id))), 0)
     if (missingParents) unknowns.add(`${missingParents} span(s) in trace ${traceId} refer to a missing parent`)
-    if (trace.every((s) => declaredSession(s) !== null && s.attributes[SUBAGENT_SPAWN_ATTR] !== true)) {
+    // The fast path also proves containment is acyclic: every parent has already arrived.
+    // An unsorted, partial or circular trace goes through the full tree reader.
+    const ordered = new Set<string>()
+    const sessionOnly = trace.every((span) => {
+      if (!declaredSession(span) || span.attributes[SUBAGENT_SPAWN_ATTR] === true ||
+        (span.parent_span_id && !ordered.has(span.parent_span_id))) return false
+      ordered.add(span.span_id)
+      return true
+    })
+    if (sessionOnly) {
       for (const s of trace) {
         const id = declaredSession(s)!
         append(sessions, id, s)

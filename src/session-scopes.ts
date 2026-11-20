@@ -44,6 +44,7 @@ function text(span: OtlpSpan, key: string): string | undefined {
 
 function canonicalNodeScopes(parent: TraceGroup): TraceGroup[] {
   const tree = buildSpanRunTree(parent.spans, 'session-facts')
+  if (tree.readError) throw Object.assign(new Error(`cannot attribute facts for trace ${parent.traceId}: ${tree.readError}`), { code: 'no-outcome' })
   if (tree.nodes.length <= 1) return [parent]
   const byId = new Map(parent.spans.map((span) => [span.span_id, span]))
   const nodeSession = new Map(tree.nodes.map((node) => {

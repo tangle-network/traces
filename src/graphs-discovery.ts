@@ -47,6 +47,10 @@ export async function importDiscoveryRunIndex(path: string, options: {
         const input = await readRuntimeRunSpans(location.path, row.runId)
         if (input.spans.length > 0) {
           const execution = buildSpanRunTree(input.spans, location.path)
+          if (execution.readError) {
+            unread.push({ runId: row.runId, reason: execution.readError })
+            continue
+          }
           const observation = owner.graphFromSessionFacts(computeSessionFacts(input.spans, { includeSubagents: true }), {
             source: { kind: 'discovery', id: row.runId, url: pathToFileURL(resolve(location.path)).href },
             taskType: options.taskType, spanRun: execution, traceRunId: execution.traceIds.length === 1 ? execution.traceIds[0] : undefined,
