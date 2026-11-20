@@ -1,11 +1,15 @@
+import { TRACE_ID_MINTED_ATTR } from './attributes.js'
+export { TRACE_ID_MINTED_ATTR } from './attributes.js'
+import { canonicalJson } from './adapters/tool-io.js'
+import { spanKey } from './span-identity.js'
 import { stampUnreadableSourceRows } from './source-unreadable.js'
 /**
  * The INBOUND path: read OTLP that some other system emitted and hand it to
  * the same analysis pipeline the adapters feed. Three shapes are read: the
  * contract's flat OTLP-JSONL rows, standard OTLP/JSON (`resourceSpans`, one
  * document or the collector file exporter's one envelope per line), and the
- * camelCase span rows Tangle Intelligence serves. Each file is streamed one
- * line at a time.
+ * camelCase span rows Tangle Intelligence serves. Uncompressed files are
+ * streamed one line at a time; retained zstd JSONL is decoded in memory.
  *
  * The adapters (`src/adapters/`) exist because Claude Code, Codex, OpenCode and
  * friends write proprietary session logs we do not control, so somebody has to
@@ -41,10 +45,11 @@ import { appendAll } from './arrays.js'
 import { readJsonValues } from './json-values.js'
 import { readJsonlLines } from './jsonl.js'
 import type { OtlpSpan, OtlpSpanKind, OtlpSpanLink, OtlpStatusCode } from './otlp.js'
+import { isCompressedJsonlFile, readCompressedJsonlText, textJsonlRows } from './span-validation.js'
 import { parseIsoToEpochMs } from './time.js'
 
-/** JSONL extensions a directory scan considers at all. */
-const OTLP_FILE_EXTENSIONS = ['.jsonl', '.ndjson']
+/** JSONL extensions a directory scan considers at all, including Discovery's retained zstd siblings. */
+const OTLP_FILE_EXTENSIONS = ['.jsonl', '.ndjson', '.jsonl.zst', '.ndjson.zst']
 
 /**
  * Directory name a producer puts its OTLP exports in. When one exists, it is
@@ -58,7 +63,7 @@ const OTLP_DIRECTORY_NAME = 'otlp'
 /** Lines sniffed before deciding a file is not OTLP. */
 const SNIFF_LINES = 5
 
-/** Why one row of an OTLP file did not become an analyzable span AT ALL. */
+/** Why a source row or an entire compressed file could not be read as spans. */
 export type OtlpIngestIssueKind =
   | 'unparseable-line'
   | 'not-an-object'
@@ -68,8 +73,10 @@ export type OtlpIngestIssueKind =
 
 export interface OtlpIngestIssue {
   readonly kind: OtlpIngestIssueKind
+  /** Set when no rows could be decoded. A missing unit denotes one rejected row. */
+  readonly unit?: 'file'
   readonly file: string
-  /** 1-indexed line within `file`. */
+  /** 1-indexed line within `file`, or zero for a failure before any line could be read. */
   readonly line: number
   readonly detail: string
 }
@@ -150,17 +157,6 @@ export const RAW_FIELD_ATTRIBUTES: Readonly<Record<SubstitutedField, string>> = 
  */
 export const SUBSTITUTED_FIELDS_ATTR = 'traces.substituted_fields'
 
-/**
- * Marks a span whose trace id this tool minted because the producer wrote none.
- *
- * Unlike every other entry in {@link SUBSTITUTED_FIELDS_ATTR}, which describes
- * only the hop that wrote it, this one STICKS: the minted id is a real,
- * non-empty trace id, so the next hop reads it as the producer's own and would
- * otherwise recompute the substitution away. It is never cleared once set — the
- * same rule as `traces.source.unreadable_rows`, and for the same reason: a chain
- * of re-exports must not launder a defect by its length.
- */
-export const TRACE_ID_MINTED_ATTR = 'traces.trace_id_minted'
 
 
 export interface OtlpInputFile {
@@ -181,21 +177,16 @@ export interface SkippedInputFile {
   readonly reason: string
 }
 
-/**
- * How much of the original source could not be represented as spans, summed
- * across every export hop that led to this file.
- *
- * `rows` is the count and `kinds` names the ingest issues behind it. On a file a
- * producer wrote, this is just what THIS ingest dropped. On a file
- * `traces` re-exported, it also carries what earlier hops dropped, read back off
- * the spans — so a re-export can never present itself as a complete copy of a
- * source it is missing rows from.
- */
+/** Cumulative known row losses and whole-file losses across export hops. */
 export interface UnreadableSourceRows {
   readonly rows: number
   readonly kinds: readonly OtlpIngestIssueKind[]
   /** Rows dropped by EARLIER hops, already absent from the file just read. */
   readonly inherited: number
+  /** Whole unreadable files, whose row counts are unknown. Absent when zero. */
+  readonly files?: number
+  /** Whole unreadable files already missing from this export. */
+  readonly inheritedFiles?: number
 }
 
 export interface OtlpInput {
@@ -209,11 +200,11 @@ export interface OtlpInput {
   readonly spans: readonly OtlpSpan[]
   /** Conformance of the RAW rows: what this trace can and cannot answer. */
   readonly validation: TraceValidation
-  /** Rows that could not become spans, each with its reason. */
+  /** Rejected rows and unreadable files, each with its reason. */
   readonly issues: readonly OtlpIngestIssue[]
   /** Rows that DID become spans, with one unusable field withheld from them. */
   readonly withheld: readonly OtlpFieldWithheld[]
-  /** Source rows absent from `spans`, this hop's and every earlier hop's. */
+  /** Known missing rows and whole unreadable files at this and earlier hops. */
   readonly unreadable: UnreadableSourceRows
 }
 
@@ -242,16 +233,9 @@ async function otlpDirectoriesUnder(dir: string): Promise<string[]> {
   return dirs
 }
 
-/**
- * Does this file hold OTLP spans?
- *
- * A run directory holds the span export next to raw event, stream and SDK logs
- * that are also `*.jsonl`. Reading them as spans turns 500 lines of perfectly
- * good telemetry into 500 conformance errors against a producer who never
- * claimed they were spans — so the first few readable lines decide, on the two
- * fields every OTLP span has and no event log does.
- */
+/** A run directory's compressed retained siblings are selected by their explicit JSONL type and validated on ingest. */
 async function sniffOtlpFile(path: string): Promise<{ otlp: true } | { otlp: false; reason: string }> {
+  if (isCompressedJsonlFile(path)) return { otlp: true }
   if (await isOtlpJsonFile(path)) return { otlp: true }
   let seen = 0
   let first: { row: unknown } | null = null
@@ -339,19 +323,6 @@ export async function resolveOtlpInputFiles(path: string, allowEmptyDirectory = 
 
 export function isObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** Key-order-independent JSON, so two spans are compared by content, not by the
- *  order their producer happened to serialize fields in. */
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  if (isObject(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(',')}}`
-  }
-  return JSON.stringify(value) ?? 'null'
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -921,16 +892,26 @@ interface ReadRow {
 const MAX_WHOLE_DOCUMENT_BYTES = 256 * 1024 * 1024
 
 /**
- * The rows of one file, streamed: a line is parsed, its rows are yielded, and
- * nothing of it is kept. Every row carries the LINE it was read from, not its
- * index in the surviving rows: blank and unparseable lines shift those apart,
- * and an index reported as a line sends the producer to the wrong place. A
- * line that is not JSON is an issue, in line order, not a failure. A file in
- * which no line parses is tried as one JSON document (a pretty-printed array
- * of rows), and its line issues are withdrawn when it is one. Standard
- * OTLP/JSON, one document or one envelope per line, is parsed as it is read.
+ * Rows carry their physical source line. Uncompressed files stream; retained
+ * zstd JSONL decodes first. Unparseable lines are issues, and an uncompressed
+ * file with no parseable lines is retried as one JSON document.
  */
 async function* fileRows(file: string, issues: OtlpIngestIssue[]): AsyncGenerator<ReadRow> {
+  if (isCompressedJsonlFile(file)) {
+    const text = await readCompressedJsonlText(file).catch((error: unknown) => {
+      issues.push({ kind: 'unparseable-line', unit: 'file', file, line: 0, detail: error instanceof Error ? error.message : String(error) })
+      return null
+    })
+    if (text === null) return
+    for (const entry of textJsonlRows(text)) {
+      if (entry.corruptionBytes !== undefined) {
+        issues.push({ kind: 'unparseable-line', file, line: entry.line, detail: `line is not JSON (${entry.corruptionBytes} bytes)` })
+        continue
+      }
+      for (const row of contractRows(entry.value)) yield { value: row, line: entry.line }
+    }
+    return
+  }
   if (await isOtlpJsonFile(file)) {
     // Standard OTLP/JSON: a collector's spool, whose lines can each be larger
     // than a string can hold, is parsed as it is read and keeps only bounded strings.
@@ -964,14 +945,9 @@ async function* fileRows(file: string, issues: OtlpIngestIssue[]): AsyncGenerato
 }
 
 /**
- * Read OTLP from a file or a directory of OTLP-JSONL files: contract rows,
- * standard OTLP/JSON envelopes, or served span rows, each file streamed.
- *
- * A directory ingests the OTLP files under it, recursively — every `*.jsonl` /
- * `*.ndjson` that holds spans, or only the contents of an `otlp/` subdirectory
- * when the producer made one — so a results directory of per-shot exports
- * analyses as one body of work while its raw event and stream logs are named
- * and skipped rather than counted as broken spans.
+ * Read contract, standard OTLP/JSON or served rows. Directory discovery reads
+ * JSONL/NDJSON and their zstd siblings recursively, or only `otlp/` when that
+ * directory exists; unrelated uncompressed logs are named and skipped.
  */
 export async function readOtlpInput(path: string, options: { readonly allowEmptyDirectory?: boolean } = {}): Promise<OtlpInput> {
   const { files: paths, skipped } = await resolveOtlpInputFiles(path, options.allowEmptyDirectory)
@@ -993,7 +969,7 @@ export async function readOtlpInput(path: string, options: { readonly allowEmpty
   // ambiguity nothing can resolve: parent lookups pick one arbitrarily and any
   // total that sums both counts the same work twice. The later row is dropped
   // and the conflict is reported.
-  const seenIdentities = new Map<string, string>()
+  const seenIdentities = new Map<string, OtlpSpan>()
 
   for (const file of paths) {
     // A file with no trace_id anywhere still needs a grouping key; its own name
@@ -1009,11 +985,10 @@ export async function readOtlpInput(path: string, options: { readonly allowEmpty
       const converted = otlpRowToSpan(row, fallbackTraceId)
       if (converted.withheld) withheld.push({ ...converted.withheld, file, line })
       if (converted.span) {
-        const identity = JSON.stringify([converted.span.trace_id, converted.span.span_id])
-        const content = canonicalJson(converted.span)
+        const identity = spanKey(converted.span.trace_id, converted.span.span_id)
         const seen = seenIdentities.get(identity)
         if (seen !== undefined) {
-          if (seen === content) {
+          if (canonicalJson(seen) === canonicalJson(converted.span)) {
             repeatsFromFile += 1
             traceIds.add(converted.span.trace_id)
             continue
@@ -1028,7 +1003,7 @@ export async function readOtlpInput(path: string, options: { readonly allowEmpty
           })
           continue
         }
-        seenIdentities.set(identity, content)
+        seenIdentities.set(identity, converted.span)
         spans.push(converted.span)
         traceIds.add(converted.span.trace_id)
         spansFromFile += 1

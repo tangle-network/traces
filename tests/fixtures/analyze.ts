@@ -65,6 +65,46 @@ export function workerSession(): Row[] {
 
 export const REVIEW_ID = 'b22b2b22-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 
+export const SHARED_TRACE_SESSION_ID = 'shared-trace'
+
+/**
+ * One trace, two sessions: a parent that delegates its whole task to one
+ * Workflow worker, and the worker's transcript written under the parent's
+ * session directory (`workflowDir`), so the adapter folds the worker into the
+ * parent's trace. The worker fails `pnpm test` three times in a row, passes on
+ * the fourth try without an edit, and hands back; the parent's only tool call
+ * is the Workflow call. `facts.includeSubagents` reports the two sessions as
+ * separate sheets of the one trace.
+ */
+export function sharedTraceSession(workflowDir: string): { parent: Row[]; worker: Row[] } {
+  const parent = transcript(SHARED_TRACE_SESSION_ID)
+  const worker: Row[] = [{ type: 'user', uuid: 'w-task', parentUuid: null, timestamp: at(0, 3), isSidechain: true, cwd: REPO, message: { role: 'user', content: 'Fix the failing parser test inside the worker.' } }]
+  let n = 0
+  const call = (minute: number, second: number, id: string, command: string): Row =>
+    ({ type: 'assistant', uuid: `w-call-${id}`, parentUuid: null, timestamp: at(minute, second), isSidechain: true, cwd: REPO, message: { id: `wm-${id}`, role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }], usage: { input_tokens: 10, output_tokens: 2 } } })
+  const result = (minute: number, second: number, id: string, text: string, isError = false): Row =>
+    ({ type: 'user', uuid: `w-res-${id}`, parentUuid: null, timestamp: at(minute, second), isSidechain: true, cwd: REPO, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError ? { is_error: true } : {}) }] } })
+  for (const [command, output, isError] of [
+    ['pnpm test', 'FAIL parse.test.ts', true],
+    ['pnpm test', 'FAIL parse.test.ts', true],
+    ['pnpm test', 'FAIL parse.test.ts', true],
+    ['pnpm test', 'PASS parse.test.ts', false],
+  ] as const) {
+    n += 1
+    worker.push(call(n, 0, `wt${n}`, command), result(n, 30, `wt${n}`, output, isError))
+  }
+  worker.push({ type: 'assistant', uuid: 'w-answer', parentUuid: null, timestamp: at(5, 0), isSidechain: true, cwd: REPO, message: { id: 'wm-final', role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'Fixed: all tests pass.' }], usage: { input_tokens: 10, output_tokens: 2 } } })
+  return {
+    parent: [
+      parent.user(at(0), 'Fix the failing parser test.'),
+      parent.call(at(0, 1), 'workflow-call-1', 'Workflow', { script: 'fix()' }),
+      { type: 'user', uuid: 'workflow-result-1', parentUuid: null, timestamp: at(0, 2), cwd: REPO, sessionId: SHARED_TRACE_SESSION_ID, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'workflow-call-1', content: `Workflow launched\nTranscript dir: ${workflowDir}\nRun ID: wf-shared` }] }, toolUseResult: { runId: 'wf-shared', transcriptDir: workflowDir } },
+      parent.say(at(9, 0), 'Done.'),
+    ],
+    worker,
+  }
+}
+
 /** A pull-request review that only reads with `gh`: its outputs name tests and builds, it runs none. */
 export function ghReviewSession(): Row[] {
   const { user, say, call, result } = transcript(REVIEW_ID)

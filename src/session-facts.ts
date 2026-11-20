@@ -24,7 +24,8 @@ export type {
 } from './session-measurements.js'
 export type { SkillUseCount } from './skill-usage.js'
 
-import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
+import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
+import { TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
 import { ACTOR_ATTR, capText } from './adapters/conversation.js'
 import { FACT_TEXT_CAP, rawContent, typedTurnsOf, isOwnAgentMessage, type SessionTurnFact, type TurnSignal, type TurnFoldState, type ExcludedTurn, stringAttr } from './session-turns.js'
@@ -34,11 +35,12 @@ import {
   SUBAGENT_SPAWN_TASK_ATTR,
   SUBAGENT_TASK_ATTR,
   isSubagentSpan,
+  isRecordedToolCall,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
 import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
-import { groupByTrace, type TraceGroup } from './session-scopes.js'
+import { groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { childModelBySpawn, foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -89,7 +91,7 @@ export interface SessionFactsOptions {
 }
 
 /** Legacy synthesized-span marker, still read so an export from before the rename counts. */
-export const SPAN_SYNTHESIZED_ATTR = 'traces.codex.span_synthesized'
+export { LEGACY_SYNTHESIZED_SPAN_ATTR as SPAN_SYNTHESIZED_ATTR } from './adapters/provenance.js'
 
 /** Records the session reader could not parse, stamped on the session span. */
 const CORRUPTION_COUNT_ATTR = 'traces.session.corruption_count'
@@ -377,16 +379,7 @@ function byTraceOrder(left: OtlpSpan, right: OtlpSpan): number {
  * and the subagent thread/path attribute pair only that span carries.
  */
 export function isSynthesizedSpan(span: OtlpSpan): boolean {
-  if (isSynthesizedByProvenance(span.attributes)) return true
-  if (attr(span, SPAN_SYNTHESIZED_ATTR) === true) return true
-  return (
-    stringAttr(span, 'traces.codex.subagent_thread_id') !== null &&
-    stringAttr(span, 'traces.codex.subagent_path') !== null
-  )
-}
-
-function isToolSpan(span: OtlpSpan): boolean {
-  return attr(span, OPENINFERENCE_SPAN_KIND) === 'TOOL'
+  return isSynthesizedByProvenance(span.attributes)
 }
 
 function toolName(span: OtlpSpan): string {
@@ -887,11 +880,11 @@ function readSession(
   // exclusive child sheet already carries them.
   const ownSpans = spans.filter((span) => !isSubagentSpan(span.attributes))
   const subagentSpans = spans.filter((span) => isSubagentSpan(span.attributes))
-  const toolSpans = spans.filter(isToolSpan)
+  const toolSpans = spans.filter((span) => resolveSpanKind(span) === 'TOOL')
   const synthesized = toolSpans.filter(isSynthesizedSpan)
-  const invoked = ownSpans.filter((span) => isToolSpan(span) && !isSynthesizedSpan(span))
+  const invoked = ownSpans.filter(isRecordedToolCall)
   const subagentTools = toolSpans.filter(
-    (span) => isSubagentSpan(span.attributes) && !isSynthesizedSpan(span),
+    (span) => isSubagentSpan(span.attributes) && isRecordedToolCall(span),
   )
   const byName: Record<string, number> = {}
   for (const span of invoked) byName[toolName(span)] = (byName[toolName(span)] ?? 0) + 1
@@ -1126,7 +1119,8 @@ export function buildSessionFactsReport(
  * across two calls is reported as two sessions.
  */
 export interface SessionFactsReportBuilder {
-  add(spans: readonly OtlpSpan[]): void
+  /** A composite run can have constituent traces with no records or failure to report. */
+  add(spans: readonly OtlpSpan[], constituentTraceIds?: ReadonlySet<string>): void
   /** Name a session that could not be read at all: it is skipped, never counted as empty. */
   addUnread(session: UnreadSessionFact): void
   build(): SessionFactsReport
@@ -1150,44 +1144,41 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
   let spanCount = 0
   let evidenceThrough: string | null = null
 
-  const select = (group: TraceGroup): void => {
-    const digest = createHash('sha256')
-    for (const span of [...group.spans].sort((a, b) => a.span_id.localeCompare(b.span_id))) {
-      digest.update(canonicalJson(span)).update('\n')
-      for (const time of [span.start_time, span.end_time]) {
-        if (Number.isFinite(Date.parse(time)) && (evidenceThrough === null || Date.parse(time) > Date.parse(evidenceThrough))) evidenceThrough = time
+  const skipUnread = (group: TraceGroup, windowed: boolean): false => {
+    unreadSessions.push(unreadTraceGroup(group, windowed))
+    return false
+  }
+  const select = (group: TraceGroup, constituent: boolean): boolean => {
+    if (bounds !== null || options.nameUnread === true) {
+      const records = group.spans.filter(isRecordSpan)
+      if (!records.length) return skipUnread(group, bounds !== null)
+      if (bounds !== null && !records.some(span => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) {
+        outsideWindow.push(group.sessionId ?? group.traceId)
+        return false
       }
     }
-    digests.push({ traceId: group.traceId, digest: digest.digest('hex') })
-    spanCount += group.spans.length
     const reading = readSession(group.traceId, group.sessionId, group.spans, options, bounds)
+    if (constituent && !reading.facts.recordSpans && reading.facts.firstFailure.status !== 'found') return skipUnread(group, false)
     sessions.push(reading.facts)
     options.onSession?.(reading)
+    return true
   }
 
   return {
-    add(spans) {
-      for (const group of groupByTrace(spans, options.includeSubagents)) {
-        if (bounds === null && options.nameUnread !== true) {
-          select(group)
-          continue
+    add(spans, constituentTraceIds) {
+      for (const trace of groupByTrace(spans)) {
+        const constituent = constituentTraceIds?.has(trace.traceId) === true
+        const original = selectSourceSpans(trace, options.includeSubagents, scope => select(scope, constituent))
+        if (!original.length) continue
+        const digest = createHash('sha256')
+        for (const span of [...original].sort((a, b) => a.span_id.localeCompare(b.span_id))) {
+          digest.update(canonicalJson(span)).update('\n')
+          for (const time of [span.start_time, span.end_time]) {
+            if (Number.isFinite(Date.parse(time)) && (evidenceThrough === null || Date.parse(time) > Date.parse(evidenceThrough))) evidenceThrough = time
+          }
         }
-        const records = group.spans.filter(isRecordSpan)
-        if (records.length === 0) {
-          // Nothing was read, so nothing says what the session did, or whether
-          // it belongs in the window; leaving it out silently would count it as empty.
-          const unread = group.spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
-          unreadSessions.push({
-            sessionId: group.sessionId,
-            traceId: group.traceId,
-            source: null,
-            reason: `no record could be read (${unread ? `${unread.attributes[CORRUPTION_COUNT_ATTR]} unread record(s)` : 'no record spans'})` +
-              (bounds === null ? '' : ', so whether the session holds a record inside the window is unknown'),
-          })
-          continue
-        }
-        if (bounds === null || records.some((span) => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) select(group)
-        else outsideWindow.push(group.sessionId ?? group.traceId)
+        digests.push({ traceId: trace.traceId, digest: digest.digest('hex') })
+        spanCount += original.length
       }
     },
     addUnread(session) {
@@ -1465,7 +1456,7 @@ export function sessionRows(spans: readonly OtlpSpan[], turns: readonly SessionT
       rows.push({ kind: 'agent', at: span.start_time, spanId: span.span_id, text: rawContent(span) })
       continue
     }
-    if (!isToolSpan(span) || isSynthesizedSpan(span)) continue
+    if (!isRecordedToolCall(span)) continue
     const call = callCommands(span)
     if (call === undefined) continue
     call.commands.forEach((words, index) => {

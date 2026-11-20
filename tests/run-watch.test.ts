@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
+import { zstdCompressSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { span, type OtlpSpan } from '../src/otlp.js'
+import { readOtlpInput, TRACE_ID_MINTED_ATTR } from '../src/otlp-input.js'
 import { buildSpanRunTree, readSpanRunSnapshot, renderSpanRunSnapshot, spanRunTotals } from '../src/run-span-tree.js'
 import { readRunWatchSnapshot, renderRunWatchSnapshot, resolveRunWatchTarget, watchRunTarget } from '../src/run-watch.js'
 import { readRunContextSnapshot } from '../src/supervisor-run-context.js'
@@ -553,6 +555,105 @@ describe('traces watch CLI', () => {
     expect(stdout).toContain('driver    1 turn(s)')
     expect(stdout).toContain('children  1 settled')
     expect(stdout).toContain('cost unknown (1 unpriced)')
+  })
+
+  it('applies one duplicate, conflict and compressed-input policy to physical OTLP files', async () => {
+    const dir = await scratch('physical-otlp')
+    const root = span({
+      traceId: 't1',
+      spanId: 'root',
+      parentSpanId: null,
+      name: 'session',
+      kind: 'AGENT',
+      startTime: '2026-07-31T10:00:00.000Z',
+      endTime: '2026-07-31T10:00:01.000Z',
+      agent: 'pi',
+    })
+    const jsonl = (rows: readonly unknown[]): string => `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`
+
+    const duplicate = join(dir, 'duplicate.otlp.jsonl')
+    await writeFile(duplicate, jsonl([root, root]))
+    const text = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch', duplicate, '--once'], {
+      cwd: process.cwd(), timeout: 60_000,
+    })
+    const machine = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch', duplicate, '--once', '--format', 'jsonl'], {
+      cwd: process.cwd(), timeout: 60_000,
+    })
+    const events = machine.stdout.trim().split('\n').map((line) => JSON.parse(line) as { event: string; spanCount?: number; unreadSessions?: unknown[] })
+    expect(text.stdout).toContain('1 span(s)')
+    expect(text.stdout).not.toContain('unreadable:')
+    expect(events.find((event) => event.event === 'session')?.spanCount).toBe(1)
+    expect(events.find((event) => event.event === 'tick')?.unreadSessions).toEqual([])
+
+    const conflicting = join(dir, 'conflicting.otlp.jsonl')
+    await writeFile(conflicting, jsonl([root, { ...root, name: 'contradiction' }]))
+    const rejected = await readSpanRunSnapshot(conflicting)
+    expect(rejected.readError).toContain('duplicate span identity (t1, root)')
+    const evidence = await readOtlpInput(conflicting)
+    expect(evidence.issues.map((issue) => issue.kind)).toEqual(['conflicting-span-id'])
+    expect(evidence.validation.findings.some((finding) => finding.code === 'duplicate-span-id')).toBe(true)
+    const measurement = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'facts', conflicting, '--format', 'json'], {
+      cwd: process.cwd(), timeout: 60_000,
+    }).then(() => null, (error: { stderr: string }) => error.stderr)
+    expect(measurement).toContain('conflicting span bodies')
+
+    const retained = join(dir, 'retained')
+    await mkdir(retained)
+    const compressedRoot = { ...root, trace_id: 'compressed-trace' }
+    const anonymous = { ...root, span_id: 'anonymous' } as Record<string, unknown>
+    delete anonymous.trace_id
+    await writeFile(join(retained, 'root.ndjson.zst'), zstdCompressSync(jsonl([compressedRoot])))
+    await writeFile(join(retained, 'overlap.jsonl'), jsonl([compressedRoot]))
+    await writeFile(join(retained, 'anonymous.jsonl.zst'), zstdCompressSync(jsonl([anonymous])))
+    await writeFile(join(retained, 'broken.jsonl.zst'), Buffer.from('not a zstd frame'))
+    await writeFile(join(retained, 'notes.txt.zst'), Buffer.from('not a zstd frame'))
+    await writeFile(join(retained, 'ignored.json.zst'), zstdCompressSync(jsonl([{ ...root, span_id: 'must-not-be-read' }])))
+
+    const input = await readOtlpInput(retained)
+    expect(input.files.map((file) => basename(file.path))).toEqual([
+      'anonymous.jsonl.zst', 'broken.jsonl.zst', 'overlap.jsonl', 'root.ndjson.zst',
+    ])
+    expect(input.spans).toHaveLength(2)
+    expect(input.files.reduce((sum, file) => sum + file.repeats, 0)).toBe(1)
+    expect(input.issues).toMatchObject([{
+      kind: 'unparseable-line', unit: 'file', line: 0, detail: expect.stringContaining('cannot decode compressed OTLP'),
+    }])
+    expect(input.unreadable).toEqual({ rows: 0, kinds: [], inherited: 0, files: 1, inheritedFiles: 0 })
+    expect(input.spans.some((item) => item.span_id === 'must-not-be-read')).toBe(false)
+    const fallback = input.spans.find((item) => item.span_id === 'anonymous')!
+    expect(fallback.trace_id).toBe('otlp:anonymous.jsonl.zst')
+    expect(fallback.attributes[TRACE_ID_MINTED_ATTR]).toBe(true)
+    expect(input.validation.findings.some((finding) => finding.code === 'missing-trace-id')).toBe(true)
+    expect((await readSpanRunSnapshot(join(retained, 'root.ndjson.zst'))).spanCount).toBe(1)
+  })
+
+  it('preserves known row losses and unreadable files through a metadata-only export', async () => {
+    const dir = await scratch('file-loss')
+    const source = join(dir, 'source')
+    await mkdir(source)
+    const root = span({
+      traceId: '1'.repeat(32), spanId: '2'.repeat(16), parentSpanId: null, name: 'session', kind: 'AGENT',
+      startTime: '2026-07-31T10:00:00Z', endTime: '2026-07-31T10:00:01Z', agent: 'pi',
+    })
+    await writeFile(join(source, 'valid.ndjson'), `${JSON.stringify(root)}\ninvalid line\n`)
+    const damaged = zstdCompressSync(`${JSON.stringify(root)}\n`.repeat(20)).subarray(0, 7)
+    await writeFile(join(source, 'private-first.ndjson.zst'), damaged)
+    await writeFile(join(source, 'private-second.jsonl.zst'), damaged)
+    const before = await readOtlpInput(source)
+    expect(before.unreadable).toEqual({ rows: 1, kinds: ['unparseable-line'], inherited: 0, files: 2, inheritedFiles: 0 })
+
+    const out = join(dir, 'export.jsonl')
+    await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'convert', source, '--no-content', '--out', out])
+    const exported = await readFile(out, 'utf8')
+    expect(exported).not.toContain(source)
+    expect(exported).not.toContain('private-')
+    expect(JSON.parse(exported).resource.attributes['traces.source.unreadable_files']).toBe(2)
+    const after = await readOtlpInput(out)
+    expect(after.spans).toHaveLength(1)
+    expect(after.unreadable).toEqual({ rows: 1, kinds: ['unparseable-line'], inherited: 1, files: 2, inheritedFiles: 2 })
+    const report = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'check', out, '--contract', 'conformance'])
+    expect(report.stdout).toContain('1 row(s) of the ORIGINAL source')
+    expect(report.stdout).toContain('2 file(s) from the ORIGINAL source could not be read by an earlier export.** Their row count is unknown.')
   })
 
   it('exits non-zero when the run ended with a driver error', async () => {

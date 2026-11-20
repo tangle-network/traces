@@ -37,6 +37,24 @@ const row = (name: string, kind: string, spanId: string, extra: Record<string, u
 })
 
 describe('traces behavior', () => {
+  it('keeps native session identity and links a coordinating actor only when the selected spans agree', async () => {
+    const root = row('session', 'AGENT', '0000000000000001', { 'tangle.node.id': 'director' })
+    const tool = (attributes: Record<string, unknown>) => row('Read', 'TOOL', '0000000000000002', attributes)
+    for (const [name, rows, expected] of [
+      ['bound', [root, tool({ 'traces.runtime.node_id': 'director' })], 'director'],
+      ['ambiguous', [root, tool({ 'tangle.node.id': 'worker' })], null],
+      ['unbound', [row('session', 'AGENT', '0000000000000001'), tool({ 'agent.name': 'director' })], null],
+    ] as const) {
+      const file = join(dir, `${name}.jsonl`)
+      await writeFile(file, rows.join('\n') + '\n')
+      const result = await runCli(['behavior', file, '--format', 'json'], { env })
+      expect(result.code, result.stderr).toBe(0)
+      const report = JSON.parse(result.stdout) as BehaviorResult
+      expect(report.nodes).toMatchObject([{ id: 'x', agent_id: expected, tool_calls: 1 }])
+      expect(report.coverage?.unknowns.some(gap => gap.includes('conflicting actor IDs'))).toBe(name === 'ambiguous')
+    }
+  })
+
   it('through the module: three nodes, the s2:s0 streak as a looping window, idle windows, steers with read latency, the calibration table', async () => {
     const input = await readOtlpInput(FIXTURE)
     const result = behaviorFromSpans(input.spans)
@@ -106,6 +124,16 @@ describe('traces behavior', () => {
     expect(text.stdout).toContain('flags (uncalibrated, record only): 3')
     expect(text.stdout).toContain('looping uncalibrated (n=0)')
 
+    const partial = join(dir, 'reexport.otlp.jsonl')
+    await writeFile(partial, `${row('tool.read', 'TOOL', '0000000000000001', {
+      'traces.source.unreadable_rows': 4, 'traces.trace_id_minted': true,
+    })}\n`, 'utf8')
+    const retained = await runCli(['behavior', partial, '--format', 'json'], { env })
+    expect(retained.code, retained.stderr).toBe(0)
+    expect(JSON.parse(retained.stdout).coverage).toMatchObject({ input_spans: 1, tool_calls: 1, unknowns: expect.arrayContaining([
+      expect.stringContaining('4 unreadable'), expect.stringContaining('file-local identity'),
+    ]) })
+
     const file = join(dir, 'llm-only.otlp.jsonl')
     await writeFile(file, `${[row('session', 'AGENT', '0000000000000001'), row('llm.turn', 'LLM', '0000000000000002'), row('llm.turn', 'LLM', '0000000000000003')].join('\n')}\n`, 'utf8')
     const refused = await runCli(['behavior', file, '--format', 'json'], { env })
@@ -136,8 +164,16 @@ describe('traces behavior', () => {
     for (const node of [parent, child]) expect(node).toMatchObject({ harness: childFacts.harness, model: childFacts.tokens.byModel[0]!.model })
     expect(result.mail.edges.map((e) => [e.kind, e.from, e.to])).toEqual(expect.arrayContaining([['spawn_agent', parent.id, 'review_env_scope'], ['send_message', child.id, '/root']]))
     const named = await runCli(['behavior', PARENT, CHILD, '--format', 'json'], { env: codexEnv })
-    const canonical = (text: string): string => JSON.stringify(JSON.parse(text), (_, v: unknown) =>
+    expect(named.code, named.stderr).toBe(0)
+    const namedResult = JSON.parse(named.stdout) as BehaviorResult
+    // Naming sessions follows their workflow references. A time sweep reads the selected sessions only.
+    expect(namedResult.coverage?.unknowns).toEqual(expect.arrayContaining([
+      expect.stringContaining(`unjoined child review_env_scope spawned by ${PARENT}`),
+      expect.stringContaining(`parent conflict for ${CHILD}`),
+    ]))
+    expect(result.coverage?.unknowns).toEqual([])
+    const comparable = (report: BehaviorResult) => JSON.stringify({ ...report, coverage: { ...report.coverage, unknowns: [] } }, (_, v: unknown) =>
       (Array.isArray(v) ? v.map((x) => JSON.stringify(x)).sort() : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).sort()) : v))
-    expect(canonical(named.stdout)).toBe(canonical(swept.stdout))
+    expect(comparable(namedResult)).toBe(comparable(result))
   })
 })

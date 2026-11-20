@@ -31,7 +31,8 @@ import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { detectEvidenceFormat, exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
-import { isObject, isOtlpJsonFile, isStandardOtlpRow, readOtlpInput, resolveOtlpInputFiles } from './otlp-input.js'
+import { isObject, isOtlpJsonFile, isStandardOtlpRow, resolveOtlpInputFiles } from './otlp-input.js'
+import { readConsistentOtlpInput } from './otlp-measurement.js'
 import { listAdapters, resolveAdapter } from './registry.js'
 import { parseSession } from './session-source.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
@@ -476,22 +477,29 @@ export async function resolveRefs(refs: readonly string[], options: ResolveRefOp
  * so a label that names more than one subtree is refused rather than unioned.
  */
 export function branchSpans(spans: readonly OtlpSpan[], branch: string): OtlpSpan[] {
-  const byId = new Map<string, OtlpSpan>()
-  for (const span of spans) byId.set(span.span_id, span)
+  const matched = spans.filter(
+    (span) => span.attributes[ATTR.branchId] === branch || span.attributes[ATTR.branchArm] === branch,
+  )
+  if (!matched.length) return []
+  const traceIds = new Set(matched.map((span) => span.trace_id))
+  if (traceIds.size > 1) throw new Error(`"${branch}" matches ${traceIds.size} distinct traces; select a trace before choosing an arm`)
+  // Span IDs and parent IDs are local to one trace. Other traces can reuse every ID in this arm.
+  const trace = spans.filter((span) => span.trace_id === matched[0]!.trace_id)
+  const byId = new Map(trace.map((span) => [span.span_id, span]))
   const children = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
+  for (const span of trace) {
     if (!span.parent_span_id) continue
     const list = children.get(span.parent_span_id)
     if (list) list.push(span)
     else children.set(span.parent_span_id, [span])
   }
-  const matched = spans.filter(
-    (span) => span.attributes[ATTR.branchId] === branch || span.attributes[ATTR.branchArm] === branch,
-  )
   const matchedIds = new Set(matched.map((span) => span.span_id))
   const hasMatchedAncestor = (span: OtlpSpan): boolean => {
     let current = span
+    const visited = new Set<string>()
     while (current.parent_span_id) {
+      if (visited.has(current.span_id)) throw new Error(`cyclic containment in branch "${branch}"`)
+      visited.add(current.span_id)
       const parent = byId.get(current.parent_span_id)
       if (!parent) return false
       if (matchedIds.has(parent.span_id)) return true
@@ -500,6 +508,7 @@ export function branchSpans(spans: readonly OtlpSpan[], branch: string): OtlpSpa
     return false
   }
   const roots = matched.filter((span) => !hasMatchedAncestor(span))
+  if (!roots.length) throw new Error(`cyclic containment in branch "${branch}"`)
   if (roots.length > 1) {
     const named = roots
       .map((span) => `${span.span_id} (${ATTR.branchId}=${JSON.stringify(span.attributes[ATTR.branchId] ?? null)})`)
@@ -515,9 +524,9 @@ export function branchSpans(spans: readonly OtlpSpan[], branch: string): OtlpSpa
     const span = stack.pop()!
     if (selected.has(span)) continue
     selected.add(span)
-    stack.push(...(children.get(span.span_id) ?? []))
+    for (const child of children.get(span.span_id) ?? []) stack.push(child)
   }
-  return spans.filter((span) => selected.has(span))
+  return trace.filter((span) => selected.has(span))
 }
 
 /** The spans a `#<trace id>` or `#branch=<id>` selector picks from a file. */
@@ -547,7 +556,7 @@ export async function readRefSpans(ref: string, options: ResolveRefOptions = {})
       throw new RefError(`${ref} is a store root, which holds many sessions; name one session in it`, 'usage')
     case 'spans': {
       const spans = resolved.reader === 'otlp'
-        ? [...(await readOtlpInput(resolved.path)).spans]
+        ? [...(await readConsistentOtlpInput(resolved.path)).spans]
         : (await exportTraceEvidenceFile(resolved.path, { format: resolved.reader })).spans
       return resolved.selector ? selectSpans(spans, resolved.selector, resolved.path) : spans
     }

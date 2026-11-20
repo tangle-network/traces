@@ -88,6 +88,17 @@ describe('traces ask: before it spends', () => {
     const typo = await ask(['ask', session.path, '--questions', file, '--budget', '1', '--format', 'json'])
     expect(errorOf(typo.stderr)).toMatchObject({ code: 'usage', error: expect.stringContaining('entry 1 has unknown key "schema"') })
 
+    for (const [dimensionKeys, reason] of [
+      ['quality', 'dimensionKeys must be an array'],
+      [['two words'], 'each dimension key must match'],
+      [['quality', 'quality'], 'duplicate dimension key "quality"'],
+    ] as const) {
+      await writeFile(file, JSON.stringify([{ question: 'Anything?', dimensionKeys }]), 'utf8')
+      const invalid = await runCli(['ask', session.path, '--questions', file, '--budget', '1', '--format', 'json'])
+      expect(invalid.code).toBe(2)
+      expect(errorOf(invalid.stderr)).toMatchObject({ code: 'usage', error: expect.stringContaining(reason) })
+    }
+
     const long = await ask(['ask', session.path, '--question', 'x'.repeat(2_000), '--budget', '1'])
     expect(long.code).toBe(2)
     expect(long.stderr).toMatch(/the limit is \d+ so the model sees it whole/u)

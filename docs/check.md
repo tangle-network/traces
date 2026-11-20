@@ -37,6 +37,7 @@ import { llmSpan, loopSpan, steeredBy, toolSpan } from '@tangle-network/agent-tr
 `parent_span_id` is containment and `links` is causality (`steeredBy`), so a retry is linked to the verdict that caused it, not nested under it.
 `traces check spans.otlp.jsonl --contract conformance` says what a trace can answer: each capability (`token-accounting`, `cost-attribution`, `tool-usage`, `loop-convergence`, `tree-comparison`, `steering-chain`, `latency-analysis`) available or not, with the reason. It fails only when not one entry reads as a span. It reads contract OTLP-JSONL, standard OTLP/JSON and every other ref.
 Nothing is repaired on the way in, and a re-export never validates cleaner than its source: `traces convert` keeps what the producer wrote and carries `traces.source.unreadable_rows`.
+OTLP directory discovery also retains `.jsonl.zst` and `.ndjson.zst`; other compressed file types are not decompressed. An undecodable retained source is named as an ingest issue. Rows without a trace id use a file-local fallback marked by `traces.trace_id_minted`, so the grouping is explicitly unknown rather than an identity the producer recorded.
 
 ## Share safety
 

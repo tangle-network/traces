@@ -10,6 +10,7 @@
  * against the store before the answer counts as answered.
  */
 
+import { distinctSpans } from './span-identity.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -59,6 +60,8 @@ export interface TraceQuestion {
   /** Stable ID for the report, the JSON result, and cost attribution. Default: `q<n>`. */
   readonly id?: string
   readonly question: string
+  /** IDs in the caller's taxonomy. Answers retain them in order for attribution. */
+  readonly dimensionKeys?: readonly string[]
   /** Extra guidance for this question only, placed after the shared rules. */
   readonly instructions?: string
   /**
@@ -88,6 +91,7 @@ export interface TraceQuestionCitation {
 export interface TraceQuestionAnswer {
   readonly id: string
   readonly question: string
+  readonly dimensionKeys?: readonly string[]
   readonly status: 'answered' | 'failed'
   readonly failure?: { readonly kind: TraceQuestionFailureKind; readonly message: string }
   /** The engine's prose answer, verbatim. Null when the engine returned none. */
@@ -223,7 +227,7 @@ const MAX_CONTEXT_TRACES = 200
 
 const QUESTION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
-const QUESTION_KEYS = new Set(['id', 'question', 'instructions', 'answerSchema'])
+const QUESTION_KEYS = new Set(['id', 'question', 'instructions', 'answerSchema', 'dimensionKeys'])
 
 /** The first `q<n>` from `index + 1` that no explicit or earlier default ID holds. */
 function defaultQuestionId(index: number, reserved: ReadonlySet<string>, taken: ReadonlySet<string>): string {
@@ -264,10 +268,23 @@ export function normalizeTraceQuestions(questions: readonly TraceQuestion[]): Ar
     if (entry.instructions !== undefined && typeof entry.instructions !== 'string') {
       throw new Error(`question ${id}: instructions must be a string`)
     }
+    const dimensionKeys = entry.dimensionKeys
+    if (dimensionKeys !== undefined) {
+      if (!Array.isArray(dimensionKeys)) throw new Error(`question ${id}: dimensionKeys must be an array of IDs`)
+      const seenKeys = new Set<string>()
+      for (const key of dimensionKeys) {
+        if (typeof key !== 'string' || !QUESTION_ID.test(key)) {
+          throw new Error(`question ${id}: each dimension key must match ${QUESTION_ID}`)
+        }
+        if (seenKeys.has(key)) throw new Error(`question ${id}: duplicate dimension key "${key}"`)
+        seenKeys.add(key)
+      }
+    }
     if (entry.answerSchema !== undefined) assertAnswerSchema(entry.answerSchema, `question ${id} answerSchema`)
     return {
       id,
       question,
+      ...(dimensionKeys !== undefined ? { dimensionKeys: [...dimensionKeys] } : {}),
       ...(entry.instructions?.trim() ? { instructions: entry.instructions.trim() } : {}),
       ...(entry.answerSchema !== undefined ? { answerSchema: entry.answerSchema } : {}),
     }
@@ -277,7 +294,7 @@ export function normalizeTraceQuestions(questions: readonly TraceQuestion[]): Ar
 /**
  * Read questions from a JSON file: an array, or an object with a `questions`
  * array. Each entry is a question string or an object with `question` and
- * optional `id`, `instructions`, and `answerSchema`. Unknown keys are
+ * optional `id`, `instructions`, `answerSchema` and `dimensionKeys`. Unknown keys are
  * rejected so a misspelled field cannot be ignored silently.
  */
 export async function loadTraceQuestionsFile(path: string): Promise<TraceQuestion[]> {
@@ -315,6 +332,7 @@ export async function loadTraceQuestionsFile(path: string): Promise<TraceQuestio
       ...(record.id !== undefined ? { id: record.id as string } : {}),
       ...(record.instructions !== undefined ? { instructions: record.instructions as string } : {}),
       ...(record.answerSchema !== undefined ? { answerSchema: record.answerSchema as AnswerSchema } : {}),
+      ...(record.dimensionKeys !== undefined ? { dimensionKeys: record.dimensionKeys as readonly string[] } : {}),
     }
   })
 }
@@ -576,6 +594,7 @@ function unrunAnswer(
   return {
     id: question.id,
     question: question.question,
+    ...(question.dimensionKeys !== undefined ? { dimensionKeys: question.dimensionKeys } : {}),
     status: 'failed',
     failure,
     answer: null,
@@ -641,7 +660,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
   const corpus = opts.corpus ?? (() => {
     const builder = createTraceQuestionCorpus()
-    builder.add(opts.spans!)
+    builder.add(distinctSpans(opts.spans!))
     return builder.finish()
   })()
   const { store, traces, context } = corpus
@@ -751,6 +770,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
     return {
       id: question.id,
       question: question.question,
+      ...(question.dimensionKeys !== undefined ? { dimensionKeys: question.dimensionKeys } : {}),
       status: failure ? 'failed' : 'answered',
       ...(failure ? { failure } : {}),
       answer,

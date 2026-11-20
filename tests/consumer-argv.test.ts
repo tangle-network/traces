@@ -86,10 +86,14 @@ describe('Discovery ask argv', () => {
     const D = join(dir, 'review')
     const session = await writeAskSession(join(D, 'otlp'), 'node-1')
     const Q = join(dir, 'questions.json')
-    await writeFile(Q, JSON.stringify([
-      { id: 'dsc.E3', question: 'Which command failed first?', answerSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
-      { id: 'dsc.F1', question: 'Did the run verify its result?' },
-    ]), 'utf8')
+    const dimensionKeys = ['reliability.first-failure', 'review_scope']
+    await writeFile(Q, JSON.stringify({
+      about: 'Review the selected sessions.',
+      questions: [
+        { id: 'dsc.E3', question: 'Which command failed first?', dimensionKeys, answerSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+        { id: 'dsc.F1', question: 'Did the run verify its result?' },
+      ],
+    }), 'utf8')
     const bridge = await writeStubBridge(join(dir, 'bridge'), [
       { match: 'failed first', answer: '{"command": "bash"}' },
       { match: 'verify', answer: `No: the bash call failed (trace://${session.traceId}/span/${session.toolSpanId}).` },
@@ -105,11 +109,15 @@ describe('Discovery ask argv', () => {
         questionBudgetUsd: number
         questionTimeoutMs: number
         concurrency: number
-        questions: Array<{ id: string; status: string; parsedAnswer?: unknown }>
+        questions: Array<{ id: string; status: string; parsedAnswer?: unknown; dimensionKeys?: string[] }>
       }
       expect(answers).toMatchObject({ engine: { model: 'zai/glm-5.3' }, questionBudgetUsd: 2, questionTimeoutMs: 1_800_000, concurrency: 4 })
       expect(answers.questions.map((answer) => [answer.id, answer.status])).toEqual([['dsc.E3', 'answered'], ['dsc.F1', 'answered']])
       expect(answers.questions[0]!.parsedAnswer).toEqual({ command: 'bash' })
+      expect(answers.questions[0]!.dimensionKeys).toEqual(dimensionKeys)
+      expect(answers.questions[1]).not.toHaveProperty('dimensionKeys')
+      const prompts = await readFile(bridge.log, 'utf8')
+      for (const key of dimensionKeys) expect(prompts).not.toContain(key)
       expect(await readFile(join(D, 'report.md'), 'utf8')).toContain('## dsc.F1: Did the run verify its result?')
 
       // The 0.21.1 argv names the 1.0 argv, whose removed flags are its defaults.

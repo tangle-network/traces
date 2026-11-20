@@ -18,6 +18,7 @@
  *   - `step`                     → run order (falls back to start_time)
  */
 
+import { SOURCE_UNREADABLE_FILES_ATTR, SOURCE_UNREADABLE_KINDS_ATTR, SOURCE_UNREADABLE_ROWS_ATTR } from './source-unreadable.js'
 import {
   applyLlmSpanOtlpAttributes,
   LLM_COST_USD,
@@ -268,13 +269,8 @@ export function toOpenInferenceSpan(s: OtlpSpan): Record<string, unknown> {
   for (const k of ['container.image.name', 'container.image.digest', 'tangle.sandbox.id', 'tangle.environment.cwd']) {
     if (a[k] != null) resourceAttrs[k] = a[k]
   }
-  // How much of the ORIGINAL source is missing from this file. Carried at the
-  // resource level so it survives every further round trip: `readOtlpInput`
-  // merges resource attributes back onto the span, and adds this hop's own
-  // drops to whatever it finds there. Without it, exporting a trace whose rows
-  // could not all be read produces a file that validates clean — the laundering
-  // this pairing exists to stop. See `SOURCE_UNREADABLE_ROWS_ATTR`.
-  for (const k of ['traces.source.unreadable_rows', 'traces.source.unreadable_row_kinds']) {
+  // Carry known rejected rows and whole unreadable files through every export.
+  for (const k of [SOURCE_UNREADABLE_ROWS_ATTR, SOURCE_UNREADABLE_KINDS_ATTR, SOURCE_UNREADABLE_FILES_ATTR]) {
     if (a[k] != null) resourceAttrs[k] = a[k]
   }
   // WHICH traces build exported this hop. Every kind, substitution and finding

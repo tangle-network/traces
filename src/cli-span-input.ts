@@ -4,8 +4,12 @@ import type { TraceValidation } from '@tangle-network/agent-trace-contract'
 import { indexSessionIdsByTrace } from './attributes.js'
 import { type TraceEvidenceFormatOption, exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
-import { readOtlpInput, type OtlpFieldWithheld, type OtlpIngestIssue, type OtlpInputFile, type SkippedInputFile, type UnreadableSourceRows } from './otlp-input.js'
+import type {
+  OtlpInput, OtlpFieldWithheld, OtlpIngestIssue, OtlpInputFile, SkippedInputFile, UnreadableSourceRows,
+} from './otlp-input.js'
+import { readConsistentOtlpInput } from './otlp-measurement.js'
 import type { ReportSource } from './report.js'
+import { distinctSpans } from './span-identity.js'
 import { selectSpans } from './refs.js'
 import type { UnreadSessionFact } from './session-facts.js'
 import type { SessionWorkflowSummary } from './session-workflow.js'
@@ -14,6 +18,7 @@ export interface CollectedSpans {
   spans: OtlpSpan[]
   harness: string
   sources: ReportSource[]
+  sourceGaps?: readonly string[]
   workflow?: SessionWorkflowSummary
   /**
    * Conformance of the SOURCE, present when the spans were read from OTLP.
@@ -30,16 +35,35 @@ export interface CollectedSpans {
   unread?: readonly UnreadSessionFact[]
 }
 
+/** Combine selected refs without counting the same OTLP occurrence twice.
+ * File conformance applies only to its source. Coverage gaps survive the join. */
+export function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
+  const workflows = parts.flatMap((part) => part.workflow ? [part.workflow] : [])
+  const unread = parts.flatMap((part) => part.unread ?? [])
+  return {
+    spans: [...distinctSpans(parts.flatMap((part) => part.spans))],
+    harness: [...new Set(parts.flatMap((part) => part.harness.split('+')))].join('+'),
+    sources: parts.flatMap((part) => part.sources),
+    sourceGaps: [...new Set(parts.flatMap((part) => part.sourceGaps ?? []))],
+    ...(workflows.length ? { workflow: {
+      complete: workflows.every((workflow) => workflow.complete),
+      seedSessionIds: [...new Set(workflows.flatMap((workflow) => workflow.seedSessionIds))],
+      issues: workflows.flatMap((workflow) => workflow.issues),
+    } } : {}),
+    ...(unread.length ? { unread } : {}),
+  }
+}
+
 /**
  * Read OTLP spans a foreign system emitted, skipping the adapter stage
  * entirely: the analysis engine is already OTLP-native, so conforming spans
  * need no translation to be analysed.
  */
-export async function collectOtlpSpans(path: string, selector?: string, retained?: Awaited<ReturnType<typeof readOtlpInput>>): Promise<CollectedSpans> {
+export async function collectOtlpSpans(path: string, selector?: string, retained?: OtlpInput): Promise<CollectedSpans> {
   const { sessionReportSource } = await import('./report.js')
-  let input: Awaited<ReturnType<typeof readOtlpInput>>
+  let input: OtlpInput
   try {
-    input = retained ?? await readOtlpInput(path)
+    input = retained ?? await readConsistentOtlpInput(path)
   } catch (error) {
     if (!(await stat(path).catch(() => undefined))?.isDirectory()) throw error
     // A directory that is no run, store root or bundle is read as OTLP: say what else it could have been.
@@ -51,9 +75,10 @@ export async function collectOtlpSpans(path: string, selector?: string, retained
   if (input.spans.length === 0) {
     throw new Error(
       `no analyzable spans in ${path} (${input.files.length} file(s), ${input.rows.length} row(s), ` +
-        `${input.issues.length} unusable). Run \`traces check ${path} --contract conformance\` for the per-finding reason.`,
+        `${input.issues.length} ingestion issue(s)). Run \`traces check ${path} --contract conformance\` for the per-finding reason.`,
     )
   }
+  const { rows, inherited, files = 0, inheritedFiles = 0 } = input.unreadable
   const fileByTrace = new Map<string, string>()
   for (const file of input.files) {
     for (const traceId of file.traceIds) if (!fileByTrace.has(traceId)) fileByTrace.set(traceId, file.path)
@@ -75,6 +100,13 @@ export async function collectOtlpSpans(path: string, selector?: string, retained
       cwd: null,
       mtimeMs: 0,
     }, spans, traceId)),
+    sourceGaps: [
+      ...(rows > inherited ? [`${rows - inherited} OTLP row(s) excluded at ingestion`] : []),
+      ...(inherited ? [`${inherited} unreadable OTLP row(s) were excluded before this export`] : []),
+      ...(files > inheritedFiles ? [`${files - inheritedFiles} OTLP file(s) could not be read at ingestion. Their row count is unknown.`] : []),
+      ...(inheritedFiles ? [`${inheritedFiles} unreadable OTLP file(s) were excluded before this export. Their row count is unknown.`] : []),
+      ...(input.skipped.length ? [`${input.skipped.length} file(s) did not contain readable OTLP`] : []),
+    ],
     conformance: input.validation,
     conformanceSubject: path,
     conformanceFiles: input.files,
@@ -89,8 +121,11 @@ export async function collectRuntimeSpans(path: string): Promise<CollectedSpans>
   const reader = await import('./adapters/runtime-run.js')
   const { isRuntimeSupervisorRunDir } = await import('@tangle-network/agent-eval/supervisor-run')
   const input = await isRuntimeSupervisorRunDir(path) ? await reader.readRuntimeRunSpans(path) : undefined
-  if (input?.retained) return collectOtlpSpans(path, undefined, input.retained)
-  return { spans: input?.spans ?? await reader.readRuntimeRunDirectory(path), harness: 'agent-runtime', sources: [] }
+  if (input?.retained) {
+    const otlp = await collectOtlpSpans(path, undefined, input.retained)
+    return { ...otlp, sourceGaps: [...input.unknowns, ...(otlp.sourceGaps ?? [])] }
+  }
+  return { spans: input?.spans ?? await reader.readRuntimeRunDirectory(path), harness: 'agent-runtime', sources: [], sourceGaps: input?.unknowns }
 }
 
 export async function collectImportedSpans(

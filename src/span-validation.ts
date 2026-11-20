@@ -1,20 +1,62 @@
+import { readFile } from 'node:fs/promises'
+import { zstdDecompressSync } from 'node:zlib'
+import { readsEveryZstdFrame } from './zstd.js'
+import { spanKey } from './span-identity.js'
+import { canonicalJson } from './adapters/tool-io.js'
 import type { OtlpSpan, OtlpStatusCode } from './otlp.js'
 import { parseIsoToEpochMs } from './time.js'
+
+const COMPRESSED_JSONL = /\.(?:jsonl|ndjson)\.zst$/iu
+export const isCompressedJsonlFile = (path: string): boolean => COMPRESSED_JSONL.test(path)
+
+/** Decode only retained JSONL; Node versions that silently truncate later zstd frames cannot read it. */
+export async function readCompressedJsonlText(path: string): Promise<string> {
+  if (!isCompressedJsonlFile(path)) throw new TypeError(`not a .jsonl.zst or .ndjson.zst source: ${path}`)
+  if (!readsEveryZstdFrame()) {
+    throw new Error(`cannot decode compressed OTLP ${path}: Node ${process.version} reads only the first frame of a multi-frame zstd file`)
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(zstdDecompressSync(await readFile(path)))
+  } catch (error) {
+    throw new Error(`cannot decode compressed OTLP ${path}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+export interface TextJsonlRow {
+  readonly line: number
+  readonly value?: unknown
+  readonly corruptionBytes?: number
+}
+
+export function* textJsonlRows(text: string): Generator<TextJsonlRow> {
+  for (const [index, raw] of text.split('\n').entries()) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+    if (line.trim().length === 0) continue
+    try {
+      yield { line: index + 1, value: JSON.parse(line) as unknown }
+    } catch {
+      yield { line: index + 1, corruptionBytes: Buffer.byteLength(raw) }
+    }
+  }
+}
 
 const STATUS_CODES = new Set<OtlpStatusCode>(['OK', 'ERROR', 'UNSET'])
 
 /**
  * Validate one normalized span batch before any consumer trusts its identity
- * or timing. The returned array contains the original span objects.
+ * or timing. File imports opt into coalescing identical deliveries of one
+ * identity; a different body at that identity is always contradictory and
+ * fails instead of choosing a winner. The default remains strict for adapters.
  */
 export function validateOtlpSpans(
   input: readonly unknown[],
   source = 'OTLP spans',
+  repeatedIdentity: 'reject' | 'coalesce-identical' = 'reject',
 ): OtlpSpan[] {
   if (!Array.isArray(input)) throw new TypeError(`${source} must be an array`)
 
   const spans: OtlpSpan[] = []
-  const identities = new Set<string>()
+  const identities = new Map<string, Record<string, unknown>>()
   for (const [index, value] of input.entries()) {
     const path = `${source}[${index}]`
     const record = requireObject(value, path)
@@ -45,11 +87,13 @@ export function validateOtlpSpans(
     requireObject(record.attributes, `${path}.attributes`)
     requireLinks(record.links, `${path}.links`)
 
-    const identity = JSON.stringify([traceId, spanId])
-    if (identities.has(identity)) {
+    const identity = spanKey(traceId, spanId)
+    const prior = identities.get(identity)
+    if (prior !== undefined) {
+      if (repeatedIdentity === 'coalesce-identical' && (prior === record || canonicalJson(prior) === canonicalJson(record))) continue
       throw new Error(`${source} contains duplicate span identity (${traceId}, ${spanId})`)
     }
-    identities.add(identity)
+    identities.set(identity, record)
     spans.push(value as OtlpSpan)
   }
   return spans

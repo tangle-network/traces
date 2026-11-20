@@ -53,9 +53,9 @@ function rows(text: string): Array<Record<string, unknown> & { trace_id: string;
 /** Two runs in one span file: trace `a…` and trace `b…`, each a root, a model call and a tool call. */
 function twoRuns(): string {
   const run = (traceId: string, session: string) => {
-    const id = (n: number) => `${traceId.slice(0, 12)}000${n}`
+    const id = (n: number) => `${n}`.padStart(16, '0')
     return [
-      span({ traceId, spanId: id(1), name: 'session', kind: 'AGENT', startTime: '2026-10-14T10:00:00.000Z', endTime: '2026-10-14T10:01:00.000Z', service: 'codex', extra: { 'session.id': session } }),
+      span({ traceId, spanId: id(1), name: 'session', kind: 'AGENT', startTime: '2026-10-14T10:00:00.000Z', endTime: '2026-10-14T10:01:00.000Z', service: 'codex', extra: { 'session.id': session, 'agent.branch.id': session } }),
       span({ traceId, spanId: id(2), parentSpanId: id(1), name: 'llm.turn', kind: 'LLM', startTime: '2026-10-14T10:00:01.000Z', service: 'codex', model: 'gpt-6.1', inputTokens: 10, outputTokens: 2 }),
       span({ traceId, spanId: id(3), parentSpanId: id(1), name: 'tool.shell', kind: 'TOOL', startTime: '2026-10-14T10:00:02.000Z', service: 'codex', tool: 'shell' }),
     ]
@@ -239,6 +239,10 @@ describe('refs: convert and upload take files', () => {
     const convert = await run(['convert', file, '--out', converted])
     expect(convert.code).toBe(0)
     expect(rows(await readFile(converted, 'utf8'))).toHaveLength(6)
+
+    const branch = join(fx.root, 'selected.otlp.jsonl')
+    expect((await run(['convert', `${file}#branch=session-a`, '--out', branch])).code).toBe(0)
+    expect(rows(await readFile(branch, 'utf8')).map((item) => item.trace_id)).toEqual(Array(3).fill('a'.repeat(32)))
 
     const preview = join(fx.root, 'preview.otlp.jsonl')
     const upload = await run(['upload', file, '--dry-run', '--out', preview])

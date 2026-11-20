@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: tangle-network/agent-runtime
-          ref: e562074c43e12066fdb02e10e239cfd716760b9c
+          ref: 2524a7ed50408f4a229a2c7bef6257e266c67df7
           path: release-policy
           sparse-checkout: |
             /scripts/

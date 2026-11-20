@@ -13,6 +13,7 @@
  * sheet; `traces ask` is the one command that calls a model.
  */
 
+import { distinctSpans } from './span-identity.js'
 import {
   type AnalystFinding,
   type AnalystRegistry,
@@ -167,6 +168,6 @@ export async function analyzeSpans(spans: readonly OtlpSpan[], opts: AnalyzeOpti
   if (spans.length === 0) throw new Error('analyzeSpans: no spans to analyze')
   opts.signal?.throwIfAborted()
   const analysis = createSpanAnalysis(opts)
-  analysis.add(spans)
+  analysis.add(distinctSpans(spans))
   return analysis.run()
 }

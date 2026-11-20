@@ -464,6 +464,7 @@ async function runFile(name: string, status?: 'STATUS_CODE_OK' | 'STATUS_CODE_ER
       toolName: 'bash',
       startTime: '2026-01-01T00:00:01.000Z',
       endTime: '2026-01-01T00:00:02.000Z',
+      attributes: { 'input.value': '{"command":"pwd"}' },
       ...(status ? { status: { code: status } } : {}),
     }),
   ].map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')

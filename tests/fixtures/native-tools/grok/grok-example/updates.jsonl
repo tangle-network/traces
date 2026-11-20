@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-01T00:00:04Z","method":"session/update","params":{"sessionId":"grok-example","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"read","kind":"read","rawInput":{}}}}
+{"timestamp":"2026-01-01T00:00:05Z","method":"session/update","params":{"sessionId":"grok-example","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","rawOutput":""}}}

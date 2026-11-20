@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
 import { type DiagnosisSpan, epochMillis } from '@tangle-network/agent-eval/diagnosis'
 import { type DiffStep, diffSteps, diffStepsFromSpans, type StepDiff } from '@tangle-network/agent-eval/pipelines'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
-import { canonicalJson } from './adapters/tool-io.js'
+import { canonicalJson, toolArgumentsFromAttributes } from './adapters/tool-io.js'
 import { ATTR, SESSION_CWD_ATTR } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { readRefSpans } from './refs.js'
@@ -55,9 +55,8 @@ export interface RunDiffReport {
   /** Step indexes are 0-based positions in `a.steps` and `b.steps`. */
   readonly diff: StepDiff
   /**
-   * Set when "the runs agree" would overclaim: neither run made a tool call,
-   * or no call on either side records an OK or ERROR status, so agreement on
-   * outcome cannot be called.
+   * Any gap in the paired calls' argument or outcome evidence, including when
+   * a separate observed difference establishes divergence.
    */
   readonly caveat?: string
 }
@@ -117,8 +116,8 @@ interface CallArgument {
 
 /** What a tool call was asked to do, before normalization, and the directory it ran in. */
 function callArgument(span: OtlpSpan): CallArgument {
-  const raw = span.attributes['input.value']
-  if (raw === undefined || raw === null || raw === '') return { argument: null, workdir: null }
+  const { args: raw } = toolArgumentsFromAttributes(span.attributes)
+  if (raw === undefined || raw === null) return { argument: null, workdir: null }
   const text = typeof raw === 'string' ? raw : canonicalJson(raw)
   const input = jsonObject(text)
   const workdir = input ? stringOf(input, WORKDIR_KEYS) : null
@@ -244,13 +243,6 @@ async function readRunSide(ref: string): Promise<RunDiffSide> {
   return { ref, traceId: traces[0]!, spans: spans.length, cwds: [...cwds].sort(), steps }
 }
 
-function agreementCaveat(a: readonly RunStep[], b: readonly RunStep[]): string | undefined {
-  if (a.length === 0 && b.length === 0) return 'neither run made a tool call'
-  const decided = (steps: readonly RunStep[]) => steps.some((step) => step.fields.status === 'OK' || step.fields.status === 'ERROR')
-  if (!decided(a) && !decided(b)) return 'no tool call on either side records an OK or ERROR status (all UNSET)'
-  return undefined
-}
-
 /**
  * Two runs' tool calls, paired, with the first divergence marked. Span ids pair
  * steps only within one trace (`diff a a`, two arms of one run): across two
@@ -258,10 +250,32 @@ function agreementCaveat(a: readonly RunStep[], b: readonly RunStep[]): string |
  */
 export async function diffRuns(a: string, b: string): Promise<RunDiffReport> {
   const [left, right] = await Promise.all([readRunSide(a), readRunSide(b)])
-  const keyed = (side: RunDiffSide): RunStep[] =>
+  const keyed = (side: RunDiffSide): DiffStep[] =>
     left.traceId === right.traceId ? [...side.steps] : side.steps.map((step) => ({ ...step, id: `${side.traceId}\u0000${step.id}` }))
-  const diff = diffSteps(keyed(left), keyed(right))
-  const caveat = diff.firstDivergence ? undefined : agreementCaveat(left.steps, right.steps)
+  const aSteps = keyed(left), bSteps = keyed(right)
+  let diff = diffSteps(aSteps, bSteps)
+  let missingArgs = 0, missingStatuses = 0, asymmetric = false
+  for (const pair of diff.pairs) {
+    const x = aSteps[pair.a]!, y = bSteps[pair.b]!
+    const args = x.fields.args === null || y.fields.args === null
+    const status = x.fields.status === 'UNSET' || y.fields.status === 'UNSET'
+    if (args) missingArgs++
+    if (status) missingStatuses++
+    if ((args && x.fields.args !== y.fields.args) || (status && x.fields.status !== y.fields.status)) {
+      // Agent Eval pairs by identity, position and tool name. Leave the original
+      // evidence on each side and compare only fields measured on both.
+      const common = { ...(args ? { args: null } : {}), ...(status ? { status: 'UNSET' } : {}) }
+      aSteps[pair.a] = { ...x, fields: { ...x.fields, ...common } }
+      bSteps[pair.b] = { ...y, fields: { ...y.fields, ...common } }
+      asymmetric = true
+    }
+  }
+  if (asymmetric) diff = diffSteps(aSteps, bSteps)
+  const gaps: string[] = []
+  if (!left.steps.length && !right.steps.length) gaps.push('neither run made a tool call')
+  if (missingStatuses) gaps.push(`no outcome to call agreement on for ${missingStatuses} of ${diff.pairs.length} paired calls (status unrecorded on at least one side)`)
+  if (missingArgs) gaps.push(`arguments unavailable for ${missingArgs} of ${diff.pairs.length} paired calls`)
+  const caveat = gaps.join('. ')
   return { kind: 'traces.run_diff', a: left, b: right, diff, ...(caveat ? { caveat } : {}) }
 }
 
@@ -307,13 +321,14 @@ export function renderRunDiff(report: RunDiffReport): string {
   const first = diff.firstDivergence
   if (!first) {
     lines.push(report.caveat
-      ? `no difference in the steps, but no agreement on outcome either: ${report.caveat}`
+      ? `no recorded difference in the tool calls. Comparison incomplete: ${report.caveat}`
       : `no difference: all ${a.steps.length} tool calls agree on tool, status and argument`)
     return `${lines.join('\n')}\n`
   }
   const stepA = first.a === null ? undefined : a.steps[first.a]
   const stepB = first.b === null ? undefined : b.steps[first.b]
-  const agreed = first.index === 0 ? 'no step before it' : first.index === 1 ? 'step 1 agrees' : `steps 1-${first.index} agree`
+  const agreed = first.index === 0 ? 'no step before it' : report.caveat ? 'no earlier recorded difference'
+    : first.index === 1 ? 'step 1 agrees' : `steps 1-${first.index} agree`
   lines.push(
     `first difference at step ${first.index + 1} (${why(first)}); ${agreed}:`,
     stepLine('A', stepA, stepB, a.steps.length),
@@ -324,5 +339,6 @@ export function renderRunDiff(report: RunDiffReport): string {
   }
   const changed = diff.pairs.filter((pair) => pair.differences.length > 0).length
   lines.push(`overall: ${diff.pairs.length} paired (${changed} differ), ${diff.onlyInA.length} only in A, ${diff.onlyInB.length} only in B`)
+  if (report.caveat) lines.push(`Comparison incomplete: ${report.caveat}`)
   return `${lines.join('\n')}\n`
 }

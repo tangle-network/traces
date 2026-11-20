@@ -346,10 +346,13 @@ function completeOpenInferenceRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('strict exported span validation', () => {
-  it('rejects duplicate trace and span identities', () => {
+  it('coalesces identical rows and rejects a different body at the same identity', () => {
     const row = completeOpenInferenceRow()
 
-    expect(() => exportTraceEvidenceRows([row, { ...row }], {
+    expect(exportTraceEvidenceRows([row, { ...row }], {
+      format: 'openinference',
+    }).spans).toHaveLength(1)
+    expect(() => exportTraceEvidenceRows([row, { ...row, name: 'contradictory.span' }], {
       format: 'openinference',
     })).toThrow('duplicate span identity (trace-hostile, span-hostile)')
   })
@@ -394,14 +397,13 @@ describe('strict exported span validation', () => {
     })).toThrow(/complete OpenInference span rows/)
   })
 
-  it('rejects duplicate identities split across JSONL rows', async () => {
+  it('coalesces identical identities split across JSONL rows', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-duplicate-export-'))
     const input = join(dir, 'duplicate.jsonl')
     const row = completeOpenInferenceRow()
     await writeFile(input, `${JSON.stringify(row)}\n${JSON.stringify(row)}\n`, 'utf8')
 
-    await expect(exportTraceEvidenceFile(input, {
-      format: 'openinference',
-    })).rejects.toThrow('duplicate span identity (trace-hostile, span-hostile)')
+    const result = await exportTraceEvidenceFile(input, { format: 'openinference' })
+    expect(result.spans).toHaveLength(1)
   })
 })

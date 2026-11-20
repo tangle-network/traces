@@ -11,6 +11,8 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { diffRuns } from '../src/index.js'
+import { serializeSpans, span } from '../src/otlp.js'
 import { runCli } from './run-cli.js'
 
 interface Call {
@@ -162,6 +164,38 @@ describe('traces diff, across worktrees', () => {
     expect(run.code).toBe(0)
     expect(run.stdout).toContain('no difference')
   })
+
+  it('compares only recorded fields after a metadata export and distinguishes explicit empty arguments', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'traces-diff-metadata-'))
+    const paths: Record<string, string> = {}
+    for (const side of ['a', 'b', 'e']) {
+      const path = join(dir, `${side}.otlp.jsonl`)
+      const converted = await runCli(['convert', files[side]!, '--no-content', '--out', path], { env })
+      expect(converted.code, converted.stderr).toBe(0)
+      paths[side] = path
+    }
+    for (const [a, b] of [[paths.a!, paths.b!], [files.a!, paths.b!], [paths.a!, files.b!]] as const) {
+      const sdk = await diffRuns(a, b)
+      expect(sdk.diff.firstDivergence).toBeNull()
+      expect(sdk.caveat).toContain('arguments unavailable for 5 of 5 paired calls')
+      expect(sdk.diff.pairs.flatMap((pair) => pair.differences)).toEqual([])
+      const cli = await runCli(['diff', a, b, '--format', 'json'], { env })
+      expect(cli.code).toBe(2)
+      expect(JSON.parse(cli.stderr)).toMatchObject({ code: 'no-outcome', error: expect.stringContaining('arguments unavailable') })
+    }
+    const status = await runCli(['diff', paths.a!, paths.e!, '--format', 'json'], { env })
+    expect(status.code).toBe(1)
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      diff: { firstDivergence: { index: 3, differences: [{ field: 'status' }] } },
+      caveat: expect.stringContaining('arguments unavailable'),
+    })
+    for (const [name, value, captured] of [['empty-object', '{}', true], ['empty-text', '', true], ['uncaptured', 'placeholder', false]] as const) {
+      const path = join(dir, name + '.otlp.jsonl')
+      await writeFile(path, serializeSpans([span({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'ping',
+        kind: 'TOOL', tool: 'ping', status: 'OK', startTime: at(0), extra: { 'input.value': value, 'tool.args_captured': captured } })]))
+      expect((await runCli(['diff', path, path], { env })).code).toBe(captured ? 0 : 2)
+    }
+  }, 60_000)
 
   it('takes session ids, prefixes and suffixes as refs', async () => {
     const byPath = await json(files.a!, files.b!)

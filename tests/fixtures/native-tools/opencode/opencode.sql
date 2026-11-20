@@ -1,0 +1,10 @@
+BEGIN TRANSACTION;
+CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);
+INSERT INTO "message" VALUES('message-1','ses_opencodeexample',1767225600000,'{"role": "assistant", "time": {"created": 1767225600000, "completed": 1767225601000}}');
+INSERT INTO "message" VALUES('message-2','ses_opencodeexample',1767225600000,'{"role": "assistant", "time": {"created": 1767225600000, "completed": 1767225601000}}');
+CREATE TABLE part(id TEXT PRIMARY KEY,session_id TEXT,message_id TEXT,time_created INTEGER,data TEXT);
+INSERT INTO "part" VALUES('part-1','ses_opencodeexample','message-1',1767225600001,'{"type": "tool", "tool": "read", "callID": "call-1", "state": {"status": "completed", "input": {}, "output": "", "time": {"start": 1767225600000, "end": 1767225601000}}}');
+INSERT INTO "part" VALUES('part-2','ses_opencodeexample','message-2',1767225600002,'{"type": "tool", "tool": "read", "callID": "call-2", "state": {"status": "completed", "input": {}, "output": "", "time": {"start": 1767225600000, "end": 1767225601000}}}');
+CREATE TABLE session(id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER,time_updated INTEGER);
+INSERT INTO "session" VALUES('ses_opencodeexample',NULL,'/example',1767225600000,1767225601000);
+COMMIT;

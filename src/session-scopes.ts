@@ -1,8 +1,10 @@
 /** Session scopes over normalized spans. Child projection never reads a native store. */
+import { distinctSpans } from './span-identity.js'
 import { ATTR, indexSessionIdsByTrace } from './attributes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { isSubagentSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
+import type { UnreadSessionFact } from './session-facts.js'
 
 export interface TraceGroup {
   readonly traceId: string
@@ -10,11 +12,23 @@ export interface TraceGroup {
   readonly spans: OtlpSpan[]
 }
 
+/** Explain an unavailable session when a window or a composite run still has other scopes to read. */
+export function unreadTraceGroup(group: TraceGroup, windowed: boolean): UnreadSessionFact {
+  const unread = group.spans.find((span) => typeof span.attributes[ATTR.CORRUPTION_COUNT] === 'number')
+  const detail = unread ? `${unread.attributes[ATTR.CORRUPTION_COUNT]} unread record(s)` : 'no record spans'
+  return {
+    sessionId: group.sessionId, traceId: group.traceId, source: null,
+    reason: `no record could be read (${detail})` +
+      (windowed ? ', so whether the session holds a record inside the window is unknown' : ''),
+  }
+}
+
 /** Group traces unchanged by default; optionally expose folded children as exclusive scopes. */
 export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = false): TraceGroup[] {
-  const { sessionByTrace } = indexSessionIdsByTrace(spans)
+  const unique = distinctSpans(spans)
+  const { sessionByTrace } = indexSessionIdsByTrace(unique)
   const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
+  for (const span of unique) {
     const group = byTrace.get(span.trace_id)
     if (group) group.push(span)
     else byTrace.set(span.trace_id, [span])
@@ -25,6 +39,19 @@ export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = fals
   })
 }
 
+/** A parent's sheet can include folded child records. A source receipt binds the selected
+ * original records once, before projecting the same source into several session sheets. */
+export function selectSourceSpans(
+  trace: TraceGroup, includeSubagents: boolean | undefined, select: (group: TraceGroup) => boolean,
+): readonly OtlpSpan[] {
+  const scopes = includeSubagents ? canonicalNodeScopes(trace) : [trace]
+  const selected = scopes.filter(select)
+  if (!selected.length) return []
+  if (selected.length === scopes.length) return trace.spans
+  const ids = new Set(selected.flatMap(group => group.spans.map(span => span.span_id)))
+  return trace.spans.filter(span => ids.has(span.span_id))
+}
+
 function text(span: OtlpSpan, key: string): string | undefined {
   const value = span.attributes[key]
   return typeof value === 'string' && value.length > 0 ? value : undefined
@@ -32,6 +59,7 @@ function text(span: OtlpSpan, key: string): string | undefined {
 
 function canonicalNodeScopes(parent: TraceGroup): TraceGroup[] {
   const tree = buildSpanRunTree(parent.spans, 'session-facts')
+  if (tree.readError) throw Object.assign(new Error(`cannot attribute facts for trace ${parent.traceId}: ${tree.readError}`), { code: 'no-outcome' })
   if (tree.nodes.length <= 1) return [parent]
   const byId = new Map(parent.spans.map((span) => [span.span_id, span]))
   const nodeSession = new Map(tree.nodes.map((node) => {

@@ -11,6 +11,7 @@ import type { CliArgs } from './cli-selection-types.js'
 import type { OtlpSpan } from './otlp.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { collectSessionSelection } from './session-selection.js'
+import { groupByTrace } from './session-scopes.js'
 import { computeSessionFacts, type SessionFacts, type UnreadSessionFact } from './session-facts.js'
 import { describeSessionRelationship } from './session-relationship.js'
 import { parseTimeBound } from './time.js'
@@ -109,6 +110,10 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
         const facts: SessionFacts[] = []
         const relationships = []
         const execution = buildSpanRunTree(selection.rows.flatMap((row) => [...row.spans]), ref.path)
+        if (execution.readError) {
+          unread.push({ sessionId: ref.sessionId, reason: execution.readError })
+          continue
+        }
         for (const row of selection.rows) {
           seen.add(`${row.adapter.harness}:${row.ref.path}`)
           facts.push(...computeSessionFacts(row.spans, { includeSubagents: true }))
@@ -122,8 +127,7 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
         await ingest(facts, { source: { kind: sourceKind, id: sourceId, url: pathToFileURL(ref.path).href },
           relationships, complete: selection.workflow?.complete,
           issues: [...sourceCoverage(selection.rows.flatMap((row) => [...row.spans])), ...(selection.workflow?.issues ?? []),
-            ...(execution.orphanSpans ? [{ kind: 'orphan-spans', count: execution.orphanSpans }] : []),
-            ...(execution.nodes.length === 0 && execution.spanCount > 0 ? [{ kind: 'unplaced-span-tree' }] : [])],
+            ...(execution.orphanSpans ? [{ kind: 'orphan-spans', count: execution.orphanSpans }] : [])],
           evidence: [...execution.traceIds.map((traceId) => ({ kind: 'trace-run', url: `trace://${traceId}` })),
             ...(args.fleetRun ? [{ kind: 'fleet-run', url: `fleet://${encodeURIComponent(args.fleetRun)}/session/${encodeURIComponent(ref.sessionId)}` }] : [])],
           spanRun: execution, traceRunId: execution.traceIds.length === 1 ? execution.traceIds[0] : undefined,
@@ -138,11 +142,13 @@ export async function cmdGraphs(args: CliArgs, readers: GraphCommandReaders): Pr
     await cache.save()
     if (args.selection?.spans.length) {
       const input = await readers.readSpans()
-      for (const traceId of new Set(input.spans.map((span) => span.trace_id))) {
-        const spans = input.spans.filter((span) => span.trace_id === traceId)
-        const facts = computeSessionFacts(spans, { includeSubagents: true })
-
+      for (const { traceId, spans } of groupByTrace(input.spans)) {
         const execution = buildSpanRunTree(spans, args.refs.join(', '))
+        if (execution.readError) {
+          unread.push({ traceId, reason: execution.readError })
+          continue
+        }
+        const facts = computeSessionFacts(spans, { includeSubagents: true })
         const runtimeRunId = spans.find((span) => typeof span.attributes['traces.runtime.run_id'] === 'string')?.attributes['traces.runtime.run_id']
         await ingest(facts, { source: { kind: runtimeRunId ? 'agent-runtime' : 'otlp', id: runtimeRunId ?? traceId }, spanRun: execution, traceRunId: traceId,
           evidence: [{ kind: 'trace-run', url: `trace://${traceId}` }],
