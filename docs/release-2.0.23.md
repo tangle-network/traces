@@ -2,7 +2,7 @@
 
 Runtime directory reads combine bound native sessions, retained OTLP and journal evidence per node. A child can contribute a distinct execution or an exclusive meter even when another node has a native transcript. The reader reports ambiguous ownership and preserves empty or unreadable node boundaries alongside readable work. Older journals retain their node status and timing when a spend receipt is missing. Partially measured token channels report their known lower bound.
 
-Retained directories can include compressed JSONL. A conflicting span identity stops a measurement, and conformance inspection keeps the source locations. Missing trace IDs and previously unreadable rows remain visible on re-export.
+Retained directories can include compressed JSONL. Traces reads every data frame on supported Node versions and reports a torn file even when its first frame is complete. A conflicting span identity stops a measurement, and conformance inspection keeps the source locations. Missing trace IDs and previously unreadable rows remain visible on re-export.
 
 A relocated OpenCode SQLite database supports an exact native session selection using `<path>#session=<id>`. The same reference follows changes in the write-ahead log.
 

@@ -603,7 +603,11 @@ describe('traces watch CLI', () => {
     const compressedRoot = { ...root, trace_id: 'compressed-trace' }
     const anonymous = { ...root, span_id: 'anonymous' } as Record<string, unknown>
     delete anonymous.trace_id
-    await writeFile(join(retained, 'root.ndjson.zst'), zstdCompressSync(jsonl([compressedRoot])))
+    // Two data frames with an application-defined skippable frame between them (RFC 8878 §3.1.2).
+    const third = { ...compressedRoot, span_id: 'second-frame' }
+    await writeFile(join(retained, 'root.ndjson.zst'), Buffer.concat([
+      zstdCompressSync(jsonl([compressedRoot])), Buffer.from('502a4d18010000007a', 'hex'), zstdCompressSync(jsonl([third])),
+    ]))
     await writeFile(join(retained, 'overlap.jsonl'), jsonl([compressedRoot]))
     await writeFile(join(retained, 'anonymous.jsonl.zst'), zstdCompressSync(jsonl([anonymous])))
     await writeFile(join(retained, 'broken.jsonl.zst'), Buffer.from('not a zstd frame'))
@@ -614,7 +618,8 @@ describe('traces watch CLI', () => {
     expect(input.files.map((file) => basename(file.path))).toEqual([
       'anonymous.jsonl.zst', 'broken.jsonl.zst', 'overlap.jsonl', 'root.ndjson.zst',
     ])
-    expect(input.spans).toHaveLength(2)
+    expect(input.spans).toHaveLength(3)
+    expect(input.spans.some((item) => item.span_id === 'second-frame')).toBe(true)
     expect(input.files.reduce((sum, file) => sum + file.repeats, 0)).toBe(1)
     expect(input.issues).toMatchObject([{
       kind: 'unparseable-line', unit: 'file', line: 0, detail: expect.stringContaining('cannot decode compressed OTLP'),
@@ -625,7 +630,7 @@ describe('traces watch CLI', () => {
     expect(fallback.trace_id).toBe('otlp:anonymous.jsonl.zst')
     expect(fallback.attributes[TRACE_ID_MINTED_ATTR]).toBe(true)
     expect(input.validation.findings.some((finding) => finding.code === 'missing-trace-id')).toBe(true)
-    expect((await readSpanRunSnapshot(join(retained, 'root.ndjson.zst'))).spanCount).toBe(1)
+    expect((await readSpanRunSnapshot(join(retained, 'root.ndjson.zst'))).spanCount).toBe(2)
   })
 
   it('preserves known row losses and unreadable files through a metadata-only export', async () => {
@@ -639,7 +644,7 @@ describe('traces watch CLI', () => {
     await writeFile(join(source, 'valid.ndjson'), `${JSON.stringify(root)}\ninvalid line\n`)
     const damaged = zstdCompressSync(`${JSON.stringify(root)}\n`.repeat(20)).subarray(0, 7)
     await writeFile(join(source, 'private-first.ndjson.zst'), damaged)
-    await writeFile(join(source, 'private-second.jsonl.zst'), damaged)
+    await writeFile(join(source, 'private-second.jsonl.zst'), Buffer.concat([zstdCompressSync(JSON.stringify(root)), damaged]))
     const before = await readOtlpInput(source)
     expect(before.unreadable).toEqual({ rows: 1, kinds: ['unparseable-line'], inherited: 0, files: 2, inheritedFiles: 0 })
 

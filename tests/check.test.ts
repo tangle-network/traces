@@ -8,7 +8,7 @@
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+import { zstdCompressSync } from 'node:zlib'
 import { deriveHexId, llmSpan, toolSpan } from '@tangle-network/agent-trace-contract'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { IDS, makeFixtureHome } from './fixtures/home.js'
@@ -18,8 +18,6 @@ const TRACE = deriveHexId('check-test-trace', 16)
 const TOOL_SPAN = deriveHexId('check-test-bash', 8)
 const EMAIL = 'planted.person@fastmail.com'
 const SECRET = 'planted-secret-value-7f3a91c2e8b4d605'
-// Node 22.23.4's zstdDecompressSync returns only the first frame of a multi-frame value; Node 24.22.1 returns all.
-const READS_EVERY_FRAME = zstdDecompressSync(Buffer.concat([zstdCompressSync('a'), zstdCompressSync('b')])).toString() === 'ab'
 
 let dir: string
 let env: Record<string, string>
@@ -214,10 +212,6 @@ describe('--share-safe', () => {
     await writeFile(join(tree, 'events', 'x.ndjson.zst'), zstdCompressSync(`{"type":"ok"}\n${JSON.stringify({ note: EMAIL })}\n`))
     const read = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
     expect(`${read.stdout}${read.stderr}`).not.toContain(EMAIL)
-    if (!READS_EVERY_FRAME) {  // a runtime that drops later frames cannot vouch for any .zst file
-      expect(read.code, `${process.version}: ${read.stdout}`).toBe(2)
-      return
-    }
     expect(read.code, read.stdout).toBe(1)
     const verdict = verdictOf(read.stdout).gates[0]!.verdict!
     expect(verdict.status).toBe('UNSAFE')
@@ -229,13 +223,19 @@ describe('--share-safe', () => {
     expect(torn.code, torn.stdout).toBe(2)
   })
 
-  it('never calls a multi-frame .zst clean, on a runtime that reads one frame or every frame', async () => {
+  it('scans later data frames and reports opaque skippable metadata', async () => {
     const tree = join(dir, 'zst-frames')
     await mkdir(join(tree, 'events'), { recursive: true })
-    const frames = Buffer.concat([zstdCompressSync('{"type":"ok"}\n'), zstdCompressSync(`${JSON.stringify({ note: EMAIL })}\n`)])
-    await writeFile(join(tree, 'events', 'x.ndjson.zst'), frames)
+    const path = join(tree, 'events', 'x.ndjson.zst')
+    const clean = zstdCompressSync('{"type":"ok"}\n')
+    const metadata = Buffer.from('502a4d18010000007a', 'hex')
+    await writeFile(path, Buffer.concat([clean, metadata]))
+    const opaque = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
+    expect(opaque.code, opaque.stdout).toBe(2)
+    expect(opaque.stdout).toContain('skippable zstd metadata (1 B)')
+    await writeFile(path, Buffer.concat([clean, metadata, zstdCompressSync(`${JSON.stringify({ note: EMAIL })}\n`)]))
     const result = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
-    expect(result.code, `${process.version}: ${result.stdout}`).toBe(READS_EVERY_FRAME ? 1 : 2)
+    expect(result.code, result.stdout).toBe(1)
     expect(`${result.stdout}${result.stderr}`).not.toContain(EMAIL)
   })
 
