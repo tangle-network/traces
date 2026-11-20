@@ -179,7 +179,7 @@ export async function collectSessionSelection(
   // A session reached twice (a seed that is also a child of an earlier seed) is read once.
   const read = new Set<string>()
   const add = async (row: SessionSelectionRow): Promise<void> => {
-    const key = `${row.adapter.harness}\0${row.ref.path}`
+    const key = `${row.adapter.harness}\0${row.ref.path}\0${row.ref.sessionId}`
     if (read.has(key)) return
     read.add(key)
     if (options.onRow) await options.onRow(row)

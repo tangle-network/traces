@@ -9,13 +9,14 @@ import { createInterface } from 'node:readline'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   claudeCodeRefForFile,
-  opencodeSessionsInStore,
+  listReaders,
   readerFor,
   readSessionInput,
   toOtlpSpans,
   type HarnessSession,
   type SessionRef as NativeRef,
 } from '@tangle-network/harness-sessions'
+import { nativePresentation, nativeSessionsInStore, nativeSourcePaths, nativeStoreVersion, readsSqlite } from './native-stores.js'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
 import {
@@ -645,6 +646,11 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       : nativeHarness === 'codex' ? new CodexAdapter() : undefined
   }
 
+  get nativeStores(): ReturnType<typeof readerFor>['stores'] { return this.reader.stores }
+  readsSqlite(): boolean { return readsSqlite(this.reader) }
+  async sessionsInStore(path: string, nativeSessionId?: string): Promise<NativeRef[]> { return nativeSessionsInStore(this.reader, path, nativeSessionId) }
+  async storeVersion(ref: SessionRef): Promise<string> { return nativeStoreVersion(this.reader, await this.sourcePaths(ref)) }
+
   /**
    * Sessions under `home` through the shared reader, which reads the recorded
    * cwd and, for Codex, every Codex home and the id in `session_meta`. `home`
@@ -691,7 +697,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
 
   async sourcePaths(ref: SessionRef): Promise<readonly string[]> {
     if (this.legacyOpencode && legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.sourcePaths(ref)
-    const paths = (await this.resolveNativeRef(ref))?.files ?? [ref.path]
+    const paths = await nativeSourcePaths(this.reader, (await this.resolveNativeRef(ref))?.files ?? [ref.path])
     if (this.nativeHarness !== 'factory-droids') return paths
     const settings = ref.path.replace(/\.jsonl$/u, '.settings.json')
     if (paths.includes(settings)) return paths
@@ -748,12 +754,11 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     options.signal?.throwIfAborted()
     let source = options.includeSubagents === false && this.nativeHarness === 'claude-code'
       ? nativeRef(this.nativeHarness, ref) : await this.resolveNativeRef(ref)
-    if (!source && this.nativeHarness === 'opencode') {
-      const matches = await opencodeSessionsInStore(ref.path, null, {
-        ...(ref.sessionId.startsWith('ses_') ? { nativeSessionId: ref.sessionId } : {}),
-      })
+    if (!source && this.readsSqlite()) {
+      const id = ref.sessionId === ref.path || ref.sessionId.startsWith('unattributed:') ? undefined : ref.sessionId
+      const matches = await this.sessionsInStore(ref.path, id)
       if (matches.length !== 1) {
-        throw new Error(`OpenCode store ${ref.path} contains ${matches.length} matching sessions; select one native session ID`)
+        throw new Error(`${this.harness} store ${ref.path} contains ${matches.length} matching sessions; select one native session ID`)
       }
       source = matches[0]!
     }
@@ -1021,12 +1026,7 @@ export function readsStoreRoots(adapter: HarnessTraceAdapter): adapter is Harnes
   return adapter instanceof HarnessSessionsAdapter
 }
 
-export const SHARED_SESSION_ADAPTERS: readonly HarnessTraceAdapter[] = [
-  new HarnessSessionsAdapter('claude-code', 'claude-code', ['claude', 'claudish', 'openclaw', 'nanoclaw']),
-  new HarnessSessionsAdapter('codex', 'codex', ['codex-acp']),
-  new HarnessSessionsAdapter('opencode'),
-  new HarnessSessionsAdapter('pi'),
-  new HarnessSessionsAdapter('kimi-code', 'kimi', ['kimi-code']),
-  new HarnessSessionsAdapter('factory-droids', 'factory', ['factory-droids', 'droid']),
-  new HarnessSessionsAdapter('grok', 'grok', ['grok-build']),
-]
+export const SHARED_SESSION_ADAPTERS: readonly HarnessTraceAdapter[] = listReaders().map((reader) => {
+  const { display, aliases } = nativePresentation(reader)
+  return new HarnessSessionsAdapter(reader.harness, display, aliases)
+})

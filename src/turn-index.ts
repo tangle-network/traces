@@ -11,10 +11,10 @@
  * their rows come from the functions a whole read uses (`readSessionIndex`,
  * `sessionRows`), never a second classifier. A piece ends before the last
  * response, which may still be streaming (`pieceBoundary`); that response is
- * read again with the next piece. Every other session (OpenCode's SQLite
- * store, Pi, Kimi, Factory, `claude -p` stream-json, a Codex rollout in the
- * older prompt form) is read whole whenever it changes, so its rows are a
- * whole read's by construction.
+ * read again with the next piece. Every other session (a native SQLite store,
+ * Pi, Kimi, Factory, `claude -p` stream-json, a Codex rollout in the older
+ * prompt form) is read whole whenever any of its sources changes, so its rows
+ * are a whole read's by construction.
  *
  * The index is lazy: a command refreshes only the sessions its selection
  * names, so the first `--since 30d` search builds 30 days and no more.
@@ -453,8 +453,10 @@ export class TurnIndex {
         // which decides whether it can be read at all.
       }
     }
-    // A shared store changes with every session in it; its own update time says whether this one did.
-    const version = ref.path.endsWith('.db') ? `m${ref.mtimeMs}` : `${info.ino}:${info.size}:${info.mtimeMs}`
+    // A shared store changes with every session in it; its own files say whether this one did.
+    const version = readsStoreRoots(adapter) && adapter.readsSqlite()
+      ? await adapter.storeVersion(ref)
+      : `${info.ino}:${info.size}:${info.mtimeMs}`
     if (previous?.mode === 'whole' && previous.version === version) return null
     return this.readWhole(key, adapter, ref, info, version)
   }

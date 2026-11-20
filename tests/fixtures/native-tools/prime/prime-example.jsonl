@@ -1,0 +1,4 @@
+{"type":"session","id":"prime-record-id","cwd":"/work","timestamp":"2026-11-20T10:00:00.000Z"}
+{"type":"message","id":"user-1","timestamp":"2026-11-20T10:00:00.000Z","message":{"role":"user","content":"Inspect the native store."}}
+{"type":"message","id":"assistant-1","timestamp":"2026-11-20T10:00:01.000Z","message":{"role":"assistant","provider":"prime","model":"prime-model","usage":{"input":10,"output":4},"content":[{"type":"text","text":"Reading."},{"type":"toolCall","id":"call-1","name":"Read","arguments":{"file_path":"/work/README.md"}}]}}
+{"type":"message","id":"tool-1","timestamp":"2026-11-20T10:00:02.000Z","message":{"role":"toolResult","toolCallId":"call-1","content":"README"}}
