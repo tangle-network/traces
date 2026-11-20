@@ -232,6 +232,14 @@ describe('behavior topology boundaries', () => {
     expect(result.nodes.find((node) => node.id === `${TRACE}/${id('unavailable-worker')}`)).toMatchObject({ parent: 'root', depth: 1, tool_calls: 0 })
   })
 
+  it('keeps an enclosing conversation ID on a tool from reversing the worker relationship', () => {
+    const rows = mixedTopologySpans().map((span) => span.span_id === id('unannotated-call')
+      ? { ...span, attributes: { ...span.attributes, 'session.id': 'root' } } : span)
+    const result = behaviorFromSpans(rows)
+    expect(result.nodes.find((node) => node.id === 'root')).toMatchObject({ parent: null, tool_calls: 1 })
+    expect(result.nodes.find((node) => node.label === 'worker-c')).toMatchObject({ parent: 'root', tool_calls: 1 })
+  })
+
   it('scopes a reused local span id to its own trace', () => {
     const spans = [TRACE, deriveHexId('behavior-other-trace', 16)].flatMap((traceId) => {
       const rootId = id('reused-root')

@@ -231,8 +231,10 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     // The fast path also proves containment is acyclic: every parent has already arrived.
     // An unsorted, partial or circular trace goes through the full tree reader.
     const ordered = new Set<string>()
-    const sessionOnly = trace.every((span) => {
-      if (!declaredSession(span) || span.attributes[SUBAGENT_SPAWN_ATTR] === true ||
+    const commonSession = declaredSession(trace[0]!)
+    const sessionOnly = commonSession !== null && trace.every((span) => {
+      if (declaredSession(span) !== commonSession || (span.parent_span_id && resolveSpanKind(span) === 'AGENT') ||
+        span.attributes[SUBAGENT_SPAWN_ATTR] === true ||
         (span.parent_span_id && !ordered.has(span.parent_span_id))) return false
       ordered.add(span.span_id)
       return true
@@ -248,6 +250,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     }
     const owners = new Map<string, string>()
     const named = new Set<string>()
+    const outerSessions = new Map<string, string>()
     const tree = buildSpanRunTree(trace, 'behavior')
     if (tree.readError) unknowns.add(tree.readError)
     for (const boundary of tree.nodes) {
@@ -257,20 +260,24 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
         ? sessionIdFromAttributes(root.attributes) : undefined
       const id = nativeRootId ?? `${traceId}/${root.span_id}`
       const parent = root.parent_span_id ? owners.get(root.parent_span_id) ?? null : null
-      const spawn = boundary.delegated && root.parent_span_id ? byId.get(root.parent_span_id) : undefined
-      const callerSession = spawn ? declaredSession(spawn) : null
+      const outerSession = parent && (named.has(parent) ? parent : outerSessions.get(parent))
+      if (outerSession) outerSessions.set(id, outerSession)
+      // A worker can carry its caller's conversation ID on every event. Its explicit
+      // boundary still owns those calls, and cannot become a parent of its caller.
+      const rootSession = declaredSession(root)
+      const sharesOuter = boundary.delegated || Boolean(outerSession && (!rootSession || rootSession === outerSession))
       const own: OtlpSpan[] = []
       for (const spanId of boundary.spanIds) {
         const span = byId.get(spanId)!
         const inherited = span !== root && span.parent_span_id ? owners.get(span.parent_span_id) : undefined
         const declared = declaredSession(span)
-        const session = boundary.delegated && (!declared || declared === callerSession) ? null
+        const session = sharesOuter && (!declared || declared === outerSession) ? null
           : declared ?? (inherited && named.has(inherited) ? inherited : null)
         owners.set(spanId, session ?? id)
         if (session === null) own.push(span)
         else {
+          if (span.parent_span_id && (span === root || !named.has(session))) rememberParent(session, owners.get(span.parent_span_id))
           named.add(session)
-          if (span.parent_span_id) rememberParent(session, owners.get(span.parent_span_id))
           append(sessions, session, span)
         }
       }

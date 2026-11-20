@@ -98,6 +98,7 @@ export async function collectOtlpSpans(path: string, selector?: string, retained
     }, spans, traceId)),
     sourceGaps: [
       ...(input.issues.length ? [`${input.issues.length} OTLP row(s) excluded at ingestion`] : []),
+      ...(input.unreadable.inherited ? [`${input.unreadable.inherited} unreadable OTLP row(s) were excluded before this export`] : []),
       ...(input.skipped.length ? [`${input.skipped.length} file(s) did not contain readable OTLP`] : []),
     ],
     conformance: input.validation,
