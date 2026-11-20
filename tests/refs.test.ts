@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { serializeSpans, span } from '../src/otlp.js'
+import { resolveRefs } from '../src/refs.js'
 import { claudeStreamJson, codexRollout, IDS, makeFixtureHome, type FixtureHome } from './fixtures/home.js'
 import { runCli } from './run-cli.js'
 
@@ -100,6 +101,42 @@ describe('refs: session ids', () => {
 })
 
 describe('refs: files and directories are read by their content', () => {
+  it('selects an exact native session inside the specified OpenCode SQLite file', async () => {
+    const { DatabaseSync } = await import('node:sqlite')
+    const path = join(fx.root, 'retained copy.sqlite')
+    await copyFile(join(fx.home, '.local/share/opencode/opencode.db'), path)
+    expect((await factsOf(path)).sessions.map((s) => s.sessionId)).toEqual([IDS.opencode])
+    const other = 'ses_second_physical_row'
+    const marker = 'Only this retained database contains the amendment.'
+    const ref = `${path}#session=${IDS.opencode}`
+    const db = new DatabaseSync(path)
+    try {
+      db.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0')
+      db.prepare('UPDATE part SET data = ? WHERE id = ?').run(JSON.stringify({ type: 'text', text: marker }), 'prt_3')
+      db.prepare('INSERT INTO session SELECT ?, NULL, directory, time_created, time_updated FROM session WHERE id = ?')
+        .run(other, IDS.opencode)
+      const ambiguous = await refusal(path)
+      expect(ambiguous.code).toBe('ambiguous')
+      expect(ambiguous.candidates?.map((row) => row.sessionId).sort()).toEqual([IDS.opencode, other].sort())
+      expect((await refusal(`${path}#session=${IDS.opencode.slice(0, 12)}`)).code).toBe('unreadable')
+      expect((await refusal(`${path}#session=`)).code).toBe('usage')
+      const facts = await factsOf(ref)
+      expect(facts.sessions.map((s) => s.sessionId)).toEqual([IDS.opencode])
+      expect(JSON.stringify(facts)).toContain(marker)
+      const watched = await run(['watch', ref, '--once', '--format', 'jsonl'])
+      expect(watched.code).toBe(0)
+      const sessions = watched.stdout.trim().split('\n').map((line) => JSON.parse(line))
+        .filter((event) => event.event === 'session').map((event) => event.session)
+      expect(sessions).toEqual([expect.objectContaining({ harness: 'opencode', sessionId: IDS.opencode, path })])
+      const [source] = await resolveRefs([ref])
+      expect(source?.kind).toBe('session')
+      if (source?.kind !== 'session') throw new Error('Expected a native session reference')
+      expect(await source.adapter.sourcePaths?.(source.session)).toEqual(expect.arrayContaining([path, path + '-wal']))
+    } finally {
+      db.close()
+    }
+  })
+
   it('reads harness session files by their store, else by their first records', async () => {
     const loose = join(fx.root, 'loose')
     await mkdir(loose, { recursive: true })
