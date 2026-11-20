@@ -15,7 +15,7 @@
  * to survive SSH, a CI log, and a pipe into a file.
  */
 
-import type { SpendRoll } from './supervisor-run-context.js'
+import { exactCount, type SpendRoll } from './spend-roll.js'
 
 export const RULE = '─'.repeat(76)
 
@@ -62,8 +62,13 @@ export function zeroPricedCost(roll: SpendRoll): boolean {
   return roll.usdKnownRecords > 0 && roll.usd === 0 && roll.tokensIn + roll.tokensOut > 0
 }
 
+export function recordedCount(roll: SpendRoll, channel: 'iterations' | 'tokensIn' | 'tokensOut'): string {
+  if (exactCount(roll, channel) !== null) return int(roll[channel])
+  return roll[channel] > 0 ? `at least ${int(roll[channel])}` : 'unknown'
+}
+
 export function tokens(roll: SpendRoll): string {
-  return `in ${int(roll.tokensIn)} · out ${int(roll.tokensOut)}`
+  return `in ${recordedCount(roll, 'tokensIn')} · out ${recordedCount(roll, 'tokensOut')}`
 }
 
 export const STATUS_MARK: Record<string, string> = {

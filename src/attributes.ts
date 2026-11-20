@@ -87,6 +87,16 @@ export const TRACE_ID_MINTED_ATTR = 'traces.trace_id_minted'
 export const SESSION_TOTAL_TOKENS_ATTR = 'traces.session.total_tokens'
 export const SESSION_TOTAL_INPUT_ATTR = 'traces.session.total_input_tokens'
 export const SESSION_TOTAL_OUTPUT_ATTR = 'traces.session.total_output_tokens'
+export const RUNTIME_INPUT_FLOOR_ATTR = 'traces.runtime.input_tokens_floor'
+export const RUNTIME_OUTPUT_FLOOR_ATTR = 'traces.runtime.output_tokens_floor'
+
+/** A supervisor node can record its own meter without producing a model or tool span. */
+export function hasRuntimeDriverMeter(span: OtlpSpan): boolean {
+  return span.name === 'runtime.agent' && typeof span.attributes['traces.runtime.node_id'] === 'string'
+    && [SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR, RUNTIME_INPUT_FLOOR_ATTR, RUNTIME_OUTPUT_FLOOR_ATTR]
+      .some((key) => typeof span.attributes[key] === 'number')
+}
+
 export const SESSION_TOTAL_CACHED_INPUT_ATTR = 'traces.session.total_cached_input_tokens'
 export const SESSION_TOTAL_CACHE_WRITE_ATTR = 'traces.session.total_cache_write_input_tokens'
 export const SESSION_TOTAL_REASONING_ATTR = 'traces.session.total_reasoning_tokens'

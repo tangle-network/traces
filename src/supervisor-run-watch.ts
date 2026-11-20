@@ -14,6 +14,7 @@ import {
   forEachTreeNode,
   int,
   ms,
+  recordedCount,
   STATUS_MARK,
   tokens,
   usd,
@@ -22,6 +23,7 @@ import {
 } from './run-view-format.js'
 
 function budget(node: RunContextNode): string {
+  if (!node.budget) return 'unknown'
   const parts: string[] = []
   if (node.budget.maxIterations !== undefined) parts.push(`${int(node.budget.maxIterations)}it`)
   if (node.budget.maxTokens !== undefined) parts.push(`${int(node.budget.maxTokens)}tok`)
@@ -38,13 +40,14 @@ function budget(node: RunContextNode): string {
  * 98% of its token pool untouched.
  */
 function budgetUse(node: RunContextNode, spent: SpendRoll): string {
+  if (!node.budget) return ''
   const parts: string[] = []
   const { maxIterations, maxTokens } = node.budget
-  if (maxIterations !== undefined && maxIterations > 0 && spent.iterations > 0) {
+  if (maxIterations !== undefined && maxIterations > 0 && spent.iterations > 0 && !spent.missing?.iterations) {
     parts.push(`${Math.round((spent.iterations / maxIterations) * 100)}% it`)
   }
   const used = spent.tokensIn + spent.tokensOut
-  if (maxTokens !== undefined && maxTokens > 0 && used > 0) {
+  if (maxTokens !== undefined && maxTokens > 0 && used > 0 && !spent.missing?.tokensIn && !spent.missing?.tokensOut) {
     parts.push(`${Math.round((used / maxTokens) * 100)}% tok`)
   }
   return parts.length === 0 ? '' : ` · ${parts.join(', ')} of budget`
@@ -78,8 +81,9 @@ function renderNode(node: RunContextNode, lastAtDepth: readonly boolean[], lines
     )
   }
   if (node.settled.records > 0) {
+    const iterations = recordedCount(node.settled, 'iterations')
     lines.push(
-      `${detail}settled   ${node.settled.iterations}it · ${tokens(node.settled)} · ${usd(node.settled)}` +
+      `${detail}settled   ${iterations === 'unknown' ? 'iterations unknown' : iterations + 'it'} · ${tokens(node.settled)} · ${usd(node.settled)}` +
         budgetUse(node, node.settled),
     )
   }

@@ -404,7 +404,7 @@ export interface RunContextNode {
   readonly status: NodeStatus
   readonly runtime: Runtime | null
   /** The budget this node was AUTHORED with, exactly as the spawn recorded it. */
-  readonly budget: Budget
+  readonly budget: Budget | null
   /** This node's own driver inference — its `metered` events. */
   readonly driver: SpendRoll
   /** What this node's direct children consumed — their `settled` spend. */
@@ -508,7 +508,14 @@ export async function readRunContextSnapshot(runDir: string): Promise<RunContext
 function safeTreeView(events: readonly SpawnEvent[]): TreeView | null {
   if (events.length === 0) return null
   try {
-    return materializeTreeView([...events])
+    // This fold supplies lifecycle, identity and placement. The roll below reads
+    // each original accounting field independently, including legacy partial receipts.
+    const unreported: Spend = { iterations: 0, iterationsKnown: false, tokens: { input: 0, output: 0 }, tokensKnown: false, usd: 0, usdKnown: false, ms: 0 }
+    return materializeTreeView(events.map((event) => {
+      if (event.kind === 'metered') return { ...event, spend: unreported }
+      if (event.kind === 'settled' || event.kind === 'cancelled' || event.kind === 'reconciled') return { ...event, spent: unreported }
+      return event
+    }))
   } catch {
     return null
   }
@@ -567,7 +574,7 @@ function orderNodes(view: TreeView, journal: RunContextJournal): RunContextNode[
       role: inferRole(node.id, node.parent, journal.supervisorIds),
       status: node.status,
       runtime: node.runtime ?? null,
-      budget: node.budget,
+      budget: node.budget ?? null,
       driver: driver.get(id) ?? ZERO_ROLL,
       children: childRoll.get(id) ?? ZERO_ROLL,
       settled: settled.get(id) ?? ZERO_ROLL,

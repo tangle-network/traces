@@ -187,9 +187,10 @@ export function sessionTokens(own: readonly OtlpSpan[], honorRoot = true): Sessi
   if (driver?.name === 'runtime.agent' && typeof driver.attributes['traces.runtime.node_id'] === 'string') {
     const input = count(driver.attributes[SESSION_TOTAL_INPUT_ATTR])
     const output = count(driver.attributes[SESSION_TOTAL_OUTPUT_ATTR])
-    if (input !== null || output !== null) return {
+    const coverage = driver.attributes['traces.runtime.token_coverage']
+    if (input !== null || output !== null || typeof coverage === 'string') return {
       input, output, cacheRead: null, cacheWrite: null, reasoning: null, modelCalls: 0, byModel: [], spanIds: [driver.span_id],
-      unavailable: input === null || output === null ? 'the Runtime driver recorded only one token channel' : null,
+      unavailable: typeof coverage === 'string' ? coverage : input === null || output === null ? 'the Runtime driver recorded only one token channel' : null,
     }
   }
   const calls = own.map(callUsage).filter((call): call is CallUsage => call !== null)
@@ -342,8 +343,9 @@ function roundUsd(usd: number): number {
 /** What the Router would charge for the session's tokens, or null with the reason. */
 export function sessionCost(tokens: SessionTokens, price: TokenPricer | undefined): SessionCost {
   const unknown = (reason: string): SessionCost => ({ usd: null, label: COST_LABEL, unavailable: reason })
-  if (tokens.input === null) return unknown(`no token counts: ${tokens.unavailable}`)
-  if (tokens.input + (tokens.output ?? 0) === 0) return { usd: 0, label: COST_LABEL, unavailable: null }
+  if (tokens.input === null && tokens.output === null) return unknown(`no token counts: ${tokens.unavailable}`)
+  if (tokens.input === null || tokens.output === null) return unknown(`incomplete token counts: ${tokens.unavailable}`)
+  if (tokens.input + tokens.output === 0) return { usd: 0, label: COST_LABEL, unavailable: null }
   if (tokens.byModel.length === 0) {
     return unknown('no model call of the session records its model, or several models share a cumulative counter the calls do not add up to')
   }

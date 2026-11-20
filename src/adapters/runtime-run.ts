@@ -1,10 +1,11 @@
+import { exactCount } from '../spend-roll.js'
 /** A Runtime node's records come from its bound capture, retained spans or own journal meter. */
 import { join } from 'node:path'
 import { readSessionInput } from '@tangle-network/harness-sessions'
 import { FileResultBlobStore, captureBoundHarnessTranscript, contentAddress, harnessTranscriptArtifact, materializeTreeView, readSpawnJournal, type HarnessTranscriptArtifact, type HarnessTranscriptBinding, type HarnessTranscriptEvidence, type SpawnEvent } from '@tangle-network/agent-runtime/kernel'
 import { HarnessSessionsAdapter } from './harness-sessions.js'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
-import { ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR, sessionIdFromAttributes } from '../attributes.js'
+import { ATTR, RUNTIME_INPUT_FLOOR_ATTR, RUNTIME_OUTPUT_FLOOR_ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR, sessionIdFromAttributes } from '../attributes.js'
 import { span, type OtlpSpan } from '../otlp.js'
 import { SUBSTITUTED_FIELDS_ATTR, type OtlpInput } from '../otlp-input.js'
 import { readConsistentOtlpInput } from '../otlp-measurement.js'
@@ -79,6 +80,9 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
     if (overlap || shared) {
       delete item.attributes[SESSION_TOTAL_INPUT_ATTR]
       delete item.attributes[SESSION_TOTAL_OUTPUT_ATTR]
+      delete item.attributes[RUNTIME_INPUT_FLOOR_ATTR]
+      delete item.attributes[RUNTIME_OUTPUT_FLOOR_ATTR]
+      delete item.attributes['traces.runtime.token_coverage']
       if (shared) unknowns.add('A journal node shares a captured Bridge session. Its separate driver usage is unknown.')
     }
     spans.push(item)
@@ -175,23 +179,27 @@ async function readRuntimeJournalSpans(runDir: string, expectedRunId: string | u
     }
     const own = node.driver
     const end = node.settledAt !== null && node.settledAt >= start ? node.settledAt : null
-    // SpendRoll fills absent channels with zero; positive channels alone prove
-    // measurement here. A missing/zero channel stays unknown, never free usage.
-    const input = own.records > 0 && own.tokensIn > 0 ? own.tokensIn : undefined
-    const output = own.records > 0 && own.tokensOut > 0 ? own.tokensOut : undefined
-    if (input === undefined || output === undefined) unknowns.push('A node lacks positive evidence for both input/output usage channels')
+    const input = exactCount(own, 'tokensIn'), output = exactCount(own, 'tokensOut')
+    const gaps = []
+    if (input === null) gaps.push(own.tokensIn > 0 ? `at least ${own.tokensIn} input tokens` : 'input tokens unknown')
+    if (output === null) gaps.push(own.tokensOut > 0 ? `at least ${own.tokensOut} output tokens` : 'output tokens unknown')
+    const coverage = gaps.length ? `Runtime driver usage is incomplete (${gaps.join(', ')})` : undefined
+    if (coverage) unknowns.push('At least one journal node has incomplete driver token usage.')
     spans.push(span({
       traceId, spanId: deriveHexId(`${traceId}:${node.id}`, 8),
       parentSpanId: node.parent ? deriveHexId(`${traceId}:${node.parent}`, 8) : null,
       name: 'runtime.agent', kind: 'AGENT', startTime: new Date(start).toISOString(),
       ...(end !== null ? { endTime: new Date(end).toISOString() } : {}),
-      status: node.status === 'failed' ? 'ERROR' : 'UNSET',
+      status: node.status === 'failed' ? 'ERROR' : node.status === 'done' ? 'OK' : 'UNSET',
       service: 'agent-runtime',
       extra: {
-        'traces.runtime.node_id': node.id, [ATTR.HARNESS]: node.runtime ?? 'agent-runtime',
+        'traces.runtime.node_id': node.id, 'tangle.node.state': node.status, [ATTR.HARNESS]: node.runtime ?? 'agent-runtime',
         'traces.runtime.run_id': runId, [SOURCE_MISSING_CHANNELS_ATTR]: JSON.stringify(['human-turns', 'tool-calls', 'cache-read', 'cache-write']), 'agent.parent.confidence': 'explicit',
-        ...(input !== undefined ? { [SESSION_TOTAL_INPUT_ATTR]: input } : {}),
-        ...(output !== undefined ? { [SESSION_TOTAL_OUTPUT_ATTR]: output } : {}),
+        ...(input !== null ? { [SESSION_TOTAL_INPUT_ATTR]: input } : {}),
+        ...(output !== null ? { [SESSION_TOTAL_OUTPUT_ATTR]: output } : {}),
+        ...(input === null && own.tokensIn > 0 ? { [RUNTIME_INPUT_FLOOR_ATTR]: own.tokensIn } : {}),
+        ...(output === null && own.tokensOut > 0 ? { [RUNTIME_OUTPUT_FLOOR_ATTR]: own.tokensOut } : {}),
+        ...(coverage ? { 'traces.runtime.token_coverage': coverage } : {}),
         ...(end === null ? { [SUBSTITUTED_FIELDS_ATTR]: 'end_time' } : {}),
       },
     }))

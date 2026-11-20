@@ -1,14 +1,9 @@
 import type { Spend } from '@tangle-network/agent-runtime/kernel'
 
-/**
- * A sum over spend records that keeps "unknown" out of the number.
- *
- * `usd` is the total of the records that priced themselves; `usdUnknown` is how
- * many declined to. A renderer that has 0 known records and >=1 unknown one must
- * print "unknown", never `$0.0000`: an unmetered turn and a free turn are
- * different facts, and agent-runtime's `Spend.usdKnown` is the only signal that
- * separates them (absent means known, per its contract).
- */
+type CountChannel = 'iterations' | 'tokensIn' | 'tokensOut'
+type MissingCounts = Partial<Record<CountChannel, number>>
+
+/** Numeric subtotals contain only recorded amounts. Missing receipts are counted by channel. */
 export interface SpendRoll {
   readonly records: number
   readonly iterations: number
@@ -17,32 +12,48 @@ export interface SpendRoll {
   readonly usd: number
   readonly usdKnownRecords: number
   readonly usdUnknownRecords: number
+  readonly missing?: Readonly<MissingCounts>
 }
 
 export const ZERO_ROLL: SpendRoll = {
-  records: 0,
-  iterations: 0,
-  tokensIn: 0,
-  tokensOut: 0,
-  usd: 0,
-  usdKnownRecords: 0,
-  usdUnknownRecords: 0,
+  records: 0, iterations: 0, tokensIn: 0, tokensOut: 0, usd: 0, usdKnownRecords: 0, usdUnknownRecords: 0,
 }
 
-export function addSpend(roll: SpendRoll, spend: Spend): SpendRoll {
-  const known = spend.usdKnown !== false
-  return {
-    records: roll.records + 1,
-    iterations: roll.iterations + (spend.iterations ?? 0),
-    tokensIn: roll.tokensIn + (spend.tokens?.input ?? 0),
-    tokensOut: roll.tokensOut + (spend.tokens?.output ?? 0),
-    usd: roll.usd + (known ? (spend.usd ?? 0) : 0),
-    usdKnownRecords: roll.usdKnownRecords + (known ? 1 : 0),
-    usdUnknownRecords: roll.usdUnknownRecords + (known ? 0 : 1),
-  }
+function nonnegative(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+export function exactCount(roll: SpendRoll, channel: CountChannel): number | null {
+  return roll.records > 0 && !roll.missing?.[channel] ? roll[channel] : null
+}
+
+export function addSpend(roll: SpendRoll, spend: Spend | undefined | null): SpendRoll {
+  const input = spend?.tokens?.input, output = spend?.tokens?.output, iterations = spend?.iterations
+  const price = spend?.usd
+  const partialTokens = spend?.tokensKnown === false || spend?.tokens?.tokensKnown === false
+  const priced = nonnegative(price) && spend?.usdKnown !== false
+  const missing: MissingCounts = {}
+  if (!nonnegative(input) || partialTokens) missing.tokensIn = 1
+  if (!nonnegative(output) || partialTokens) missing.tokensOut = 1
+  if (!nonnegative(iterations) || spend?.iterationsKnown === false) missing.iterations = 1
+  return mergeRolls(roll, {
+    records: 1, iterations: nonnegative(iterations) ? iterations : 0,
+    tokensIn: nonnegative(input) ? input : 0, tokensOut: nonnegative(output) ? output : 0,
+    usd: priced ? price : 0, usdKnownRecords: priced ? 1 : 0, usdUnknownRecords: priced ? 0 : 1,
+    ...(Object.keys(missing).length ? { missing } : {}),
+  })
 }
 
 export function mergeRolls(a: SpendRoll, b: SpendRoll): SpendRoll {
+  let missing = a.missing
+  if (b.missing) {
+    const counts = { ...missing }
+    for (const channel of ['iterations', 'tokensIn', 'tokensOut'] as const) {
+      const delta = b.missing[channel] ?? 0
+      if (delta) counts[channel] = (counts[channel] ?? 0) + delta
+    }
+    missing = counts
+  }
   return {
     records: a.records + b.records,
     iterations: a.iterations + b.iterations,
@@ -51,6 +62,6 @@ export function mergeRolls(a: SpendRoll, b: SpendRoll): SpendRoll {
     usd: a.usd + b.usd,
     usdKnownRecords: a.usdKnownRecords + b.usdKnownRecords,
     usdUnknownRecords: a.usdUnknownRecords + b.usdUnknownRecords,
+    ...(missing ? { missing } : {}),
   }
 }
-
