@@ -40,7 +40,7 @@ import {
 } from './adapters/provenance.js'
 import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
-import { groupByTrace, type TraceGroup } from './session-scopes.js'
+import { groupByTrace, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { childModelBySpawn, foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -1119,7 +1119,8 @@ export function buildSessionFactsReport(
  * across two calls is reported as two sessions.
  */
 export interface SessionFactsReportBuilder {
-  add(spans: readonly OtlpSpan[]): void
+  /** A composite run can have constituent traces with no records or failure to report. */
+  add(spans: readonly OtlpSpan[], constituentTraceIds?: ReadonlySet<string>): void
   /** Name a session that could not be read at all: it is skipped, never counted as empty. */
   addUnread(session: UnreadSessionFact): void
   build(): SessionFactsReport
@@ -1143,7 +1144,12 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
   let spanCount = 0
   let evidenceThrough: string | null = null
 
-  const select = (group: TraceGroup): void => {
+  const select = (group: TraceGroup, constituent = false): void => {
+    const reading = readSession(group.traceId, group.sessionId, group.spans, options, bounds)
+    if (constituent && reading.facts.recordSpans === 0 && reading.facts.firstFailure.status !== 'found') {
+      unreadSessions.push(unreadTraceGroup(group, false))
+      return
+    }
     const digest = createHash('sha256')
     for (const span of [...group.spans].sort((a, b) => a.span_id.localeCompare(b.span_id))) {
       digest.update(canonicalJson(span)).update('\n')
@@ -1153,30 +1159,22 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
     }
     digests.push({ traceId: group.traceId, digest: digest.digest('hex') })
     spanCount += group.spans.length
-    const reading = readSession(group.traceId, group.sessionId, group.spans, options, bounds)
     sessions.push(reading.facts)
     options.onSession?.(reading)
   }
 
   return {
-    add(spans) {
+    add(spans, constituentTraceIds) {
       for (const group of groupByTrace(spans, options.includeSubagents)) {
         if (bounds === null && options.nameUnread !== true) {
-          select(group)
+          select(group, constituentTraceIds?.has(group.traceId))
           continue
         }
         const records = group.spans.filter(isRecordSpan)
         if (records.length === 0) {
           // Nothing was read, so nothing says what the session did, or whether
           // it belongs in the window; leaving it out silently would count it as empty.
-          const unread = group.spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
-          unreadSessions.push({
-            sessionId: group.sessionId,
-            traceId: group.traceId,
-            source: null,
-            reason: `no record could be read (${unread ? `${unread.attributes[CORRUPTION_COUNT_ATTR]} unread record(s)` : 'no record spans'})` +
-              (bounds === null ? '' : ', so whether the session holds a record inside the window is unknown'),
-          })
+          unreadSessions.push(unreadTraceGroup(group, bounds !== null))
           continue
         }
         if (bounds === null || records.some((span) => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) select(group)

@@ -367,7 +367,7 @@ async function cmdList(args: CliArgs): Promise<void> {
 
 type SelectedSessionSource = ReportSource
 
-async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
+async function collectSpans(args: CliArgs, runTraceIds?: Set<string>): Promise<CollectedSpans> {
   if (args.refs.length > 0 && !args.selection) throw new Error(`internal: ${args.command} read its refs before resolving them`)
   const sources = args.selection?.spans ?? []
   if (sources.length === 0) {
@@ -377,11 +377,13 @@ async function collectSpans(args: CliArgs): Promise<CollectedSpans> {
   }
   const parts: CollectedSpans[] = []
   for (const source of sources) {
-    parts.push(source.kind === 'run-dir'
+    const part = source.kind === 'run-dir'
       ? await collectRuntimeSpans(source.path)
       : source.reader === 'otlp'
         ? await collectOtlpSpans(source.path, source.selector)
-        : await collectImportedSpans(source.path, source.reader, source.selector))
+        : await collectImportedSpans(source.path, source.reader, source.selector)
+    if (runTraceIds && source.kind === 'run-dir') for (const span of part.spans) runTraceIds.add(span.trace_id)
+    parts.push(part)
   }
   if (args.selection?.sessions.length) parts.push(await collectSessionSpans(args))
   const collected = parts.length === 1 ? parts[0]! : mergeCollected(parts)
@@ -711,18 +713,9 @@ function hostOf(args: CliArgs): string {
 /**
  * `traces facts` — the deterministic session-facts sheet, printed.
  *
- * No model, no engine, no budget: the numbers come out of the spans. The text
- * sheet by default, at most 25 lines a session; `--format json` prints the
- * whole sheet for programs, and `--format jsonl` one row per typed turn. With
- * `--match RE` it prints the human turns, agent messages and shell commands
- * that match instead of the sheet. Every fact names the span ids it came from.
- *
- * A named session (a ref or `--current`) comes first, its spawned children
- * after it, and one that cannot be read exits 2. A sweep (`--last`, a window)
- * skips a session that cannot be read and names it with its reason in
- * `selection.unreadSessions`, so one bad file never ends a run over hundreds.
- * With `--since`/`--until` the selection is every session with a record in
- * the window, read one at a time.
+ * Report the selected session and its children in spawn order. Unreadable
+ * named sessions exit 2. Sweeps and composite Runtime runs list unreadable
+ * constituents in selection.unreadSessions. Windows stream one session at a time.
  */
 async function cmdFacts(args: CliArgs): Promise<void> {
   const format = args.format ?? 'text'
@@ -786,13 +779,14 @@ async function cmdFacts(args: CliArgs): Promise<void> {
     warnUnread(args, unread)
     report = { ...builder.build(), harness: [...harnesses].join('+') || (args.harnessExplicit ? args.harness : null) }
   } else {
-    const collected = await collectSpans(args)
+    const runTraceIds = new Set<string>()
+    const collected = await collectSpans(args, runTraceIds)
     if (collected.spans.length === 0 && (collected.unread ?? []).length === 0) throw new Error('no spans found for the given selection')
     warnIncompleteWorkflow(collected.workflow)
     for (const source of collected.sources) sourceOf.set(source.sessionId, source.path)
     const files = args.selection?.spans ?? []
     if (files.length === 1 && collected.sources.length === 0) readingFrom = files[0]!.path
-    builder.add(collected.spans)
+    builder.add(collected.spans, runTraceIds)
     readingFrom = null
     for (const entry of collected.unread ?? []) builder.addUnread(entry)
     report = { ...builder.build(), harness: collected.harness }
@@ -802,13 +796,15 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   // zeros for it would state, in the sheet's own voice, that the session did
   // nothing — which is the one thing the sheet must never do. A sweep names
   // such a session in selection.unreadSessions instead; a failed root is its record.
-  const unread = report.sessions.filter((facts) => facts.recordSpans === 0 && facts.firstFailure.status !== 'found')
+  const unread = report.sessions
+    .filter((facts) => facts.recordSpans === 0 && facts.firstFailure.status !== 'found')
+    .map((facts) => `${facts.sessionId ?? facts.traceId} (${facts.unreadRecords.value ?? 0} unread record(s))`)
+  if (named > 0 && window === undefined && report.sessions.length === 0) {
+    for (const session of report.selection?.unreadSessions ?? []) unread.push(`${session.sessionId ?? session.traceId} (${session.reason})`)
+  }
   if (unread.length > 0) {
     throw new RefError(
-      `no records could be read from ${unread.length} selected session(s): ` +
-        unread
-          .map((facts) => `${facts.sessionId ?? facts.traceId} (${facts.unreadRecords.value ?? 0} unread record(s))`)
-          .join(', ') +
+      `no records could be read from ${unread.length} selected session(s): ${unread.join(', ')}` +
         '. The facts sheet would state zeros the spans cannot support.',
       'unreadable',
     )

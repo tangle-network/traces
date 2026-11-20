@@ -6,6 +6,7 @@ import { FileResultBlobStore, FileSpawnJournal, contentAddress, persistHarnessTr
 import { expect, it } from 'vitest'
 import { readRefSpans } from '../src/refs.js'
 import { computeSessionFacts } from '../src/session-facts.js'
+import { SESSION_TOTAL_INPUT_ATTR } from '../src/attributes.js'
 import { serializeSpans, span } from '../src/otlp.js'
 import { codexRollout } from './fixtures/home.js'
 import { runCli } from './run-cli.js'
@@ -50,23 +51,78 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
       }, blobs)
       await appendMetadata(journal, binding, index * 4 + 1)
       await journal.appendEvent(root, { kind: 'settled', id, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 999, output: 999 }, usd: 0, ms: 0, iterations: 0 }, seq: index * 4 + 4, at })
+      if (index === 0) {
+        const one = await runCli(['facts', dir, '--format', 'json', '--no-content'])
+        expect(one.code, one.stderr).toBe(0)
+        expect(JSON.parse(one.stdout)).toMatchObject({
+          sessions: [expect.objectContaining({ sessionId: nativeSessionId })],
+          selection: { unreadSessions: [expect.objectContaining({ reason: expect.stringContaining('no record could be read') })] },
+        })
+      }
     }
     await writeFile(join(dir, 'bridge.otlp.jsonl'), serializeSpans([span({
       traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'bridge.request', kind: 'LLM', startTime: at, inputTokens: 999, outputTokens: 999,
     })]))
     const spans = await readRefSpans(dir)
     const facts = computeSessionFacts(spans)
-    expect(facts).toHaveLength(1)
-    expect(facts[0]?.recordSpans).toBeGreaterThan(0)
-    expect(facts[0]?.toolCalls.value).toBe(1)
-    expect(facts[0]?.tokens.input).toBeNull() // Neither request usage nor journal spend fills an unmeasured native channel.
+    const native = facts.find((fact) => fact.sessionId === nativeSessionId)
+    expect(native?.recordSpans).toBeGreaterThan(0)
+    expect(native?.toolCalls.value).toBe(1)
+    expect(native?.tokens.input).toBeNull() // Neither request usage nor journal spend fills an unmeasured native channel.
+    const shared = spans.filter((item) => item.name === 'runtime.agent')
+    expect(shared.map((item) => item.attributes['traces.runtime.node_id']).sort()).toEqual([root, ...bindings.map((binding) => binding.node!.nodeId)].sort())
+    expect(shared.every((item) => item.attributes[SESSION_TOTAL_INPUT_ATTR] === undefined)).toBe(true)
     expect(new Set(spans.map((item) => `${item.trace_id}:${item.span_id}`)).size).toBe(spans.length)
     expect(JSON.parse(String(spans[0]?.attributes['traces.runtime.capture_bindings']))).toEqual(bindings.map(({ node, ...binding }) => ({ ...binding, node: { rootId: node!.rootId, parentId: node!.parentId, nodeId: node!.nodeId, attemptId: node!.attemptId } })))
     expect(JSON.parse(String(spans[0]?.attributes['traces.runtime.capture_refs']))).toHaveLength(2)
     const result = await runCli(['facts', dir, '--format', 'json', '--no-content'])
     expect(result.code, result.stderr).toBe(0)
     expect(result.stdout).not.toMatch(/PRIVATE_|pnpm test|rollout.jsonl/)
-    expect(JSON.parse(result.stdout)).toMatchObject({ contentIncluded: false, sessions: [{ sessionId: nativeSessionId, toolCalls: { value: 1 } }] })
+    expect(JSON.parse(result.stdout)).toMatchObject({ contentIncluded: false, sessions: expect.arrayContaining([
+      expect.objectContaining({ sessionId: nativeSessionId, toolCalls: expect.objectContaining({ value: 1 }) }),
+    ]) })
+    // An uncaptured sibling's rooted OTLP subtree and a journal-only sibling survive alongside the bound session.
+    const spend = (input: number) => ({ tokens: { input, output: 1 }, usd: 0, ms: 1, iterations: 0 })
+    let seq = 9
+    for (const [id, input] of [['retained-sibling', 444], ['journal-sibling', 5]] as const) {
+      await journal.appendEvent(root, { kind: 'spawned', id, parent: root, label: id, runtime: 'cli', budget: {}, at, seq: seq++ })
+      await journal.appendEvent(root, { kind: 'metered', id, spend: spend(input), at, seq: seq++ })
+    }
+    const traceId = '1'.repeat(32)
+    const retained = span({ traceId, spanId: '1'.repeat(16), name: 'sibling', kind: 'AGENT', startTime: at,
+      extra: { 'tangle.run.id': root, 'tangle.node.id': 'retained-sibling', 'session.id': 'retained-session' } })
+    await writeFile(join(dir, 'team.otlp.jsonl'), serializeSpans([
+      retained,
+      span({ traceId, spanId: '2'.repeat(16), parentSpanId: retained.span_id, name: 'provider.call', kind: 'LLM', startTime: at, inputTokens: 7, outputTokens: 3 }),
+      span({ traceId, spanId: '3'.repeat(16), name: 'covered-request', kind: 'LLM', startTime: at, inputTokens: 888, extra: { 'cli_bridge.run.id': 'request-0' } }),
+    ]))
+    const combined = await readRefSpans(dir)
+    expect(combined.some((item) => item.name === 'covered-request' || item.name === 'bridge.request')).toBe(false)
+    const journalOnly = combined.filter((item) => item.name === 'runtime.agent')
+    expect(journalOnly.map((item) => item.attributes['traces.runtime.node_id']).sort()).toEqual(['journal-sibling', root, ...bindings.map((binding) => binding.node!.nodeId)].sort())
+    expect(journalOnly.find((item) => item.attributes['traces.runtime.node_id'] === 'journal-sibling')?.attributes[SESSION_TOTAL_INPUT_ATTR]).toBe(5)
+    const combinedFacts = await runCli(['facts', dir, '--format', 'json', '--no-content'])
+    expect(combinedFacts.code, combinedFacts.stderr).toBe(0)
+    expect(JSON.parse(combinedFacts.stdout).sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: nativeSessionId, toolCalls: expect.objectContaining({ value: 1 }) }),
+      expect.objectContaining({ sessionId: 'retained-session', tokens: expect.objectContaining({ input: 7, output: 3 }) }),
+    ]))
+    const unknowns = JSON.parse(String(combined[0]!.attributes['traces.source.unknowns'])) as string[]
+    expect(unknowns).toEqual(expect.arrayContaining([
+      expect.stringContaining('Bound native captures supersede 1 of 4 retained OTLP spans'),
+      expect.stringContaining('Ownership is ambiguous for 1 of 4 retained OTLP spans'),
+    ]))
+    const separate = span({ traceId: '3'.repeat(32), spanId: '4'.repeat(16), name: 'independent-session', kind: 'LLM', startTime: at,
+      inputTokens: 9, extra: { 'cli_bridge.backend.session_id': 'another-native-session' } })
+    const separateFile = join(dir, 'independent.otlp.jsonl')
+    await writeFile(separateFile, serializeSpans([separate]))
+    const unplaced = await readRefSpans(dir)
+    expect(unplaced.some((item) => item.span_id === separate.span_id)).toBe(true)
+    const unmatchedMeter = unplaced.find((item) => item.attributes['traces.runtime.node_id'] === 'journal-sibling')
+    expect(unmatchedMeter).toBeDefined()
+    expect(unmatchedMeter!.attributes[SESSION_TOTAL_INPUT_ATTR]).toBeUndefined()
+    await rm(separateFile)
+    await rm(join(dir, 'team.otlp.jsonl'))
     // A capture claims bytes, so losing them is an error, never permission to use request-only spans.
     await rm(join(dir, 'blobs'), { recursive: true })
     const missing = await runCli(['facts', dir, '--format', 'json', '--no-content'])

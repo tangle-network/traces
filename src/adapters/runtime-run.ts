@@ -1,20 +1,137 @@
-/** Runtime runs select bound native captures before request-only OTLP or journal summaries. */
+/** A Runtime node's records come from its bound capture, retained spans or own journal meter. */
 import { join } from 'node:path'
 import { readSessionInput } from '@tangle-network/harness-sessions'
 import { FileResultBlobStore, captureBoundHarnessTranscript, contentAddress, harnessTranscriptArtifact, materializeTreeView, readSpawnJournal, type HarnessTranscriptArtifact, type HarnessTranscriptBinding, type HarnessTranscriptEvidence, type SpawnEvent } from '@tangle-network/agent-runtime/kernel'
 import { HarnessSessionsAdapter } from './harness-sessions.js'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
-import { ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR } from '../attributes.js'
+import { ATTR, SOURCE_MISSING_CHANNELS_ATTR, SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR, sessionIdFromAttributes } from '../attributes.js'
 import { span, type OtlpSpan } from '../otlp.js'
 import { readOtlpInput, SUBSTITUTED_FIELDS_ATTR, type OtlpInput } from '../otlp-input.js'
+import { spanKey } from '../span-identity.js'
 
 export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string): Promise<{
   spans: OtlpSpan[]; unknowns: string[]; retained?: OtlpInput
 }> {
-  const { selected, unbound } = await readRuntimeCaptures(runDir, expectedRunId)
-  if (selected) return selected
+  const { selected, unbound, materialized } = await readRuntimeCaptures(runDir, expectedRunId)
   const retained = await readOtlpInput(runDir, { allowEmptyDirectory: true })
-  if (retained.files.length > 0) return { spans: [...retained.spans], retained, unknowns: ['Retained OTLP selected; supervisor journal is excluded to avoid duplicate accounting', ...unbound] }
+  // Preserve the raw OTLP integrity report and avoid an extra journal fold when there is no possible node join.
+  if (!selected && retained.files.length && !retained.spans.some(({ attributes }) =>
+    attributes['traces.runtime.node_id'] || attributes['tangle.node.id'] ||
+    (typeof attributes['cli_bridge.session.id'] === 'string' && materialized.has(attributes['cli_bridge.session.id'])))) {
+    return { spans: [...retained.spans], retained, unknowns: [...unbound, 'Retained OTLP selected; journal nodes cannot be joined to its spans and their usage is excluded.'] }
+  }
+  const journal = await readRuntimeJournalSpans(runDir, expectedRunId, unbound)
+  if (!selected && !retained.files.length) return journal
+  const nodes = new Set(journal.spans.map((item) => String(item.attributes['traces.runtime.node_id'])))
+  const runId = journal.spans[0]?.attributes['traces.runtime.run_id'] ?? expectedRunId
+  // A native session spanning several nodes has no per-node placement. Keep
+  // those journal boundaries, with the shared usage measured only on the session.
+  const included = new Set<string>()
+  for (const item of selected?.spans ?? []) {
+    const node = item.attributes['traces.runtime.node_id']
+    if (typeof node === 'string') included.add(node)
+  }
+  const spans = [...(selected?.spans ?? [])]
+  const unknowns = new Set([...unbound, ...(selected?.unknowns ?? [])])
+  const owners = retainedOwners(retained.spans, nodes, runId, materialized, selected)
+  let unidentified = 0
+  let separateSessions = 0
+  let overlaps = 0
+  for (const item of retained.spans) {
+    const owner = owners.get(spanKey(item.trace_id, item.span_id))
+    if (owner === CAPTURED) { overlaps++; continue }
+    if (owner === SEPARATE_SESSION) separateSessions++
+    else if (owner) included.add(owner)
+    else {
+      unidentified++
+      if (selected) continue
+    }
+    spans.push(item)
+  }
+  if (!selected && included.size === 0) return {
+    spans, retained, unknowns: [...unbound, 'Retained OTLP identities could not be joined to journal nodes; journal usage is excluded.'],
+  }
+  if (overlaps) unknowns.add(`Bound native captures supersede ${overlaps} of ${retained.spans.length} retained OTLP spans.`)
+  if (unidentified) unknowns.add(selected
+    ? `Ownership is ambiguous for ${unidentified} of ${retained.spans.length} retained OTLP spans. They were excluded to avoid duplicate native usage.`
+    : `Ownership is ambiguous for ${unidentified} of ${retained.spans.length} retained OTLP spans. Additional journal nodes retain topology without usage.`)
+  if (separateSessions) unknowns.add(`A distinct backend session contributed ${separateSessions} retained spans without a Runtime node binding. Additional journal usage cannot be separated.`)
+  const sharedSessions = new Set<string>()
+  for (const [session, materializations] of materialized) {
+    if (selected?.sessions.has(session)) for (const node of materializations) sharedSessions.add(node)
+  }
+  const selectedSpanCount = spans.length
+  for (const item of journal.spans) {
+    const node = String(item.attributes['traces.runtime.node_id'])
+    if (included.has(node)) continue
+    if ((!selected && unidentified) || separateSessions || selected?.nodes.has(node) || sharedSessions.has(node)) {
+      delete item.attributes[SESSION_TOTAL_INPUT_ATTR]
+      delete item.attributes[SESSION_TOTAL_OUTPUT_ATTR]
+      if (sharedSessions.has(node) || selected?.nodes.has(node)) unknowns.add('A journal node shares a captured Bridge session. Its separate driver usage is unknown.')
+    }
+    spans.push(item)
+  }
+  for (const issue of journal.unknowns) unknowns.add(issue)
+  if (retained.issues.length) unknowns.add(`${retained.issues.length} retained OTLP ingestion issues; see the original OTLP for details.`)
+  if (!selected && spans.length === selectedSpanCount) return { spans, retained, unknowns: [...unknowns] }
+  if (spans[0]) spans[0].attributes['traces.source.unknowns'] = JSON.stringify([...unknowns])
+  return { spans, unknowns: [...unknowns] }
+}
+
+const CAPTURED = Symbol('bound native capture')
+const SEPARATE_SESSION = Symbol('distinct backend session without a node binding')
+type Owner = string | typeof CAPTURED | typeof SEPARATE_SESSION | null
+interface BoundCaptures {
+  spans: OtlpSpan[]; unknowns: string[]; nodes: Set<string>; sessions: Set<string>; requests: Set<string>
+}
+
+/** Resolve each span at its nearest recorded owner. A shared trace id alone cannot identify a node. */
+function retainedOwners(spans: readonly OtlpSpan[], nodes: Set<string>, runId: unknown, materialized: Map<string, Set<string>>, native?: BoundCaptures) {
+  const byId = new Map(spans.map((item) => [spanKey(item.trace_id, item.span_id), item]))
+  const nativeSpans = new Set(native?.spans.map((item) => spanKey(item.trace_id, item.span_id)))
+  const owners = new Map<string, Owner>()
+  for (const span of spans) {
+    let item: OtlpSpan | undefined = span
+    let owner: Owner = null
+    const trail: Array<{ key: string; separate: boolean }> = []
+    while (item) {
+      const key = spanKey(item.trace_id, item.span_id)
+      if (owners.has(key)) { owner = owners.get(key)!; break }
+      const step = { key, separate: false }
+      trail.push(step)
+      owners.set(key, null) // Unresolved if the parent chain cycles.
+      const attrs = item.attributes
+      const declared = attrs['traces.runtime.node_id'] ?? attrs['tangle.node.id']
+      if (attrs['tangle.node.id'] && declared !== attrs['tangle.node.id']) break
+      const root = attrs['traces.runtime.run_id'] ?? (declared ? attrs['tangle.run.id'] : undefined)
+      if (root !== undefined && root !== runId) break
+      const session = sessionIdFromAttributes(attrs)
+      const bridgeSession = attrs['cli_bridge.session.id']
+      const binding = typeof bridgeSession === 'string' ? materialized.get(bridgeSession) : undefined
+      if (typeof declared === 'string' && binding && !binding.has(declared)) break
+      const node = declared ?? (binding?.size === 1 ? [...binding][0] : undefined)
+      const bound = nativeSpans.has(key) || [session, attrs['cli_bridge.session.id'], attrs['cli_bridge.backend.session_id']]
+        .some((id) => typeof id === 'string' && native?.sessions.has(id)) ||
+        (typeof attrs['cli_bridge.run.id'] === 'string' && native?.requests.has(attrs['cli_bridge.run.id']))
+      if (typeof node === 'string') {
+        if (native?.nodes.has(node)) owner = CAPTURED
+        else if (!bound && (nodes.has(node) || (typeof runId === 'string' && root === runId))) owner = node
+        break
+      }
+      if (bound) { owner = CAPTURED; break }
+      if (binding) break // Multiple journal nodes used this session; the records cannot be divided across them.
+      step.separate = !!native && typeof attrs['cli_bridge.backend.session_id'] === 'string' && !!attrs['cli_bridge.backend.session_id']
+      item = item.parent_span_id ? byId.get(spanKey(item.trace_id, item.parent_span_id)) : undefined
+    }
+    for (const { key, separate } of trail.reverse()) {
+      if (owner === null && separate) owner = SEPARATE_SESSION
+      owners.set(key, owner)
+    }
+  }
+  return owners
+}
+
+async function readRuntimeJournalSpans(runDir: string, expectedRunId: string | undefined, unbound: readonly string[]) {
   const { readRunContextSnapshot } = await import('../supervisor-run-context.js')
   const snapshot = await readRunContextSnapshot(runDir)
   const unknowns = [
@@ -128,14 +245,14 @@ function assertRuntimeCaptureBinding(binding: HarnessTranscriptBinding, events: 
 
 /** Keep native session containment; Bridge request spans and journal spend would count it twice. An unbound capture is left to the run's other sources. */
 async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Promise<{
-  selected?: { spans: OtlpSpan[]; unknowns: string[] }; unbound: string[]
+  selected?: BoundCaptures; unbound: string[]; materialized: Map<string, Set<string>>
 }> {
   const journal = await readSpawnJournal(runDir, { invalid: 'skip' })
   const blobs = new FileResultBlobStore(join(runDir, 'blobs'))
   const sessions = new Map<string, RuntimeNativeCapture>()
   const prefixes = new Map<string, SpawnEvent[]>()
+  const materialized = new Map<string, Set<string>>()
   const unknowns = new Set<string>([
-    'Bound native sessions selected; Bridge request spans and supervisor journal usage are excluded to avoid duplicate accounting.',
     'Capture bindings identify whole native sessions; per-request record scope is unavailable.',
   ])
   const unbound = new Set<string>()
@@ -146,6 +263,12 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
     const events = prefixes.get(row.root) ?? []
     events.push(row.event)
     prefixes.set(row.root, events)
+    if (row.event.kind === 'materialized' && row.event.receipt.status === 'known' && row.event.receipt.execution.kind === 'session') {
+      const id = row.event.receipt.execution.id
+      const nodes = materialized.get(id) ?? new Set<string>()
+      nodes.add(row.event.id)
+      materialized.set(id, nodes)
+    }
     if (!('harnessTranscript' in row.event)) {
       if (row.event.kind === 'settled') unknowns.add('A settled Runtime node has no transcript receipt and is excluded from native record facts.')
       continue
@@ -153,7 +276,7 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
     const evidence = row.event.harnessTranscript
     if (!evidence) continue
     if (evidence.status !== 'available') {
-      unknowns.add(`Runtime transcript unavailable: ${evidence.reason}`)
+      unbound.add(`Runtime transcript unavailable: ${evidence.reason}`)
       continue
     }
     const artifact = await harnessTranscriptArtifact(evidence, blobs)
@@ -179,14 +302,20 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
       })
     }
   }
-  if (!available) return { unbound: [...unbound] }
+  if (!available) return { unbound: [...unbound], materialized }
   // Journal summaries retain their historical recovery; a capture join requires an intact binding log.
   const verified = await readSpawnJournal(runDir)
   if (verified.cursor?.file !== journal.cursor?.file || verified.cursor?.offset !== journal.cursor?.offset
     || verified.cursor?.boundary !== journal.cursor?.boundary) throw new Error('Runtime binding journal changed during capture read')
   if (journal.remainingBytes || journal.truncated) throw new Error('Runtime capture journal has an unread tail')
   for (const reason of unbound) unknowns.add(reason)
-  return { selected: { spans: await projectRuntimeCaptures(sessions, unknowns), unknowns: [...unknowns] }, unbound: [...unbound] }
+  const bindings = [...sessions.values()].flatMap((capture) => capture.bindings)
+  return { selected: {
+    spans: await projectRuntimeCaptures(sessions, unknowns), unknowns: [...unknowns],
+    nodes: new Set(bindings.map((binding) => binding.node!.nodeId)),
+    sessions: new Set([...sessions.keys(), ...bindings.map((binding) => binding.sessionId)]),
+    requests: new Set(bindings.flatMap((binding) => binding.runs.map((run) => run.runId))),
+  }, unbound: [...unbound], materialized }
 }
 
 async function projectRuntimeCaptures(sessions: Map<string, RuntimeNativeCapture>, unknowns: Set<string>): Promise<OtlpSpan[]> {
@@ -197,8 +326,12 @@ async function projectRuntimeCaptures(sessions: Map<string, RuntimeNativeCapture
     const ref = { harness: 'codex', sessionId, path: capture.path, cwd: null, mtimeMs: 0 }
     if (!adapter.readsPieces(ref, records)) throw new Error('Captured Codex session requires unsupported fork or legacy task scoping')
     const projected = await adapter.readPiece(ref, records)
+    const nodeIds = new Set(capture.bindings.map((binding) => binding.node!.nodeId))
+    const [nodeId] = nodeIds
+    if (nodeIds.size > 1) unknowns.add('One native session was bound to multiple Runtime nodes; its records and usage cannot be split by node.')
     for (const item of projected.spans) Object.assign(item.attributes, {
       'traces.runtime.run_id': capture.bindings[0]!.node!.rootId,
+      ...(nodeIds.size === 1 ? { 'traces.runtime.node_id': nodeId } : {}),
       'traces.runtime.capture_refs': JSON.stringify([...capture.refs]),
       'traces.runtime.capture_bindings': JSON.stringify(capture.bindings.map(({ kind, sessionId, nativeSessionId, profileDigest, runs, node }) => ({
         kind, sessionId, nativeSessionId, profileDigest, runs,

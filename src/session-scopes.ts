@@ -3,11 +3,23 @@ import { ATTR, indexSessionIdsByTrace } from './attributes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { isSubagentSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
+import type { UnreadSessionFact } from './session-facts.js'
 
 export interface TraceGroup {
   readonly traceId: string
   readonly sessionId: string | null
   readonly spans: OtlpSpan[]
+}
+
+/** Explain an unavailable session when a window or a composite run still has other scopes to read. */
+export function unreadTraceGroup(group: TraceGroup, windowed: boolean): UnreadSessionFact {
+  const unread = group.spans.find((span) => typeof span.attributes[ATTR.CORRUPTION_COUNT] === 'number')
+  const detail = unread ? `${unread.attributes[ATTR.CORRUPTION_COUNT]} unread record(s)` : 'no record spans'
+  return {
+    sessionId: group.sessionId, traceId: group.traceId, source: null,
+    reason: `no record could be read (${detail})` +
+      (windowed ? ', so whether the session holds a record inside the window is unknown' : ''),
+  }
 }
 
 /** Group traces unchanged by default; optionally expose folded children as exclusive scopes. */
