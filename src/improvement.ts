@@ -35,6 +35,8 @@ import {
   type SessionFactsReportOptions,
   type UnreadSessionFact,
 } from './session-facts.js'
+import { groupByTrace } from './session-scopes.js'
+import { distinctSpans } from './span-identity.js'
 import { CONTEXT_BANDS, modelCallMeasurement, type ModelCallMeasurement } from './session-measurements.js'
 
 export interface TraceInvestigationOptions {
@@ -43,8 +45,11 @@ export interface TraceInvestigationOptions {
   readonly harness: string
   /** Sessions the selection skipped because they could not be read: each is a question the trace cannot answer. */
   readonly unread?: readonly UnreadSessionFact[]
-  /** Options of the facts sheet: the window, the agent identity lookup. */
-  readonly facts?: Pick<SessionFactsReportOptions, 'window' | 'agentIdentity' | 'includeContent'>
+  /** Options of the facts sheet: the window, the agent identity lookup, content, and
+   * whether a trace's folded subagent scopes are reported as separate sheets. However
+   * many sheets one trace emits, its findings and tool errors are counted once per
+   * session scope, never once per sheet of the same trace. */
+  readonly facts?: Pick<SessionFactsReportOptions, 'window' | 'agentIdentity' | 'includeContent' | 'includeSubagents'>
   /** Your own analysts instead of agent-eval's built-in behavioral analyst (`analyzeSpans`). */
   readonly registry?: AnalystRegistry
   readonly minLoopOccurrences?: number
@@ -399,7 +404,11 @@ function guardRefusalRates(toolCalls: number, byGuard: ReadonlyMap<string, numbe
 export interface TraceInvestigation {
   /**
    * One batch of whole sessions, in selection order: a trace's spans never
-   * span two batches. Only what the report needs is kept of it.
+   * span two batches — a trace that arrives in two calls is refused with an
+   * error, never silently merged into a second report of the same trace.
+   * Identical repeated deliveries in one batch count once; spans with one
+   * identity and different bodies are refused (`span-identity.ts`). Only what
+   * the report needs is kept of it.
    */
   add(spans: readonly OtlpSpan[], batch?: { readonly harness?: string }): Promise<void>
   addUnread(entry: UnreadSessionFact): void
@@ -416,19 +425,28 @@ export interface TraceInvestigation {
  * tool errors, per-trace measures and the metadata export the behavioral
  * analyst reads; the spans are then dropped. Every part that reads one trace
  * at a time is run trace by trace and merged in selection order, so the
- * result equals one pass over every span.
+ * result equals one pass over every span. A trace the facts sheet splits into
+ * session scopes (its folded subagents, under `facts.includeSubagents`) keeps
+ * one rules-and-tool-errors computation per scope: a scope is never charged
+ * for another sheet of the same trace, and the trace's earlier scopes are
+ * never dropped for its last.
  */
 export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, 'spans'>): TraceInvestigation {
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  let selected: SessionFacts | undefined
+  /** The sheet the current builder call emitted; one per session scope. */
+  const emitted: SessionFacts[] = []
   const contexts: number[] = []
   const latencies: number[][] = Array.from({ length: CONTEXT_BANDS }, () => [])
+  const { includeSubagents, ...factsOptions } = opts.facts ?? {}
+  // The scopes themselves are derived once per trace below (`groupByTrace`),
+  // and the builder is handed each scope as one whole session: a second
+  // canonicalization of an already-scoped span set would split it again.
   const builder = createSessionFactsReportBuilder({
-    ...opts.facts,
+    ...factsOptions,
     harness: opts.harness,
     generatedAt,
     onSession: (reading) => {
-      selected = reading.facts
+      emitted.push(reading.facts)
       appendAll(contexts, reading.operating.contextTokens)
       reading.operating.latencyMs.forEach((values, band) => appendAll(latencies[band]!, values))
     },
@@ -445,7 +463,9 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
     ...(opts.signal ? { signal: opts.signal } : {}),
     ...(opts.log ? { log: opts.log } : {}),
   })
-  const rules = new Map<string, { findings: AnalystFinding[]; toolErrors: SessionToolErrors }>()
+  const rules = new Map<string, { findings: AnalystFinding[]; toolErrors: SessionToolErrors[] }>()
+  /** Every trace already added: one trace in two `add` calls is refused, never silently re-reported. */
+  const addedTraces = new Set<string>()
   const failedRoots: OtlpSpan[] = []
   const conformanceSpans: OtlpSpan[] = [], causality = createCausalityAccumulator()
   let spanCount = 0
@@ -453,41 +473,72 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
   return {
     async add(spans, batch = {}) {
       opts.signal?.throwIfAborted()
-      if (spans.length === 0) return
+      const distinct = distinctSpans(spans)
+      if (distinct.length === 0) return
       empty = false
-      spanCount += spans.length
-      const groups = byTrace(spans)
+      spanCount += distinct.length
+      const groups = byTrace(distinct)
       for (const [traceId, group] of groups) {
-        selected = undefined
-        builder.add(group)
+        if (addedTraces.has(traceId)) {
+          throw new Error(
+            `createTraceInvestigation: trace ${traceId} arrives in two add() calls; a trace's spans never span two batches. ` +
+            'Pass the whole trace in one call: a trace split across calls would be reported as two sessions of one trace, ' +
+            'its earlier rules silently overwritten and its tool errors charged once per sheet.',
+          )
+        }
+        addedTraces.add(traceId)
         causality.add(group)
-        const sheet = selected as SessionFacts | undefined
         const failed = group.find((item) => item.parent_span_id === null && item.status.code === 'ERROR')
         if (failed) failedRoots.push({ ...failed, attributes: {} })
-        if (!sheet) continue
-        const { guardRefusals, limitStop } = sheet.measurements
-        toolCalls += sheet.toolCalls.value ?? 0
-        for (const [guard, count] of Object.entries(guardRefusals.byGuard)) byGuard.set(guard, (byGuard.get(guard) ?? 0) + count)
-        if (limitStop) limitKinds.set(limitStop.kind, (limitKinds.get(limitStop.kind) ?? 0) + 1)
+        // One sheet, one rule run and one tool-error sheet per session scope of
+        // the trace (the whole trace unless its folded subagents are reported
+        // separately), each counted once however many sheets the trace emits.
+        const traceFindings: AnalystFinding[] = []
+        const traceToolErrors: SessionToolErrors[] = []
+        const findingIds = new Set<string>()
+        let sheetOfTrace = false
+        let limitStopOfTrace = false
+        for (const scope of groupByTrace(group, includeSubagents === true)) {
+          emitted.length = 0
+          builder.add(scope.spans)
+          const sheet = emitted[0]
+          if (!sheet) continue
+          sheetOfTrace = true
+          const { guardRefusals, limitStop } = sheet.measurements
+          toolCalls += sheet.toolCalls.value ?? 0
+          for (const [guard, count] of Object.entries(guardRefusals.byGuard)) byGuard.set(guard, (byGuard.get(guard) ?? 0) + count)
+          if (limitStop) {
+            limitKinds.set(limitStop.kind, (limitKinds.get(limitStop.kind) ?? 0) + 1)
+            limitStopOfTrace = true
+          }
+          const sessionId = sheet.sessionId ?? sheet.traceId
+          const context = ruleContext(scope.spans, {
+            session: { harness: sheet.harness ?? batch.harness ?? opts.harness, sessionId, cwd: sheet.cwd.value },
+            generatedAt,
+            facts: [sheet],
+          })
+          for (const live of runRules(context)) {
+            const finding = ruleFinding(live, sheet.traceId)
+            // Two scopes of one trace can fire one rule on one signature: that
+            // is one claim about one trace, kept once.
+            if (findingIds.has(finding.finding_id)) continue
+            findingIds.add(finding.finding_id)
+            traceFindings.push(finding)
+          }
+          traceToolErrors.push(toolErrorsOf(sessionId, context.tools, context.erroredTools))
+        }
+        // The failed root is one session of the trace, counted once however
+        // many sheets the trace emitted.
         if (failed) {
           terminalFailures += 1
-          if (limitStop) terminalAtLimit += 1
+          if (limitStopOfTrace) terminalAtLimit += 1
         }
-        const sessionId = sheet.sessionId ?? sheet.traceId
-        const context = ruleContext(group, {
-          session: { harness: sheet.harness ?? batch.harness ?? opts.harness, sessionId, cwd: sheet.cwd.value },
-          generatedAt,
-          facts: [sheet],
-        })
-        rules.set(traceId, {
-          findings: runRules(context).map((live) => ruleFinding(live, sheet.traceId)),
-          toolErrors: toolErrorsOf(sessionId, context.tools, context.erroredTools),
-        })
+        if (sheetOfTrace) rules.set(traceId, { findings: traceFindings, toolErrors: traceToolErrors })
       }
-      await pipelines.add(spans)
-      analysis.add(spans)
+      await pipelines.add(distinct)
+      analysis.add(distinct)
       if (!opts.conformance) {
-        for (const span of spans) {
+        for (const span of distinct) {
           if (conformanceSpans.length >= CONFORMANCE_SPANS_READ) break
           conformanceSpans.push(conformanceView(span))
         }
@@ -506,11 +557,12 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
       const measures = pipelines.report()
       const findings: AnalystFinding[] = []
       const toolErrors: SessionToolErrors[] = []
-      for (const sheet of facts.sessions) {
-        const held = rules.get(sheet.traceId)
-        if (!held) continue
+      // One trace's rules and tool errors are appended once, in selection
+      // order: never once per sheet of the same trace, which would double-charge
+      // its scopes and duplicate its findings.
+      for (const held of rules.values()) {
         appendAll(findings, held.findings)
-        toolErrors.push(held.toolErrors)
+        appendAll(toolErrors, held.toolErrors)
       }
       const terminal = terminalFailureFinding(measures, failedRoots)
       if (terminal) findings.push(terminal)
