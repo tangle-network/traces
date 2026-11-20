@@ -218,7 +218,7 @@ const FLAGS: Readonly<Record<string, Flag>> = {
   },
   '--count': { help: "with --match: per value of RE's first capture group (else per hit), how many rows and when first and last", set: (a) => { a.count = true } },
   '--question': { value: 'TEXT', help: `a question (repeatable, at most ${MAX_TRACE_QUESTION_CHARS} characters)`, freeText: true, set: (a, v) => { a.questions.push(v) } },
-  '--questions': { value: 'FILE', help: 'a JSON array of questions: strings or {id?, question, answerSchema?}', set: (a, v) => { a.questionsFile = v } },
+  '--questions': { value: 'FILE', help: 'a JSON question array or a bank with a questions array (see docs/ask.md)', set: (a, v) => { a.questionsFile = v } },
   '--budget': { value: 'USD', help: 'required: the most the run may spend, shared by every question', set: (a, v) => { a.budget = positiveNumber('--budget', v, 'USD') } },
   '--model': { value: 'ID', help: `the analyst model (default ${DEFAULT_ANALYST_MODEL})`, set: (a, v) => { a.model = v } },
   '--contract': { value: 'FILE|conformance', help: 'gate on a trace contract file, or on conformance (repeatable)', set: (a, v) => { a.contracts.push(v) } },

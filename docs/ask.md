@@ -14,7 +14,8 @@ A question is at most 705 characters, so the engine sees it whole; put detail in
 
 ## Questions from a file
 
-The file is a JSON array of question strings or entries `{ id?, question, instructions?, answerSchema? }`.
+Supply a JSON array or a bank with a `questions` array. Each entry is a question string or an object with `question` and optional `id`, `instructions`, `answerSchema` and `dimensionKeys`.
+Use `dimensionKeys` to link a question to dimensions in your own evaluation catalog. Each key follows the question ID format (1–64 letters, digits, dots, underscores or hyphens, starting with a letter or digit). Keys must be distinct within one question. The JSON result retains them in input order on every answer, including failed questions. Only the question, instructions and answer schema guide the analyst.
 An `answerSchema` makes the answer one JSON value a scorer can compare; it accepts `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `title` and `description`, and any other keyword is rejected before the run starts.
 
 ```json
@@ -72,7 +73,7 @@ Needs TANGLE_API_KEY (or OPENAI_API_KEY) and uv, or TRACES_PYTHON naming a Pytho
   --harness ID        read only this harness; with a file ref, force its reader
   --latest-turn       only the latest task turn of a resumed Codex or Claude Code session
   --question TEXT     a question (repeatable, at most 705 characters)
-  --questions FILE    a JSON array of questions: strings or {id?, question, answerSchema?}
+  --questions FILE    a JSON question array or a bank with a questions array (see docs/ask.md)
   --budget USD        required: the most the run may spend, shared by every question
   --model ID          the analyst model (default gpt-5.6-luna)
   --format text|json  text (default): the report; json: each answer, its citations, failure and cost
