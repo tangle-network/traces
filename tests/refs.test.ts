@@ -103,7 +103,7 @@ describe('refs: session ids', () => {
 describe('refs: files and directories are read by their content', () => {
   it('selects an exact native session inside the specified OpenCode SQLite file', async () => {
     const { DatabaseSync } = await import('node:sqlite')
-    const path = join(fx.root, 'retained copy.sqlite')
+    const path = join(dirname(fx.paths.claude), 'retained copy.snapshot')
     await copyFile(join(fx.home, '.local/share/opencode/opencode.db'), path)
     expect((await factsOf(path)).sessions.map((s) => s.sessionId)).toEqual([IDS.opencode])
     const other = 'ses_second_physical_row'
