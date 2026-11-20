@@ -149,11 +149,11 @@ describe('traces behavior', () => {
     expect(named.code, named.stderr).toBe(0)
     const namedResult = JSON.parse(named.stdout) as BehaviorResult
     // Naming sessions follows their workflow references. A time sweep reads the selected sessions only.
-    expect(namedResult.coverage.unknowns).toEqual(expect.arrayContaining([
+    expect(namedResult.coverage?.unknowns).toEqual(expect.arrayContaining([
       expect.stringContaining(`unjoined child review_env_scope spawned by ${PARENT}`),
       expect.stringContaining(`parent conflict for ${CHILD}`),
     ]))
-    expect(result.coverage.unknowns).toEqual([])
+    expect(result.coverage?.unknowns).toEqual([])
     const comparable = (report: BehaviorResult) => JSON.stringify({ ...report, coverage: { ...report.coverage, unknowns: [] } }, (_, v: unknown) =>
       (Array.isArray(v) ? v.map((x) => JSON.stringify(x)).sort() : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).sort()) : v))
     expect(comparable(namedResult)).toBe(comparable(result))

@@ -104,7 +104,8 @@ export interface BehaviorResult {
   readonly run: { readonly t0: number; readonly t1: number; readonly n_windows: number; readonly spans: number }
   readonly nodes: BehaviorNode[]; readonly windows: BehaviorWindow[]; readonly flags: BehaviorFlag[]; readonly streaks: BehaviorStreak[]; readonly stalls: BehaviorStall[]
   readonly anomalies: BehaviorAnomaly[]; readonly drift: BehaviorDrift[]; readonly mail: { readonly edges: BehaviorMailEdge[]; readonly summary: BehaviorMailSummary }
-  readonly coverage: { readonly input_spans: number; readonly tool_calls: number; readonly unknowns: readonly string[] }
+  /** Present on newly measured reports. Older saved reports may omit source coverage. */
+  readonly coverage?: { readonly input_spans: number; readonly tool_calls: number; readonly unknowns: readonly string[] }
   readonly calibration: typeof BEHAVIOR_CALIBRATION
 }
 /** `now` is epoch seconds: the end of a node still running. */
@@ -525,7 +526,7 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator): ReadNode {
 }
 
 /** The run's nodes, a session read on its own hung under the session that spawned it (`traces.parent_session_id`); then the windows on the run's clock. */
-function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanCount: number, coverage: BehaviorResult['coverage']): BehaviorResult {
+function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanCount: number, coverage: NonNullable<BehaviorResult['coverage']>): BehaviorResult {
   const bySession = new Map<string, string>()
   const byId = new Map(read.map((r) => [r.node.id, r]))
   for (const { n } of read) {
