@@ -11,7 +11,7 @@ import type { OtlpSpan, OtlpSpanKind, OtlpStatusCode } from './otlp.js'
 import { isObject, otlpRowToSpan } from './otlp-input.js'
 import { span } from './otlp.js'
 import { redactSpans } from './redact.js'
-import { validateOtlpSpans } from './span-validation.js'
+import { isCompressedJsonlFile, readCompressedJsonlText, validateOtlpSpans } from './span-validation.js'
 
 type JsonObject = Record<string, unknown>
 
@@ -602,7 +602,7 @@ export function exportTraceEvidenceRows(
   const spans = withExportAttributes(converted, opts.attributes)
   if (spans.length === 0) throw new Error(`no spans exported from ${format} input`)
   const redacted = redactSpans(spans)
-  const validated = validateOtlpSpans(redacted.spans, `${format} export`)
+  const validated = validateOtlpSpans(redacted.spans, `${format} export`, 'coalesce-identical')
   return {
     format,
     spans: validated,
@@ -620,6 +620,9 @@ export async function exportTraceEvidenceFile(
   inputPath: string,
   opts: TraceEvidenceExportOptions = {},
 ): Promise<TraceEvidenceExportResult> {
+  if (isCompressedJsonlFile(inputPath)) {
+    return exportTraceEvidenceText(await readCompressedJsonlText(inputPath), opts)
+  }
   if (/\.(?:jsonl|ndjson)$/i.test(inputPath)) {
     let format: TraceEvidenceInputFormat | undefined
     const spans: OtlpSpan[] = []
@@ -647,7 +650,7 @@ export async function exportTraceEvidenceFile(
     }
     return {
       format,
-      spans: validateOtlpSpans(spans, `${format} file export`),
+      spans: validateOtlpSpans(spans, `${format} file export`, 'coalesce-identical'),
       redactionCount,
       redactionsByDetector,
     }

@@ -44,6 +44,7 @@ traces watch traces.otlp.jsonl       # spans only, from any emitter with parent 
 
 Two sources sit behind it, and the output names which number came from which: OTLP spans (tree shape, wall time, tokens, cost when priced) and agent-runtime's `spawn-journal.jsonl` (authored budget, settled spend, blocking questions, steers, the result).
 A node's own driving and the work it delegated are separate lines, and an unpriced turn reads `cost unknown`, never `$0.0000`. `traces analyze <run-dir>` writes the full report.
+An identical repeated OTLP row counts once in both the text tree and the JSONL envelope. A different body with the same `(trace_id, span_id)` is contradictory: the strict tree reports it unreadable rather than choosing a winner, while conformance intake keeps its `duplicate-span-id` and `conflicting-span-id` evidence. Span refs may be `.jsonl`, `.ndjson`, `.jsonl.zst` or `.ndjson.zst`.
 
 ## `traces watch --help`
 
