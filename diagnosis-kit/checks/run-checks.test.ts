@@ -6,7 +6,7 @@
  * the scrub, and the measures that need no content still come through.
  */
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -125,7 +125,7 @@ describe('diagnosis kit on public commands', () => {
     const prepared = await kit('prepare-bundle.ts', [accepted])
     expect(prepared.code, prepared.stderr).toBe(0)
     const bundle = join(accepted, 'bundle', 'spans.flat.jsonl')
-    expect(JSON.parse(prepared.stdout)).toMatchObject({ output: bundle, spans: 5, droppedAttributes: ['tool.args_captured'] })
+    expect(JSON.parse(prepared.stdout)).toMatchObject({ output: await realpath(bundle), spans: 5, droppedAttributes: ['tool.args_captured'] })
     expect((await stat(bundle)).mode & 0o777).toBe(0o600)
 
     const checks = await kit('run-checks.ts', [bundle, '--label', 'synthetic agent'])
