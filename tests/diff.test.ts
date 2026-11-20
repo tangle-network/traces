@@ -189,10 +189,12 @@ describe('traces diff, across worktrees', () => {
       diff: { firstDivergence: { index: 3, differences: [{ field: 'status' }] } },
       caveat: expect.stringContaining('arguments unavailable'),
     })
-    const empty = join(dir, 'explicit-empty.otlp.jsonl')
-    await writeFile(empty, serializeSpans([span({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'ping',
-      kind: 'TOOL', tool: 'ping', status: 'OK', startTime: at(0), extra: { 'input.value': '{}' } })]))
-    expect((await runCli(['diff', empty, empty], { env })).code).toBe(0)
+    for (const [name, value, captured] of [['empty-object', '{}', true], ['empty-text', '', true], ['uncaptured', 'placeholder', false]] as const) {
+      const path = join(dir, name + '.otlp.jsonl')
+      await writeFile(path, serializeSpans([span({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'ping',
+        kind: 'TOOL', tool: 'ping', status: 'OK', startTime: at(0), extra: { 'input.value': value, 'tool.args_captured': captured } })]))
+      expect((await runCli(['diff', path, path], { env })).code).toBe(captured ? 0 : 2)
+    }
   }, 60_000)
 
   it('takes session ids, prefixes and suffixes as refs', async () => {

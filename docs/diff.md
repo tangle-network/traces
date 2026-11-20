@@ -13,7 +13,7 @@ A run's steps are its tool calls in containment order; model calls are not steps
 Each call compares by tool, status and argument: the command a shell call ran, the file a file tool touched, or the call's input.
 First each run's own places become placeholders (its cwd and worktree, temp dirs, and hex ids), so two runs of one play in two worktrees agree wherever they did the same thing.
 The first divergence is `changed`, `replaced`, `only-in-a`, `only-in-b` or `reordered`; `--format json` holds every step, and `.diff.firstDivergence.index` is 0-based.
-Exit 0 requires matching tools, order, outcomes and recorded arguments. An explicit empty argument object counts as a recorded argument. Missing or withheld input leaves the argument comparison unknown. A difference in another measured field still exits 1. If no difference is observable and evidence is incomplete, the CLI exits 2 and the SDK report names the gap in `caveat`.
+Exit 0 requires matching tools, order, outcomes and recorded arguments. An explicitly captured empty object or string counts as a known argument. Missing input or a producer's `tool.args_captured=false` leaves the comparison unknown. A difference in another measured field still exits 1. If no difference is observable and evidence is incomplete, the CLI exits 2 and the SDK report names the gap in `caveat`.
 
 ## `traces diff --help`
 

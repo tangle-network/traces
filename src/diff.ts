@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
 import { type DiagnosisSpan, epochMillis } from '@tangle-network/agent-eval/diagnosis'
 import { type DiffStep, diffSteps, diffStepsFromSpans, type StepDiff } from '@tangle-network/agent-eval/pipelines'
 import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
-import { canonicalJson } from './adapters/tool-io.js'
+import { canonicalJson, toolArgumentsFromAttributes } from './adapters/tool-io.js'
 import { ATTR, SESSION_CWD_ATTR } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
 import { readRefSpans } from './refs.js'
@@ -116,8 +116,8 @@ interface CallArgument {
 
 /** What a tool call was asked to do, before normalization, and the directory it ran in. */
 function callArgument(span: OtlpSpan): CallArgument {
-  const raw = span.attributes['input.value']
-  if (raw === undefined || raw === null || raw === '') return { argument: null, workdir: null }
+  const { args: raw } = toolArgumentsFromAttributes(span.attributes)
+  if (raw === undefined || raw === null) return { argument: null, workdir: null }
   const text = typeof raw === 'string' ? raw : canonicalJson(raw)
   const input = jsonObject(text)
   const workdir = input ? stringOf(input, WORKDIR_KEYS) : null
