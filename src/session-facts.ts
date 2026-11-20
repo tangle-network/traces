@@ -24,7 +24,8 @@ export type {
 } from './session-measurements.js'
 export type { SkillUseCount } from './skill-usage.js'
 
-import { OPENINFERENCE_SPAN_KIND, TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
+import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
+import { TOOL_NAME } from '@tangle-network/agent-eval/trace-attributes'
 import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-network/agent-eval/diagnosis'
 import { ACTOR_ATTR, capText } from './adapters/conversation.js'
 import { FACT_TEXT_CAP, rawContent, typedTurnsOf, isOwnAgentMessage, type SessionTurnFact, type TurnSignal, type TurnFoldState, type ExcludedTurn, stringAttr } from './session-turns.js'
@@ -34,6 +35,7 @@ import {
   SUBAGENT_SPAWN_TASK_ATTR,
   SUBAGENT_TASK_ATTR,
   isSubagentSpan,
+  isRecordedToolCall,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
 import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
@@ -89,7 +91,7 @@ export interface SessionFactsOptions {
 }
 
 /** Legacy synthesized-span marker, still read so an export from before the rename counts. */
-export const SPAN_SYNTHESIZED_ATTR = 'traces.codex.span_synthesized'
+export { LEGACY_SYNTHESIZED_SPAN_ATTR as SPAN_SYNTHESIZED_ATTR } from './adapters/provenance.js'
 
 /** Records the session reader could not parse, stamped on the session span. */
 const CORRUPTION_COUNT_ATTR = 'traces.session.corruption_count'
@@ -377,16 +379,7 @@ function byTraceOrder(left: OtlpSpan, right: OtlpSpan): number {
  * and the subagent thread/path attribute pair only that span carries.
  */
 export function isSynthesizedSpan(span: OtlpSpan): boolean {
-  if (isSynthesizedByProvenance(span.attributes)) return true
-  if (attr(span, SPAN_SYNTHESIZED_ATTR) === true) return true
-  return (
-    stringAttr(span, 'traces.codex.subagent_thread_id') !== null &&
-    stringAttr(span, 'traces.codex.subagent_path') !== null
-  )
-}
-
-function isToolSpan(span: OtlpSpan): boolean {
-  return attr(span, OPENINFERENCE_SPAN_KIND) === 'TOOL'
+  return isSynthesizedByProvenance(span.attributes)
 }
 
 function toolName(span: OtlpSpan): string {
@@ -887,11 +880,11 @@ function readSession(
   // exclusive child sheet already carries them.
   const ownSpans = spans.filter((span) => !isSubagentSpan(span.attributes))
   const subagentSpans = spans.filter((span) => isSubagentSpan(span.attributes))
-  const toolSpans = spans.filter(isToolSpan)
+  const toolSpans = spans.filter((span) => resolveSpanKind(span) === 'TOOL')
   const synthesized = toolSpans.filter(isSynthesizedSpan)
-  const invoked = ownSpans.filter((span) => isToolSpan(span) && !isSynthesizedSpan(span))
+  const invoked = ownSpans.filter(isRecordedToolCall)
   const subagentTools = toolSpans.filter(
-    (span) => isSubagentSpan(span.attributes) && !isSynthesizedSpan(span),
+    (span) => isSubagentSpan(span.attributes) && isRecordedToolCall(span),
   )
   const byName: Record<string, number> = {}
   for (const span of invoked) byName[toolName(span)] = (byName[toolName(span)] ?? 0) + 1
@@ -1465,7 +1458,7 @@ export function sessionRows(spans: readonly OtlpSpan[], turns: readonly SessionT
       rows.push({ kind: 'agent', at: span.start_time, spanId: span.span_id, text: rawContent(span) })
       continue
     }
-    if (!isToolSpan(span) || isSynthesizedSpan(span)) continue
+    if (!isRecordedToolCall(span)) continue
     const call = callCommands(span)
     if (call === undefined) continue
     call.commands.forEach((words, index) => {

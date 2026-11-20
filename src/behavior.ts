@@ -8,7 +8,7 @@
  * kinds. Gaming flags and uncalibrated classes are record-only, never above info. Times are epoch seconds.
  */
 import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
-import { isInheritedSpan, isSynthesizedSpan, SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './adapters/provenance.js'
+import { isInheritedSpan, isRecordedToolCall, SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './adapters/provenance.js'
 import { sessionIdFromAttributes } from './attributes.js'
 import { distinctSpans } from './span-identity.js'
 import { dominantModel } from './execution.js'
@@ -177,7 +177,6 @@ export function classifySpan(span: Pick<OtlpSpan, 'name' | 'attributes'>, kind?:
   return { category: FALLBACK[live] ?? 'running', flags, detail: toolOf(span).replaceAll(COORDINATION_PREFIX, '') }
 }
 
-const isToolSpan = (s: OtlpSpan): boolean => !isSynthesizedSpan(s.attributes) && (resolveSpanKind(s) === 'TOOL' || s.name.startsWith('tool.'))
 const failed = (s: OtlpSpan): boolean => String(s.status?.code).endsWith('ERROR') || s.attributes['tangle.tool.status'] === 'failed'
 /** A span whose end the reader substituted is still running: its end is now. */
 const endOf = (s: OtlpSpan, now: number): number => (String(s.attributes[SUBSTITUTED_FIELDS_ATTR] ?? '').split(',').includes('end_time') ? now : ts(s.end_time))
@@ -310,7 +309,7 @@ function nodeEvents(n: RawNode): Event[] {
   const kinds = new Map(classifyLiveActions(n.spans).map((act) => [act.spanId, act.kind]))
   return n.spans.filter((s) => s.name !== 'session' && !isInheritedSpan(s.attributes)).map((s): Event => {
     const cls = classifySpan(s, kinds.get(s.span_id) ?? 'other')
-    return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, tool: toolKey(toolOf(s)), call: isToolSpan(s), span: s.span_id, ok: !failed(s), llm: resolveSpanKind(s) === 'LLM',
+    return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, tool: toolKey(toolOf(s)), call: isRecordedToolCall(s), span: s.span_id, ok: !failed(s), llm: resolveSpanKind(s) === 'LLM',
       tokens_in: num(s.attributes['gen_ai.usage.input_tokens']), tokens_out: num(s.attributes['gen_ai.usage.output_tokens']), mail: mailOf(s, cls, n.parent) }
   }).sort((x, y) => x.t - y.t || x.span.localeCompare(y.span))
 }
@@ -577,11 +576,11 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: 
       const spans = distinct.filter((s) => ts(s.start_time) > 0) // OTLP's zero time is unknown; one such span opened millions of windows back to 1970
       spanCount += spans.length
       unplaced += distinct.length - spans.length
-      observedCalls += distinct.filter((span) => isToolSpan(span) && !isInheritedSpan(span.attributes)).length
+      observedCalls += distinct.filter(isRecordedToolCall).length
       // A Codex lifecycle span stands for another session's thread (a child it spawned, or the parent it answered),
       // whose records are in that session's file: that session is the node, never a callless stand-in.
       for (const n of groupNodes(spans, now, topologyGaps)) {
-        if (n.thread === null || n.spans.some((span) => isToolSpan(span) && !isInheritedSpan(span.attributes))) {
+        if (n.thread === null || n.spans.some(isRecordedToolCall)) {
           read.push(readNode(n, acc))
         }
       }

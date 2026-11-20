@@ -28,6 +28,12 @@
  * carry a rule per harness.
  */
 
+import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
+import type { OtlpSpan } from '../otlp.js'
+
+/** Older Codex exporters used this marker for derived lifecycle records. */
+export const LEGACY_SYNTHESIZED_SPAN_ATTR = 'traces.codex.span_synthesized'
+
 /** `true` on a span the adapter synthesized from lifecycle events. */
 export const SYNTHESIZED_SPAN_ATTR = 'traces.span.synthesized'
 
@@ -68,7 +74,8 @@ export const SUBAGENT_SPAWN_ATTR = 'traces.agent.spawn'
 export const SUBAGENT_SPAWN_TASK_ATTR = 'traces.agent.spawn_task'
 
 export function isSynthesizedSpan(attributes: Readonly<Record<string, unknown>>): boolean {
-  return attributes[SYNTHESIZED_SPAN_ATTR] === true
+  return attributes[SYNTHESIZED_SPAN_ATTR] === true || attributes[LEGACY_SYNTHESIZED_SPAN_ATTR] === true ||
+    (typeof attributes['traces.codex.subagent_thread_id'] === 'string' && typeof attributes['traces.codex.subagent_path'] === 'string')
 }
 
 export function isInheritedSpan(attributes: Readonly<Record<string, unknown>>): boolean {
@@ -79,3 +86,8 @@ export function isSubagentSpan(attributes: Readonly<Record<string, unknown>>): b
   return attributes[SUBAGENT_SPAN_ATTR] === true
 }
 
+
+/** A call recorded for the acting session, excluding derived lifecycle and inherited fork records. */
+export function isRecordedToolCall(span: OtlpSpan): boolean {
+  return !isSynthesizedSpan(span.attributes) && !isInheritedSpan(span.attributes) && resolveSpanKind(span) === 'TOOL'
+}

@@ -38,9 +38,9 @@ import {
   LLM_COST_ATTR_KEYS,
   LLM_INPUT_TOKEN_ATTR_KEYS,
   LLM_OUTPUT_TOKEN_ATTR_KEYS,
-  SPAN_KIND_ATTR_KEYS,
 } from '@tangle-network/agent-eval/trace-attributes'
-import { isSynthesizedSpan } from './adapters/provenance.js'
+import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
+import { isInheritedSpan, isRecordedToolCall } from './adapters/provenance.js'
 import { isUsageAggregate } from './attributes.js'
 import { exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
@@ -146,7 +146,8 @@ export const EMPTY_SPAN_RUN_SNAPSHOT: Omit<SpanRunSnapshot, 'source'> = {
 }
 
 function spanKind(span: OtlpSpan): string | null {
-  return firstStringAttr(span.attributes, SPAN_KIND_ATTR_KEYS)
+  const kind = resolveSpanKind(span)
+  return kind === 'UNKNOWN' ? null : kind
 }
 
 /**
@@ -299,14 +300,14 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
     if (host !== undefined) {
       host.spanIds.push(span.span_id)
       const kind = spanKind(span)
-      if (kind === 'LLM' && !isUsageAggregate(span.attributes)) {
+      if (kind === 'LLM' && !isUsageAggregate(span.attributes) && !isInheritedSpan(span.attributes)) {
         host.driver = addSpend(host.driver, spanSpend(span))
         if (firstNumberAttr(span.attributes, LLM_INPUT_TOKEN_ATTR_KEYS) === null &&
           firstNumberAttr(span.attributes, LLM_OUTPUT_TOKEN_ATTR_KEYS) === null) {
           llmSpansWithoutTokens += 1
         }
         if (firstNumberAttr(span.attributes, LLM_COST_ATTR_KEYS) === null) llmSpansWithoutCost += 1
-      } else if (kind === 'TOOL' && !isSynthesizedSpan(span.attributes)) {
+      } else if (isRecordedToolCall(span)) {
         // A synthesized lifecycle span is not a call this node made.
         host.toolCalls += 1
       }
