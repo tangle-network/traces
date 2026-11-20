@@ -181,12 +181,15 @@ const isToolSpan = (s: OtlpSpan): boolean => !isSynthesizedSpan(s.attributes) &&
 const failed = (s: OtlpSpan): boolean => String(s.status?.code).endsWith('ERROR') || s.attributes['tangle.tool.status'] === 'failed'
 /** A span whose end the reader substituted is still running: its end is now. */
 const endOf = (s: OtlpSpan, now: number): number => (String(s.attributes[SUBSTITUTED_FIELDS_ATTR] ?? '').split(',').includes('end_time') ? now : ts(s.end_time))
-const byStart = (x: OtlpSpan, y: OtlpSpan): number => ts(x.start_time) - ts(y.start_time)
+const byStart = (x: OtlpSpan, y: OtlpSpan): number =>
+  ts(x.start_time) - ts(y.start_time) || x.trace_id.localeCompare(y.trace_id) || x.span_id.localeCompare(y.span_id)
 
 type RawNode = Pick<BehaviorNode, 'id' | 'label' | 'parent' | 'depth' | 'state' | 'profile' | 'model' | 'harness' | 'start' | 'end' | 'span_id'> & {
   readonly spans: OtlpSpan[]
-  /** The root of the tree this node was read in; the harness session that root opens and the one that spawned it; the Codex child thread a lifecycle span stands for. */
-  readonly top: string; readonly session: string | null; readonly parentSession: string | null; readonly thread: string | null
+  /** A native parent reference resolves only against a recorded session. */
+  readonly session: string | null
+  readonly parentSession: string | null
+  readonly thread: string | null
 }
 /** The model and harness that acted: the root's `agent.*` identity, else the model its own calls name (facts' `tokens.byModel`) and the harness whose reader wrote it. */
 const identity = (a: Record<string, unknown>, own: readonly OtlpSpan[]): Pick<RawNode, 'model' | 'harness'> => ({
@@ -223,13 +226,13 @@ function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
     const byId = new Map(trace.map((s) => [s.span_id, s]))
     const owners = new Map<string, string>()
     const named = new Set<string>()
-    const tops = new Map<string, string>()
     for (const boundary of buildSpanRunTree(trace, 'behavior').nodes) {
       const root = byId.get(boundary.spanId)!
       // A span id is only unique within its trace, including for orphan roots.
-      const id = `${traceId}/${root.span_id}`
+      const nativeRootId = root.name === 'session' && root.parent_span_id === null
+        ? sessionIdFromAttributes(root.attributes) : undefined
+      const id = nativeRootId ?? `${traceId}/${root.span_id}`
       const parent = root.parent_span_id ? owners.get(root.parent_span_id) ?? null : null
-      const top = parent ? tops.get(parent) ?? parent : id
       const own: OtlpSpan[] = []
       for (const spanId of boundary.spanIds) {
         const span = byId.get(spanId)!
@@ -243,11 +246,10 @@ function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
         }
       }
       if (!own.length) continue
-      tops.set(id, top)
       const a = root.attributes
       nodes.push({ id, label: boundary.label, parent, depth: boundary.depth, state: boundary.status,
         profile: str(a['agent.profile.name']), ...identity(a, own), start: boundary.startMs / 1000,
-        end: Math.max(boundary.endMs / 1000, endOf(root, now)), span_id: root.span_id, spans: own, top,
+        end: Math.max(boundary.endMs / 1000, endOf(root, now)), span_id: root.span_id, spans: own,
         session: parent === null ? sessionIdFromAttributes(a) ?? null : null,
         parentSession: str(a['traces.parent_session_id']), thread: str(a['traces.codex.subagent_thread_id']) })
     }
@@ -260,7 +262,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
     nodes.push({ id, label: str(a['tangle.node.label']) ?? str(a['gen_ai.agent.name']) ?? id, parent,
       depth: num(a['tangle.node.depth']) ?? 0, state: str(a['tangle.node.state']), profile: str(a['agent.profile.name']),
       ...identity(a, own), start: ts(own[0]!.start_time), end: own.reduce((max, s) => Math.max(max, endOf(s, now)), 0),
-      span_id: root.span_id, spans: own, top: id, session: sessionIdFromAttributes(a) ?? id,
+      span_id: root.span_id, spans: own, session: sessionIdFromAttributes(a) ?? id,
       parentSession: parent, thread: str(a['traces.codex.subagent_thread_id']) })
   }
   return nodes
@@ -290,7 +292,7 @@ function nodeEvents(n: RawNode): Event[] {
     const cls = classifySpan(s, kinds.get(s.span_id) ?? 'other')
     return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, tool: toolKey(toolOf(s)), call: isToolSpan(s), span: s.span_id, ok: !failed(s), llm: resolveSpanKind(s) === 'LLM',
       tokens_in: num(s.attributes['gen_ai.usage.input_tokens']), tokens_out: num(s.attributes['gen_ai.usage.output_tokens']), mail: mailOf(s, cls, n.parent) }
-  }).sort((x, y) => x.t - y.t)
+  }).sort((x, y) => x.t - y.t || x.span.localeCompare(y.span))
 }
 
 interface Segment { readonly a: number; readonly b: number; readonly cat: BehaviorCategory; readonly span: string }
@@ -480,22 +482,41 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator): ReadNode {
 
 /** The run's nodes, a session read on its own hung under the session that spawned it (`traces.parent_session_id`); then the windows on the run's clock. */
 function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanCount: number, coverage: BehaviorResult['coverage']): BehaviorResult {
-  const bySession = new Map(read.flatMap((r) => (r.n.session ? [[r.n.session, r.node.id] as const] : [])))
+  const bySession = new Map<string, string>()
   const byId = new Map(read.map((r) => [r.node.id, r]))
-  const links = new Map<string, string>()
   for (const { n } of read) {
-    const parent = n.session === null || n.parentSession === null ? undefined : bySession.get(n.parentSession)
-    if (parent !== undefined && parent !== n.id) links.set(n.id, parent)
+    bySession.set(n.id, n.id)
+    if (n.session !== null) bySession.set(n.session, n.id)
   }
-  const depthOf = (r: ReadNode, hops = 0): number => {
-    const up = hops < read.length ? byId.get(links.get(r.n.top) ?? '') : undefined
-    if (!up) return r.n.depth
-    return (r.n.top === r.n.id ? 0 : r.n.depth) + depthOf(up, hops + 1) + 1
+  const parents = new Map(read.map(({ n }) => [
+    n.id, (n.parentSession ? bySession.get(n.parentSession) : undefined) ?? n.parent,
+  ]))
+  // Resolve once for the whole forest, including cross-session forks and
+  // parents recorded in another file. A missing parent retains its declared depth.
+  const depths = new Map<string, number>()
+  for (const item of read) {
+    let id = item.n.id
+    const path: string[] = []
+    const visiting = new Set<string>()
+    while (!depths.has(id)) {
+      if (visiting.has(id)) throw Object.assign(new Error('recorded agent parent relationships form a cycle'), { code: 'no-outcome' })
+      const parent = parents.get(id)
+      if (!parent || !byId.has(parent)) {
+        depths.set(id, byId.get(id)!.n.depth)
+        break
+      }
+      visiting.add(id)
+      path.push(id)
+      id = parent
+    }
+    let depth = depths.get(id)!
+    for (let i = path.length - 1; i >= 0; i--) depths.set(path[i]!, ++depth)
   }
-  const outNodes = read.map(({ node, n }) => {
+  const outNodes = read.map(({ node }) => {
     const spawn = acc.spawned.get(node.id)
     const model = node.model ?? spawn?.model ?? null
-    return { ...node, parent: links.get(node.id) ?? node.parent, depth: depthOf(byId.get(node.id)!), model, harness: node.harness ?? spawn?.harness ?? (String(model ?? '').startsWith('gpt') ? 'codex' : null) }
+    return { ...node, parent: parents.get(node.id) ?? null, depth: depths.get(node.id)!, model,
+      harness: node.harness ?? spawn?.harness ?? null }
   })
   const [t0, t1] = [Math.min(...outNodes.map((n) => n.start)), Math.max(...outNodes.map((n) => n.end))]
   const nwin = Math.floor((t1 - t0) / W) + 1
@@ -534,11 +555,18 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: 
       observedCalls += spans.filter((span) => isToolSpan(span) && !isInheritedSpan(span.attributes)).length
       // A Codex lifecycle span stands for another session's thread (a child it spawned, or the parent it answered),
       // whose records are in that session's file: that session is the node, never a callless stand-in.
-      for (const n of groupNodes(spans, now)) if (n.thread === null) read.push(readNode(n, acc))
+      for (const n of groupNodes(spans, now)) {
+        if (n.thread === null || n.spans.some((span) => isToolSpan(span) && !isInheritedSpan(span.attributes))) {
+          read.push(readNode(n, acc))
+        }
+      }
     },
     result(sourceGaps = []) {
+      read.sort((left, right) => left.n.start - right.n.start || left.n.id.localeCompare(right.n.id))
       const attributed = read.reduce((sum, r) => sum + r.node.tool_calls, 0)
-      if (observedCalls !== attributed) throw Object.assign(new Error(`could attribute ${attributed} of ${observedCalls} observed tool calls to a node`), { code: 'no-outcome' })
+      if (observedCalls !== attributed) {
+        throw Object.assign(new Error(`could attribute ${attributed} of ${observedCalls} observed tool calls to a node`), { code: 'no-outcome' })
+      }
       if (!attributed) throw Object.assign(new Error('no tool spans; categories unavailable'), { code: 'no-outcome' })
       const unknowns = [...sourceGaps]
       if (unplaced) unknowns.push(`${unplaced} span(s) have no usable start time and cannot be placed in a window`)

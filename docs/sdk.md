@@ -22,7 +22,7 @@ Import other packages' names from their owners: `AnalystRegistry`, `makeFinding`
 | `analyzeSpans` | `(spans, AnalyzeOptions?) → Promise<AnalyzeResult>` | agent-eval's deterministic analyst, or yours through `{ registry }`; no model call |
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → Promise<TraceInvestigationResult>` | `traces analyze <ref> --format json`: facts, finding packet, measures, conformance, `cannotAnswer` |
 | `buildTraceFindingPacket` | `(BuildTraceFindingPacketOptions) → TraceFindingPacket` | `findings.json` under `traces analyze <ref> --out <dir>`; renders any `AnalystFinding[]` unchanged |
-| `behaviorFromSpans` | `(spans, BehaviorOptions?) → BehaviorResult` | `traces behavior <ref> --format json`: per-node windows, streaks, stalls, flags, anomalies, mail and the calibration table; throws `code: no-outcome` with no tool span |
+| `behaviorFromSpans` | `(spans, BehaviorOptions?) → BehaviorResult` | `traces behavior <ref> --format json`: per-node windows, streaks, stalls, flags, anomalies, mail and source coverage over mixed session and span-tree input; throws `code: no-outcome` for unavailable behavior |
 | `classifySpan` | `(span, kind?) → BehaviorSpanClass` | one span's category, record-only flags and detail under the calibrated rules |
 | `renderBehaviorText` | `(BehaviorResult) → string` | `traces behavior` text |
 | `runTraceQuestions` | `(options) → Promise<TraceQuestionsResult>` | `traces ask`: concurrent questions under one cost ledger, citations checked |
