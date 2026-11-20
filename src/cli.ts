@@ -46,7 +46,7 @@ import { listAdapters, resolveAdapter, selectAdapters } from './registry.js'
 import { locateSessions, parseSession, readSessionSpans, sessionsInCwd } from './session-source.js'
 import { collectSessionSelection, type SessionSelection, type SessionSelectionRow } from './session-selection.js'
 import {
-  type SessionWorkflowIssue,
+  workflowIssueText,
   type SessionWorkflowSummary,
 } from './session-workflow.js'
 import { assembleSessionBundle, verifySessionBundle } from './bundle.js'
@@ -579,22 +579,6 @@ async function cmdConvert(args: CliArgs): Promise<void> {
   console.log(args.format === 'json'
     ? JSON.stringify({ out, spans: spans.length, droppedAttributes: dropped })
     : `wrote ${spans.length} spans → ${out}${args.noContent ? ` (metadata only: ${dropped.length} attribute key(s) dropped)` : ''}`)
-}
-
-function workflowIssueText(issue: SessionWorkflowIssue): string {
-  if (issue.kind === 'cycle') return `cycle: ${issue.sessionIds.join(' -> ')}`
-  if (issue.kind === 'unresolved-parent-task') {
-    return `cannot resolve parent task for child ${issue.childSessionId} in ${issue.parentSessionId}: ${issue.reason}`
-  }
-  if (issue.kind === 'parent-conflict') {
-    return `parent conflict for ${issue.sessionId}: declared ${issue.declaredParentSessionId ?? 'none'}, ` +
-      `referenced by ${issue.referencedParentSessionIds.join(', ') || 'none'}`
-  }
-  if (issue.kind === 'unjoined-child') {
-    return `unjoined child ${issue.agentPath} spawned by ${issue.parentSessionId}: ${issue.reason}` +
-      (issue.candidates ? ` (${issue.candidates.join(', ')})` : '')
-  }
-  return `${issue.kind} ${issue.sessionId}, referenced as ${issue.relation} by ${issue.referencedBySessionId}`
 }
 
 /** Issues the incomplete-workflow warning names; the rest are counted. */

@@ -227,6 +227,8 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
         (nativeId && native.has(nativeId) ? nativeId : null)
     }
     const byId = new Map(trace.map((s) => [s.span_id, s]))
+    const missingParents = trace.reduce((count, span) => count + Number(Boolean(span.parent_span_id && !byId.has(span.parent_span_id))), 0)
+    if (missingParents) unknowns.add(`${missingParents} span(s) in trace ${traceId} refer to a missing parent`)
     if (trace.every((s) => declaredSession(s) !== null)) {
       for (const s of trace) {
         const id = declaredSession(s)!
@@ -511,6 +513,10 @@ function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanC
   ]))
   // Resolve once for the whole forest, including cross-session forks and
   // parents recorded in another file. A missing parent retains its declared depth.
+  const unknowns = new Set(coverage.unknowns)
+  for (const [id, parent] of parents) {
+    if (parent && !byId.has(parent)) unknowns.add(`parent ${parent} of session ${id} is outside the selection`)
+  }
   const depths = new Map<string, number>()
   for (const item of read) {
     let id = item.n.id
@@ -551,7 +557,7 @@ function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanC
   return {
     policy: { ...BEHAVIOR_POLICY, window_s: W }, run: { t0, t1, n_windows: nwin, spans: spanCount }, nodes: outNodes, windows,
     flags: acc.flags, streaks: acc.streaks, stalls: acc.stalls, anomalies: anomalies(outNodes), drift: drift(read, cats, t0, W, nwin),
-    mail: { edges: acc.edges, summary: mailSummary(acc.edges) }, coverage, calibration: BEHAVIOR_CALIBRATION,
+    mail: { edges: acc.edges, summary: mailSummary(acc.edges) }, coverage: { ...coverage, unknowns: [...unknowns].sort() }, calibration: BEHAVIOR_CALIBRATION,
   }
 }
 
@@ -571,7 +577,7 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: 
       const spans = distinct.filter((s) => ts(s.start_time) > 0) // OTLP's zero time is unknown; one such span opened millions of windows back to 1970
       spanCount += spans.length
       unplaced += distinct.length - spans.length
-      observedCalls += spans.filter((span) => isToolSpan(span) && !isInheritedSpan(span.attributes)).length
+      observedCalls += distinct.filter((span) => isToolSpan(span) && !isInheritedSpan(span.attributes)).length
       // A Codex lifecycle span stands for another session's thread (a child it spawned, or the parent it answered),
       // whose records are in that session's file: that session is the node, never a callless stand-in.
       for (const n of groupNodes(spans, now, topologyGaps)) {
@@ -608,6 +614,10 @@ const oneLine = (s: string): string => s.replace(/\s+/g, ' ').slice(0, 80)
 /** One line per node with its category minutes, then flags, anomalies, streaks, the mail summary and the calibration table. */
 export function renderBehaviorText(r: BehaviorResult): string {
   const lines = [`behavior ${r.calibration.policy}, window ${r.policy.window_s / 60}m, ${r.nodes.length} nodes, ${r.run.n_windows} windows, ${iso(r.run.t0)} to ${iso(r.run.t1)}`]
+  if (r.coverage) {
+    lines.push(`coverage: ${r.coverage.tool_calls} attributed tool calls in ${r.coverage.input_spans} unique input spans`)
+    for (const gap of r.coverage.unknowns) lines.push(`  incomplete: ${oneLine(gap)}`)
+  }
   for (const n of r.nodes) {
     const cats = Object.entries(n.by_cat).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}m`).join(', ')
     lines.push(`${n.label} (${n.id}) ${n.state ?? 'running'} ${n.model ?? '?'}: ${cats || 'no activity'} | ${n.tool_calls} calls, ${n.failed} failed, ${n.streaks} streaks`)

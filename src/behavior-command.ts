@@ -2,6 +2,7 @@
 import { behaviorReader, renderBehaviorText } from './behavior.js'
 import type { CollectedSpans } from './cli-span-input.js'
 import type { CliArgs } from './cli-selection-types.js'
+import { workflowIssueText } from './session-workflow.js'
 import { CliError } from './commands.js'
 import type { OtlpSpan } from './otlp.js'
 
@@ -14,7 +15,7 @@ export async function cmdBehavior(args: CliArgs, forEachBatch: (onBatch: (spans:
     result = reader.result([
       ...(selection.sourceGaps ?? []),
       ...(selection.unread?.length ? [`${selection.unread.length} selected session(s) were unreadable`] : []),
-      ...(selection.workflow?.issues.length ? [`${selection.workflow.issues.length} workflow relationship(s) are unresolved`] : []),
+      ...(selection.workflow?.issues.map(workflowIssueText) ?? []),
     ])
   } catch (error) {
     if ((error as { code?: unknown }).code !== 'no-outcome') throw error

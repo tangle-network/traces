@@ -54,6 +54,23 @@ export type SessionWorkflowIssue =
       readonly turnIds?: readonly string[]
     }
 
+/** Explain what the selected sources could not join. */
+export function workflowIssueText(issue: SessionWorkflowIssue): string {
+  if (issue.kind === 'cycle') return `cycle: ${issue.sessionIds.join(' -> ')}`
+  if (issue.kind === 'unresolved-parent-task') {
+    return `cannot resolve parent task for child ${issue.childSessionId} in ${issue.parentSessionId}: ${issue.reason}`
+  }
+  if (issue.kind === 'parent-conflict') {
+    return `parent conflict for ${issue.sessionId}: declared ${issue.declaredParentSessionId ?? 'none'}, ` +
+      `referenced by ${issue.referencedParentSessionIds.join(', ') || 'none'}`
+  }
+  if (issue.kind === 'unjoined-child') {
+    return `unjoined child ${issue.agentPath} spawned by ${issue.parentSessionId}: ${issue.reason}` +
+      (issue.candidates ? ` (${issue.candidates.join(', ')})` : '')
+  }
+  return `${issue.kind} ${issue.sessionId}, referenced as ${issue.relation} by ${issue.referencedBySessionId}`
+}
+
 export interface SessionWorkflowSession {
   readonly adapter: HarnessTraceAdapter
   readonly ref: SessionRef
