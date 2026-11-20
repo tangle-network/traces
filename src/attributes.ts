@@ -75,6 +75,9 @@ export const ATTR = {
  */
 export const SESSION_CWD_ATTR = 'traces.session.cwd'
 
+/** Sticky across re-exports when the reader supplied the missing trace identity. */
+export const TRACE_ID_MINTED_ATTR = 'traces.trace_id_minted'
+
 /**
  * A harness's cumulative token counter, copied verbatim by its reader onto the
  * session's root span (Codex's `total_token_usage`). Input is the whole prompt

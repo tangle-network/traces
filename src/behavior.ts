@@ -9,7 +9,7 @@
  */
 import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
 import { isInheritedSpan, isRecordedToolCall, SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './adapters/provenance.js'
-import { sessionIdFromAttributes } from './attributes.js'
+import { sessionIdFromAttributes, TRACE_ID_MINTED_ATTR } from './attributes.js'
 import { distinctSpans } from './span-identity.js'
 import { dominantModel } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -218,6 +218,9 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
   for (const span of spans) append(traces, span.trace_id, span)
 
   for (const [traceId, trace] of traces) {
+    if (trace.some((span) => span.attributes[TRACE_ID_MINTED_ATTR] === true)) {
+      unknowns.add(`trace ${traceId} has a file-local identity; cross-file ownership is unknown`)
+    }
     const native = new Set(trace.filter((s) => s.name === 'session' && str(s.attributes['tangle.node.id']))
       .map((s) => sessionIdFromAttributes(s.attributes)))
     const declaredSession = (s: OtlpSpan): string | null => {

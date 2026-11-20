@@ -106,6 +106,16 @@ describe('traces behavior', () => {
     expect(text.stdout).toContain('flags (uncalibrated, record only): 3')
     expect(text.stdout).toContain('looping uncalibrated (n=0)')
 
+    const partial = join(dir, 'reexport.otlp.jsonl')
+    await writeFile(partial, `${row('tool.read', 'TOOL', '0000000000000001', {
+      'traces.source.unreadable_rows': 4, 'traces.trace_id_minted': true,
+    })}\n`, 'utf8')
+    const retained = await runCli(['behavior', partial, '--format', 'json'], { env })
+    expect(retained.code, retained.stderr).toBe(0)
+    expect(JSON.parse(retained.stdout).coverage).toMatchObject({ input_spans: 1, tool_calls: 1, unknowns: expect.arrayContaining([
+      expect.stringContaining('4 unreadable'), expect.stringContaining('file-local identity'),
+    ]) })
+
     const file = join(dir, 'llm-only.otlp.jsonl')
     await writeFile(file, `${[row('session', 'AGENT', '0000000000000001'), row('llm.turn', 'LLM', '0000000000000002'), row('llm.turn', 'LLM', '0000000000000003')].join('\n')}\n`, 'utf8')
     const refused = await runCli(['behavior', file, '--format', 'json'], { env })

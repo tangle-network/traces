@@ -1,3 +1,5 @@
+import { TRACE_ID_MINTED_ATTR } from './attributes.js'
+export { TRACE_ID_MINTED_ATTR } from './attributes.js'
 import { canonicalJson } from './adapters/tool-io.js'
 import { spanKey } from './span-identity.js'
 import { stampUnreadableSourceRows } from './source-unreadable.js'
@@ -154,17 +156,6 @@ export const RAW_FIELD_ATTRIBUTES: Readonly<Record<SubstitutedField, string>> = 
  */
 export const SUBSTITUTED_FIELDS_ATTR = 'traces.substituted_fields'
 
-/**
- * Marks a span whose trace id this tool minted because the producer wrote none.
- *
- * Unlike every other entry in {@link SUBSTITUTED_FIELDS_ATTR}, which describes
- * only the hop that wrote it, this one STICKS: the minted id is a real,
- * non-empty trace id, so the next hop reads it as the producer's own and would
- * otherwise recompute the substitution away. It is never cleared once set — the
- * same rule as `traces.source.unreadable_rows`, and for the same reason: a chain
- * of re-exports must not launder a defect by its length.
- */
-export const TRACE_ID_MINTED_ATTR = 'traces.trace_id_minted'
 
 
 export interface OtlpInputFile {
