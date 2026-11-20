@@ -1,12 +1,10 @@
-import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import { contractSpan, deriveHexId, llmSpan, loopSpan, steeredBy, toolSpan } from '@tangle-network/agent-trace-contract'
 
-const execFileAsync = promisify(execFile)
+import { runCli } from './run-cli.js'
 
 // Hex wire ids, as OTLP and W3C `traceparent` require.
 const TRACE = deriveHexId('cli-otlp-trace', 16)
@@ -14,22 +12,6 @@ const ROUND_1 = deriveHexId('cli-round-1', 8)
 const LLM_1 = deriveHexId('cli-llm-1', 8)
 const TOOL_1 = deriveHexId('cli-tool-1', 8)
 const ROUND_2 = deriveHexId('cli-round-2', 8)
-const ENV = { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' }
-
-async function runCli(args: readonly string[]): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const result = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
-      cwd: process.cwd(),
-      env: ENV,
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 120_000,
-    })
-    return { stdout: result.stdout, stderr: result.stderr, code: 0 }
-  } catch (error) {
-    const failure = error as { stdout?: string; stderr?: string; code?: number }
-    return { stdout: failure.stdout ?? '', stderr: failure.stderr ?? '', code: failure.code ?? 1 }
-  }
-}
 
 function conformingRows(): unknown[] {
   return [

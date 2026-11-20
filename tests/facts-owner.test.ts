@@ -219,11 +219,13 @@ describe('the price table loads only to price a sheet', () => {
     return urls.some((url) => url.endsWith('/agent-runtime/dist/index.js'))
   }
 
-  it('never for list, --match, jsonl rows or a session with no usage; for a sheet with tokens to price', async () => {
-    expect(await loadsPrices(['list', '--last', '50', '--format', 'json'], fx.env)).toBe(false)
-    expect(await loadsPrices(['facts', '--since', '2026-10-01T00:00:00Z', '--match', 'build', '--format', 'json'], fx.env)).toBe(false)
-    expect(await loadsPrices(['facts', IDS.claude, '--format', 'jsonl'], fx.env)).toBe(false)
-    expect(await loadsPrices(['facts', IDS.codex, '--format', 'json'], fx.env)).toBe(false)
-    expect(await loadsPrices(['facts', IDS.claude, '--format', 'json'], fx.env)).toBe(true)
+  it.each([
+    { operation: 'list', argv: ['list', '--last', '50', '--format', 'json'], needsPrice: false },
+    { operation: 'match', argv: ['facts', '--since', '2026-10-01T00:00:00Z', '--match', 'build', '--format', 'json'], needsPrice: false },
+    { operation: 'JSONL rows', argv: ['facts', IDS.claude, '--format', 'jsonl'], needsPrice: false },
+    { operation: 'sheet without usage', argv: ['facts', IDS.codex, '--format', 'json'], needsPrice: false },
+    { operation: 'sheet with usage', argv: ['facts', IDS.claude, '--format', 'json'], needsPrice: true },
+  ])('$operation loads the price table only when it prices tokens', async ({ argv, needsPrice }) => {
+    expect(await loadsPrices(argv, fx.env)).toBe(needsPrice)
   })
 })
