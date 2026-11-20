@@ -10,6 +10,7 @@ import { exportTraceEvidenceFile } from '../src/file-export.js'
 import { readOtlpInput, type OtlpInput } from '../src/otlp-input.js'
 import { span, writeOtlpFile, type OtlpSpan } from '../src/otlp.js'
 import { listAdapters, resolveAdapter } from '../src/registry.js'
+import { buildSpanRunTree } from '../src/run-span-tree.js'
 import { computeSessionFacts } from '../src/session-facts.js'
 import { parseSession } from '../src/session-source.js'
 import type { SessionRef } from '../src/types.js'
@@ -171,6 +172,10 @@ describe('recorded harness behavior coverage', () => {
     for (const rec of ALL_RECORDINGS.filter((item) => item.name !== 'Claude in-stream subagent')) {
       expect(direct.nodes.find((node) => node.id === rec.sessionId), rec.name).toMatchObject({ tool_calls: rec.rawToolCalls })
     }
+
+    const transport = converted.get('Sandbox OpenCode stream')!
+    expect(buildSpanRunTree(transport, 'sandbox').nodes).toHaveLength(1)
+    expect(behaviorFromSpans(transport).nodes).toMatchObject([{ id: 'retained-session-fixture-opencode', tool_calls: 6 }])
 
     const reversed = behaviorFromSpans([...spans].reverse())
     expect(nodeSummary(reversed)).toEqual(nodeSummary(direct))

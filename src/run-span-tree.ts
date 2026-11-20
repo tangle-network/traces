@@ -177,7 +177,9 @@ function isNodeBoundary(
   if (spanKind(span) === 'AGENT') return true
   // Native readers also use CHAIN for observations inside an agent, not
   // execution phases. Keep those messages/receipts in their enclosing node.
-  if (spanKind(span) === 'CHAIN' && !/^(?:user\.prompt|message\.|session\.compacted|file\.change|command\.execution|source\.corruption\.receipt)/.test(span.name)) return true
+  const transportEvent = span.attributes['traces.source_format'] === 'sandbox-events' && typeof span.attributes['traces.event.index'] === 'number'
+  if (spanKind(span) === 'CHAIN' && !transportEvent &&
+    !/^(?:user\.prompt|message\.|session\.compacted|file\.change|command\.execution|source\.corruption\.receipt)/.test(span.name)) return true
   if (AGENT_OPERATIONS.has(String(span.attributes[OPERATION_ATTR_KEY] ?? ''))) return true
   const agent = firstStringAttr(span.attributes, AGENT_NAME_ATTR_KEYS)
   return agent !== null && enclosingAgent !== null && agent !== enclosingAgent

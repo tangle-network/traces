@@ -241,8 +241,10 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     if (trace.some((span) => span.attributes[TRACE_ID_MINTED_ATTR] === true)) {
       unknowns.add(`trace ${traceId} has a file-local identity; cross-file ownership is unknown`)
     }
-    const native = new Set(trace.filter((s) => s.name === 'session' && str(s.attributes['tangle.node.id']))
-      .map((s) => sessionIdFromAttributes(s.attributes)))
+    const native = new Set(trace.filter(s =>
+      (s.name === 'session' && str(s.attributes['tangle.node.id'])) ||
+      (s.parent_span_id === null && s.attributes['traces.source_format'] === 'sandbox-events'),
+    ).map(s => sessionIdFromAttributes(s.attributes)))
     const declaredSession = (s: OtlpSpan): string | null => {
       const nativeId = sessionIdFromAttributes(s.attributes)
       return str(s.attributes['session.id']) ?? str(s.attributes['traces.session.id']) ??
