@@ -14,8 +14,7 @@
 
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, extname, join, relative } from 'node:path'
-import { zstdDecompressSync } from 'node:zlib'
-import { readsEveryZstdFrame } from './zstd.js'
+import { decompressZstd } from './zstd.js'
 import {
   assessShareSafety,
   classifyKey,
@@ -49,14 +48,14 @@ export async function verifySafe(target: string, options: VerifySafeOptions = {}
     // A `.zst` file (Discovery keeps session events as `<x>.ndjson.zst`) is checked as its decompressed bytes, by its
     // inner extension; one that does not decompress is unreadable, never clean.
     const compressed = extname(file).toLowerCase() === '.zst'
-    if (compressed && !readsEveryZstdFrame()) {
-      unreadable.push(`${label}: Node ${process.version} reads only the first frame of a multi-frame zstd file`)
-      continue
-    }
     let bytes: Buffer
     try {
       bytes = await readFile(file)
-      if (compressed) bytes = zstdDecompressSync(bytes)
+      if (compressed) {
+        const decoded = decompressZstd(bytes)
+        if (decoded.skippedBytes > 0) unreadable.push(`${label}: skippable zstd metadata (${decoded.skippedBytes} B)`)
+        bytes = decoded.content
+      }
     } catch (error) {
       unreadable.push(`${label}: ${compressed ? 'not a readable zstd frame: ' : ''}${error instanceof Error ? error.message : String(error)}`)
       continue

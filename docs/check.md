@@ -43,6 +43,8 @@ OTLP directory discovery also retains `.jsonl.zst` and `.ndjson.zst`; other comp
 
 `traces check <path> --share-safe` reads each path as bytes, never as a trace, so a handoff, an issue draft and a span export are all just files. SAFE and SAFE_WITH_WARNINGS pass, UNSAFE fails, UNKNOWN cannot decide. `--known-secret-env NAME` also fails on that variable's value, in any encoding. Findings name the file and JSON Pointer, never the value.
 
+For zstd archives, the check inspects every data frame. It reports an incomplete frame or opaque metadata in a skippable frame as unreadable.
+
 ## Exit codes and output
 
 Gates combine: 1 if any fails, else 2 if any could not decide, else 0. Exit 2 means no gate, a bad contract, a rule that could not run, an UNKNOWN share verdict, or an unreadable or ambiguous ref.

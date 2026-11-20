@@ -1,6 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { zstdDecompressSync } from 'node:zlib'
-import { readsEveryZstdFrame } from './zstd.js'
+import { decompressZstd } from './zstd.js'
 import { spanKey } from './span-identity.js'
 import { canonicalJson } from './adapters/tool-io.js'
 import type { OtlpSpan, OtlpStatusCode } from './otlp.js'
@@ -9,14 +8,11 @@ import { parseIsoToEpochMs } from './time.js'
 const COMPRESSED_JSONL = /\.(?:jsonl|ndjson)\.zst$/iu
 export const isCompressedJsonlFile = (path: string): boolean => COMPRESSED_JSONL.test(path)
 
-/** Decode only retained JSONL; Node versions that silently truncate later zstd frames cannot read it. */
+/** Decode the entire retained file before accepting any of its rows. */
 export async function readCompressedJsonlText(path: string): Promise<string> {
   if (!isCompressedJsonlFile(path)) throw new TypeError(`not a .jsonl.zst or .ndjson.zst source: ${path}`)
-  if (!readsEveryZstdFrame()) {
-    throw new Error(`cannot decode compressed OTLP ${path}: Node ${process.version} reads only the first frame of a multi-frame zstd file`)
-  }
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(zstdDecompressSync(await readFile(path)))
+    return new TextDecoder('utf-8', { fatal: true }).decode(decompressZstd(await readFile(path)).content)
   } catch (error) {
     throw new Error(`cannot decode compressed OTLP ${path}: ${error instanceof Error ? error.message : String(error)}`)
   }
