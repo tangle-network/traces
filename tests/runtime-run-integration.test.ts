@@ -6,7 +6,7 @@ import { expect, it } from 'vitest'
 import { span, serializeSpans } from '../src/otlp.js'
 import { runCli } from './run-cli.js'
 import { readRefSpans } from '../src/refs.js'
-import { buildSpanRunTree, computeSessionFacts } from '../src/index.js'
+import { buildSessionFactsReport, buildSpanRunTree, computeSessionFacts, readOtlpInput, type SessionFactsReport } from '../src/index.js'
 
 it('reads a named Runtime run through its owner without summing child-inclusive settlements', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'traces-runtime-graph-'))
@@ -92,6 +92,28 @@ it('reads legacy lifecycle rows independently of missing and partial driver spen
       expect.objectContaining({ input: 17, output: null, unavailable: expect.stringContaining('output tokens unknown') }),
       expect.objectContaining({ input: null, output: null, unavailable: expect.stringContaining('at least 11 input tokens, at least 2 output tokens') }),
     ]))
+    const artifact = join(dir, 'export.otlp.jsonl')
+    const exported = await runCli(['convert', dir, '--no-content', '--out', artifact])
+    expect(exported.code, exported.stderr).toBe(0)
+    const reread = await readOtlpInput(artifact)
+    const copied = await runCli(['facts', artifact, '--format', 'json'])
+    expect(copied.code, copied.stderr).toBe(0)
+    const selected = (report: SessionFactsReport) => ({
+      tokens: report.sessions.map(sheet => sheet.tokens), unread: report.selection?.unreadSessions,
+    })
+    const direct = selected(JSON.parse(facts.stdout))
+    expect(selected(JSON.parse(copied.stdout))).toEqual(direct)
+    expect(selected(buildSessionFactsReport(reread.spans))).toEqual(direct)
+    expect(reread.spans.map(item => [item.span_id, item.parent_span_id])).toEqual(spans.map(item => [item.span_id, item.parent_span_id]))
+
+    const nativePath = join(process.cwd(), 'tests/fixtures/claude-origin-reemission/origin-reemission.jsonl')
+    const nativeSpans = await readRefSpans(nativePath, { harness: 'claude-code' })
+    const ordinary = buildSessionFactsReport(nativeSpans)
+    expect(ordinary.sessions).toHaveLength(1)
+    expect(buildSpanRunTree(nativeSpans, nativePath).nodes.length).toBeGreaterThan(1)
+    const combined = buildSessionFactsReport([...reread.spans, ...nativeSpans])
+    const native = combined.sessions.filter(sheet => sheet.traceId === ordinary.sessions[0]!.traceId)
+    expect(native.map(sheet => sheet.tokens)).toEqual(ordinary.sessions.map(sheet => sheet.tokens))
     expect(watch.code, watch.stderr).toBe(0)
     expect(watch.stdout).toContain('budget unknown')
     expect(watch.stdout).toContain('wall 9.0s')

@@ -38,9 +38,9 @@ import {
   isRecordedToolCall,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { ATTR, hasRuntimeDriverMeter, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
+import { ATTR, hasRuntimeDriverMeter, isRuntimeJournalNode, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
-import { groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
+import { factScopes, groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { childModelBySpawn, foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -825,7 +825,7 @@ function isRecordSpan(span: OtlpSpan): boolean {
  */
 export function computeSessionFacts(spans: readonly OtlpSpan[], options: SessionFactsOptions = {}): SessionFacts[] {
   const bounds = windowBounds(options.window)
-  return groupByTrace(spans, options.includeSubagents)
+  return groupByTrace(spans).flatMap(trace => factScopes(trace, options.includeSubagents))
     .sort((left, right) => compareIds(left.traceId, right.traceId))
     .map((group) => readSession(group.traceId, group.sessionId, group.spans, options, bounds).facts)
 }
@@ -1166,9 +1166,8 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
   return {
     add(spans, constituentTraceIds) {
       for (const trace of groupByTrace(spans)) {
-        const constituent = constituentTraceIds?.has(trace.traceId) === true
-        const split = options.includeSubagents ?? (constituent && trace.spans.some(hasRuntimeDriverMeter))
-        const original = selectSourceSpans(trace, split, scope => select(scope, constituent))
+        const constituent = constituentTraceIds?.has(trace.traceId) === true || trace.spans.some(isRuntimeJournalNode)
+        const original = selectSourceSpans(trace, options.includeSubagents, scope => select(scope, constituent))
         if (!original.length) continue
         const digest = createHash('sha256')
         for (const span of [...original].sort((a, b) => a.span_id.localeCompare(b.span_id))) {

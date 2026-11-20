@@ -90,10 +90,14 @@ export const SESSION_TOTAL_OUTPUT_ATTR = 'traces.session.total_output_tokens'
 export const RUNTIME_INPUT_FLOOR_ATTR = 'traces.runtime.input_tokens_floor'
 export const RUNTIME_OUTPUT_FLOOR_ATTR = 'traces.runtime.output_tokens_floor'
 
+export function isRuntimeJournalNode(span: OtlpSpan): boolean {
+  return span.name === 'runtime.agent' && typeof span.attributes['traces.runtime.node_id'] === 'string'
+}
+
 /** A supervisor node can record its own meter without producing a model or tool span. */
 export function hasRuntimeDriverMeter(span: OtlpSpan): boolean {
-  return span.name === 'runtime.agent' && typeof span.attributes['traces.runtime.node_id'] === 'string'
-    && [SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR, RUNTIME_INPUT_FLOOR_ATTR, RUNTIME_OUTPUT_FLOOR_ATTR]
+  return isRuntimeJournalNode(span) &&
+    [SESSION_TOTAL_INPUT_ATTR, SESSION_TOTAL_OUTPUT_ATTR, RUNTIME_INPUT_FLOOR_ATTR, RUNTIME_OUTPUT_FLOOR_ATTR]
       .some((key) => typeof span.attributes[key] === 'number')
 }
 

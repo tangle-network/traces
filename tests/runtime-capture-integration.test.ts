@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { FileResultBlobStore, FileSpawnJournal, contentAddress, persistHarnessTranscript, type HarnessTranscriptBinding, type ProfileMaterializationReceipt } from '@tangle-network/agent-runtime/kernel'
 import { expect, it } from 'vitest'
 import { readRefSpans } from '../src/refs.js'
-import { computeSessionFacts } from '../src/session-facts.js'
+import { buildSessionFactsReport, computeSessionFacts } from '../src/session-facts.js'
 import { SESSION_TOTAL_INPUT_ATTR } from '../src/attributes.js'
 import { serializeSpans, span } from '../src/otlp.js'
 import { codexRollout } from './fixtures/home.js'
@@ -106,7 +106,19 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
     expect(JSON.parse(combinedFacts.stdout).sessions).toEqual(expect.arrayContaining([
       expect.objectContaining({ sessionId: nativeSessionId, toolCalls: expect.objectContaining({ value: 1 }) }),
       expect.objectContaining({ sessionId: 'retained-session', tokens: expect.objectContaining({ input: 7, output: 3 }) }),
+      expect.objectContaining({ tokens: expect.objectContaining({ input: 5, output: 1 }) }),
     ]))
+    const sdkFacts = buildSessionFactsReport(combined)
+    const file = join(dir, 'compare.otlp.jsonl')
+    const converted = await runCli(['convert', dir, '--no-content', '--out', file])
+    expect(converted.code, converted.stderr).toBe(0)
+    const reopened = await runCli(['facts', file, '--format', 'json'])
+    expect(reopened.code, reopened.stderr).toBe(0)
+    await rm(file)
+    for (const report of [JSON.parse(combinedFacts.stdout), JSON.parse(reopened.stdout)]) {
+      expect(report.sessions.map((sheet: { tokens: object }) => sheet.tokens)).toEqual(sdkFacts.sessions.map(sheet => sheet.tokens))
+      expect(report.selection?.unreadSessions).toEqual(sdkFacts.selection?.unreadSessions)
+    }
     const unknowns = JSON.parse(String(combined[0]!.attributes['traces.source.unknowns'])) as string[]
     expect(unknowns).toEqual(expect.arrayContaining([
       expect.stringContaining('Bound native captures supersede 1 of 4 retained OTLP spans'),
