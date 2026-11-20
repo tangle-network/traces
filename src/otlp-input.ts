@@ -1,3 +1,5 @@
+import { canonicalJson } from './adapters/tool-io.js'
+import { spanKey } from './span-identity.js'
 import { stampUnreadableSourceRows } from './source-unreadable.js'
 /**
  * The INBOUND path: read OTLP that some other system emitted and hand it to
@@ -339,19 +341,6 @@ export async function resolveOtlpInputFiles(path: string, allowEmptyDirectory = 
 
 export function isObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** Key-order-independent JSON, so two spans are compared by content, not by the
- *  order their producer happened to serialize fields in. */
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  if (isObject(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(',')}}`
-  }
-  return JSON.stringify(value) ?? 'null'
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -1009,7 +998,7 @@ export async function readOtlpInput(path: string, options: { readonly allowEmpty
       const converted = otlpRowToSpan(row, fallbackTraceId)
       if (converted.withheld) withheld.push({ ...converted.withheld, file, line })
       if (converted.span) {
-        const identity = JSON.stringify([converted.span.trace_id, converted.span.span_id])
+        const identity = spanKey(converted.span.trace_id, converted.span.span_id)
         const content = canonicalJson(converted.span)
         const seen = seenIdentities.get(identity)
         if (seen !== undefined) {

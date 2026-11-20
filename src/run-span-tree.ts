@@ -30,6 +30,7 @@
  * are present, the journal's numbers win.
  */
 
+import { distinctSpans, spanKey } from './span-identity.js'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -222,11 +223,12 @@ interface Building {
  * Fold a flat span batch into the node tree. Pure, so the same spans always
  * render the same text — which is what lets the live tail print only on change.
  */
-export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): SpanRunSnapshot {
+export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): SpanRunSnapshot {
+  const spans = distinctSpans(input)
   if (spans.length === 0) return { ...EMPTY_SPAN_RUN_SNAPSHOT, source }
 
   const byId = new Map<string, OtlpSpan>()
-  for (const span of spans) byId.set(spanKey(span), span)
+  for (const span of spans) byId.set(spanKey(span.trace_id, span.span_id), span)
 
   const childrenOf = new Map<string | null, OtlpSpan[]>()
   let orphanSpans = 0
@@ -234,8 +236,8 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
     const parentKey =
       span.parent_span_id === null
         ? null
-        : byId.has(`${span.trace_id}\x00${span.parent_span_id}`)
-          ? `${span.trace_id}\x00${span.parent_span_id}`
+        : byId.has(spanKey(span.trace_id, span.parent_span_id))
+          ? spanKey(span.trace_id, span.parent_span_id)
           : null
     // A span whose parent is absent is still real work; re-root it rather than
     // drop it, and say how many were re-rooted.
@@ -263,7 +265,7 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
     enclosingAgent: string | null,
     depth: number,
   ): void => {
-    const key = spanKey(span)
+    const key = spanKey(span.trace_id, span.span_id)
     const agent = firstStringAttr(span.attributes, AGENT_NAME_ATTR_KEYS) ?? enclosingAgent
     let nodeId = enclosingNodeId
     let nodeAgent = enclosingAgent
@@ -377,10 +379,6 @@ export function buildSpanRunTree(spans: readonly OtlpSpan[], source: string): Sp
     orphanSpans,
     readError: null,
   }
-}
-
-function spanKey(span: OtlpSpan): string {
-  return `${span.trace_id}\x00${span.span_id}`
 }
 
 /**

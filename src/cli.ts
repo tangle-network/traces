@@ -59,7 +59,7 @@ import type { RefusedSession, UploadPlan } from './upload.js'
 import { cmdSkills } from './skills-command.js'
 import { cmdGraphs } from './graphs-command.js'
 import { cmdBehavior } from './behavior-command.js'
-import { collectImportedSpans, collectOtlpSpans, collectRuntimeSpans, type CollectedSpans } from './cli-span-input.js'
+import { collectImportedSpans, collectOtlpSpans, collectRuntimeSpans, mergeCollected, type CollectedSpans } from './cli-span-input.js'
 import type { CliArgs, RefSelection } from './cli-selection-types.js'
 
 import { type Args, CliError, type Handler, runTraces, UsageError, writeError } from './commands.js'
@@ -408,26 +408,6 @@ async function forEachSpanBatch(args: CliArgs, onBatch: SpanBatchConsumer): Prom
   const collected = await collectSpans(args)
   if (collected.spans.length > 0) await counted(collected.spans, collected.harness)
   return { ...collected, spans: [], spanCount }
-}
-
-/** Spans of several refs together. A source's conformance describes that source alone, so it is not carried. */
-function mergeCollected(parts: readonly CollectedSpans[]): CollectedSpans {
-  const spans: OtlpSpan[] = []
-  const sources: SelectedSessionSource[] = []
-  const unread: UnreadSessionFact[] = []
-  const workflows = parts.flatMap((part) => (part.workflow ? [part.workflow] : []))
-  for (const part of parts) {
-    appendAll(spans, part.spans)
-    appendAll(sources, part.sources)
-    appendAll(unread, part.unread ?? [])
-  }
-  return {
-    spans,
-    harness: [...new Set(parts.flatMap((part) => part.harness.split('+')))].join('+'),
-    sources,
-    ...(workflows[0] ? { workflow: workflows[0] } : {}),
-    ...(unread.length > 0 ? { unread } : {}),
-  }
 }
 
 /** One session's spans as a sweep reads it, and the harness that wrote it. */
