@@ -19,6 +19,8 @@ A ref is sniffed, so no flag names its type:
 
 `file#<traceId>` and `file#branch=<id>` name one run of several. `--harness` with a file ref forces that reader.
 
+Use `traces facts 'recordings.sqlite#session=ses_example'` to read an exact native OpenCode session from that database, including a relocated copy. The same ref works with `analyze` and `watch`. A database with one session can be named directly. A database with several sessions reports the available IDs. A raw bundle includes the shared database and its available SQLite sidecars.
+
 ## Selection
 
 A reading command needs a ref, `--current`, `--last N` or `--since T`; `--cwd`, `--harness`, `--until` and `--latest-turn` only narrow. `list` defaults to `--last 20`, `watch` to `--since 30m`, `skills` to `--since 30d`.

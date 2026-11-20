@@ -23,13 +23,23 @@ export function nativeRef(harness: SupportedHarness, ref: SessionRef): NativeRef
   }
 }
 
-export function tracesRef(ref: NativeRef, harness: string): SessionRef {
-  return {
+export function sessionRefKey(ref: SessionRef): string {
+  return `${ref.sessionId}\0${ref.path}`
+}
+
+export function legacyOpencodeFile(ref: SessionRef, registered: ReadonlyMap<string, NativeRef>): boolean {
+  return !ref.path.endsWith('.db') && !registered.has(sessionRefKey(ref))
+}
+
+export function tracesRef(ref: NativeRef, harness: string, registered?: Map<string, NativeRef>): SessionRef {
+  const session = {
     harness,
     sessionId: ref.nativeSessionId,
     path: ref.path,
     cwd: ref.cwd,
     mtimeMs: ref.mtimeMs,
   }
+  registered?.set(sessionRefKey(session), ref)
+  return session
 }
 
