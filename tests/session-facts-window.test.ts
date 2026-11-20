@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { CLI } from './run-cli.js'
 import type { SessionFactsReport } from '../src/session-facts.js'
 
 const execFileAsync = promisify(execFile)
@@ -93,7 +94,7 @@ beforeAll(() => {
 })
 
 const cli = (args: string[]) =>
-  execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+  execFileAsync(process.execPath, [CLI, ...args], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: home, NO_COLOR: '1', FORCE_COLOR: '' },
     maxBuffer: 16 * 1024 * 1024,

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
+import { CLI } from './run-cli.js'
 import { readFileRunContext } from '../src/supervisor-run-context.js'
 
 const execFileAsync = promisify(execFile)
@@ -21,7 +22,7 @@ afterEach(async () => {
 })
 
 function run(args: string[]) {
-  return execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+  return execFileAsync(process.execPath, [CLI, ...args], {
     cwd: process.cwd(),
     env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
     maxBuffer: 10 * 1024 * 1024,

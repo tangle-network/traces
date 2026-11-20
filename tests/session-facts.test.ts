@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
+import { CLI } from './run-cli.js'
 import {
   buildSessionFactsReport,
   computeSessionFacts,
@@ -218,7 +219,7 @@ describe('session facts as prepared context', () => {
 
 describe('traces facts', () => {
   const cli = (args: string[]) =>
-    execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], { cwd: process.cwd() })
+    execFileAsync(process.execPath, [CLI, ...args], { cwd: process.cwd() })
 
   it('prints the sheet as JSON with no model call', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-facts-cli-'))

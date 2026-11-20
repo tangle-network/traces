@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 import { zstdCompressSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
+import { CLI } from './run-cli.js'
 import { span, type OtlpSpan } from '../src/otlp.js'
 import { readOtlpInput, TRACE_ID_MINTED_ATTR } from '../src/otlp-input.js'
 import { buildSpanRunTree, readSpanRunSnapshot, renderSpanRunSnapshot, spanRunTotals } from '../src/run-span-tree.js'
@@ -549,7 +550,7 @@ describe('traces watch CLI', () => {
     )
     const { stdout } = await execFileAsync(
       process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'watch', dir, '--once'],
+      [CLI, 'watch', dir, '--once'],
       { cwd: process.cwd(), timeout: 60_000 },
     )
     expect(stdout).toContain('driver    1 turn(s)')
@@ -573,10 +574,10 @@ describe('traces watch CLI', () => {
 
     const duplicate = join(dir, 'duplicate.otlp.jsonl')
     await writeFile(duplicate, jsonl([root, root]))
-    const text = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch', duplicate, '--once'], {
+    const text = await execFileAsync(process.execPath, [CLI, 'watch', duplicate, '--once'], {
       cwd: process.cwd(), timeout: 60_000,
     })
-    const machine = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch', duplicate, '--once', '--format', 'jsonl'], {
+    const machine = await execFileAsync(process.execPath, [CLI, 'watch', duplicate, '--once', '--format', 'jsonl'], {
       cwd: process.cwd(), timeout: 60_000,
     })
     const events = machine.stdout.trim().split('\n').map((line) => JSON.parse(line) as { event: string; spanCount?: number; unreadSessions?: unknown[] })
@@ -592,7 +593,7 @@ describe('traces watch CLI', () => {
     const evidence = await readOtlpInput(conflicting)
     expect(evidence.issues.map((issue) => issue.kind)).toEqual(['conflicting-span-id'])
     expect(evidence.validation.findings.some((finding) => finding.code === 'duplicate-span-id')).toBe(true)
-    const measurement = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'facts', conflicting, '--format', 'json'], {
+    const measurement = await execFileAsync(process.execPath, [CLI, 'facts', conflicting, '--format', 'json'], {
       cwd: process.cwd(), timeout: 60_000,
     }).then(() => null, (error: { stderr: string }) => error.stderr)
     expect(measurement).toContain('conflicting span bodies')
@@ -643,7 +644,7 @@ describe('traces watch CLI', () => {
     expect(before.unreadable).toEqual({ rows: 1, kinds: ['unparseable-line'], inherited: 0, files: 2, inheritedFiles: 0 })
 
     const out = join(dir, 'export.jsonl')
-    await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'convert', source, '--no-content', '--out', out])
+    await execFileAsync(process.execPath, [CLI, 'convert', source, '--no-content', '--out', out])
     const exported = await readFile(out, 'utf8')
     expect(exported).not.toContain(source)
     expect(exported).not.toContain('private-')
@@ -651,7 +652,7 @@ describe('traces watch CLI', () => {
     const after = await readOtlpInput(out)
     expect(after.spans).toHaveLength(1)
     expect(after.unreadable).toEqual({ rows: 1, kinds: ['unparseable-line'], inherited: 1, files: 2, inheritedFiles: 2 })
-    const report = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'check', out, '--contract', 'conformance'])
+    const report = await execFileAsync(process.execPath, [CLI, 'check', out, '--contract', 'conformance'])
     expect(report.stdout).toContain('1 row(s) of the ORIGINAL source')
     expect(report.stdout).toContain('2 file(s) from the ORIGINAL source could not be read by an earlier export.** Their row count is unknown.')
   })
@@ -668,7 +669,7 @@ describe('traces watch CLI', () => {
     )
     // A terminal run that ended badly must not look like a success to a script.
     await expect(
-      execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch', dir, '--once'], {
+      execFileAsync(process.execPath, [CLI, 'watch', dir, '--once'], {
         cwd: process.cwd(),
         timeout: 60_000,
       }),

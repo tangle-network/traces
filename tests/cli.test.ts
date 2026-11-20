@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { deriveHexId } from '@tangle-network/agent-trace-contract'
 import { describe, expect, it } from 'vitest'
+import { CLI } from './run-cli.js'
 import { serializeSpans, span } from '../src/otlp.js'
 
 const execFileAsync = promisify(execFile)
@@ -45,7 +46,7 @@ describe('traces CLI', () => {
         extra: { 'session.id': 'session-cli' },
       }),
     ]), 'utf8')
-    const run = (args: string[]) => execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+    const run = (args: string[]) => execFileAsync(process.execPath, [CLI, ...args], {
       cwd: process.cwd(),
       env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' },
       maxBuffer: 10 * 1024 * 1024,
@@ -103,9 +104,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     const analyze = (format: string[]) => execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'analyze',
       session,
       '--harness',
@@ -159,9 +158,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'convert',
       session,
       '--harness',
@@ -190,9 +187,7 @@ describe('traces CLI', () => {
     })).toBe(true)
 
     const validation = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'check',
       otlp,
       '--contract',
@@ -244,9 +239,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'convert',
       session,
       '--harness',
@@ -275,9 +268,7 @@ describe('traces CLI', () => {
     })).toBe(true)
 
     const validation = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'check',
       otlp,
       '--contract',
@@ -312,9 +303,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'facts',
       sessionId,
       '--harness',
@@ -355,9 +344,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'facts',
       '--harness',
       'codex',
@@ -428,9 +415,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'facts',
       session,
       '--harness',
@@ -520,9 +505,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     const { stdout, stderr } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'facts',
       '--harness',
       'codex',
@@ -637,9 +620,7 @@ describe('traces CLI', () => {
     ].map((row) => JSON.stringify(row)).join('\n'), 'utf8')
 
     const { stdout, stderr } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'facts',
       '--harness',
       'codex',
@@ -728,9 +709,7 @@ describe('traces CLI', () => {
     await writeFile(input, serializeSpans(spans), 'utf8')
 
     const { stdout } = await execFileAsync(process.execPath, [
-      '--import',
-      'tsx',
-      'src/cli.ts',
+      CLI,
       'watch',
       input,
       '--once',
@@ -756,7 +735,7 @@ describe('traces CLI', () => {
     ])
 
     // --spans adds each span once, as the OTLP-JSONL contract, after its session and before its findings.
-    const withSpans = parseRows((await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch', input, '--once', '--format', 'jsonl', '--spans'], {
+    const withSpans = parseRows((await execFileAsync(process.execPath, [CLI, 'watch', input, '--once', '--format', 'jsonl', '--spans'], {
       cwd: process.cwd(), env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '' }, maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
     })).stdout)
     expect(withSpans.map((row) => row.event)).toEqual(['session', 'span', 'span', 'span', 'span', 'span', 'span', 'finding', 'finding', 'finding', 'tick'])

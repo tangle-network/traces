@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
+import { CLI } from './run-cli.js'
 import type { SessionFactsReport } from '../src/session-facts.js'
 
 const execFileAsync = promisify(execFile)
@@ -73,7 +74,7 @@ describe('traces facts on real Claude Code harness records', () => {
     writeFileSync(file, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
     const { stdout } = await execFileAsync(
       process.execPath,
-      ['--import', 'tsx', 'src/cli.ts', 'facts', file, '--harness', 'claude-code', '--format', 'json'],
+      [CLI, 'facts', file, '--harness', 'claude-code', '--format', 'json'],
       { cwd: process.cwd(), env: { ...process.env, HOME: dir, NO_COLOR: '1', FORCE_COLOR: '' }, maxBuffer: 16 * 1024 * 1024 },
     )
     const [facts] = (JSON.parse(stdout) as SessionFactsReport).sessions
