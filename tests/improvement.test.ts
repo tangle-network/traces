@@ -140,6 +140,9 @@ describe('runTraceInvestigation over one trace two sessions share', () => {
   it('reports each session scope once: findings, citations, tool errors and counts are never charged per sheet', async () => {
     const facts: SessionFactsReportOptions = { includeSubagents: true }
     const scoped = await runTraceInvestigation({ spans, harness: 'claude-code', facts })
+    const whole = await runTraceInvestigation({ spans, harness: 'claude-code' })
+    expect(scoped.facts.spanCount).toBe(spans.length)
+    expect(scoped.facts.sourceDigest).toBe(whole.facts.sourceDigest)
     const sheetIds = scoped.facts.sessions.map((session) => session.sessionId ?? session.traceId)
     expect(sheetIds[0]).toBe(SHARED_TRACE_SESSION_ID)
     expect(new Set(sheetIds)).toHaveLength(2)

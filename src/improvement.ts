@@ -33,9 +33,9 @@ import {
   type SessionFacts,
   type SessionFactsReport,
   type SessionFactsReportOptions,
+  type SessionReading,
   type UnreadSessionFact,
 } from './session-facts.js'
-import { groupByTrace } from './session-scopes.js'
 import { distinctSpans } from './span-identity.js'
 import { CONTEXT_BANDS, modelCallMeasurement, type ModelCallMeasurement } from './session-measurements.js'
 
@@ -242,8 +242,9 @@ function measuredSeverity(finding: AnalystFinding): AnalystFinding {
 }
 
 /** A rule's finding in the packet's vocabulary, citing at most three spans by `trace://` URI. */
-function ruleFinding(live: TraceLiveFinding, traceId: string): AnalystFinding {
+function ruleFinding(live: TraceLiveFinding, traceId: string, scopeId?: string): AnalystFinding {
   const spanIds = [...new Set(live.evidence.flatMap((item) => item.spanIds ?? []))]
+  const metricScope = scopeId ? `/scope/${encodeURIComponent(scopeId)}` : ''
   return makeFinding({
     analyst_id: 'traces-rules',
     area: RULE_AREA[live.ruleId] ?? 'tool-use',
@@ -259,7 +260,7 @@ function ruleFinding(live: TraceLiveFinding, traceId: string): AnalystFinding {
       })),
       ...live.evidence.filter((item) => item.kind === 'metric').map((item) => ({
         kind: 'metric' as const,
-        uri: `metric://trace/${encodeURIComponent(traceId)}/rules/${live.ruleId}/${item.label}`,
+        uri: `metric://trace/${encodeURIComponent(traceId)}${metricScope}/rules/${live.ruleId}/${item.label}`,
         excerpt: item.value,
       })),
     ],
@@ -267,7 +268,7 @@ function ruleFinding(live: TraceLiveFinding, traceId: string): AnalystFinding {
     validation_plan: live.check,
     confidence: 1,
     metadata: { source: 'traces.rules', ruleId: live.ruleId, sessionId: live.session.sessionId, traceId, spanIds },
-    id_basis: `${traceId}:${live.fingerprint}`,
+    id_basis: `${scopeId ?? traceId}:${live.fingerprint}`,
   })
 }
 
@@ -433,20 +434,15 @@ export interface TraceInvestigation {
  */
 export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, 'spans'>): TraceInvestigation {
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
-  /** The sheet the current builder call emitted; one per session scope. */
-  const emitted: SessionFacts[] = []
+  const emitted: SessionReading[] = []
   const contexts: number[] = []
   const latencies: number[][] = Array.from({ length: CONTEXT_BANDS }, () => [])
-  const { includeSubagents, ...factsOptions } = opts.facts ?? {}
-  // The scopes themselves are derived once per trace below (`groupByTrace`),
-  // and the builder is handed each scope as one whole session: a second
-  // canonicalization of an already-scoped span set would split it again.
   const builder = createSessionFactsReportBuilder({
-    ...factsOptions,
+    ...opts.facts,
     harness: opts.harness,
     generatedAt,
     onSession: (reading) => {
-      emitted.push(reading.facts)
+      emitted.push(reading)
       appendAll(contexts, reading.operating.contextTokens)
       reading.operating.latencyMs.forEach((values, band) => appendAll(latencies[band]!, values))
     },
@@ -475,17 +471,13 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
       opts.signal?.throwIfAborted()
       const distinct = distinctSpans(spans)
       if (distinct.length === 0) return
+      const groups = byTrace(distinct)
+      for (const traceId of groups.keys()) {
+        if (addedTraces.has(traceId)) throw new Error(`createTraceInvestigation: trace ${traceId} arrives in two add() calls. Supply each whole trace once.`)
+      }
       empty = false
       spanCount += distinct.length
-      const groups = byTrace(distinct)
       for (const [traceId, group] of groups) {
-        if (addedTraces.has(traceId)) {
-          throw new Error(
-            `createTraceInvestigation: trace ${traceId} arrives in two add() calls; a trace's spans never span two batches. ` +
-            'Pass the whole trace in one call: a trace split across calls would be reported as two sessions of one trace, ' +
-            'its earlier rules silently overwritten and its tool errors charged once per sheet.',
-          )
-        }
         addedTraces.add(traceId)
         causality.add(group)
         const failed = group.find((item) => item.parent_span_id === null && item.status.code === 'ERROR')
@@ -496,14 +488,9 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
         const traceFindings: AnalystFinding[] = []
         const traceToolErrors: SessionToolErrors[] = []
         const findingIds = new Set<string>()
-        let sheetOfTrace = false
         let limitStopOfTrace = false
-        for (const scope of groupByTrace(group, includeSubagents === true)) {
-          emitted.length = 0
-          builder.add(scope.spans)
-          const sheet = emitted[0]
-          if (!sheet) continue
-          sheetOfTrace = true
+        builder.add(group)
+        for (const { facts: sheet, spans: scopeSpans } of emitted) {
           const { guardRefusals, limitStop } = sheet.measurements
           toolCalls += sheet.toolCalls.value ?? 0
           for (const [guard, count] of Object.entries(guardRefusals.byGuard)) byGuard.set(guard, (byGuard.get(guard) ?? 0) + count)
@@ -511,16 +498,16 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
             limitKinds.set(limitStop.kind, (limitKinds.get(limitStop.kind) ?? 0) + 1)
             limitStopOfTrace = true
           }
-          const sessionId = sheet.sessionId ?? sheet.traceId
-          const context = ruleContext(scope.spans, {
+          const boundary = opts.facts?.includeSubagents && scopeSpans.find(span => span.parent_span_id === null)
+          const scopeId = boundary ? `${traceId}/${boundary.span_id}` : undefined
+          const sessionId = sheet.sessionId ?? scopeId ?? sheet.traceId
+          const context = ruleContext(scopeSpans, {
             session: { harness: sheet.harness ?? batch.harness ?? opts.harness, sessionId, cwd: sheet.cwd.value },
             generatedAt,
             facts: [sheet],
           })
           for (const live of runRules(context)) {
-            const finding = ruleFinding(live, sheet.traceId)
-            // Two scopes of one trace can fire one rule on one signature: that
-            // is one claim about one trace, kept once.
+            const finding = ruleFinding(live, sheet.traceId, scopeId)
             if (findingIds.has(finding.finding_id)) continue
             findingIds.add(finding.finding_id)
             traceFindings.push(finding)
@@ -529,11 +516,12 @@ export function createTraceInvestigation(opts: Omit<TraceInvestigationOptions, '
         }
         // The failed root is one session of the trace, counted once however
         // many sheets the trace emitted.
-        if (failed) {
+        if (failed && emitted.length) {
           terminalFailures += 1
           if (limitStopOfTrace) terminalAtLimit += 1
         }
-        if (sheetOfTrace) rules.set(traceId, { findings: traceFindings, toolErrors: traceToolErrors })
+        if (emitted.length) rules.set(traceId, { findings: traceFindings, toolErrors: traceToolErrors })
+        emitted.length = 0
       }
       await pipelines.add(distinct)
       analysis.add(distinct)
