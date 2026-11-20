@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -615,14 +615,45 @@ describe('traces watch CLI', () => {
     ])
     expect(input.spans).toHaveLength(2)
     expect(input.files.reduce((sum, file) => sum + file.repeats, 0)).toBe(1)
-    expect(input.issues.map((issue) => issue.kind)).toEqual(['undecodable-compressed-file'])
-    expect(input.issues[0]?.detail).toContain('cannot decode compressed OTLP')
+    expect(input.issues).toMatchObject([{
+      kind: 'unparseable-line', unit: 'file', line: 0, detail: expect.stringContaining('cannot decode compressed OTLP'),
+    }])
+    expect(input.unreadable).toEqual({ rows: 0, kinds: [], inherited: 0, files: 1, inheritedFiles: 0 })
     expect(input.spans.some((item) => item.span_id === 'must-not-be-read')).toBe(false)
     const fallback = input.spans.find((item) => item.span_id === 'anonymous')!
     expect(fallback.trace_id).toBe('otlp:anonymous.jsonl.zst')
     expect(fallback.attributes[TRACE_ID_MINTED_ATTR]).toBe(true)
     expect(input.validation.findings.some((finding) => finding.code === 'missing-trace-id')).toBe(true)
     expect((await readSpanRunSnapshot(join(retained, 'root.ndjson.zst'))).spanCount).toBe(1)
+  })
+
+  it('preserves known row losses and unreadable files through a metadata-only export', async () => {
+    const dir = await scratch('file-loss')
+    const source = join(dir, 'source')
+    await mkdir(source)
+    const root = span({
+      traceId: '1'.repeat(32), spanId: '2'.repeat(16), parentSpanId: null, name: 'session', kind: 'AGENT',
+      startTime: '2026-07-31T10:00:00Z', endTime: '2026-07-31T10:00:01Z', agent: 'pi',
+    })
+    await writeFile(join(source, 'valid.ndjson'), `${JSON.stringify(root)}\ninvalid line\n`)
+    const damaged = zstdCompressSync(`${JSON.stringify(root)}\n`.repeat(20)).subarray(0, 7)
+    await writeFile(join(source, 'private-first.ndjson.zst'), damaged)
+    await writeFile(join(source, 'private-second.jsonl.zst'), damaged)
+    const before = await readOtlpInput(source)
+    expect(before.unreadable).toEqual({ rows: 1, kinds: ['unparseable-line'], inherited: 0, files: 2, inheritedFiles: 0 })
+
+    const out = join(dir, 'export.jsonl')
+    await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'convert', source, '--no-content', '--out', out])
+    const exported = await readFile(out, 'utf8')
+    expect(exported).not.toContain(source)
+    expect(exported).not.toContain('private-')
+    expect(JSON.parse(exported).resource.attributes['traces.source.unreadable_files']).toBe(2)
+    const after = await readOtlpInput(out)
+    expect(after.spans).toHaveLength(1)
+    expect(after.unreadable).toEqual({ rows: 1, kinds: ['unparseable-line'], inherited: 1, files: 2, inheritedFiles: 2 })
+    const report = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'check', out, '--contract', 'conformance'])
+    expect(report.stdout).toContain('1 row(s) of the ORIGINAL source')
+    expect(report.stdout).toContain('2 file(s) from the ORIGINAL source could not be read by an earlier export.** Their row count is unknown.')
   })
 
   it('exits non-zero when the run ended with a driver error', async () => {

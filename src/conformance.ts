@@ -24,8 +24,8 @@ import {
   TRACE_ID_MINTED_ATTR,
   type UnreadableSourceRows,
 } from './otlp-input.js'
-import type { OtlpSpan } from './otlp.js'
-import { toOpenInferenceSpan } from './otlp.js'
+import { type OtlpSpan, toOpenInferenceSpan } from './otlp.js'
+import { classifyIngestLoss } from './source-unreadable.js'
 
 /** Span ids listed per finding before the rest are summarized as a count. */
 const SPAN_ID_SAMPLE = 5
@@ -233,7 +233,10 @@ export interface ConformanceRenderOptions {
  * reader is told the artifact's clean findings are not the source's.
  */
 function renderInheritedLoss(lines: string[], unreadable: UnreadableSourceRows | undefined): void {
-  if (unreadable === undefined || unreadable.inherited === 0) return
+  if (unreadable?.inheritedFiles) {
+    lines.push(`**${unreadable.inheritedFiles} file(s) from the ORIGINAL source could not be read by an earlier export.** Their row count is unknown.`, '')
+  }
+  if (!unreadable?.inherited) return
   lines.push(
     `**${unreadable.inherited} row(s) of the ORIGINAL source are not in this file.** It is a re-export: ` +
       `${unreadable.kinds.join(', ')} row(s) could not be represented as spans and were left behind by an ` +
@@ -276,6 +279,7 @@ function renderIngest(
   issues: readonly OtlpIngestIssue[] | undefined,
   withheld: readonly OtlpFieldWithheld[] | undefined,
 ): void {
+  const loss = classifyIngestLoss(issues ?? [])
   if (files && files.length > 0) {
     const rows = files.reduce((total, file) => total + file.rows, 0)
     const spans = files.reduce((total, file) => total + file.spans, 0)
@@ -288,7 +292,7 @@ function renderIngest(
     lines.push('| File | Rows | Spans | Identical repeats |')
     lines.push('|---|---:|---:|---:|')
     for (const file of files) {
-      lines.push(`| \`${tableCell(file.path)}\` | ${file.rows} | ${file.spans} | ${file.repeats} |`)
+      lines.push(`| \`${tableCell(file.path)}\` | ${loss.files.has(file.path) ? 'unknown' : file.rows} | ${file.spans} | ${file.repeats} |`)
     }
     lines.push('')
     if (repeats > 0) {
@@ -318,15 +322,12 @@ function renderIngest(
     lines.push('')
   }
   if (issues && issues.length > 0) {
-    lines.push(
-      `**${issues.length} row(s) could not be analysed.** They are excluded from every count above ` +
-        'rather than repaired, because a synthesized timestamp or id would put invented work into the totals.',
-    )
-    lines.push('')
+    if (loss.rows) lines.push(`**${loss.rows} row(s) could not be analysed.** The measurements exclude these rows.`, '')
+    if (loss.files.size) lines.push(`**${loss.files.size} file(s) could not be read.** Their row count is unknown.`, '')
     lines.push('| Reason | File | Line | Detail |')
     lines.push('|---|---|---:|---|')
     for (const issue of issues.slice(0, ISSUE_SAMPLE)) {
-      lines.push(`| ${issue.kind} | \`${tableCell(issue.file)}\` | ${issue.line} | ${tableCell(issue.detail)} |`)
+      lines.push(`| ${issue.unit === 'file' ? 'unreadable file' : issue.kind} | \`${tableCell(issue.file)}\` | ${issue.line || '—'} | ${tableCell(issue.detail)} |`)
     }
     if (issues.length > ISSUE_SAMPLE) {
       lines.push(`| ... | ${issues.length - ISSUE_SAMPLE} more omitted | - | - |`)

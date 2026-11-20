@@ -63,10 +63,9 @@ const OTLP_DIRECTORY_NAME = 'otlp'
 /** Lines sniffed before deciding a file is not OTLP. */
 const SNIFF_LINES = 5
 
-/** Why one row of an OTLP file did not become an analyzable span AT ALL. */
+/** Why a source row or an entire compressed file could not be read as spans. */
 export type OtlpIngestIssueKind =
   | 'unparseable-line'
-  | 'undecodable-compressed-file'
   | 'not-an-object'
   | 'missing-span-id'
   | 'unreadable-timestamp'
@@ -74,8 +73,10 @@ export type OtlpIngestIssueKind =
 
 export interface OtlpIngestIssue {
   readonly kind: OtlpIngestIssueKind
+  /** Set when no rows could be decoded. A missing unit denotes one rejected row. */
+  readonly unit?: 'file'
   readonly file: string
-  /** 1-indexed line within `file`. */
+  /** 1-indexed line within `file`, or zero for a failure before any line could be read. */
   readonly line: number
   readonly detail: string
 }
@@ -176,21 +177,16 @@ export interface SkippedInputFile {
   readonly reason: string
 }
 
-/**
- * How much of the original source could not be represented as spans, summed
- * across every export hop that led to this file.
- *
- * `rows` is the count and `kinds` names the ingest issues behind it. On a file a
- * producer wrote, this is just what THIS ingest dropped. On a file
- * `traces` re-exported, it also carries what earlier hops dropped, read back off
- * the spans — so a re-export can never present itself as a complete copy of a
- * source it is missing rows from.
- */
+/** Cumulative known row losses and whole-file losses across export hops. */
 export interface UnreadableSourceRows {
   readonly rows: number
   readonly kinds: readonly OtlpIngestIssueKind[]
   /** Rows dropped by EARLIER hops, already absent from the file just read. */
   readonly inherited: number
+  /** Whole unreadable files, whose row counts are unknown. Absent when zero. */
+  readonly files?: number
+  /** Whole unreadable files already missing from this export. */
+  readonly inheritedFiles?: number
 }
 
 export interface OtlpInput {
@@ -204,11 +200,11 @@ export interface OtlpInput {
   readonly spans: readonly OtlpSpan[]
   /** Conformance of the RAW rows: what this trace can and cannot answer. */
   readonly validation: TraceValidation
-  /** Rows that could not become spans, each with its reason. */
+  /** Rejected rows and unreadable files, each with its reason. */
   readonly issues: readonly OtlpIngestIssue[]
   /** Rows that DID become spans, with one unusable field withheld from them. */
   readonly withheld: readonly OtlpFieldWithheld[]
-  /** Source rows absent from `spans`, this hop's and every earlier hop's. */
+  /** Known missing rows and whole unreadable files at this and earlier hops. */
   readonly unreadable: UnreadableSourceRows
 }
 
@@ -903,7 +899,7 @@ const MAX_WHOLE_DOCUMENT_BYTES = 256 * 1024 * 1024
 async function* fileRows(file: string, issues: OtlpIngestIssue[]): AsyncGenerator<ReadRow> {
   if (isCompressedJsonlFile(file)) {
     const text = await readCompressedJsonlText(file).catch((error: unknown) => {
-      issues.push({ kind: 'undecodable-compressed-file', file, line: 1, detail: error instanceof Error ? error.message : String(error) })
+      issues.push({ kind: 'unparseable-line', unit: 'file', file, line: 0, detail: error instanceof Error ? error.message : String(error) })
       return null
     })
     if (text === null) return

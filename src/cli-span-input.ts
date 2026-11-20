@@ -75,9 +75,10 @@ export async function collectOtlpSpans(path: string, selector?: string, retained
   if (input.spans.length === 0) {
     throw new Error(
       `no analyzable spans in ${path} (${input.files.length} file(s), ${input.rows.length} row(s), ` +
-        `${input.issues.length} unusable). Run \`traces check ${path} --contract conformance\` for the per-finding reason.`,
+        `${input.issues.length} ingestion issue(s)). Run \`traces check ${path} --contract conformance\` for the per-finding reason.`,
     )
   }
+  const { rows, inherited, files = 0, inheritedFiles = 0 } = input.unreadable
   const fileByTrace = new Map<string, string>()
   for (const file of input.files) {
     for (const traceId of file.traceIds) if (!fileByTrace.has(traceId)) fileByTrace.set(traceId, file.path)
@@ -100,8 +101,10 @@ export async function collectOtlpSpans(path: string, selector?: string, retained
       mtimeMs: 0,
     }, spans, traceId)),
     sourceGaps: [
-      ...(input.issues.length ? [`${input.issues.length} OTLP row(s) excluded at ingestion`] : []),
-      ...(input.unreadable.inherited ? [`${input.unreadable.inherited} unreadable OTLP row(s) were excluded before this export`] : []),
+      ...(rows > inherited ? [`${rows - inherited} OTLP row(s) excluded at ingestion`] : []),
+      ...(inherited ? [`${inherited} unreadable OTLP row(s) were excluded before this export`] : []),
+      ...(files > inheritedFiles ? [`${files - inheritedFiles} OTLP file(s) could not be read at ingestion. Their row count is unknown.`] : []),
+      ...(inheritedFiles ? [`${inheritedFiles} unreadable OTLP file(s) were excluded before this export. Their row count is unknown.`] : []),
       ...(input.skipped.length ? [`${input.skipped.length} file(s) did not contain readable OTLP`] : []),
     ],
     conformance: input.validation,
