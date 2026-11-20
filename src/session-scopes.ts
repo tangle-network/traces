@@ -1,4 +1,5 @@
 /** Session scopes over normalized spans. Child projection never reads a native store. */
+import { distinctSpans } from './span-identity.js'
 import { ATTR, indexSessionIdsByTrace } from './attributes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { isSubagentSpan } from './adapters/provenance.js'
@@ -24,9 +25,10 @@ export function unreadTraceGroup(group: TraceGroup, windowed: boolean): UnreadSe
 
 /** Group traces unchanged by default; optionally expose folded children as exclusive scopes. */
 export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = false): TraceGroup[] {
-  const { sessionByTrace } = indexSessionIdsByTrace(spans)
+  const unique = distinctSpans(spans)
+  const { sessionByTrace } = indexSessionIdsByTrace(unique)
   const byTrace = new Map<string, OtlpSpan[]>()
-  for (const span of spans) {
+  for (const span of unique) {
     const group = byTrace.get(span.trace_id)
     if (group) group.push(span)
     else byTrace.set(span.trace_id, [span])

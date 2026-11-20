@@ -10,6 +10,7 @@ import { exportTraceEvidenceFile } from '../src/file-export.js'
 import { readOtlpInput, type OtlpInput } from '../src/otlp-input.js'
 import { span, writeOtlpFile, type OtlpSpan } from '../src/otlp.js'
 import { listAdapters, resolveAdapter } from '../src/registry.js'
+import { computeSessionFacts } from '../src/session-facts.js'
 import { parseSession } from '../src/session-source.js'
 import type { SessionRef } from '../src/types.js'
 
@@ -154,6 +155,8 @@ describe('recorded harness behavior coverage', () => {
     expect(result.nodes).toHaveLength(2)
     expect(result.nodes.find((node) => node.id === PARENT)).toMatchObject({ parent: null, depth: 0, tool_calls: 2 })
     expect(result.nodes.find((node) => node.id === CHILD)).toMatchObject({ parent: PARENT, depth: 1, tool_calls: 3 })
+    const single = converted.get('Codex parent')!
+    expect(computeSessionFacts([...single, ...single])).toEqual(computeSessionFacts(single))
   })
 
   it('mixes session.id producers with native identities and span trees without losing calls or parentage', async () => {

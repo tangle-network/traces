@@ -10,6 +10,7 @@
  * against the store before the answer counts as answered.
  */
 
+import { distinctSpans } from './span-identity.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -658,7 +659,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
   const generatedAt = opts.generatedAt ?? new Date().toISOString()
   const corpus = opts.corpus ?? (() => {
     const builder = createTraceQuestionCorpus()
-    builder.add(opts.spans!)
+    builder.add(distinctSpans(opts.spans!))
     return builder.finish()
   })()
   const { store, traces, context } = corpus
