@@ -1,5 +1,5 @@
 /**
- * Formatting primitives shared by every `traces watch <target>` view.
+ * Display formatting for trace listings, findings and run views.
  *
  * Two rules live here rather than in each renderer, because they are the whole
  * reason this view exists and a second copy would eventually disagree with the
@@ -18,6 +18,11 @@
 import { exactCount, type SpendRoll } from './spend-roll.js'
 
 export const RULE = '─'.repeat(76)
+
+export const oneLine = (text: string, cap: number): string => {
+  const line = text.replace(/\s+/gu, ' ').trim()
+  return line.length > cap ? `${line.slice(0, cap - 1)}…` : line
+}
 
 export function int(n: number): string {
   return n.toLocaleString('en-US')

@@ -20,7 +20,8 @@ import { analystLog } from './analyst-log.js'
 import { metadataOnly } from './metadata-only.js'
 import { shellWord } from './moved.js'
 import type { TraceStreamEvent, WatchedSession } from './live.js'
-import { oneLine, type TraceLiveFinding } from './pipelines.js'
+import type { TraceLiveFinding } from './pipelines.js'
+import { oneLine } from './run-view-format.js'
 import { DEFAULT_ANALYST_MODEL, DEFAULT_ASK_CONCURRENCY, DEFAULT_QUESTION_MAX_COST_USD, DEFAULT_QUESTION_TIMEOUT_MS } from './ask-defaults.js'
 import type { TraceQuestion, TraceQuestionsResult } from './ask.js'
 import type { OtlpSpan } from './otlp.js'
@@ -57,7 +58,6 @@ import { errorText, RefError, resolveRefs, shortestRefs, type ResolvedRef } from
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import type { RefusedSession, UploadPlan } from './upload.js'
 import { cmdSkills } from './skills-command.js'
-import { cmdGraphs } from './graphs-command.js'
 import { cmdBehavior } from './behavior-command.js'
 import { collectImportedSpans, collectOtlpSpans, collectRuntimeSpans, mergeCollected, type CollectedSpans } from './cli-span-input.js'
 import type { CliArgs, RefSelection } from './cli-selection-types.js'
@@ -1009,19 +1009,9 @@ async function cmdAnalyze(args: CliArgs): Promise<void> {
 
 
 /**
- * `traces ask`: free-form questions over the selected sessions, the one
- * command that spends. Every question is its own recursive investigation;
- * they run concurrently under one shared ledger, so `--budget` bounds the
- * whole run, and each question spends at most min(--budget, $2) within 1800 s.
- *
- * Nothing is spent until the run can start: a missing key or bridge exits 2
- * (`setup`) before any session is parsed. A key or model the endpoint refuses
- * stops every question at its first call and exits 2 (`auth` or `model`). A
- * busy or rate-limited endpoint is retried inside the call. Answers, citation
- * checks, and per-question cost and time are written before the exit code is
- * decided, so a failed question never costs the others' answers: a run that
- * answered only some exits 2 (`partial`) with every answer written. Ctrl-C is
- * one of those failures.
+ * Each question investigates the selected spans under one shared ledger.
+ * A permanent endpoint refusal stops the cohort. Partial answers and their
+ * citation checks are written before the command reports its exit status.
  */
 async function cmdAsk(args: CliArgs): Promise<void> {
   const { analysisEngineFromEnv, bridgeVersion, missingAskRequirements, UnservableModelError } = await import('./analyst-model-call.js')
@@ -1404,7 +1394,10 @@ await runTraces(process.argv.slice(2), {
   'bundle verify': cmdBundleVerify,
   convert: reading(cmdConvert),
   upload: reading(cmdUpload),
-  graphs: reading((args) => cmdGraphs(args, { discover: () => discover(args), readSpans: () => collectSpans(args) })),
+  graphs: reading(async (args) => {
+    const { cmdGraphs } = await import('./graphs-command.js')
+    await cmdGraphs(args, { discover: () => discover(args), readSpans: () => collectSpans(args) })
+  }),
   skills: cmdSkills,
   mcp: reading(cmdMcp),
 })
