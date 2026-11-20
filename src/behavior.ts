@@ -265,7 +265,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
       // A worker can carry its caller's conversation ID on every event. Its explicit
       // boundary still owns those calls, and cannot become a parent of its caller.
       const rootSession = declaredSession(root)
-      const sharesOuter = boundary.delegated || Boolean(outerSession && (!rootSession || rootSession === outerSession))
+      const sharesOuter = boundary.delegated || Boolean(outerSession && !rootSession && resolveSpanKind(root) === 'AGENT')
       const own: OtlpSpan[] = []
       for (const spanId of boundary.spanIds) {
         const span = byId.get(spanId)!
@@ -276,7 +276,9 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
         owners.set(spanId, session ?? id)
         if (session === null) own.push(span)
         else {
-          if (span.parent_span_id && (span === root || !named.has(session))) rememberParent(session, owners.get(span.parent_span_id))
+          if (span.parent_span_id && session !== outerSession && (span === root || !named.has(session))) {
+            rememberParent(session, owners.get(span.parent_span_id))
+          }
           named.add(session)
           append(sessions, session, span)
         }
