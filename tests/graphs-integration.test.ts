@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { span, serializeSpans } from '../src/otlp.js'
 import { readOtlpInput } from '../src/otlp-input.js'
 import { describe, expect, it } from 'vitest'
-import { buildSpanRunTree, collectSessionSelection, computeSessionFacts, describeSessionRelationship, parseSession, scanSessions } from '../src/index.js'
+import { buildSessionFactsReport, buildSpanRunTree, collectSessionSelection, computeSessionFacts, describeSessionRelationship, parseSession, scanSessions } from '../src/index.js'
 import { makeTokenHome, TOKEN_IDS } from './fixtures/tokens.js'
 import { runCli } from './run-cli.js'
 
@@ -80,6 +80,11 @@ describe('graph observations through maintained readers', () => {
     const [parent] = computeSessionFacts(session.spans)
     const facts = computeSessionFacts(session.spans, { includeSubagents: true })
     expect(facts).toHaveLength(2)
+    const source = buildSessionFactsReport(session.spans)
+    const scoped = buildSessionFactsReport(session.spans, { includeSubagents: true })
+    expect(scoped.sessions).toHaveLength(2)
+    expect(scoped.spanCount).toBe(session.spans.length)
+    expect(scoped.sourceDigest).toBe(source.sourceDigest)
     const tree = buildSpanRunTree(session.spans, session.ref.path)
     expect(tree.nodes).toHaveLength(2)
     expect(tree.nodes.filter((node) => node.parentNodeId !== null)).toHaveLength(1)

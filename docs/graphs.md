@@ -5,7 +5,7 @@
 `traces graphs` observes sessions through the existing readers and stores Runtime's `StoredGraph` and `GraphRunRecord`. The existing span-run tree owns execution boundaries: sessions, agents and recorded workflow phases become nodes. Parent edges retain containment without claiming delegation. Node tokens are exclusive: summing a parent and its children never counts a child's usage twice. Missing identity, timing, usage and relationships remain explicit unknowns.
 
 ```bash
-traces graphs --since 7d --out corpus --runtime-module /path/to/runtime/dist/kernel.js
+traces graphs --since 7d --out corpus
 traces graphs --registry corpus --task-type bugfix --format json
 ```
 
@@ -13,7 +13,7 @@ A selection ingests one session tree at a time and byte-binds each selected sour
 
 Task type is explicit. A source's final message or successful tool result does not prove delivery: newly ingested sessions have unknown outcomes until an owner attaches independently checked merge or served-release evidence. Unknown outcomes are excluded from delivered-rate denominators and counted beside each group. Ranking uses delivered rate, median wall minutes, tokens and human messages; median minutes to merge stays null without a verified merge time. Run links accompany every group. Exact repository-qualified PR command references are retained as `pr-created-command` or `pr-merge-command` evidence; these are observations for an independent GitHub join, never delivery labels.
 
-The currently pinned Runtime predates corpus ingestion. Until a compatible Runtime release is published, pass `--runtime-module` pointing to its exact built or packed **public** `dist/kernel.js`. A missing API exits 2 with an actionable setup error. Source PR merges do not publish packages. Observed graphs cannot become replay candidates.
+The installed Runtime kernel supports corpus ingestion and queries. Use `--runtime-module` to select another compatible public kernel. A kernel missing the corpus API exits 2 and names the missing capability. Only planned graphs can become replay candidates.
 
 `--discovery-index PATH` streams Discovery’s maintained `run-index.jsonl` or host run catalog. A directory location and a named Runtime run use the same reader. The graph includes bound native sessions, other nodes identified by their retained OTLP, and uncovered nodes from the supervisor journal. The reader records ambiguous overlaps in source coverage. Driver usage excludes child-inclusive settlement totals. Unavailable journals leave the container’s topology and usage unknown. Missing start and registration timestamps stay unreadable. A `winner` state alone supplies no delivery evidence.
 

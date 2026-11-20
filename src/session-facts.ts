@@ -40,7 +40,7 @@ import {
 } from './adapters/provenance.js'
 import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
-import { groupByTrace, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
+import { groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { childModelBySpawn, foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -1144,41 +1144,41 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
   let spanCount = 0
   let evidenceThrough: string | null = null
 
-  const select = (group: TraceGroup, constituent = false): void => {
-    const reading = readSession(group.traceId, group.sessionId, group.spans, options, bounds)
-    if (constituent && reading.facts.recordSpans === 0 && reading.facts.firstFailure.status !== 'found') {
-      unreadSessions.push(unreadTraceGroup(group, false))
-      return
-    }
-    const digest = createHash('sha256')
-    for (const span of [...group.spans].sort((a, b) => a.span_id.localeCompare(b.span_id))) {
-      digest.update(canonicalJson(span)).update('\n')
-      for (const time of [span.start_time, span.end_time]) {
-        if (Number.isFinite(Date.parse(time)) && (evidenceThrough === null || Date.parse(time) > Date.parse(evidenceThrough))) evidenceThrough = time
+  const skipUnread = (group: TraceGroup, windowed: boolean): false => {
+    unreadSessions.push(unreadTraceGroup(group, windowed))
+    return false
+  }
+  const select = (group: TraceGroup, constituent: boolean): boolean => {
+    if (bounds !== null || options.nameUnread === true) {
+      const records = group.spans.filter(isRecordSpan)
+      if (!records.length) return skipUnread(group, bounds !== null)
+      if (bounds !== null && !records.some(span => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) {
+        outsideWindow.push(group.sessionId ?? group.traceId)
+        return false
       }
     }
-    digests.push({ traceId: group.traceId, digest: digest.digest('hex') })
-    spanCount += group.spans.length
+    const reading = readSession(group.traceId, group.sessionId, group.spans, options, bounds)
+    if (constituent && !reading.facts.recordSpans && reading.facts.firstFailure.status !== 'found') return skipUnread(group, false)
     sessions.push(reading.facts)
     options.onSession?.(reading)
+    return true
   }
 
   return {
     add(spans, constituentTraceIds) {
-      for (const group of groupByTrace(spans, options.includeSubagents)) {
-        if (bounds === null && options.nameUnread !== true) {
-          select(group, constituentTraceIds?.has(group.traceId))
-          continue
+      for (const trace of groupByTrace(spans)) {
+        const constituent = constituentTraceIds?.has(trace.traceId) === true
+        const original = selectSourceSpans(trace, options.includeSubagents, scope => select(scope, constituent))
+        if (!original.length) continue
+        const digest = createHash('sha256')
+        for (const span of [...original].sort((a, b) => a.span_id.localeCompare(b.span_id))) {
+          digest.update(canonicalJson(span)).update('\n')
+          for (const time of [span.start_time, span.end_time]) {
+            if (Number.isFinite(Date.parse(time)) && (evidenceThrough === null || Date.parse(time) > Date.parse(evidenceThrough))) evidenceThrough = time
+          }
         }
-        const records = group.spans.filter(isRecordSpan)
-        if (records.length === 0) {
-          // Nothing was read, so nothing says what the session did, or whether
-          // it belongs in the window; leaving it out silently would count it as empty.
-          unreadSessions.push(unreadTraceGroup(group, bounds !== null))
-          continue
-        }
-        if (bounds === null || records.some((span) => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) select(group)
-        else outsideWindow.push(group.sessionId ?? group.traceId)
+        digests.push({ traceId: trace.traceId, digest: digest.digest('hex') })
+        spanCount += original.length
       }
     },
     addUnread(session) {

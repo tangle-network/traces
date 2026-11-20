@@ -39,6 +39,19 @@ export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = fals
   })
 }
 
+/** A parent's sheet can include folded child records. A source receipt binds the selected
+ * original records once, before projecting the same source into several session sheets. */
+export function selectSourceSpans(
+  trace: TraceGroup, includeSubagents: boolean | undefined, select: (group: TraceGroup) => boolean,
+): readonly OtlpSpan[] {
+  const scopes = includeSubagents ? canonicalNodeScopes(trace) : [trace]
+  const selected = scopes.filter(select)
+  if (!selected.length) return []
+  if (selected.length === scopes.length) return trace.spans
+  const ids = new Set(selected.flatMap(group => group.spans.map(span => span.span_id)))
+  return trace.spans.filter(span => ids.has(span.span_id))
+}
+
 function text(span: OtlpSpan, key: string): string | undefined {
   const value = span.attributes[key]
   return typeof value === 'string' && value.length > 0 ? value : undefined
