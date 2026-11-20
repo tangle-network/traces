@@ -259,12 +259,14 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
    * Walk the raw span tree, carrying the node each span belongs to. A boundary
    * span opens a node; every other span rolls into the node enclosing it.
    */
-  const walk = (
-    span: OtlpSpan,
-    enclosingNodeId: string | null,
-    enclosingAgent: string | null,
-    depth: number,
-  ): void => {
+  type Pending = { span: OtlpSpan; enclosingNodeId: string | null; enclosingAgent: string | null; depth: number }
+  const pending: Pending[] = (childrenOf.get(null) ?? []).map((span) => ({
+    span, enclosingNodeId: null, enclosingAgent: null, depth: 0,
+  })).reverse()
+  let placed = 0
+  while (pending.length) {
+    const { span, enclosingNodeId, enclosingAgent, depth } = pending.pop()!
+    placed++
     const key = spanKey(span.trace_id, span.span_id)
     const agent = firstStringAttr(span.attributes, AGENT_NAME_ATTR_KEYS) ?? enclosingAgent
     let nodeId = enclosingNodeId
@@ -315,30 +317,26 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
       }
     }
 
-    for (const child of childrenOf.get(key) ?? []) walk(child, nodeId, nodeAgent, childDepth)
+    const children = childrenOf.get(key) ?? []
+    for (let i = children.length - 1; i >= 0; i--) {
+      pending.push({ span: children[i]!, enclosingNodeId: nodeId, enclosingAgent: nodeAgent, depth: childDepth })
+    }
   }
 
-  for (const root of childrenOf.get(null) ?? []) walk(root, null, null, 0)
-
-  // Child totals roll UP whole subtrees, so a driver's own turns and the work
-  // it delegated are never summed into one figure the reader cannot split.
+  // Children appear after their parent in order, so reverse order computes each subtotal once.
   const subtotal = new Map<string, SpendRoll>()
-  const subtotalOf = (key: string): SpendRoll => {
-    const cached = subtotal.get(key)
-    if (cached !== undefined) return cached
-    const node = building.get(key)
-    if (node === undefined) return ZERO_ROLL
-    subtotal.set(key, ZERO_ROLL) // cycle guard: a self-parented span cannot recurse forever
+  for (let i = order.length - 1; i >= 0; i--) {
+    const key = order[i]!
+    const node = building.get(key)!
     let total = node.driver
-    for (const child of node.childNodeIds) total = mergeRolls(total, subtotalOf(child))
+    for (const child of node.childNodeIds) total = mergeRolls(total, subtotal.get(child)!)
     subtotal.set(key, total)
-    return total
   }
 
   const nodes: SpanRunNode[] = order.map((key) => {
     const node = building.get(key)!
     let children = ZERO_ROLL
-    for (const child of node.childNodeIds) children = mergeRolls(children, subtotalOf(child))
+    for (const child of node.childNodeIds) children = mergeRolls(children, subtotal.get(child)!)
     return {
       traceId: node.span.trace_id,
       spanId: node.span.span_id,
@@ -377,7 +375,7 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
     llmSpansWithoutTokens,
     llmSpansWithoutCost,
     orphanSpans,
-    readError: null,
+    readError: placed === spans.length ? null : `${spans.length - placed} span(s) have cyclic containment and cannot be placed`,
   }
 }
 

@@ -200,10 +200,17 @@ const identity = (a: Record<string, unknown>, own: readonly OtlpSpan[]): Pick<Ra
 /** A supervisor can name the native session only on its session boundary. Other
  * producers describe nested agents by span containment. Resolve both per trace,
  * including a tool without a session tag below an explicitly identified parent. */
-function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
+function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<string>): RawNode[] {
   const traces = new Map<string, OtlpSpan[]>()
   const sessions = new Map<string, OtlpSpan[]>()
   const nodes: RawNode[] = []
+  const enclosing = new Map<string, Set<string>>()
+  function rememberParent(id: string, parent: string | undefined): void {
+    if (!parent || parent === id) return
+    const parents = enclosing.get(id)
+    if (parents) parents.add(parent)
+    else enclosing.set(id, new Set([parent]))
+  }
   function append(groups: Map<string, OtlpSpan[]>, id: string, span: OtlpSpan): void {
     const group = groups.get(id)
     if (group) group.push(span)
@@ -219,14 +226,21 @@ function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
       return str(s.attributes['session.id']) ?? str(s.attributes['traces.session.id']) ??
         (nativeId && native.has(nativeId) ? nativeId : null)
     }
+    const byId = new Map(trace.map((s) => [s.span_id, s]))
     if (trace.every((s) => declaredSession(s) !== null)) {
-      for (const s of trace) append(sessions, declaredSession(s)!, s)
+      for (const s of trace) {
+        const id = declaredSession(s)!
+        append(sessions, id, s)
+        const parent = s.parent_span_id ? byId.get(s.parent_span_id) : undefined
+        if (parent) rememberParent(id, declaredSession(parent) ?? undefined)
+      }
       continue
     }
-    const byId = new Map(trace.map((s) => [s.span_id, s]))
     const owners = new Map<string, string>()
     const named = new Set<string>()
-    for (const boundary of buildSpanRunTree(trace, 'behavior').nodes) {
+    const tree = buildSpanRunTree(trace, 'behavior')
+    if (tree.readError) unknowns.add(tree.readError)
+    for (const boundary of tree.nodes) {
       const root = byId.get(boundary.spanId)!
       // A span id is only unique within its trace, including for orphan roots.
       const nativeRootId = root.name === 'session' && root.parent_span_id === null
@@ -242,6 +256,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
         if (session === null) own.push(span)
         else {
           named.add(session)
+          if (span.parent_span_id) rememberParent(session, owners.get(span.parent_span_id))
           append(sessions, session, span)
         }
       }
@@ -258,7 +273,10 @@ function groupNodes(spans: readonly OtlpSpan[], now: number): RawNode[] {
     own.sort(byStart)
     const root = own.find((s) => s.name === 'session') ?? own.find((s) => s.parent_span_id === null) ?? own[0]!
     const a = root.attributes
-    const parent = str(a['tangle.harness_session.parent']) ?? str(a['traces.parent_session_id'])
+    const recordedParents = enclosing.get(id)
+    if (recordedParents && recordedParents.size > 1) unknowns.add(`session ${id} has several enclosing span owners`)
+    const structuralParent = recordedParents?.size === 1 ? [...recordedParents][0]! : null
+    const parent = str(a['tangle.harness_session.parent']) ?? str(a['traces.parent_session_id']) ?? structuralParent
     nodes.push({ id, label: str(a['tangle.node.label']) ?? str(a['gen_ai.agent.name']) ?? id, parent,
       depth: num(a['tangle.node.depth']) ?? 0, state: str(a['tangle.node.state']), profile: str(a['agent.profile.name']),
       ...identity(a, own), start: ts(own[0]!.start_time), end: own.reduce((max, s) => Math.max(max, endOf(s, now)), 0),
@@ -545,6 +563,7 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: 
   let inputSpans = 0
   let observedCalls = 0
   let unplaced = 0
+  const topologyGaps = new Set<string>()
   return {
     add(all) {
       const distinct = distinctSpans(all)
@@ -555,7 +574,7 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: 
       observedCalls += spans.filter((span) => isToolSpan(span) && !isInheritedSpan(span.attributes)).length
       // A Codex lifecycle span stands for another session's thread (a child it spawned, or the parent it answered),
       // whose records are in that session's file: that session is the node, never a callless stand-in.
-      for (const n of groupNodes(spans, now)) {
+      for (const n of groupNodes(spans, now, topologyGaps)) {
         if (n.thread === null || n.spans.some((span) => isToolSpan(span) && !isInheritedSpan(span.attributes))) {
           read.push(readNode(n, acc))
         }
@@ -568,7 +587,7 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: 
         throw Object.assign(new Error(`could attribute ${attributed} of ${observedCalls} observed tool calls to a node`), { code: 'no-outcome' })
       }
       if (!attributed) throw Object.assign(new Error('no tool spans; categories unavailable'), { code: 'no-outcome' })
-      const unknowns = [...sourceGaps]
+      const unknowns = [...new Set([...sourceGaps, ...topologyGaps])]
       if (unplaced) unknowns.push(`${unplaced} span(s) have no usable start time and cannot be placed in a window`)
       return runResult(read, acc, windowMs / 1000, spanCount, { input_spans: inputSpans, tool_calls: attributed, unknowns })
     },
