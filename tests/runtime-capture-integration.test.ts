@@ -121,6 +121,13 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
     const unmatchedMeter = unplaced.find((item) => item.attributes['traces.runtime.node_id'] === 'journal-sibling')
     expect(unmatchedMeter).toBeDefined()
     expect(unmatchedMeter!.attributes[SESSION_TOTAL_INPUT_ATTR]).toBeUndefined()
+    await journal.appendEvent(root, { kind: 'spawned', id: 'bound-meter', parent: root, label: 'worker', runtime: 'cli', budget: {}, at, seq: seq++ })
+    await journal.appendEvent(root, { kind: 'materialized', id: 'bound-meter', receipt: materialization({ ...bindings[0]!, sessionId: 'meter-bridge' }), at, seq: seq++ })
+    await journal.appendEvent(root, { kind: 'metered', id: 'bound-meter', spend: spend(13), at, seq: seq++ })
+    await writeFile(separateFile, serializeSpans([{ ...separate, attributes: { ...separate.attributes, 'cli_bridge.session.id': 'other-bridge' } }]))
+    const disjoint = await readRefSpans(dir)
+    expect(disjoint.find((item) => item.attributes['traces.runtime.node_id'] === 'bound-meter')?.attributes[SESSION_TOTAL_INPUT_ATTR]).toBe(13)
+    expect(disjoint.find((item) => item.attributes['traces.runtime.node_id'] === 'journal-sibling')?.attributes[SESSION_TOTAL_INPUT_ATTR]).toBeUndefined()
     await rm(separateFile)
     await rm(join(dir, 'team.otlp.jsonl'))
     // A capture claims bytes, so losing them is an error, never permission to use request-only spans.
@@ -165,3 +172,25 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
     expect(noCapture.stderr).toContain('no records could be read')
   } finally { await rm(dir, { recursive: true, force: true }) }
 }, 60_000)
+
+it('reports a single journal child’s exclusive meter when retained OTLP covers its parent', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'traces-orphan-meter-'))
+  const root = 'retained-root', child = 'journal-child', at = '2026-10-17T10:00:00.000Z'
+  try {
+    const journal = new FileSpawnJournal(join(dir, 'spawn-journal.jsonl'))
+    await journal.beginTree(root, at)
+    await journal.appendEvent(root, { kind: 'spawned', id: root, label: root, runtime: 'cli', budget: {}, at, seq: 0 })
+    await journal.appendEvent(root, { kind: 'spawned', id: child, parent: root, label: child, runtime: 'cli', budget: {}, at, seq: 1 })
+    await journal.appendEvent(root, { kind: 'metered', id: child, spend: { tokens: { input: 5, output: 1 }, usd: 0, ms: 1, iterations: 0 }, at, seq: 2 })
+    const otlp = span({ traceId: '8'.repeat(32), spanId: '7'.repeat(16), kind: 'AGENT', name: root, startTime: at,
+      extra: { 'tangle.run.id': root, 'tangle.node.id': root } })
+    await writeFile(join(dir, 'retained.otlp.jsonl'), serializeSpans([
+      otlp,
+      span({ traceId: otlp.trace_id, spanId: '6'.repeat(16), parentSpanId: otlp.span_id, kind: 'LLM', name: 'call', startTime: at, inputTokens: 7, outputTokens: 3 }),
+    ]))
+    const result = await runCli(['facts', dir, '--format', 'json', '--no-content'])
+    expect(result.code, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout).sessions.map((sheet: { tokens: { input: number; output: number } }) =>
+      [sheet.tokens.input, sheet.tokens.output])).toEqual([[7, 3], [5, 1]])
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

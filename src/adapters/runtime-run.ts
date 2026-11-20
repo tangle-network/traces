@@ -12,7 +12,7 @@ import { spanKey } from '../span-identity.js'
 export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string): Promise<{
   spans: OtlpSpan[]; unknowns: string[]; retained?: OtlpInput
 }> {
-  const { selected, unbound, materialized } = await readRuntimeCaptures(runDir, expectedRunId)
+  const { selected, unbound, materialized, meteredSessions } = await readRuntimeCaptures(runDir, expectedRunId)
   const retained = await readOtlpInput(runDir, { allowEmptyDirectory: true })
   // Preserve the raw OTLP integrity report and avoid an extra journal fold when there is no possible node join.
   if (!selected && retained.files.length && !retained.spans.some(({ attributes }) =>
@@ -33,18 +33,24 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
   }
   const spans = [...(selected?.spans ?? [])]
   const unknowns = new Set([...unbound, ...(selected?.unknowns ?? [])])
-  const owners = retainedOwners(retained.spans, nodes, runId, materialized, selected)
+  const { owners, bridgeSessions } = retainedOwners(retained.spans, nodes, runId, materialized, selected)
+  const unplacedSessions = new Set<string | undefined>()
   let unidentified = 0
   let separateSessions = 0
   let overlaps = 0
   for (const item of retained.spans) {
-    const owner = owners.get(spanKey(item.trace_id, item.span_id))
+    const key = spanKey(item.trace_id, item.span_id)
+    const owner = owners.get(key)
     if (owner === CAPTURED) { overlaps++; continue }
-    if (owner === SEPARATE_SESSION) separateSessions++
+    if (owner === SEPARATE_SESSION) {
+      separateSessions++
+      unplacedSessions.add(bridgeSessions.get(key))
+    }
     else if (owner) included.add(owner)
     else {
       unidentified++
       if (selected) continue
+      unplacedSessions.add(bridgeSessions.get(key))
     }
     spans.push(item)
   }
@@ -54,8 +60,8 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
   if (overlaps) unknowns.add(`Bound native captures supersede ${overlaps} of ${retained.spans.length} retained OTLP spans.`)
   if (unidentified) unknowns.add(selected
     ? `Ownership is ambiguous for ${unidentified} of ${retained.spans.length} retained OTLP spans. They were excluded to avoid duplicate native usage.`
-    : `Ownership is ambiguous for ${unidentified} of ${retained.spans.length} retained OTLP spans. Additional journal nodes retain topology without usage.`)
-  if (separateSessions) unknowns.add(`A distinct backend session contributed ${separateSessions} retained spans without a Runtime node binding. Additional journal usage cannot be separated.`)
+    : `Ownership is ambiguous for ${unidentified} of ${retained.spans.length} retained OTLP spans. Journal meters without a disjoint session binding are excluded.`)
+  if (separateSessions) unknowns.add(`A distinct backend session contributed ${separateSessions} retained spans without a Runtime node binding. Journal meters without a disjoint session binding are excluded.`)
   const sharedSessions = new Set<string>()
   for (const [session, materializations] of materialized) {
     if (selected?.sessions.has(session)) for (const node of materializations) sharedSessions.add(node)
@@ -64,10 +70,15 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
   for (const item of journal.spans) {
     const node = String(item.attributes['traces.runtime.node_id'])
     if (included.has(node)) continue
-    if ((!selected && unidentified) || separateSessions || selected?.nodes.has(node) || sharedSessions.has(node)) {
+    const meter = meteredSessions.get(node)
+    const overlap = unplacedSessions.size > 0 && (unplacedSessions.has(undefined) || !meter ||
+      [...meter].some((session) => session === undefined || unplacedSessions.has(session)))
+    const shared = (selected?.nodes.has(node) || sharedSessions.has(node)) &&
+      (!meter || [...meter].some((session) => session === undefined || selected?.sessions.has(session)))
+    if (overlap || shared) {
       delete item.attributes[SESSION_TOTAL_INPUT_ATTR]
       delete item.attributes[SESSION_TOTAL_OUTPUT_ATTR]
-      if (sharedSessions.has(node) || selected?.nodes.has(node)) unknowns.add('A journal node shares a captured Bridge session. Its separate driver usage is unknown.')
+      if (shared) unknowns.add('A journal node shares a captured Bridge session. Its separate driver usage is unknown.')
     }
     spans.push(item)
   }
@@ -90,14 +101,17 @@ function retainedOwners(spans: readonly OtlpSpan[], nodes: Set<string>, runId: u
   const byId = new Map(spans.map((item) => [spanKey(item.trace_id, item.span_id), item]))
   const nativeSpans = new Set(native?.spans.map((item) => spanKey(item.trace_id, item.span_id)))
   const owners = new Map<string, Owner>()
+  const bridgeSessions = new Map<string, string>()
   for (const span of spans) {
     let item: OtlpSpan | undefined = span
     let owner: Owner = null
-    const trail: Array<{ key: string; separate: boolean }> = []
+    let inheritedBridge: string | undefined
+    const trail: Array<{ key: string; separate: boolean; bridge: string | undefined }> = []
     while (item) {
       const key = spanKey(item.trace_id, item.span_id)
-      if (owners.has(key)) { owner = owners.get(key)!; break }
-      const step = { key, separate: false }
+      if (owners.has(key)) { owner = owners.get(key)!; inheritedBridge = bridgeSessions.get(key); break }
+      const bridge = item.attributes['cli_bridge.session.id']
+      const step = { key, separate: false, bridge: typeof bridge === 'string' && bridge ? bridge : undefined }
       trail.push(step)
       owners.set(key, null) // Unresolved if the parent chain cycles.
       const attrs = item.attributes
@@ -123,12 +137,14 @@ function retainedOwners(spans: readonly OtlpSpan[], nodes: Set<string>, runId: u
       step.separate = !!native && typeof attrs['cli_bridge.backend.session_id'] === 'string' && !!attrs['cli_bridge.backend.session_id']
       item = item.parent_span_id ? byId.get(spanKey(item.trace_id, item.parent_span_id)) : undefined
     }
-    for (const { key, separate } of trail.reverse()) {
+    for (const { key, separate, bridge } of trail.reverse()) {
       if (owner === null && separate) owner = SEPARATE_SESSION
+      inheritedBridge = bridge ?? inheritedBridge
+      if (inheritedBridge) bridgeSessions.set(key, inheritedBridge)
       owners.set(key, owner)
     }
   }
-  return owners
+  return { owners, bridgeSessions }
 }
 
 async function readRuntimeJournalSpans(runDir: string, expectedRunId: string | undefined, unbound: readonly string[]) {
@@ -245,13 +261,15 @@ function assertRuntimeCaptureBinding(binding: HarnessTranscriptBinding, events: 
 
 /** Keep native session containment; Bridge request spans and journal spend would count it twice. An unbound capture is left to the run's other sources. */
 async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Promise<{
-  selected?: BoundCaptures; unbound: string[]; materialized: Map<string, Set<string>>
+  selected?: BoundCaptures; unbound: string[]; materialized: Map<string, Set<string>>; meteredSessions: Map<string, Set<string | undefined>>
 }> {
   const journal = await readSpawnJournal(runDir, { invalid: 'skip' })
   const blobs = new FileResultBlobStore(join(runDir, 'blobs'))
   const sessions = new Map<string, RuntimeNativeCapture>()
   const prefixes = new Map<string, SpawnEvent[]>()
   const materialized = new Map<string, Set<string>>()
+  const activeBridge = new Map<string, string>()
+  const meteredSessions = new Map<string, Set<string | undefined>>()
   const unknowns = new Set<string>([
     'Capture bindings identify whole native sessions; per-request record scope is unavailable.',
   ])
@@ -263,11 +281,18 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
     const events = prefixes.get(row.root) ?? []
     events.push(row.event)
     prefixes.set(row.root, events)
-    if (row.event.kind === 'materialized' && row.event.receipt.status === 'known' && row.event.receipt.execution.kind === 'session') {
+    if (row.event.kind === 'spawned' || row.event.kind === 'materialized') activeBridge.delete(row.event.id)
+    if (row.event.kind === 'materialized' && row.event.receipt.status === 'known' && row.event.receipt.backend === 'bridge' && row.event.receipt.execution.kind === 'session') {
       const id = row.event.receipt.execution.id
+      activeBridge.set(row.event.id, id)
       const nodes = materialized.get(id) ?? new Set<string>()
       nodes.add(row.event.id)
       materialized.set(id, nodes)
+    }
+    if (row.event.kind === 'metered') {
+      const sessions = meteredSessions.get(row.event.id) ?? new Set<string | undefined>()
+      sessions.add(activeBridge.get(row.event.id))
+      meteredSessions.set(row.event.id, sessions)
     }
     if (!('harnessTranscript' in row.event)) {
       if (row.event.kind === 'settled') unknowns.add('A settled Runtime node has no transcript receipt and is excluded from native record facts.')
@@ -302,7 +327,7 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
       })
     }
   }
-  if (!available) return { unbound: [...unbound], materialized }
+  if (!available) return { unbound: [...unbound], materialized, meteredSessions }
   // Journal summaries retain their historical recovery; a capture join requires an intact binding log.
   const verified = await readSpawnJournal(runDir)
   if (verified.cursor?.file !== journal.cursor?.file || verified.cursor?.offset !== journal.cursor?.offset
@@ -315,7 +340,7 @@ async function readRuntimeCaptures(runDir: string, expectedRunId?: string): Prom
     nodes: new Set(bindings.map((binding) => binding.node!.nodeId)),
     sessions: new Set([...sessions.keys(), ...bindings.map((binding) => binding.sessionId)]),
     requests: new Set(bindings.flatMap((binding) => binding.runs.map((run) => run.runId))),
-  }, unbound: [...unbound], materialized }
+  }, unbound: [...unbound], materialized, meteredSessions }
 }
 
 async function projectRuntimeCaptures(sessions: Map<string, RuntimeNativeCapture>, unknowns: Set<string>): Promise<OtlpSpan[]> {

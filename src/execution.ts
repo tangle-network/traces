@@ -181,6 +181,17 @@ function sum(values: readonly (number | null)[]): number | null {
 
 /** The tokens of one session from the spans the caller hands it. */
 export function sessionTokens(own: readonly OtlpSpan[], honorRoot = true): SessionTokens {
+  // A Runtime driver's meter is exclusive to its node. The journal parent can
+  // be on a different selected trace when a native or OTLP source covers it.
+  const driver = honorRoot && own.length === 1 ? own[0] : undefined
+  if (driver?.name === 'runtime.agent' && typeof driver.attributes['traces.runtime.node_id'] === 'string') {
+    const input = count(driver.attributes[SESSION_TOTAL_INPUT_ATTR])
+    const output = count(driver.attributes[SESSION_TOTAL_OUTPUT_ATTR])
+    if (input !== null || output !== null) return {
+      input, output, cacheRead: null, cacheWrite: null, reasoning: null, modelCalls: 0, byModel: [], spanIds: [driver.span_id],
+      unavailable: input === null || output === null ? 'the Runtime driver recorded only one token channel' : null,
+    }
+  }
   const calls = own.map(callUsage).filter((call): call is CallUsage => call !== null)
   const counted = (span: OtlpSpan) => count(span.attributes[SESSION_TOTAL_INPUT_ATTR]) !== null && count(span.attributes[SESSION_TOTAL_OUTPUT_ATTR]) !== null
   const root = own.find((span) => span.parent_span_id === null && counted(span))
