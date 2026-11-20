@@ -88,9 +88,10 @@ export interface TraceQuestionCitation {
   readonly resolved: boolean
 }
 
-export interface TraceQuestionAnswer extends Pick<TraceQuestion, 'dimensionKeys'> {
+export interface TraceQuestionAnswer {
   readonly id: string
   readonly question: string
+  readonly dimensionKeys?: readonly string[]
   readonly status: 'answered' | 'failed'
   readonly failure?: { readonly kind: TraceQuestionFailureKind; readonly message: string }
   /** The engine's prose answer, verbatim. Null when the engine returned none. */

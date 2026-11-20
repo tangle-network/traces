@@ -45,11 +45,10 @@ export interface TraceInvestigationOptions {
   readonly harness: string
   /** Sessions the selection skipped because they could not be read: each is a question the trace cannot answer. */
   readonly unread?: readonly UnreadSessionFact[]
-  /** Options of the facts sheet: the window, the agent identity lookup, content, and
-   * whether a trace's folded subagent scopes are reported as separate sheets. However
-   * many sheets one trace emits, its findings and tool errors are counted once per
-   * session scope, never once per sheet of the same trace. */
-  readonly facts?: Pick<SessionFactsReportOptions, 'window' | 'agentIdentity' | 'includeContent' | 'includeSubagents'>
+  /** Options for the facts sheet and for attributing findings to folded subagents. */
+  readonly facts?: Pick<SessionFactsReportOptions, 'window' | 'agentIdentity' | 'includeContent'> & {
+    readonly includeSubagents?: SessionFactsReportOptions['includeSubagents']
+  }
   /** Your own analysts instead of agent-eval's built-in behavioral analyst (`analyzeSpans`). */
   readonly registry?: AnalystRegistry
   readonly minLoopOccurrences?: number

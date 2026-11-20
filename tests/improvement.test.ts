@@ -145,7 +145,7 @@ describe('runTraceInvestigation over one trace two sessions share', () => {
     expect(scoped.facts.sourceDigest).toBe(whole.facts.sourceDigest)
     const sheetIds = scoped.facts.sessions.map((session) => session.sessionId ?? session.traceId)
     expect(sheetIds[0]).toBe(SHARED_TRACE_SESSION_ID)
-    expect(new Set(sheetIds)).toHaveLength(2)
+    expect(new Set(sheetIds).size).toBe(2)
     expect(scoped.facts.sessions.every((session) => session.traceId === traceId)).toBe(true)
     const workerSessionId = sheetIds[1]!
 
