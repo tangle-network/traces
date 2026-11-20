@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"pi-example","timestamp":"2026-01-01T00:00:06Z","cwd":"/example"}
+{"type":"message","id":"message-1","timestamp":"2026-01-01T00:00:07Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"read","arguments":{}}]}}
+{"type":"message","id":"message-2","parentId":"message-1","timestamp":"2026-01-01T00:00:08Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"read","content":[],"isError":true}}

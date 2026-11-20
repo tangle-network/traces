@@ -1,0 +1,3 @@
+{"type":"metadata","protocol_version":"[REDACTED:fixture-content]"}
+{"timestamp":"2026-01-01T00:00:09Z","message":{"type":"ToolCall","payload":{"id":"call-1","function":{"name":"read","arguments":"{}"}}}}
+{"timestamp":"2026-01-01T00:00:10Z","message":{"type":"ToolResult","payload":{"tool_call_id":"call-1","return_value":{"output":"","is_error":false}}}}

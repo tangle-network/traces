@@ -1,0 +1,3 @@
+{"type":"metadata","protocol_version":"1.5"}
+{"type":"context.append_loop_event","time":"2026-01-01T00:00:11Z","event":{"type":"tool.call","id":"call-1","function":{"name":"read","arguments":"{}"}}}
+{"type":"context.append_loop_event","time":"2026-01-01T00:00:12Z","event":{"type":"tool.result","tool_call_id":"call-1","return_value":{"output":"","is_error":false}}}
