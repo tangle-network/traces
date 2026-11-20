@@ -1110,7 +1110,7 @@ async function cmdAsk(args: CliArgs): Promise<void> {
   // Any kind, not only `error`: the hint is decided by the message, and a
   // mismatch that also exhausted the budget still needs the reinstall line.
   const hint = failed.some((answer) => isBridgeMismatchError(answer.failure?.message ?? ''))
-    ? ` The DSPy bridge protocol is version-locked: TRACES_PYTHON needs agent-eval-rpc[dspy]==${bridgeVersion()}, or unset it to let uv run that version.`
+    ? ` TRACES_PYTHON needs agent-eval-rpc[dspy]==${bridgeVersion()}, or unset it to let uv run that version.`
     : ''
   throw new CliError(
     `${failed.length} of ${result.questions.length} question(s) unanswered ` +

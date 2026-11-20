@@ -27,9 +27,9 @@ const BRIDGE_MODULE = 'agent_eval_rpc.dspy_rlm_bridge'
 export const ANALYST_MAX_OUTPUT_TOKENS = 16_384
 
 /**
- * The PyPI version of `agent-eval-rpc`, the Python bridge, that speaks this
- * package's engine protocol: its installed `@tangle-network/agent-eval` version.
- * Other versions can refuse its exact-key input before a model call.
+ * Select the Python bridge for the installed JS engine. The affected releases
+ * shipped the same DSPy RPC implementation. Its compatible patch keeps the
+ * planner from overriding the execution profile on a reasoning-capable model.
  */
 export function bridgeVersion(): string {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.resolve('@tangle-network/agent-eval')), 'utf8')) as {
@@ -39,6 +39,7 @@ export function bridgeVersion(): string {
   if (typeof version !== 'string' || !version) {
     throw new Error('installed agent-eval package has no version')
   }
+  if (/^(?:1\.0\.(?:3[2-9]|40)|2\.0\.[01])$/u.test(version)) return '2.0.2'
   return version
 }
 

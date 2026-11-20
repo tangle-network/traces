@@ -159,10 +159,7 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
         artifact: { schemaVersion: 1, harness: 'codex', binding: negative.binding, files: [{ path: 'sessions/rollout.jsonl', content: text, bytes: Buffer.byteLength(text) }], skipped: [] },
       }, blobs)
       await negativeJournal.appendEvent(root, { kind: 'settled', id: valid.node!.nodeId, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 0, output: 0 }, usd: 0, ms: 0, iterations: 0 }, seq: 4, at })
-      const refused = await runCli(['facts', dir, '--format', 'json', '--no-content'])
-      expect(refused.code, refused.stderr).toBe(2)
-      expect(refused.stdout).toBe('')
-      expect(refused.stderr).toContain(negative.reason)
+      await expect(readRefSpans(dir)).rejects.toThrow(negative.reason)
     }
     // With no capture at all, the existing zero-record refusal remains in force.
     await rm(join(dir, 'spawn-journal.jsonl'))
