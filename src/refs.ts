@@ -22,13 +22,13 @@
  */
 
 import type { Stats } from 'node:fs'
-import { open, readFile, stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { CODEX_HOME_RULE, codexHomes, isCodexHome, type SessionRef as NativeRef } from '@tangle-network/harness-sessions'
+import { CODEX_HOME_RULE, codexHomes, isCodexHome, isNativeStoreDatabase, nativeStoreSessions, type SessionRef as NativeRef } from '@tangle-network/harness-sessions'
 import { ATTR } from '@tangle-network/agent-trace-contract'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
-import { readsStoreRoots, type HarnessSessionsAdapter } from './adapters/harness-sessions.js'
+import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { detectEvidenceFormat, exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
 import { readJsonl } from './jsonl.js'
 import type { OtlpSpan } from './otlp.js'
@@ -207,58 +207,50 @@ function adapterFor(harness: string): HarnessTraceAdapter {
   return adapter
 }
 
-const SQLITE_HEADER = Buffer.from('SQLite format 3\0')
-
-async function isSqliteDatabase(path: string): Promise<boolean> {
-  const handle = await open(path, 'r')
-  try {
-    const head = Buffer.alloc(SQLITE_HEADER.length)
-    const { bytesRead } = await handle.read(head, 0, head.length, 0)
-    return bytesRead === head.length && head.equals(SQLITE_HEADER)
-  } finally {
-    await handle.close()
-  }
-}
-
 async function sqliteSessionRef(path: string, ref: string, selector: string | undefined, options: ResolveRefOptions): Promise<ResolvedRef> {
   if (selector !== undefined && (!selector.startsWith('session=') || selector === 'session=')) {
     throw new RefError(`${ref}: select a native session with #session=<exact native id>`, 'usage')
   }
   const id = selector?.slice('session='.length)
   const absolute = resolve(path)
-  const selected = options.harness ? [adapterFor(options.harness)] : listAdapters()
-  const adapters = selected.filter(readsStoreRoots).filter((adapter) => adapter.readsSqlite())
-  if (adapters.length === 0) {
+  const selected = options.harness ? adapterFor(options.harness) : undefined
+  if (selected && (!readsStoreRoots(selected) || !selected.readsSqlite())) {
     throw new RefError(`${ref}: --harness ${options.harness} does not read a SQLite session store`, 'usage')
   }
-  const found: Array<{ adapter: HarnessSessionsAdapter; row: NativeRef }> = []
-  const failures: string[] = []
-  for (const adapter of adapters) {
-    try {
-      const rows = await adapter.sessionsInStore(absolute, id)
-      found.push(...rows.map((row) => ({ adapter, row })))
-    } catch (error) {
-      failures.push(`${adapter.harness}: ${errorText(error)}`)
+  let rows: NativeRef[]
+  try {
+    rows = await nativeStoreSessions(absolute, { harness: selected?.harness, nativeSessionId: id })
+  } catch (error) {
+    // The SDK requires a harness for a mixed schema. Resolve its choices for the CLI diagnostic.
+    if (!selected && error instanceof Error && !('code' in error)) {
+      const catalogs = await Promise.allSettled(listAdapters().filter(readsStoreRoots)
+        .filter(adapter => adapter.readsSqlite())
+        .map(adapter => nativeStoreSessions(absolute, { harness: adapter.nativeHarness })))
+      const choices = catalogs.flatMap(catalog => catalog.status === 'fulfilled' ? catalog.value : [])
+      if (new Set(choices.map(row => row.harness)).size > 1) {
+        throw new RefError(`${path} contains multiple native harnesses; select one with --harness`, 'ambiguous',
+          choices.map(row => ({ harness: row.harness, sessionId: row.nativeSessionId, path: absolute })))
+      }
     }
+    throw new RefError(`${path}: ${errorText(error)}`, 'unreadable')
   }
-  if (found.length === 0) {
-    const reason = failures.length > 0 ? ` (${failures.join('; ')})` : ''
-    throw new RefError(id
-      ? `${path} has no exact native session ${id}${reason}`
-      : `${path} is not a recognized native session SQLite store${reason}`, 'unreadable')
+  if (!rows.length) {
+    throw new RefError(id ? `${path} has no exact native session ${id}` : `${path} is not a recognized native session SQLite store`, 'unreadable')
   }
-  if (found.length > 1) {
-    throw new RefError(`${path} contains ${found.length} matching native sessions; select one with #session=<exact native id>`, 'ambiguous',
-      found.map(({ adapter, row }) => ({ harness: adapter.harness, sessionId: row.nativeSessionId, path: absolute })))
+  if (rows.length > 1) {
+    throw new RefError(`${path} contains ${rows.length} matching native sessions; select one with #session=<exact native id>`, 'ambiguous',
+      rows.map(row => ({ harness: row.harness, sessionId: row.nativeSessionId, path: absolute })))
   }
-  const { adapter, row } = found[0]!
+  const row = rows[0]!
+  const adapter = adapterFor(row.harness)
+  if (!readsStoreRoots(adapter)) throw new RefError(`${row.harness} has no native store reader`, 'unreadable')
   return { kind: 'session', ref, adapter, session: adapter.bindNativeRef(row) }
 }
 
 async function fileRef(path: string, ref: string, selector: string | undefined, options: ResolveRefOptions): Promise<ResolvedRef> {
   if (options.format) return { kind: 'spans', ref, path, reader: options.format, ...(selector ? { selector } : {}) }
   // A retained database can have any name, even inside another harness's inferred store root.
-  if (await isSqliteDatabase(path)) return sqliteSessionRef(path, ref, selector, options)
+  if (await isNativeStoreDatabase(path)) return sqliteSessionRef(path, ref, selector, options)
   const sniffed = options.harness ? { kind: 'session' as const, harness: options.harness } : await sniffTraceFile(path)
   if (sniffed.kind === 'spans') return { kind: 'spans', ref, path, reader: sniffed.reader, ...(selector ? { selector } : {}) }
   if (selector) throw new RefError(`${ref}: a #selector picks a run from a span file; ${path} is a ${sniffed.harness} session`, 'usage')

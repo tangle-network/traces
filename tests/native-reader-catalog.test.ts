@@ -217,11 +217,11 @@ describe('native reader catalog', () => {
     expect(JSON.parse(refused.stderr)).toMatchObject({ code: 'unreadable' })
 
     const conflict = join(root, 'conflict.db')
-    const conflictDb = await database(conflict, `
-      CREATE TABLE sessions (id TEXT PRIMARY KEY);
-      CREATE TABLE session_windows (session_id TEXT PRIMARY KEY);`)
-    conflictDb.prepare('INSERT INTO sessions VALUES (?)').run(HERMES_A)
-    conflictDb.prepare('INSERT INTO session_windows VALUES (?)').run(OPENCLAW_A)
+    const corpus = join(import.meta.dirname, 'fixtures', 'native-tools')
+    const [hermesSchema, openclawSchema] = await Promise.all(
+      ['hermes/hermes-example.sql', 'openclaw/openclaw-example.sql'].map(file => readFile(join(corpus, file), 'utf8')),
+    )
+    const conflictDb = await database(conflict, hermesSchema + '\n' + openclawSchema)
     conflictDb.close()
     const conflicting = await run(['facts', conflict, '--format', 'json'])
     expect(conflicting.code).toBe(2)

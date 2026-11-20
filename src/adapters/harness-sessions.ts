@@ -2,7 +2,7 @@
  * Traces keeps selection and trace-specific presentation here; the shared reader
  * alone interprets the harness's records, model calls, tools, and token usage. */
 import { homedir } from 'node:os'
-import { legacyOpencodeFile, nativeRef, sessionRefKey, tracesRef, type SupportedHarness } from './harness-refs.js'
+import { legacyOpencodeFile, nativeRef, sessionRefKey, tracesRef } from './harness-refs.js'
 import { createReadStream } from 'node:fs'
 import { open, stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
@@ -16,7 +16,7 @@ import {
   type HarnessSession,
   type SessionRef as NativeRef,
 } from '@tangle-network/harness-sessions'
-import { nativePresentation, nativeSessionsInStore, nativeSourcePaths, nativeStoreVersion, readsSqlite } from './native-stores.js'
+import { nativePresentation, nativeStoreVersion, storedSession } from './native-stores.js'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
 import {
@@ -637,7 +637,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   private readonly legacyOpencode: OpencodeAdapter | undefined
   private readonly scopedAdapter: ClaudeAdapter | CodexAdapter | undefined
 
-  constructor(readonly nativeHarness: SupportedHarness, displayHarness?: string, aliases: readonly string[] = []) {
+  constructor(readonly nativeHarness: string, displayHarness?: string, aliases: readonly string[] = []) {
     this.reader = readerFor(nativeHarness)
     this.harness = displayHarness ?? nativeHarness
     this.aliases = aliases
@@ -647,9 +647,8 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   get nativeStores(): ReturnType<typeof readerFor>['stores'] { return this.reader.stores }
-  readsSqlite(): boolean { return readsSqlite(this.reader) }
-  async sessionsInStore(path: string, nativeSessionId?: string): Promise<NativeRef[]> { return nativeSessionsInStore(this.reader, path, nativeSessionId) }
-  async storeVersion(ref: SessionRef): Promise<string> { return nativeStoreVersion(this.reader, await this.sourcePaths(ref)) }
+  readsSqlite(): boolean { return this.reader.sqlite !== undefined }
+  async storeVersion(ref: SessionRef): Promise<string> { return nativeStoreVersion(await this.sourcePaths(ref)) }
 
   /**
    * Sessions under `home` through the shared reader, which reads the recorded
@@ -696,8 +695,10 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async sourcePaths(ref: SessionRef): Promise<readonly string[]> {
-    if (this.legacyOpencode && legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.sourcePaths(ref)
-    const paths = await nativeSourcePaths(this.reader, (await this.resolveNativeRef(ref))?.files ?? [ref.path])
+    if (this.legacyOpencode && await legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.sourcePaths(ref)
+    // Ask the owner again: a writer may have created or checkpointed a sidecar since discovery.
+    if (this.readsSqlite()) return (await storedSession(this.nativeHarness, ref)).files
+    const paths = (await this.resolveNativeRef(ref))?.files ?? [ref.path]
     if (this.nativeHarness !== 'factory-droids') return paths
     const settings = ref.path.replace(/\.jsonl$/u, '.settings.json')
     if (paths.includes(settings)) return paths
@@ -737,7 +738,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
-    if (this.legacyOpencode && legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.parse(ref, options)
+    if (this.legacyOpencode && await legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.parse(ref, options)
     // Scoped/cited reads retain their existing projection; ordinary sessions use the shared fold.
     if (this.scopedAdapter && (options.taskScope === 'latest' || options.taskScope === 'turn' || options.captureSources)) {
       return this.scopedAdapter.parse(ref, options)
@@ -754,14 +755,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     options.signal?.throwIfAborted()
     let source = options.includeSubagents === false && this.nativeHarness === 'claude-code'
       ? nativeRef(this.nativeHarness, ref) : await this.resolveNativeRef(ref)
-    if (!source && this.readsSqlite()) {
-      const id = ref.sessionId === ref.path || ref.sessionId.startsWith('unattributed:') ? undefined : ref.sessionId
-      const matches = await this.sessionsInStore(ref.path, id)
-      if (matches.length !== 1) {
-        throw new Error(`${this.harness} store ${ref.path} contains ${matches.length} matching sessions; select one native session ID`)
-      }
-      source = matches[0]!
-    }
+    if (!source && this.readsSqlite()) source = await storedSession(this.nativeHarness, ref)
     source ??= nativeRef(this.nativeHarness, ref)
     if (this.scopedAdapter instanceof ClaudeAdapter && source.files.some((path) => basename(path) === 'journal.jsonl')) return this.scopedAdapter.parse(ref, options)
     let session: HarnessSession
