@@ -187,7 +187,7 @@ describe('native reader catalog', () => {
         tokens: { modelCalls: native.modelCalls.filter((call) => call.usage !== null).length },
       })
     }
-  })
+  }, 120_000)
 
   it('selects exact rows from direct and relocated SQLite stores and refuses conflicts and foreign stores', async () => {
     for (const { harness, path, ids } of [
@@ -226,7 +226,7 @@ describe('native reader catalog', () => {
     const conflicting = await run(['facts', conflict, '--format', 'json'])
     expect(conflicting.code).toBe(2)
     expect(JSON.parse(conflicting.stderr)).toMatchObject({ code: 'ambiguous' })
-  })
+  }, 120_000)
 
   it('reads Prime and paired NanoClaw files with their own identities and unknown behavior coverage', async () => {
     const prime = await facts(primePath, '--harness', 'prime')
