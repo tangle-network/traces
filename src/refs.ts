@@ -248,9 +248,8 @@ async function sqliteSessionRef(path: string, ref: string, selector: string | un
 
 async function fileRef(path: string, ref: string, selector: string | undefined, options: ResolveRefOptions): Promise<ResolvedRef> {
   if (options.format) return { kind: 'spans', ref, path, reader: options.format, ...(selector ? { selector } : {}) }
-  // Known JSONL harness stores avoid an extra file open. A copied database may have any name.
-  if ((selector?.startsWith('session=') || options.harness === 'opencode' || (!options.harness && !harnessOfStorePath(path)))
-      && await isSqliteDatabase(path)) {
+  // A retained database can have any name, even inside another harness's inferred store root.
+  if (await isSqliteDatabase(path)) {
     if (options.harness && adapterFor(options.harness).harness !== 'opencode') {
       throw new RefError(`${ref}: this SQLite store requires --harness opencode`, 'usage')
     }
