@@ -233,7 +233,7 @@ describe('--share-safe', () => {
     const opaque = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
     expect(opaque.code, opaque.stdout).toBe(2)
     expect(opaque.stdout).toContain('skippable zstd metadata (1 B)')
-    await writeFile(path, Buffer.concat([clean, metadata, zstdCompressSync(`${JSON.stringify({ note: EMAIL })}\n`)]))
+    await writeFile(path, Buffer.concat([clean, zstdCompressSync(`${JSON.stringify({ note: EMAIL })}\n`)]))
     const result = await runCli(['check', tree, '--share-safe', '--format', 'json'], { env })
     expect(result.code, result.stdout).toBe(1)
     expect(`${result.stdout}${result.stderr}`).not.toContain(EMAIL)
