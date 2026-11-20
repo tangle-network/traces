@@ -458,7 +458,6 @@ async function pathRef(ref: string, options: ResolveRefOptions): Promise<Resolve
 export async function resolveRefs(refs: readonly string[], options: ResolveRefOptions = {}): Promise<ResolvedRef[]> {
   const byPath = await Promise.all(refs.map((ref) => pathRef(ref, options)))
   const roots = byPath.flat().filter((ref): ref is Extract<ResolvedRef, { kind: 'store-root' }> => ref?.kind === 'store-root')
-  if (!roots.length) throw new Error(`cyclic containment in branch "${branch}"`)
   if (roots.length > 1) {
     throw new RefError(`name one store root per command, not ${roots.length}: ${roots.map((root) => root.ref).join(', ')}`, 'usage')
   }
