@@ -315,16 +315,20 @@ describe('traces analyze <otlp file>', () => {
     for (const entry of cannotAnswer) expect(written).toContain(entry.reason)
   })
 
-  it('degrades instead of crashing on a trace the span model cannot represent', async () => {
+  it('refuses conflicting measurements and preserves the raw conformance diagnosis', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'traces-analyze-dupe-'))
     const rows = conformingRows() as Record<string, unknown>[]
     const conflicting = { ...rows[1], name: 'a different call entirely' }
     const path = await writeRows(dir, 'spans.otlp.jsonl', [...rows, conflicting, 'not json object'])
 
     const result = await runCli(['analyze', path, '--format', 'json'])
-    expect(result.code).toBe(0)
-    const analysis = JSON.parse(result.stdout) as AnalysisJson
-    expect(analysis.conformance.findings.map((finding) => finding.code)).toContain('duplicate-span-id')
+    expect(result.code).toBe(2)
+    expect(result.stdout).toBe('')
+    expect(JSON.parse(result.stderr)).toMatchObject({ code: 'unreadable', error: expect.stringContaining(`${path}:5`) })
+    const diagnosis = await runCli(['check', path, '--contract', 'conformance', '--format', 'json'])
+    expect(diagnosis.code).toBe(0)
+    expect(diagnosis.stdout).toContain('conflicting-span-id')
+    expect(diagnosis.stdout).toContain('duplicate-span-id')
   })
 
   it('reports a multi-shot cell re-declaring its ancestors as repeats, not as defects', async () => {
