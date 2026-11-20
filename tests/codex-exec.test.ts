@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
+import { CLI } from './run-cli.js'
 import { CodexExecAdapter, CodexExecStreamError } from '../src/adapters/codex-exec.js'
 import { resolveAdapter } from '../src/registry.js'
 import { parseSession } from '../src/session-source.js'
@@ -41,7 +42,7 @@ function kind(spans: Awaited<ReturnType<CodexExecAdapter['parse']>>, value: stri
 }
 
 async function cli(args: readonly string[]): Promise<string> {
-  const { stdout } = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+  const { stdout } = await execFileAsync(process.execPath, [CLI, ...args], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: dir, NO_COLOR: '1', FORCE_COLOR: '' },
     maxBuffer: 10 * 1024 * 1024,

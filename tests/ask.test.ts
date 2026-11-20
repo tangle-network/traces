@@ -12,10 +12,9 @@ import { join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ASK_KEY, type BridgeScript, type EndpointReply, type FakeEndpoint, startEndpoint, writeAskSession, writeStubBridge } from './fixtures/ask.js'
 import { CLI, type CliRun, runCli } from './run-cli.js'
+import { bridgeVersion } from '../src/analyst-model-call.js'
 
-const AGENT_EVAL = (JSON.parse(await readFile(new URL('../package.json', import.meta.resolve('@tangle-network/agent-eval')), 'utf8')) as {
-  version: string
-}).version
+const PYTHON_BRIDGE_VERSION = bridgeVersion()
 
 interface Answers {
   ok: boolean
@@ -129,7 +128,7 @@ describe('traces ask: before it spends', () => {
     expect(error.code).toBe('setup')
     expect(error.error).toContain('TANGLE_API_KEY')
     expect(error.error).toContain('install uv')
-    expect(error.error).toContain(`TRACES_PYTHON to a Python with agent-eval-rpc[dspy]==${AGENT_EVAL}`)
+    expect(error.error).toContain(`TRACES_PYTHON to a Python with agent-eval-rpc[dspy]==${PYTHON_BRIDGE_VERSION}`)
     expect(error.error).toContain('Nothing was spent')
     expect(run.endpoint.requests).toHaveLength(0)
     expect(existsSync(out)).toBe(false)
@@ -193,7 +192,7 @@ describe('traces ask: answers', () => {
     })
     expect(run.code, run.stderr).toBe(0)
     const [call] = (await readFile(uvx.log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { argv: string[] })
-    expect(call!.argv.slice(0, 6)).toEqual(['--from', `agent-eval-rpc[dspy]==${AGENT_EVAL}`, 'python', '-m', 'agent_eval_rpc.dspy_rlm_bridge', '--max-input-bytes'])
+    expect(call!.argv.slice(0, 6)).toEqual(['--from', `agent-eval-rpc[dspy]==${PYTHON_BRIDGE_VERSION}`, 'python', '-m', 'agent_eval_rpc.dspy_rlm_bridge', '--max-input-bytes'])
   })
 
   it('exits 2 with code partial when only some questions are answered, and still writes every answer', async () => {
@@ -217,7 +216,7 @@ describe('traces ask: answers', () => {
     expect(error.code).toBe('partial')
     expect(error.error).toContain('2 of 3 question(s) unanswered (q2: unresolved-citations, q3: error)')
     // A bridge that is missing or the wrong version gets the line that fixes it.
-    expect(error.error).toContain(`agent-eval-rpc[dspy]==${AGENT_EVAL}, or unset it to let uv run that version`)
+    expect(error.error).toContain(`agent-eval-rpc[dspy]==${PYTHON_BRIDGE_VERSION}, or unset it to let uv run that version`)
     const answers = JSON.parse(await readFile(join(out, 'answers.json'), 'utf8')) as Answers
     expect(answers.questions.map((answer) => [answer.id, answer.status, answer.failure?.kind ?? null])).toEqual([
       ['q1', 'answered', null],

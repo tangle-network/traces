@@ -2,7 +2,7 @@
  * Traces keeps selection and trace-specific presentation here; the shared reader
  * alone interprets the harness's records, model calls, tools, and token usage. */
 import { homedir } from 'node:os'
-import { nativeRef, tracesRef, type SupportedHarness } from './harness-refs.js'
+import { legacyOpencodeFile, nativeRef, sessionRefKey, tracesRef, type SupportedHarness } from './harness-refs.js'
 import { createReadStream } from 'node:fs'
 import { open, stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
@@ -654,14 +654,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     const found = await this.reader.locate(home, { nativeSessionId: opts.nativeSessionId, sinceMs: opts.sinceMs, cwd: opts.cwd })
     const refs = found
       .filter((native) => this.nativeHarness !== 'claude-code' || native.parentNativeSessionId === null)
-      .map((native) => {
-        const ref = tracesRef(native, this.harness)
-        // Claude Code and Codex parse a file ref the way an explicit session
-        // path parses, so the same session reads the same whichever way it
-        // was named. A shared store (OpenCode) needs the reader's own ref.
-        if (!this.scopedAdapter) this.refs.set(`${ref.sessionId}\0${ref.path}`, native)
-        return ref
-      })
+      .map((native) => this.bindNativeRef(native))
     if (this.legacyOpencode) {
       // This machine's own legacy store follows XDG_DATA_HOME; a store root's sits in its layout.
       const own = resolve(home) === resolve(ownHome())
@@ -669,6 +662,11 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
       refs.push(...legacy.filter((ref) => opts.nativeSessionId === undefined || ref.sessionId === opts.nativeSessionId))
     }
     return refs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  }
+
+  /** Keep the native store and its source files when selection names a specific row. */
+  bindNativeRef(native: NativeRef): SessionRef {
+    return tracesRef(native, this.harness, this.scopedAdapter ? undefined : this.refs)
   }
 
   /** Sessions under HOME, or under the store root `opts.home` names, through the shared reader. */
@@ -692,7 +690,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async sourcePaths(ref: SessionRef): Promise<readonly string[]> {
-    if (this.legacyOpencode && !ref.path.endsWith('.db')) return this.legacyOpencode.sourcePaths(ref)
+    if (this.legacyOpencode && legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.sourcePaths(ref)
     const paths = (await this.resolveNativeRef(ref))?.files ?? [ref.path]
     if (this.nativeHarness !== 'factory-droids') return paths
     const settings = ref.path.replace(/\.jsonl$/u, '.settings.json')
@@ -707,7 +705,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   private async resolveNativeRef(ref: SessionRef): Promise<NativeRef | undefined> {
-    const key = `${ref.sessionId}\0${ref.path}`
+    const key = sessionRefKey(ref)
     const cached = this.refs.get(key)
     if (cached) return cached
     if (this.scopedAdapter instanceof ClaudeAdapter) {
@@ -733,7 +731,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
-    if (this.legacyOpencode && !ref.path.endsWith('.db')) return this.legacyOpencode.parse(ref, options)
+    if (this.legacyOpencode && legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.parse(ref, options)
     // Scoped/cited reads retain their existing projection; ordinary sessions use the shared fold.
     if (this.scopedAdapter && (options.taskScope === 'latest' || options.taskScope === 'turn' || options.captureSources)) {
       return this.scopedAdapter.parse(ref, options)

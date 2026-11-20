@@ -1,5 +1,5 @@
 /**
- * Formatting primitives shared by every `traces watch <target>` view.
+ * Display formatting for trace listings, findings and run views.
  *
  * Two rules live here rather than in each renderer, because they are the whole
  * reason this view exists and a second copy would eventually disagree with the
@@ -15,9 +15,14 @@
  * to survive SSH, a CI log, and a pipe into a file.
  */
 
-import type { SpendRoll } from './supervisor-run-context.js'
+import { exactCount, type SpendRoll } from './spend-roll.js'
 
 export const RULE = '─'.repeat(76)
+
+export const oneLine = (text: string, cap: number): string => {
+  const line = text.replace(/\s+/gu, ' ').trim()
+  return line.length > cap ? `${line.slice(0, cap - 1)}…` : line
+}
 
 export function int(n: number): string {
   return n.toLocaleString('en-US')
@@ -62,8 +67,13 @@ export function zeroPricedCost(roll: SpendRoll): boolean {
   return roll.usdKnownRecords > 0 && roll.usd === 0 && roll.tokensIn + roll.tokensOut > 0
 }
 
+export function recordedCount(roll: SpendRoll, channel: 'iterations' | 'tokensIn' | 'tokensOut'): string {
+  if (exactCount(roll, channel) !== null) return int(roll[channel])
+  return roll[channel] > 0 ? `at least ${int(roll[channel])}` : 'unknown'
+}
+
 export function tokens(roll: SpendRoll): string {
-  return `in ${int(roll.tokensIn)} · out ${int(roll.tokensOut)}`
+  return `in ${recordedCount(roll, 'tokensIn')} · out ${recordedCount(roll, 'tokensOut')}`
 }
 
 export const STATUS_MARK: Record<string, string> = {

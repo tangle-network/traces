@@ -28,6 +28,7 @@ import {
 } from '@tangle-network/agent-eval/pipelines'
 import { isInheritedSpan, isSubagentSpan, isSynthesizedSpan } from './adapters/provenance.js'
 import { appendAll } from './arrays.js'
+import { oneLine } from './run-view-format.js'
 import {
   failureFollowUpReport,
   failureFollowUpSequences,
@@ -456,11 +457,6 @@ function finding(input: {
     session: input.session,
     observedAt: input.observedAt,
   }
-}
-
-export const oneLine = (text: string, cap: number): string => {
-  const line = text.replace(/\s+/gu, ' ').trim()
-  return line.length > cap ? `${line.slice(0, cap - 1)}…` : line
 }
 
 /**

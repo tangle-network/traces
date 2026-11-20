@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { FileResultBlobStore, FileSpawnJournal, contentAddress, persistHarnessTranscript, type HarnessTranscriptBinding, type ProfileMaterializationReceipt } from '@tangle-network/agent-runtime/kernel'
 import { expect, it } from 'vitest'
 import { readRefSpans } from '../src/refs.js'
-import { computeSessionFacts } from '../src/session-facts.js'
+import { buildSessionFactsReport, computeSessionFacts } from '../src/session-facts.js'
 import { SESSION_TOTAL_INPUT_ATTR } from '../src/attributes.js'
 import { serializeSpans, span } from '../src/otlp.js'
 import { codexRollout } from './fixtures/home.js'
@@ -106,7 +106,19 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
     expect(JSON.parse(combinedFacts.stdout).sessions).toEqual(expect.arrayContaining([
       expect.objectContaining({ sessionId: nativeSessionId, toolCalls: expect.objectContaining({ value: 1 }) }),
       expect.objectContaining({ sessionId: 'retained-session', tokens: expect.objectContaining({ input: 7, output: 3 }) }),
+      expect.objectContaining({ tokens: expect.objectContaining({ input: 5, output: 1 }) }),
     ]))
+    const sdkFacts = buildSessionFactsReport(combined)
+    const file = join(dir, 'compare.otlp.jsonl')
+    const converted = await runCli(['convert', dir, '--no-content', '--out', file])
+    expect(converted.code, converted.stderr).toBe(0)
+    const reopened = await runCli(['facts', file, '--format', 'json'])
+    expect(reopened.code, reopened.stderr).toBe(0)
+    await rm(file)
+    for (const report of [JSON.parse(combinedFacts.stdout), JSON.parse(reopened.stdout)]) {
+      expect(report.sessions.map((sheet: { tokens: object }) => sheet.tokens)).toEqual(sdkFacts.sessions.map(sheet => sheet.tokens))
+      expect(report.selection?.unreadSessions).toEqual(sdkFacts.selection?.unreadSessions)
+    }
     const unknowns = JSON.parse(String(combined[0]!.attributes['traces.source.unknowns'])) as string[]
     expect(unknowns).toEqual(expect.arrayContaining([
       expect.stringContaining('Bound native captures supersede 1 of 4 retained OTLP spans'),
@@ -159,10 +171,7 @@ it('selects bound native records over Bridge requests, deduplicates reentry, and
         artifact: { schemaVersion: 1, harness: 'codex', binding: negative.binding, files: [{ path: 'sessions/rollout.jsonl', content: text, bytes: Buffer.byteLength(text) }], skipped: [] },
       }, blobs)
       await negativeJournal.appendEvent(root, { kind: 'settled', id: valid.node!.nodeId, status: 'done', harnessTranscript: receipt, spent: { tokens: { input: 0, output: 0 }, usd: 0, ms: 0, iterations: 0 }, seq: 4, at })
-      const refused = await runCli(['facts', dir, '--format', 'json', '--no-content'])
-      expect(refused.code, refused.stderr).toBe(2)
-      expect(refused.stdout).toBe('')
-      expect(refused.stderr).toContain(negative.reason)
+      await expect(readRefSpans(dir)).rejects.toThrow(negative.reason)
     }
     // With no capture at all, the existing zero-record refusal remains in force.
     await rm(join(dir, 'spawn-journal.jsonl'))

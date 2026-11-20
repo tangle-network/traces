@@ -38,9 +38,9 @@ import {
   isRecordedToolCall,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { ATTR, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
+import { ATTR, hasRuntimeDriverMeter, isRuntimeJournalNode, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
-import { groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
+import { factScopes, groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { childModelBySpawn, foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -814,9 +814,8 @@ function excludedTurnFacts(
     .map(({ reason, author, spanIds }) => ({ reason, author, turns: spanIds.length, spanIds }))
 }
 
-/** A span the adapter built from one of the session's records: not the root, not an integrity receipt. */
 function isRecordSpan(span: OtlpSpan): boolean {
-  return span.parent_span_id !== null && span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] === undefined
+  return (span.parent_span_id !== null || hasRuntimeDriverMeter(span)) && span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] === undefined
 }
 
 /**
@@ -826,7 +825,7 @@ function isRecordSpan(span: OtlpSpan): boolean {
  */
 export function computeSessionFacts(spans: readonly OtlpSpan[], options: SessionFactsOptions = {}): SessionFacts[] {
   const bounds = windowBounds(options.window)
-  return groupByTrace(spans, options.includeSubagents)
+  return groupByTrace(spans).flatMap(trace => factScopes(trace, options.includeSubagents))
     .sort((left, right) => compareIds(left.traceId, right.traceId))
     .map((group) => readSession(group.traceId, group.sessionId, group.spans, options, bounds).facts)
 }
@@ -1167,7 +1166,7 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
   return {
     add(spans, constituentTraceIds) {
       for (const trace of groupByTrace(spans)) {
-        const constituent = constituentTraceIds?.has(trace.traceId) === true
+        const constituent = constituentTraceIds?.has(trace.traceId) === true || trace.spans.some(isRuntimeJournalNode)
         const original = selectSourceSpans(trace, options.includeSubagents, scope => select(scope, constituent))
         if (!original.length) continue
         const digest = createHash('sha256')
@@ -1553,8 +1552,8 @@ export function readSessionIndex(
 
 /** `in 2.1M · out 310k · cache read 88M · $38.20 list price (Router rates)`, or why a part is unknown. */
 function renderTokens(tokens: SessionTokens, cost: SessionCost): string {
-  if (tokens.input === null) return `unknown: ${tokens.unavailable}`
-  const parts = [`in ${tokenCount(tokens.input)}`, `out ${tokenCount(tokens.output ?? 0)}`]
+  if (tokens.input === null && tokens.output === null) return `unknown: ${tokens.unavailable}`
+  const parts = [`in ${tokens.input === null ? 'unknown' : tokenCount(tokens.input)}`, `out ${tokens.output === null ? 'unknown' : tokenCount(tokens.output)}`]
   if ((tokens.cacheRead ?? 0) > 0) parts.push(`cache read ${tokenCount(tokens.cacheRead!)}`)
   if ((tokens.cacheWrite ?? 0) > 0) parts.push(`cache write ${tokenCount(tokens.cacheWrite!)}`)
   parts.push(cost.usd === null ? `cost unknown (${cost.unavailable})` : `$${cost.usd.toFixed(cost.usd < 1 ? 4 : 2)} ${cost.label}`)

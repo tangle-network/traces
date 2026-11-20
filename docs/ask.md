@@ -36,7 +36,7 @@ An `answerSchema` makes the answer one JSON value a scorer can compare; it accep
 
 ## Setup and refusals
 
-`ask` needs `TANGLE_API_KEY` (or `OPENAI_API_KEY` with `OPENAI_BASE_URL`) and the DSPy bridge: with `uv` installed it runs `uvx --from agent-eval-rpc[dspy]==<version>`, or `TRACES_PYTHON` names a Python that has it. A missing key or bridge exits 2 with `code: setup` before anything is read or spent.
+`ask` needs `TANGLE_API_KEY` (or `OPENAI_API_KEY` with `OPENAI_BASE_URL`) and the DSPy bridge: with `uv` installed it runs `uvx --from agent-eval-rpc[dspy]==<version>`, or `TRACES_PYTHON` names a Python that has it. Traces selects a compatible bridge for the installed JS engine. Its planner uses the reasoning settings from the execution profile. A missing key or bridge exits 2 with `code: setup` before anything is read or spent.
 
 | Refusal from the endpoint | What `ask` does |
 |---|---|

@@ -1,6 +1,6 @@
 /** Session scopes over normalized spans. Child projection never reads a native store. */
 import { distinctSpans } from './span-identity.js'
-import { ATTR, indexSessionIdsByTrace } from './attributes.js'
+import { ATTR, hasRuntimeDriverMeter, indexSessionIdsByTrace } from './attributes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { isSubagentSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
@@ -23,8 +23,8 @@ export function unreadTraceGroup(group: TraceGroup, windowed: boolean): UnreadSe
   }
 }
 
-/** Group traces unchanged by default; optionally expose folded children as exclusive scopes. */
-export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = false): TraceGroup[] {
+/** Group original spans once, before selecting node scopes or hashing source evidence. */
+export function groupByTrace(spans: readonly OtlpSpan[]): TraceGroup[] {
   const unique = distinctSpans(spans)
   const { sessionByTrace } = indexSessionIdsByTrace(unique)
   const byTrace = new Map<string, OtlpSpan[]>()
@@ -33,10 +33,13 @@ export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = fals
     if (group) group.push(span)
     else byTrace.set(span.trace_id, [span])
   }
-  return [...byTrace].flatMap(([traceId, traceSpans]) => {
-    const parent = { traceId, sessionId: sessionByTrace.get(traceId) ?? null, spans: traceSpans }
-    return includeSubagents ? canonicalNodeScopes(parent) : [parent]
-  })
+  return [...byTrace].map(([traceId, traceSpans]) => ({ traceId, sessionId: sessionByTrace.get(traceId) ?? null, spans: traceSpans }))
+}
+
+/** Runtime driver meters are exclusive to their node, including when their spans arrive in an export. */
+export function factScopes(trace: TraceGroup, includeSubagents?: boolean): TraceGroup[] {
+  const split = includeSubagents ?? trace.spans.some(hasRuntimeDriverMeter)
+  return split ? canonicalNodeScopes(trace) : [trace]
 }
 
 /** A parent's sheet can include folded child records. A source receipt binds the selected
@@ -44,7 +47,7 @@ export function groupByTrace(spans: readonly OtlpSpan[], includeSubagents = fals
 export function selectSourceSpans(
   trace: TraceGroup, includeSubagents: boolean | undefined, select: (group: TraceGroup) => boolean,
 ): readonly OtlpSpan[] {
-  const scopes = includeSubagents ? canonicalNodeScopes(trace) : [trace]
+  const scopes = factScopes(trace, includeSubagents)
   const selected = scopes.filter(select)
   if (!selected.length) return []
   if (selected.length === scopes.length) return trace.spans
