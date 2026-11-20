@@ -37,6 +37,24 @@ const row = (name: string, kind: string, spanId: string, extra: Record<string, u
 })
 
 describe('traces behavior', () => {
+  it('keeps native session identity and links a coordinating actor only when the selected spans agree', async () => {
+    const root = row('session', 'AGENT', '0000000000000001', { 'tangle.node.id': 'director' })
+    const tool = (attributes: Record<string, unknown>) => row('Read', 'TOOL', '0000000000000002', attributes)
+    for (const [name, rows, expected] of [
+      ['bound', [root, tool({ 'traces.runtime.node_id': 'director' })], 'director'],
+      ['ambiguous', [root, tool({ 'tangle.node.id': 'worker' })], null],
+      ['unbound', [row('session', 'AGENT', '0000000000000001'), tool({ 'agent.name': 'director' })], null],
+    ] as const) {
+      const file = join(dir, `${name}.jsonl`)
+      await writeFile(file, rows.join('\n') + '\n')
+      const result = await runCli(['behavior', file, '--format', 'json'], { env })
+      expect(result.code, result.stderr).toBe(0)
+      const report = JSON.parse(result.stdout) as BehaviorResult
+      expect(report.nodes).toMatchObject([{ id: 'x', agent_id: expected, tool_calls: 1 }])
+      expect(report.coverage?.unknowns.some(gap => gap.includes('conflicting actor IDs'))).toBe(name === 'ambiguous')
+    }
+  })
+
   it('through the module: three nodes, the s2:s0 streak as a looping window, idle windows, steers with read latency, the calibration table', async () => {
     const input = await readOtlpInput(FIXTURE)
     const result = behaviorFromSpans(input.spans)

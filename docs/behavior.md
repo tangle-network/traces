@@ -9,7 +9,7 @@ traces behavior run/otlp/                                                       
 traces behavior run.otlp.jsonl --format json | jq '.windows[] | select(.category == "looping")'
 ```
 
-Recordings can mix explicit `session.id` values, native session IDs and agent boundaries in the OTLP parent tree. Behavior assigns each observed tool call to one node. A native session keeps its identity across input files. For a boundary with only span identity, its node ID contains both its trace ID and its span ID. Parent references can join sessions in different files. A fork’s inherited transcript belongs to the original session.
+Recordings can mix explicit `session.id` values, native session IDs and agent boundaries in the OTLP parent tree. Behavior assigns each observed tool call to one node. A native session keeps its identity across input files. For a boundary with only span identity, its node ID contains both its trace ID and its span ID. Parent references can join sessions in different files. Each node keeps its session `id`. Its `agent_id` names the coordinating actor when the producer recorded a consistent binding. A missing or conflicting binding gives `null`. A fork’s inherited transcript belongs to the original session.
 
 The JSON `coverage` gives the count of unique input spans, the tool calls actually attributed, and any known gaps in the selected sources. Two refs containing the same OTLP span count once. A run with no recorded calls cannot support a behavior verdict. A partial run can report what its sources cover. Text output names the same gaps. Naming a session also checks its workflow references. A time sweep covers sessions in the selected window.
 

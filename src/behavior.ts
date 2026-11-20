@@ -85,6 +85,8 @@ const isCalibrated = (cat: string): boolean => (CLASSES as Partial<Record<string
 
 /** One node: `by_cat` is minutes per category; `z` is the robust z per anomaly metric against the run's other nodes, null below four known values. */
 export interface BehaviorNode {
+  /** The coordinating actor recorded by the producer. Several native sessions can belong to one actor. */
+  readonly agent_id?: string | null
   readonly id: string; readonly label: string; readonly parent: string | null; readonly depth: number; readonly state: string | null; readonly profile: string | null
   readonly model: string | null; readonly harness: string | null; readonly start: number; readonly end: number; readonly hours: number; readonly by_cat: Readonly<Record<string, number>>
   readonly tool_calls: number; readonly failed: number; readonly fail_rate: number | null; readonly calls_per_hour: number; readonly idle_min: number; readonly streaks: number
@@ -196,6 +198,23 @@ const identity = (a: Record<string, unknown>, own: readonly OtlpSpan[]): Pick<Ra
   model: str(a['agent.model']) ?? str(a['gen_ai.request.model']) ?? dominantModel(own),
   harness: str(a['agent.harness']) ?? str(a['tangle.harness']) ?? resolveAdapter(String(a['service.name'] ?? ''))?.harness ?? null,
 })
+
+/** Only a recorded binding can join a session to its coordinating actor. */
+function recordedAgentId(id: string, spans: readonly OtlpSpan[], unknowns: Set<string>): string | null {
+  let actor: string | null = null
+  for (const { attributes } of spans) {
+    for (const key of ['tangle.node.id', 'traces.runtime.node_id']) {
+      const candidate = str(attributes[key])
+      if (candidate === null) continue
+      if (actor !== null && candidate !== actor) {
+        unknowns.add(`session ${id} records conflicting actor IDs`)
+        return null
+      }
+      actor = candidate
+    }
+  }
+  return actor
+}
 
 /** A supervisor can name the native session only on its session boundary. Other
  * producers describe nested agents by span containment. Resolve both per trace,
@@ -500,7 +519,7 @@ interface Mark { readonly t: number; readonly cat: BehaviorCategory; readonly sp
 interface ReadNode { readonly node: BehaviorNode; readonly n: Omit<RawNode, 'spans'>; readonly marks: Mark[]; readonly segs: Segment[]; readonly streaks: BehaviorStreak[]; readonly turns: number[] }
 interface Accumulator { flags: BehaviorFlag[]; streaks: BehaviorStreak[]; stalls: BehaviorStall[]; edges: BehaviorMailEdge[]; spawned: Map<string, Spawn> }
 
-function readNode({ spans, ...n }: RawNode, acc: Accumulator): ReadNode {
+function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<string>): ReadNode {
   const ev = nodeEvents({ ...n, spans })
   const segs = segments(ev, n, acc.stalls)
   const streaks = failingStreaks(ev, n.id)
@@ -514,6 +533,7 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator): ReadNode {
   const known = ev.filter((e) => e.tokens_in != null)
   const lastActive = [...segs].reverse().find((s) => s.cat !== 'idle')
   const node: BehaviorNode = {
+    agent_id: recordedAgentId(n.id, spans, unknowns),
     id: n.id, label: n.label, parent: n.parent, depth: n.depth, state: n.state, profile: n.profile, model: n.model, harness: n.harness,
     start: n.start, end: n.end, hours: round(hours, 2), by_cat: Object.fromEntries(Object.entries(byCat).map(([k, v]) => [k, round(v / 60, 1)])),
     tool_calls: calls.length, failed: failedCalls.length, fail_rate: calls.length ? round(failedCalls.length / calls.length, 3) : null,
@@ -607,7 +627,7 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000 }: 
       // whose records are in that session's file: that session is the node, never a callless stand-in.
       for (const n of groupNodes(spans, now, topologyGaps)) {
         if (n.thread === null || n.spans.some(isRecordedToolCall)) {
-          read.push(readNode(n, acc))
+          read.push(readNode(n, acc, topologyGaps))
         }
       }
     },
