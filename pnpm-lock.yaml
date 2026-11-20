@@ -177,13 +177,13 @@ importers:
     dependencies:
       '@tangle-network/agent-eval':
         specifier: ^1.0.32 || ^2.0.0
-        version: 2.0.1
+        version: 2.0.2
       '@tangle-network/agent-interface':
         specifier: ^5.10.28
         version: 5.10.28
       '@tangle-network/agent-runtime':
         specifier: ^10.0.10
-        version: 10.0.10(@tangle-network/agent-eval@2.0.1)(@tangle-network/agent-interface@5.10.28)(@tangle-network/sandbox@1.0.487)
+        version: 10.0.10(@tangle-network/agent-eval@2.0.2)(@tangle-network/agent-interface@5.10.28)(@tangle-network/sandbox@1.0.487)
       '@tangle-network/agent-trace-contract':
         specifier: ^2.2.2
         version: 2.2.2
@@ -658,8 +658,8 @@ packages:
       '@modelcontextprotocol/sdk':
         optional: true
 
-  '@tangle-network/agent-eval@2.0.1':
-    resolution: {integrity: sha512-0imUdt8UOU0DjT/FcFznkA9R3dT1SSuWJpSnDtNbCOIqcJmjnH6k6UfDtQKzQcE6j3iMG6L2IYx4UiLYNw++XA==}
+  '@tangle-network/agent-eval@2.0.2':
+    resolution: {integrity: sha512-4DcNLVkJt6t4f8Udxz+MSA6b9I5vRBnzlhe+l/rOdTswrn++yY55R+G0NVgeNevn5Fnf1H4ejhivJp0vX2h5iQ==}
     engines: {node: '>=20.19.0'}
     hasBin: true
     peerDependencies:
@@ -1549,7 +1549,7 @@ snapshots:
       '@tangle-network/agent-trace-contract': 2.2.2
       zod: 4.6.7
 
-  '@tangle-network/agent-eval@2.0.1':
+  '@tangle-network/agent-eval@2.0.2':
     dependencies:
       '@asteasolutions/zod-to-openapi': 9.1.0(zod@4.6.7)
       '@hono/node-server': 2.1.8(hono@4.13.18)
@@ -1571,9 +1571,9 @@ snapshots:
       spdx-expression-parse: 5.0.0
       zod: 4.6.7
 
-  '@tangle-network/agent-knowledge@23.0.7(@tangle-network/agent-eval@2.0.1)(@tangle-network/agent-interface@5.10.28)':
+  '@tangle-network/agent-knowledge@23.0.7(@tangle-network/agent-eval@2.0.2)(@tangle-network/agent-interface@5.10.28)':
     dependencies:
-      '@tangle-network/agent-eval': 2.0.1
+      '@tangle-network/agent-eval': 2.0.2
       '@tangle-network/agent-interface': 5.10.28
       '@types/proper-lockfile': 4.1.4
       proper-lockfile: 4.1.2
@@ -1583,13 +1583,13 @@ snapshots:
     dependencies:
       '@tangle-network/agent-interface': 5.10.28
 
-  '@tangle-network/agent-runtime@10.0.10(@tangle-network/agent-eval@2.0.1)(@tangle-network/agent-interface@5.10.28)(@tangle-network/sandbox@1.0.487)':
+  '@tangle-network/agent-runtime@10.0.10(@tangle-network/agent-eval@2.0.2)(@tangle-network/agent-interface@5.10.28)(@tangle-network/sandbox@1.0.487)':
     dependencies:
       '@earendil-works/pi-codemode': 1.5.0
       '@tangle-network/agent-core': 1.0.3
-      '@tangle-network/agent-eval': 2.0.1
+      '@tangle-network/agent-eval': 2.0.2
       '@tangle-network/agent-interface': 5.10.28
-      '@tangle-network/agent-knowledge': 23.0.7(@tangle-network/agent-eval@2.0.1)(@tangle-network/agent-interface@5.10.28)
+      '@tangle-network/agent-knowledge': 23.0.7(@tangle-network/agent-eval@2.0.2)(@tangle-network/agent-interface@5.10.28)
       '@tangle-network/agent-profile-materialize': 1.1.144(@tangle-network/agent-interface@5.10.28)
       '@tangle-network/agent-trace-contract': 2.2.2
       '@tangle-network/harness-sessions': 1.0.13
