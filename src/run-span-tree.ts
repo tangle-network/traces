@@ -40,7 +40,7 @@ import {
   LLM_OUTPUT_TOKEN_ATTR_KEYS,
 } from '@tangle-network/agent-eval/trace-attributes'
 import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
-import { isInheritedSpan, isRecordedToolCall } from './adapters/provenance.js'
+import { isInheritedSpan, isRecordedToolCall, SUBAGENT_SPAWN_ATTR } from './adapters/provenance.js'
 import { isUsageAggregate } from './attributes.js'
 import { exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
@@ -85,6 +85,8 @@ export interface SpanRunNode {
   readonly kind: string | null
   /** Source span IDs attributed exclusively to this boundary by this same fold. */
   readonly spanIds: readonly string[]
+  /** The owning tool explicitly delegated these records inside its own session. */
+  readonly delegated?: true
   /** The enclosing NODE's span id — not necessarily the raw parent span. */
   readonly parentNodeId: string | null
   readonly label: string
@@ -208,6 +210,7 @@ function epoch(value: string): number {
 
 interface Building {
   readonly span: OtlpSpan
+  readonly delegated?: true
   readonly parentNodeId: string | null
   readonly depth: number
   readonly agent: string | null
@@ -253,6 +256,15 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
 
   const building = new Map<string, Building>()
   const order: string[] = []
+  function openNode(span: OtlpSpan, parentNodeId: string | null, depth: number, agent: string | null, delegated = false): string {
+    const key = spanKey(span.trace_id, span.span_id)
+    building.set(key, { span, parentNodeId, depth, agent, driver: ZERO_ROLL, toolCalls: 0,
+      startMs: epoch(span.start_time), endMs: epoch(span.end_time), errors: [], childNodeIds: [], spanIds: [],
+      ...(delegated ? { delegated: true } : {}) })
+    order.push(key)
+    if (parentNodeId !== null) building.get(parentNodeId)!.childNodeIds.push(key)
+    return key
+  }
   let llmSpansWithoutTokens = 0
   let llmSpansWithoutCost = 0
 
@@ -260,13 +272,13 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
    * Walk the raw span tree, carrying the node each span belongs to. A boundary
    * span opens a node; every other span rolls into the node enclosing it.
    */
-  type Pending = { span: OtlpSpan; enclosingNodeId: string | null; enclosingAgent: string | null; depth: number }
+  type Pending = { span: OtlpSpan; enclosingNodeId: string | null; enclosingAgent: string | null; depth: number; grouped?: boolean }
   const pending: Pending[] = (childrenOf.get(null) ?? []).map((span) => ({
     span, enclosingNodeId: null, enclosingAgent: null, depth: 0,
   })).reverse()
   let placed = 0
   while (pending.length) {
-    const { span, enclosingNodeId, enclosingAgent, depth } = pending.pop()!
+    const { span, enclosingNodeId, enclosingAgent, depth, grouped } = pending.pop()!
     placed++
     const key = spanKey(span.trace_id, span.span_id)
     const agent = firstStringAttr(span.attributes, AGENT_NAME_ATTR_KEYS) ?? enclosingAgent
@@ -274,24 +286,8 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
     let nodeAgent = enclosingAgent
     let childDepth = depth
 
-    if (isNodeBoundary(span, enclosingNodeId, enclosingAgent)) {
-      const node: Building = {
-        span,
-        parentNodeId: enclosingNodeId,
-        depth,
-        agent,
-        driver: ZERO_ROLL,
-        toolCalls: 0,
-        startMs: epoch(span.start_time),
-        endMs: epoch(span.end_time),
-        errors: [],
-        childNodeIds: [],
-        spanIds: [],
-      }
-      building.set(key, node)
-      order.push(key)
-      if (enclosingNodeId !== null) building.get(enclosingNodeId)?.childNodeIds.push(key)
-      nodeId = key
+    if (!grouped && isNodeBoundary(span, enclosingNodeId, enclosingAgent)) {
+      nodeId = openNode(span, enclosingNodeId, depth, agent)
       nodeAgent = agent
       childDepth = depth + 1
     }
@@ -319,8 +315,20 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
     }
 
     const children = childrenOf.get(key) ?? []
+    // In-stream workers can share the caller's session and agent name. Their native
+    // parent_tool_use_id binds their first model call and prompt to the spawning tool.
+    // Keep that tool in the caller and anchor the worker at its first recorded event.
+    const embedded = span.attributes[SUBAGENT_SPAWN_ATTR] === true
+      ? children.filter((child) => child.attributes['agent.parent.confidence'] === 'explicit' &&
+        (spanKind(child) === 'LLM' || child.name === 'user.prompt' || child.name.startsWith('message.')))
+      : []
+    const anchor = embedded[0]
+    const worker = anchor ? openNode(anchor, nodeId, childDepth, firstStringAttr(anchor.attributes, AGENT_NAME_ATTR_KEYS) ?? nodeAgent, true) : null
+    const members = worker ? new Set(embedded) : undefined
     for (let i = children.length - 1; i >= 0; i--) {
-      pending.push({ span: children[i]!, enclosingNodeId: nodeId, enclosingAgent: nodeAgent, depth: childDepth })
+      const child = children[i]!
+      if (worker && members?.has(child)) pending.push({ span: child, enclosingNodeId: worker, enclosingAgent: nodeAgent, depth: childDepth + 1, grouped: true })
+      else pending.push({ span: child, enclosingNodeId: nodeId, enclosingAgent: nodeAgent, depth: childDepth })
     }
   }
 
@@ -343,6 +351,7 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
       spanId: node.span.span_id,
       kind: spanKind(node.span),
       spanIds: node.spanIds,
+      ...(node.delegated ? { delegated: true as const } : {}),
       parentNodeId: node.parentNodeId === null ? null : building.get(node.parentNodeId)!.span.span_id,
       label: node.agent ?? node.span.name,
       depth: node.depth,

@@ -228,7 +228,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     const byId = new Map(trace.map((s) => [s.span_id, s]))
     const missingParents = trace.reduce((count, span) => count + Number(Boolean(span.parent_span_id && !byId.has(span.parent_span_id))), 0)
     if (missingParents) unknowns.add(`${missingParents} span(s) in trace ${traceId} refer to a missing parent`)
-    if (trace.every((s) => declaredSession(s) !== null)) {
+    if (trace.every((s) => declaredSession(s) !== null && s.attributes[SUBAGENT_SPAWN_ATTR] !== true)) {
       for (const s of trace) {
         const id = declaredSession(s)!
         append(sessions, id, s)
@@ -248,11 +248,15 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
         ? sessionIdFromAttributes(root.attributes) : undefined
       const id = nativeRootId ?? `${traceId}/${root.span_id}`
       const parent = root.parent_span_id ? owners.get(root.parent_span_id) ?? null : null
+      const spawn = boundary.delegated && root.parent_span_id ? byId.get(root.parent_span_id) : undefined
+      const callerSession = spawn ? declaredSession(spawn) : null
       const own: OtlpSpan[] = []
       for (const spanId of boundary.spanIds) {
         const span = byId.get(spanId)!
         const inherited = span !== root && span.parent_span_id ? owners.get(span.parent_span_id) : undefined
-        const session = declaredSession(span) ?? (inherited && named.has(inherited) ? inherited : null)
+        const declared = declaredSession(span)
+        const session = boundary.delegated && (!declared || declared === callerSession) ? null
+          : declared ?? (inherited && named.has(inherited) ? inherited : null)
         owners.set(spanId, session ?? id)
         if (session === null) own.push(span)
         else {
