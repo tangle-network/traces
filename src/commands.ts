@@ -430,7 +430,7 @@ const COMMANDS = [
       'A side is a session id or 8+ char prefix or suffix, a session file, OTLP, file#<trace id> or file#branch=<id>.',
       'Calls compare by tool, status and argument (the command, the file, or the input), after each run\'s',
       'cwd, worktree, temp dirs and hex ids become <cwd>, <worktree>, <tmp> and <hex>. Model calls are not compared.',
-      'Exit 0 agree, 1 diverge, 2 could not compare: a side cannot be read, or neither records an outcome.',
+      'Exit 0 for agreement on measured fields, 1 for a recorded difference, 2 for incomplete evidence or unreadable input.',
     ],
     flags: [{ flag: '--format', help: 'text (default) or json' }],
     formats: ['text', 'json'],

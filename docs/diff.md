@@ -13,7 +13,7 @@ A run's steps are its tool calls in containment order; model calls are not steps
 Each call compares by tool, status and argument: the command a shell call ran, the file a file tool touched, or the call's input.
 First each run's own places become placeholders (its cwd and worktree, temp dirs, and hex ids), so two runs of one play in two worktrees agree wherever they did the same thing.
 The first divergence is `changed`, `replaced`, `only-in-a`, `only-in-b` or `reordered`; `--format json` holds every step, and `.diff.firstDivergence.index` is 0-based.
-Exit 0 agree, 1 diverge, 2 could not compare (a side unreadable, or no call records an outcome); a gate treats 2 as unknown, never as a pass.
+Exit 0 requires matching tools, order, outcomes and recorded arguments. An explicit empty argument object counts as a recorded argument. Missing or withheld input leaves the argument comparison unknown. A difference in another measured field still exits 1. If no difference is observable and evidence is incomplete, the CLI exits 2 and the SDK report names the gap in `caveat`.
 
 ## `traces diff --help`
 
@@ -23,7 +23,7 @@ Where two runs of one task split: the first tool call that differs, with both ca
 A side is a session id or 8+ char prefix or suffix, a session file, OTLP, file#<trace id> or file#branch=<id>.
 Calls compare by tool, status and argument (the command, the file, or the input), after each run's
 cwd, worktree, temp dirs and hex ids become <cwd>, <worktree>, <tmp> and <hex>. Model calls are not compared.
-Exit 0 agree, 1 diverge, 2 could not compare: a side cannot be read, or neither records an outcome.
+Exit 0 for agreement on measured fields, 1 for a recorded difference, 2 for incomplete evidence or unreadable input.
 
   --format text|json  text (default) or json
 

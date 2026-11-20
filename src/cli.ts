@@ -673,7 +673,7 @@ async function cmdDiff(args: CliArgs): Promise<void> {
   const { diffRuns, renderRunDiff } = await import('./diff.js')
   const report = await diffRuns(args.refs[0]!, args.refs[1]!)
   if (!report.diff.firstDivergence && report.caveat) {
-    throw new CliError(`the runs' tool calls line up with no difference, but there is no outcome to call agreement on: ${report.caveat}`, 'no-outcome')
+    throw new CliError(`no recorded difference in the tool calls. Comparison incomplete: ${report.caveat}`, 'no-outcome')
   }
   process.stdout.write(args.format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderRunDiff(report))
   if (report.diff.firstDivergence) process.exitCode = 1
