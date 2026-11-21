@@ -1,7 +1,7 @@
 import type { Stats } from 'node:fs'
 import { open, readFile, stat } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
-import { CODEX_HOME_RULE, isCodexHome, listReaders } from '@tangle-network/harness-sessions'
+import { CODEX_HOME_RULE, isCodexHome, listReaders, type HarnessSession } from '@tangle-network/harness-sessions'
 import { nativePresentation } from './adapters/native-stores.js'
 import type { SessionRef } from './types.js'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
@@ -61,7 +61,7 @@ async function headRows(path: string): Promise<unknown[]> {
   return [parsed]
 }
 
-function nativeFormat(row: unknown): string | undefined {
+export function nativeFormat(row: unknown): string | undefined {
   if (!isObject(row)) return undefined
   if ((typeof row.sessionId === 'string' || typeof row.session_id === 'string')
     && typeof row.type === 'string' && ('message' in row || 'uuid' in row || 'subtype' in row)) return 'claude-code'
@@ -117,6 +117,14 @@ export function incompatibleFile(format: FileFormat | undefined, requested: stri
   if (!format) return undefined
   const actual = format.kind === 'session' ? format.harness : format.reader
   return actual === requested ? undefined : `expected ${requested}, found ${actual} records`
+}
+
+// Several native folds observe timestamps before examining the row type. For an
+// unidentified recording, look for evidence that this decoder understood at least one event.
+export function hasDecodedEvent(session: HarnessSession): boolean {
+  return session.messages.length > 0 || session.modelCalls.length > 0 || session.toolCalls.length > 0
+    || session.children.length > 0 || Boolean(session.turnReceipts?.length) || session.usage !== null
+    || session.ending.status !== 'open'
 }
 
 // A file ref is normally resolved and read in the same call. Recheck the bytes if a writer

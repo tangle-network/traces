@@ -5,7 +5,7 @@
  * and XDG_STATE_HOME inside a synthetic home.
  */
 import { spawn } from 'node:child_process'
-import { appendFile, mkdir, mkdtemp, readdir, utimes, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, mkdir, mkdtemp, readdir, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
@@ -83,6 +83,18 @@ describe('turn index: the window answer is the union of whole reads', () => {
     expect(union.length).toBeGreaterThan(10)
     expect(answer.matches).toEqual(byTime(union))
   }, 120_000)
+
+  it('reports a foreign native file in a selected harness store as unreadable on warm and cold reads', async () => {
+    const fx = await makeFixtureHome()
+    const id = '0199f6c0-abcd-7666-8666-666666666666'
+    await copyFile(fx.paths.codex, join(dirname(fx.paths.claude), `${id}.jsonl`))
+    for (let read = 0; read < 2; read++) {
+      const answer = await search(fx.env)
+      const unread = answer.selection.unreadSessions.find(row => row.sessionId === id)
+      expect(unread).toMatchObject({ reason: expect.stringContaining('expected claude-code, found codex records') })
+      expect(answer.matches.some(row => row.sessionId === id)).toBe(false)
+    }
+  })
 
   it('on every session of the conversation home: turns by other hands are never human rows', async () => {
     const fx = await makeConversationHome()

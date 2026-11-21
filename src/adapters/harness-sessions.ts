@@ -30,7 +30,7 @@ import {
 } from '../attributes.js'
 import type { OtlpSpan } from '../otlp.js'
 import { takeJsonl } from '../jsonl.js'
-import { checkNativeFile, isClaudeStreamJson } from '../session-file-format.js'
+import { checkNativeFile, hasDecodedEvent, isClaudeStreamJson, nativeFormat } from '../session-file-format.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { codexActor } from './actor.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
@@ -759,11 +759,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     // A missing timestamp is not epoch work. Exclude it rather than allowing the
     // projection's display fallback to enter measured totals.
     if (!session.startedAt) return []
-    // Several native folds observe any timestamp before examining its row type. An unknown
-    // file needs at least one decoded event to establish that the reader owns this session.
-    if (!this.readsSqlite() && !fileFormat && session.messages.length === 0 && session.modelCalls.length === 0
-      && session.toolCalls.length === 0 && session.children.length === 0 && !session.turnReceipts?.length
-      && !session.usage && session.ending.status === 'open') return []
+    if (!this.readsSqlite() && !fileFormat && !hasDecodedEvent(session)) return []
     let codex: CodexDecoration | undefined
     if (session.harness === 'codex') {
       const head = await takeJsonl<CodexHead>(ref.path, 40, { mode: 'recover', onCorruption: () => {} })
@@ -890,6 +886,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     if (this.nativeHarness !== 'claude-code' && this.nativeHarness !== 'codex') return false
     if (first === undefined) return true
     const records = first.filter((record): record is Record<string, unknown> => record !== null)
+    if (!records.some(record => nativeFormat(record) === this.harness)) return false
     if (this.nativeHarness === 'claude-code') return !records.some((record) => record.type === 'system' && record.subtype === 'init')
     // A forked child is read whole by traces' own reader (`parse`), so the index reads it whole too.
     const head = records.slice(0, 40) as CodexHead[]
