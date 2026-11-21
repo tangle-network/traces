@@ -186,16 +186,17 @@ describe('traces ask: answers', () => {
     expect(answers.questions[0]!.citations).toEqual([expect.objectContaining({ uri: cite(), resolved: true })])
   })
 
-  it('runs the pinned bridge with uv when TRACES_PYTHON is unset', async () => {
+  it('runs the pinned bridge with the caller’s offline cache when TRACES_PYTHON is unset', async () => {
     const bin = join(dir, 'uv-bin')
     await mkdir(bin, { recursive: true })
     const uvx = await writeStubBridge(join(bin, 'uvx'), [{ match: '', answer: `It failed at ${cite()}.` }])
     const run = await ask(['ask', session.path, '--question', 'Which command failed first?', '--budget', '1'], {
-      env: { TRACES_PYTHON: '', PATH: bin },
+      env: { TRACES_PYTHON: '', PATH: bin, UV_OFFLINE: 'true', UV_CACHE_DIR: 'cache for uv', UV_INDEX_URL: 'https://example.invalid/simple' },
     })
     expect(run.code, run.stderr).toBe(0)
-    const [call] = (await readFile(uvx.log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { argv: string[] })
+    const [call] = (await readFile(uvx.log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { argv: string[]; uv: Record<string, unknown> })
     expect(call!.argv.slice(0, 6)).toEqual(['--from', `agent-eval-rpc[dspy]==${PYTHON_BRIDGE_VERSION}`, 'python', '-m', 'agent_eval_rpc.dspy_rlm_bridge', '--max-input-bytes'])
+    expect(call!.uv).toEqual({ offline: 'true', cacheDir: join(process.cwd(), 'cache for uv'), indexPresent: false, modelKeyPresent: false })
   })
 
   it('exits 2 with code partial when only some questions are answered, and still writes every answer', async () => {

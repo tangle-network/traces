@@ -41,6 +41,8 @@ When the model runs inside OpenCode (`opencode/<model>`) or Kimi Code (`kimi-cod
 
 `ask` needs `TANGLE_API_KEY` (or `OPENAI_API_KEY` with `OPENAI_BASE_URL`) and the DSPy bridge: with `uv` installed it runs `uvx --from agent-eval-rpc[dspy]==<version>`, or `TRACES_PYTHON` names a Python that has it. Traces selects a compatible bridge for the installed JS engine. Its planner uses the reasoning settings from the execution profile. A missing key or bridge exits 2 with `code: setup` before anything is read or spent.
 
+For a disconnected device, prepare the pinned bridge in uv’s cache before going offline. `UV_OFFLINE=1` makes uv use cached packages only. Set `UV_CACHE_DIR` to choose a cache. Relative paths start in the directory where you run Traces.
+
 | Refusal from the endpoint | What `ask` does |
 |---|---|
 | 408, 425, 429, 5xx, no connection | retries the call: 2 s doubling to 60 s, 10 attempts, inside the question's deadline |

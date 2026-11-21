@@ -1,5 +1,5 @@
 import { accessSync, constants, readFileSync } from 'node:fs'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import type { AgentProfile } from '@tangle-network/agent-interface'
 import {
   canonicalAgentProfileDigest,
@@ -48,9 +48,18 @@ export function bridgeVersion(): string {
  * `agent-eval-rpc[dspy]` installed), else uv runs the pinned bridge with
  * nothing installed beforehand.
  */
-function bridgeRunner(env: NodeJS.ProcessEnv): { command: string; args?: string[] } {
+function bridgeRunner(env: NodeJS.ProcessEnv) {
   if (env.TRACES_PYTHON) return { command: env.TRACES_PYTHON }
-  return { command: 'uvx', args: ['--from', `agent-eval-rpc[dspy]==${bridgeVersion()}`, 'python', '-m', BRIDGE_MODULE] }
+  const uv: Record<string, string> = {}
+  if (env.UV_OFFLINE !== undefined) uv.UV_OFFLINE = env.UV_OFFLINE
+  // Eval changes directories. Resolve the caller's path and let uv validate an empty value.
+  const cache = env.UV_CACHE_DIR
+  if (cache !== undefined) uv.UV_CACHE_DIR = cache && resolve(cache)
+  return {
+    command: 'uvx',
+    args: ['--from', `agent-eval-rpc[dspy]==${bridgeVersion()}`, 'python', '-m', BRIDGE_MODULE],
+    env: uv,
+  }
 }
 
 /** True when `command` is an executable path, or an executable on PATH. */
