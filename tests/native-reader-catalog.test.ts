@@ -285,6 +285,32 @@ describe('native reader catalog', () => {
     }
   })
 
+  it('preserves a marked Prime session when a device receives a renamed recording', async () => {
+    const received = join(root, 'received-prime')
+    const file = join(received, 'shared-recording.jsonl')
+    const [header, ...messages] = (await readFile(primePath, 'utf8')).trimEnd().split('\n')
+    const sessionId = '01929beb-b5a0-7431-bbf3-0b2329b81627'
+    await mkdir(received)
+    await writeFile(file, [JSON.stringify({ ...JSON.parse(header!), id: sessionId, version: 3, rlmDepth: 0 }), ...messages, ''].join('\n'))
+
+    for (const input of [file, received]) {
+      const report = await facts(input)
+      expect(report.sessions).toHaveLength(1)
+      expect(report.sessions[0]).toMatchObject({ harness: 'prime', sessionId, toolCalls: { value: 1 } })
+    }
+    const wrong = await run(['facts', file, '--harness', 'pi', '--format', 'json'])
+    expect(wrong.code).toBe(2)
+    expect(wrong.stdout).toBe('')
+    expect(wrong.stderr).toContain('found prime records')
+
+    const bundle = join(root, 'portable-prime-bundle')
+    const exported = await run(['bundle', file, '--out', bundle])
+    expect(exported.code, exported.stderr).toBe(0)
+    const manifest = JSON.parse(await readFile(join(bundle, 'manifest.json'), 'utf8'))
+    expect(manifest.provenance).toMatchObject({ sessionId })
+    expect((await run(['bundle', 'verify', bundle, '--format', 'json'])).code).toBe(0)
+  })
+
   it('keeps public SDK rows separate and bundles paired stores and real SQLite sidecars', async () => {
     const [alpha] = await resolveRefs([`${hermesPath}#session=${HERMES_A}`])
     const [beta] = await resolveRefs([`${hermesPath}#session=${HERMES_B}`])

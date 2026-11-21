@@ -30,6 +30,7 @@ const VALUES = [
   // facts
   'computeSessionFacts',
   'buildSessionFactsReport',
+  'priceReport',
   'renderSessionFacts',
   // analyze
   'analyzeSpans',
