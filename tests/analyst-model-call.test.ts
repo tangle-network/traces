@@ -34,7 +34,14 @@ function owner(baseUrl: string, model = 'test-model') {
 }
 
 describe('analyst model owner', () => {
-  it.each([['test-model', false], ['opencode/test-model', true], ['OpenCode', true]] as const)('sends the analyst profile and tool policy for %s to the streamed endpoint', async (model, modelOnly) => {
+  it.each([
+    ['test-model', false],
+    ['moonshotai/kimi-for-coding', false],
+    ['opencode/test-model', true],
+    ['OpenCode', true],
+    ['kimi-code/kimi-for-coding', true],
+    ['Kimi-Code', true],
+  ] as const)('sends the analyst profile and tool policy for %s to the streamed endpoint', async (model, modelOnly) => {
     let body: Record<string, unknown> | undefined
     let idempotencyKey: string | undefined
     const baseUrl = await startGateway((req, res) => {

@@ -35,7 +35,7 @@ An `answerSchema` makes the answer one JSON value a scorer can compare; it accep
 - Each cost carries its provenance (`observed`, `estimated` or `uncaptured`); an uncaptured cost stays null.
 - The ledger reserves each call's maximum before it runs, so a budget below one call is refused before any spend.
 
-For an OpenCode model route (`opencode/<model>`), the analyst sends `tool_choice: "none"`. Use a bridge that honors this field to keep the nested model from editing files or running a shell. The analyst still searches the trace and reads original spans through its interpreter.
+When the model runs inside OpenCode (`opencode/<model>`) or Kimi Code (`kimi-code/<model>`), the analyst requests `tool_choice: "none"`. A bridge that honors the request runs the model with its native tools disabled. The analyst searches the trace and opens source spans through its own interpreter.
 
 ## Setup and refusals
 
