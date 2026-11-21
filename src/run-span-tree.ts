@@ -41,20 +41,12 @@ import {
 } from '@tangle-network/agent-eval/trace-attributes'
 import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
 import { isInheritedSpan, isRecordedToolCall, SUBAGENT_SPAWN_ATTR } from './adapters/provenance.js'
-import { isUsageAggregate } from './attributes.js'
+import { isUsageAggregate, recordedAgentName, recordedNodeLabel } from './attributes.js'
 import { exportTraceEvidenceFile } from './file-export.js'
 import type { OtlpSpan } from './otlp.js'
 import { connectors, forEachTreeNode, int, ms, tokens, usd } from './run-view-format.js'
 import { addSpend, mergeRolls, ZERO_ROLL, type SpendRoll } from './spend-roll.js'
 
-/**
- * Agent-identity keys, in the order a reader should trust them. These are the
- * keys this repo's own emitter writes (`agent.name`, `inference.agent_name`)
- * plus GenAI semconv's (`gen_ai.agent.name`) — the same pairing every other
- * alias list in `trace-attributes` uses. agent-eval publishes no agent-name
- * alias list to import, so the list is stated once, here.
- */
-const AGENT_NAME_ATTR_KEYS = ['agent.name', 'inference.agent_name', 'gen_ai.agent.name'] as const
 const SERVICE_NAME_ATTR_KEYS = ['service.name', 'tangle.runtime'] as const
 
 /**
@@ -181,7 +173,7 @@ function isNodeBoundary(
   if (spanKind(span) === 'CHAIN' && !transportEvent &&
     !/^(?:user\.prompt|message\.|session\.compacted|file\.change|command\.execution|source\.corruption\.receipt)/.test(span.name)) return true
   if (AGENT_OPERATIONS.has(String(span.attributes[OPERATION_ATTR_KEY] ?? ''))) return true
-  const agent = firstStringAttr(span.attributes, AGENT_NAME_ATTR_KEYS)
+  const agent = recordedAgentName(span.attributes)
   return agent !== null && enclosingAgent !== null && agent !== enclosingAgent
 }
 
@@ -283,7 +275,7 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
     const { span, enclosingNodeId, enclosingAgent, depth, grouped } = pending.pop()!
     placed++
     const key = spanKey(span.trace_id, span.span_id)
-    const agent = firstStringAttr(span.attributes, AGENT_NAME_ATTR_KEYS) ?? enclosingAgent
+    const agent = recordedAgentName(span.attributes) ?? enclosingAgent
     let nodeId = enclosingNodeId
     let nodeAgent = enclosingAgent
     let childDepth = depth
@@ -325,7 +317,7 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
         (spanKind(child) === 'LLM' || child.name === 'user.prompt' || child.name.startsWith('message.')))
       : []
     const anchor = embedded[0]
-    const worker = anchor ? openNode(anchor, nodeId, childDepth, firstStringAttr(anchor.attributes, AGENT_NAME_ATTR_KEYS) ?? nodeAgent, true) : null
+    const worker = anchor ? openNode(anchor, nodeId, childDepth, recordedAgentName(anchor.attributes) ?? nodeAgent, true) : null
     const members = worker ? new Set(embedded) : undefined
     for (let i = children.length - 1; i >= 0; i--) {
       const child = children[i]!
@@ -355,7 +347,7 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
       spanIds: node.spanIds,
       ...(node.delegated ? { delegated: true as const } : {}),
       parentNodeId: node.parentNodeId === null ? null : building.get(node.parentNodeId)!.span.span_id,
-      label: node.agent ?? node.span.name,
+      label: recordedNodeLabel(node.span.attributes, node.agent) ?? node.span.name,
       depth: node.depth,
       role: node.childNodeIds.length > 0 ? 'driver' : 'leaf',
       status:
