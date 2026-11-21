@@ -5,3 +5,5 @@ Renaming or moving a marked Prime recording preserves its native session ID. The
 A Prime user fork retains its parent and its copied conversation. The execution tree and behavior report attribute each recorded action to the session that performed it. You can inspect the prompt and tool result the fork inherited and see where its own work began.
 
 SDK consumers can call `priceReport` to apply the same list-price lookup as `traces facts`.
+
+When a trace question fails, `traces ask` keeps the count of model completions and trace-tool calls reported by its analyst engine. With an older engine that omits either measurement, the corresponding count remains unknown.
