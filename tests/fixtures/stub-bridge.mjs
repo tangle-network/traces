@@ -20,7 +20,15 @@ const [planPath, ...argv] = process.argv.slice(2)
 const plan = JSON.parse(readFileSync(planPath, 'utf8'))
 const valueOf = (flag) => argv[argv.indexOf(flag) + 1]
 const input = JSON.parse(readFileSync(valueOf('--input'), 'utf8'))
-if (plan.log) appendFileSync(plan.log, `${JSON.stringify({ argv, question: input.question, instructions: input.instructions, modelProxy: { model: input.modelProxy.model, maxOutputTokens: input.modelProxy.maxOutputTokens } })}\n`)
+if (plan.log) {
+  const uv = {
+    offline: process.env.UV_OFFLINE,
+    cacheDir: process.env.UV_CACHE_DIR,
+    indexPresent: process.env.UV_INDEX_URL !== undefined,
+    modelKeyPresent: process.env.TANGLE_API_KEY !== undefined,
+  }
+  appendFileSync(plan.log, `${JSON.stringify({ argv, uv, question: input.question, instructions: input.instructions, modelProxy: { model: input.modelProxy.model, maxOutputTokens: input.modelProxy.maxOutputTokens } })}\n`)
+}
 
 const script = plan.questions.find((entry) => input.question.includes(entry.match)) ?? plan.questions.at(-1)
 const modelCalls = script.modelCalls ?? 1
