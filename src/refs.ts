@@ -3,7 +3,7 @@
  * names its type.
  *
  *   1. An existing path is read by its content: a harness session file (its
- *      harness from its store root, else from its first records), a Sandbox
+ *      records identify the format, its store disambiguates shared formats), a Sandbox
  *      live stream (Codex events in `raw` envelopes, read by codex-exec), a
  *      sandbox-events recording, OTLP or OpenInference JSONL, standard
  *      OTLP/JSON (`resourceSpans`, one document or one envelope per line),
@@ -17,7 +17,7 @@
  *      8 characters, looked up across every harness (in the store root named
  *      beside it, when there is one).
  *
- * `--harness` forces the reader of a file ref and narrows an id lookup; an
+ * `--harness` requires a compatible file reader and narrows an id lookup; an
  * input format named on the command line forces how a file ref is read.
  */
 
@@ -25,14 +25,13 @@ import type { Stats } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { CODEX_HOME_RULE, codexHomes, isCodexHome, isNativeStoreDatabase, nativeStoreSessions, type SessionRef as NativeRef } from '@tangle-network/harness-sessions'
+import { CODEX_HOME_RULE, codexHomes, isNativeStoreDatabase, nativeStoreSessions, type SessionRef as NativeRef } from '@tangle-network/harness-sessions'
 import { ATTR } from '@tangle-network/agent-trace-contract'
-import { isCodexExecRecord } from './adapters/codex-exec.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
-import { detectEvidenceFormat, exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
-import { readJsonl } from './jsonl.js'
+import { exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
+import { harnessOfStorePath, incompatibleFile, recordedFileFormat, rememberFileFormat, STORE_PATHS, type FileFormat } from './session-file-format.js'
 import type { OtlpSpan } from './otlp.js'
-import { isObject, isOtlpJsonFile, isStandardOtlpRow, resolveOtlpInputFiles } from './otlp-input.js'
+import { resolveOtlpInputFiles } from './otlp-input.js'
 import { readConsistentOtlpInput } from './otlp-measurement.js'
 import { listAdapters, resolveAdapter } from './registry.js'
 import { parseSession } from './session-source.js'
@@ -72,7 +71,7 @@ export type ResolvedRef =
   | { readonly kind: 'store-root'; readonly ref: string; readonly path: string }
 
 export interface ResolveRefOptions {
-  /** `--harness` as given: forces the reader of a file ref and narrows an id lookup. */
+  /** `--harness` as given: requires a compatible file reader and narrows an id lookup. */
   readonly harness?: string
   /** An input format named on the command line: forces how a file ref is read. */
   readonly format?: SpanReader
@@ -97,107 +96,6 @@ const isFile = async (path: string): Promise<boolean> => (await statOf(path))?.i
 const ownHome = (): string => process.env.HOME || homedir()
 
 // ── Files ─────────────────────────────────────────────────────────────
-
-const HEAD_ROWS = 20
-/** A JSON document (not JSONL) is parsed whole to be sniffed; past this it must be named with --format. */
-const MAX_WHOLE_JSON_BYTES = 256 * 1024 * 1024
-const CODEX_ROLLOUT_TYPES = new Set(['session_meta', 'response_item', 'event_msg', 'turn_context'])
-
-/** Harness stores a session file can sit in, by the path segment that names the store. */
-const STORE_PATHS: ReadonlyArray<{ readonly harness: string; readonly root: string }> = listAdapters().flatMap((adapter) =>
-  readsStoreRoots(adapter) ? adapter.nativeStores.map((store) => ({ harness: adapter.harness, root: store.root })) : [],
-)
-
-/** The harness whose store holds `path`, from the path alone. */
-function harnessOfStorePath(path: string): string | undefined {
-  const absolute = resolve(path)
-  for (const { harness, root } of STORE_PATHS) {
-    if (absolute.includes(`${sep}${root.split('/').join(sep)}${sep}`)) return harness
-  }
-  // A Codex rollout under any Codex home's `sessions/` or `archived_sessions/`.
-  const segments = absolute.split(sep)
-  for (let i = 1; i < segments.length - 1; i += 1) {
-    if (!(CODEX_HOME_RULE.sessionDirs as readonly string[]).includes(segments[i + 1]!)) continue
-    if (isCodexHome(segments.slice(0, i + 1).join(sep))) return 'codex'
-  }
-  return undefined
-}
-
-/** The first rows of a JSONL file, or the rows of a JSON document. */
-async function headRows(path: string): Promise<unknown[]> {
-  const rows: unknown[] = []
-  let unparsed = 0
-  for await (const row of readJsonl<unknown>(path, { mode: 'recover', onCorruption: () => { unparsed += 1 } })) {
-    rows.push(row)
-    if (rows.length >= HEAD_ROWS) return rows
-    if (unparsed > HEAD_ROWS && rows.length === 0) break
-  }
-  if (rows.length > 0 && unparsed === 0) {
-    // A one-line JSON document: an array of events, or an `{ events }` wrapper.
-    const only = rows.length === 1 ? rows[0] : undefined
-    if (Array.isArray(only)) return only
-    if (isObject(only) && Array.isArray(only.events)) return only.events
-    return rows
-  }
-  // A pretty-printed JSON document reads as no JSONL at all.
-  const info = await stat(path)
-  if (info.size > MAX_WHOLE_JSON_BYTES) return rows
-  const parsed: unknown = await readFile(path, 'utf8').then((text) => JSON.parse(text) as unknown).catch(() => undefined)
-  if (parsed === undefined) return rows
-  if (Array.isArray(parsed)) return parsed
-  if (isObject(parsed) && Array.isArray(parsed.events)) return parsed.events
-  return [parsed]
-}
-
-function isClaudeRecord(row: unknown): boolean {
-  return isObject(row) &&
-    (typeof row.sessionId === 'string' || typeof row.session_id === 'string') &&
-    typeof row.type === 'string' &&
-    ('message' in row || 'uuid' in row || 'subtype' in row)
-}
-
-type Sniffed =
-  | { readonly kind: 'session'; readonly harness: string }
-  | { readonly kind: 'spans'; readonly reader: SpanReader }
-
-/**
- * What a trace file holds: its store decides its harness; otherwise its first
- * records do. A file nothing claims is read as OTLP, which names every row it
- * cannot use rather than refusing the file.
- */
-export async function sniffTraceFile(path: string): Promise<Sniffed> {
-  const stored = harnessOfStorePath(path)
-  if (stored) return { kind: 'session', harness: stored }
-  // Standard OTLP/JSON is known from its first bytes; its lines can be too large to parse just to look.
-  if (await isOtlpJsonFile(path)) return { kind: 'spans', reader: 'otlp' }
-  const rows = await headRows(path)
-  if (rows.some(isCodexExecRecord)) return { kind: 'session', harness: 'codex-exec' }
-  if (rows.length > 0 && rows.every((row) => isObject(row) && typeof row.trace_id === 'string' && typeof row.span_id === 'string')) {
-    return { kind: 'spans', reader: 'otlp' }
-  }
-  // Standard OTLP/JSON (`resourceSpans`), or the camelCase span rows Tangle Intelligence serves.
-  if (rows.length > 0 && rows.every(isStandardOtlpRow)) return { kind: 'spans', reader: 'otlp' }
-  if (!rows.some((row) => isObject(row) && typeof row.span_id === 'string')) {
-    if (rows.some(isClaudeRecord)) return { kind: 'session', harness: 'claude-code' }
-    if (rows.some((row) => isObject(row) && CODEX_ROLLOUT_TYPES.has(String(row.type)) && isObject(row.payload))) {
-      return { kind: 'session', harness: 'codex' }
-    }
-    const first = rows[0]
-    if (isObject(first) && first.type === 'session' && typeof first.id === 'string') return { kind: 'session', harness: 'pi' }
-    if (rows.some((row) => isObject(row) && row.type === 'session_start')) return { kind: 'session', harness: 'factory' }
-  }
-  const evidence = detectEvidenceFormat(rows)
-  if (evidence === 'sandbox-events') {
-    // A Sandbox live stream opens with the sandbox's own events; its first
-    // Codex envelope can come after any number of them. Discovery's rule is
-    // the same: any `"backend":"codex"` envelope makes the file a live stream.
-    for await (const row of readJsonl<unknown>(path, { mode: 'recover', onCorruption: () => {} })) {
-      if (isCodexExecRecord(row)) return { kind: 'session', harness: 'codex-exec' }
-    }
-  }
-  if (evidence) return { kind: 'spans', reader: evidence }
-  return { kind: 'spans', reader: 'otlp' }
-}
 
 function adapterFor(harness: string): HarnessTraceAdapter {
   const adapter = resolveAdapter(harness)
@@ -251,21 +149,25 @@ async function fileRef(path: string, ref: string, selector: string | undefined, 
   if (options.format) return { kind: 'spans', ref, path, reader: options.format, ...(selector ? { selector } : {}) }
   // A retained database can have any name, even inside another harness's inferred store root.
   if (await isNativeStoreDatabase(path)) return sqliteSessionRef(path, ref, selector, options)
-  const sniffed = options.harness ? { kind: 'session' as const, harness: options.harness } : await sniffTraceFile(path)
+  const requested = options.harness ? adapterFor(options.harness).harness : undefined
+  const stored = harnessOfStorePath(path)
+  const sourceInfo = await stat(path)
+  const recorded = await recordedFileFormat(path, stored, requested)
+  const fallback = stored ?? requested
+  const sniffed: FileFormat = recorded ?? (fallback ? { kind: 'session', harness: fallback } : { kind: 'spans', reader: 'otlp' })
+  const mismatch = requested && incompatibleFile(sniffed, requested)
+  if (mismatch) throw new RefError(`${path}: ${mismatch}`, 'unreadable')
   if (sniffed.kind === 'spans') return { kind: 'spans', ref, path, reader: sniffed.reader, ...(selector ? { selector } : {}) }
   if (selector) throw new RefError(`${ref}: a #selector picks a run from a span file; ${path} is a ${sniffed.harness} session`, 'usage')
   const adapter = adapterFor(sniffed.harness)
-  // A Grok session is a directory whose record is updates.jsonl, whichever of its files the ref names.
-  const session = adapter.harness === 'grok' ? join(dirname(path), 'updates.jsonl') : path
-  const info = await stat(session)
-  // The same ref an explicit session path has always produced, so a session
-  // reads the same whichever way it is named.
-  return {
-    kind: 'session',
-    ref,
-    adapter,
-    session: { harness: adapter.harness, sessionId: ref, path: session, cwd: null, mtimeMs: info.mtimeMs },
-  }
+  // Only the native catalog's named companion files can refer to the Grok updates beside them.
+  const companion = adapter.harness === 'grok' && readsStoreRoots(adapter)
+    && adapter.nativeStores.some(store => store.files.some(file => basename(file) === basename(path)))
+  const session = companion ? join(dirname(path), 'updates.jsonl') : path
+  const info = session === path ? sourceInfo : await stat(session)
+  const selected = { harness: adapter.harness, sessionId: ref, path: session, cwd: null, mtimeMs: info.mtimeMs }
+  if (session === path) rememberFileFormat(selected, info, recorded)
+  return { kind: 'session', ref, adapter, session: selected }
 }
 
 // ── Directories ───────────────────────────────────────────────────────

@@ -4,7 +4,7 @@
 import { homedir } from 'node:os'
 import { legacyOpencodeFile, nativeRef, sessionRefKey, tracesRef } from './harness-refs.js'
 import { createReadStream } from 'node:fs'
-import { open, stat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
@@ -30,6 +30,7 @@ import {
 } from '../attributes.js'
 import type { OtlpSpan } from '../otlp.js'
 import { takeJsonl } from '../jsonl.js'
+import { checkNativeFile, isClaudeStreamJson } from '../session-file-format.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { codexActor } from './actor.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
@@ -39,26 +40,6 @@ import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath,
 import { codexCompletedItem, type CodexLine, contentTextBlocks, multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
-
-async function isClaudeStreamJson(path: string): Promise<boolean> {
-  const file = await open(path, 'r')
-  try {
-    const buffer = Buffer.alloc(65536)
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
-    for (const line of buffer.toString('utf8', 0, bytesRead).split('\n').slice(0, 20)) {
-      if (!line || line.length > 60000) continue
-      try {
-        const row = JSON.parse(line) as { type?: string; subtype?: string }
-        if (row.type === 'system' && row.subtype === 'init') return true
-      } catch {
-        // A torn head is the shared reader's integrity decision.
-      }
-    }
-    return false
-  } finally {
-    await file.close()
-  }
-}
 
 function status(code: string): OtlpSpan['status']['code'] {
   return code === 'STATUS_CODE_OK' ? 'OK' : code === 'STATUS_CODE_ERROR' ? 'ERROR' : 'UNSET'
@@ -739,6 +720,9 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
     if (this.legacyOpencode && await legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.parse(ref, options)
+    // SQLite validates its own schema. A physical transcript must agree with the requested
+    // reader before either the native fold or the scoped projection can stamp its identity.
+    const fileFormat = this.readsSqlite() ? undefined : await checkNativeFile(ref, this.harness)
     // Scoped/cited reads retain their existing projection; ordinary sessions use the shared fold.
     if (this.scopedAdapter && (options.taskScope === 'latest' || options.taskScope === 'turn' || options.captureSources)) {
       return this.scopedAdapter.parse(ref, options)
@@ -775,6 +759,11 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     // A missing timestamp is not epoch work. Exclude it rather than allowing the
     // projection's display fallback to enter measured totals.
     if (!session.startedAt) return []
+    // Several native folds observe any timestamp before examining its row type. An unknown
+    // file needs at least one decoded event to establish that the reader owns this session.
+    if (!this.readsSqlite() && !fileFormat && session.messages.length === 0 && session.modelCalls.length === 0
+      && session.toolCalls.length === 0 && session.children.length === 0 && !session.turnReceipts?.length
+      && !session.usage && session.ending.status === 'open') return []
     let codex: CodexDecoration | undefined
     if (session.harness === 'codex') {
       const head = await takeJsonl<CodexHead>(ref.path, 40, { mode: 'recover', onCorruption: () => {} })
