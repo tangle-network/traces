@@ -1,34 +1,24 @@
 /** Ref conversion at the native-reader boundary; shared-store resolution stays with the adapter. */
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import {
-  claudeCodeRefForFile, codexRefForFile, factoryRefForFile, grokRefForFile, kimiRefForFile, piRefForFile, type SessionRef as NativeRef,
-} from '@tangle-network/harness-sessions'
+import { readerFor, type SessionRef as NativeRef } from '@tangle-network/harness-sessions'
 import type { SessionRef } from '../types.js'
 
-export type SupportedHarness = 'claude-code' | 'codex' | 'opencode' | 'pi' | 'kimi-code' | 'factory-droids' | 'grok'
-
-export function nativeRef(harness: SupportedHarness, ref: SessionRef): NativeRef {
-  const unattributed = ref.sessionId.startsWith('unattributed:')
-  const selected = (native: NativeRef): NativeRef => unattributed
-    ? { ...native, nativeSessionId: ref.sessionId }
-    : native
-  switch (harness) {
-    case 'claude-code': return selected(claudeCodeRefForFile(ref.path))
-    case 'codex': return selected(codexRefForFile(ref.path))
-    case 'pi': return selected(piRefForFile(ref.path))
-    case 'kimi-code': return selected(kimiRefForFile(ref.path.endsWith('wire.jsonl') ? ref.path : join(ref.path, 'wire.jsonl')))
-    case 'factory-droids': return selected(factoryRefForFile(ref.path))
-    case 'grok': return selected(grokRefForFile(ref.path))
-    case 'opencode': throw new Error('OpenCode SQLite sessions must be selected from its session catalog')
-  }
+export function nativeRef(harness: string, ref: SessionRef): NativeRef {
+  const reader = readerFor(harness)
+  if (!reader.refForFile) throw new Error(`${harness} sessions must be selected from their native store`)
+  const path = harness === 'kimi-code' && !ref.path.endsWith('wire.jsonl') ? join(ref.path, 'wire.jsonl') : ref.path
+  const native = reader.refForFile(path)
+  return ref.sessionId.startsWith('unattributed:') ? { ...native, nativeSessionId: ref.sessionId } : native
 }
 
 export function sessionRefKey(ref: SessionRef): string {
   return `${ref.sessionId}\0${ref.path}`
 }
 
-export function legacyOpencodeFile(ref: SessionRef, registered: ReadonlyMap<string, NativeRef>): boolean {
-  return !ref.path.endsWith('.db') && !registered.has(sessionRefKey(ref))
+/** OpenCode's historical JSON layout identifies a session by its message directory. */
+export async function legacyOpencodeFile(ref: SessionRef, registered: ReadonlyMap<string, NativeRef>): Promise<boolean> {
+  return !registered.has(sessionRefKey(ref)) && (await stat(ref.path)).isDirectory()
 }
 
 export function tracesRef(ref: NativeRef, harness: string, registered?: Map<string, NativeRef>): SessionRef {

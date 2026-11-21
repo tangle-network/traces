@@ -54,6 +54,10 @@ const RECORDINGS: readonly Recording[] = [
   ...CLAUDE_RECORDINGS,
   recording('Native Factory', 'factory', 'factory-example', join(FIXTURES, 'native-tools/factory/factory-example.jsonl'), 1),
   recording('Native Grok', 'grok', 'grok-example', join(FIXTURES, 'native-tools/grok/grok-example/updates.jsonl'), 1),
+  recording('Native Hermes', 'hermes', 'hermes-example', join(FIXTURES, 'native-tools/hermes/hermes-example.sql'), 1),
+  recording('Native OpenClaw', 'openclaw', 'openclaw-example', join(FIXTURES, 'native-tools/openclaw/openclaw-example.sql'), 1),
+  recording('Native NanoClaw metadata', 'nanoclaw', 'nanoclaw-example', join(FIXTURES, 'native-tools/nanoclaw/nanoclaw-example.sql'), 0),
+  recording('Native Prime', 'prime', 'prime-example', join(FIXTURES, 'native-tools/prime/prime-example.jsonl'), 1),
   recording('Native Pi', 'pi', 'pi-example', join(FIXTURES, 'native-tools/pi/pi-example.jsonl'), 1),
   recording('Kimi v1 wire', 'kimi', 'kimi-v1', join(FIXTURES, 'native-tools/kimi/kimi-v1/wire.jsonl'), 1),
   recording('Kimi v2 wire', 'kimi', 'kimi-v2', join(FIXTURES, 'native-tools/kimi/kimi-v2/wire.jsonl'), 1),
@@ -84,7 +88,8 @@ const nodeSummary = (result: BehaviorResult): unknown => result.nodes.map((node)
 async function refFor(rec: Recording, temp: string): Promise<SessionRef> {
   let path = rec.path
   if (path.endsWith('.sql')) {
-    path = join(temp, 'opencode.db')
+    path = rec.harness === 'nanoclaw' ? join(temp, rec.sessionId, 'outbound.db') : join(temp, `${rec.harness}.db`)
+    await mkdir(dirname(path), { recursive: true })
     const db = new DatabaseSync(path)
     try { db.exec(await readFile(rec.path, 'utf8')) } finally { db.close() }
   }
@@ -121,9 +126,10 @@ describe('recorded harness behavior coverage', () => {
     if (replayDir) await rm(replayDir, { recursive: true, force: true })
   })
 
-  it('has a positive native recording for every registered adapter', () => {
-    expect(new Set(RECORDINGS.filter((rec) => rec.rawToolCalls > 0).map((rec) => rec.harness)))
+  it('has a native recording for every registered adapter, with calls only where the format records them', () => {
+    expect(new Set(RECORDINGS.map((rec) => rec.harness)))
       .toEqual(new Set(listAdapters().map((adapter) => adapter.harness)))
+    expect(RECORDINGS.filter((rec) => rec.rawToolCalls === 0).map((rec) => rec.harness)).toEqual(['nanoclaw'])
   })
 
   it.each(RECORDINGS)('$name preserves its $rawToolCalls native tool calls through the maintained registry', (rec) => {

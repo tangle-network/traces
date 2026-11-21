@@ -1,6 +1,6 @@
 # traces
 
-> What your coding agents did, where they wasted time, and whether a run passes: exact answers from the sessions Claude Code, Codex, OpenCode, Pi, Kimi, Factory and Grok Build already write to disk, or from the OTLP spans your own system emits. A CLI and an SDK.
+> What your coding agents did, where they wasted time, and whether a run passes: exact answers from the sessions Claude Code, Codex, OpenCode, Pi, Kimi, Factory, Grok Build, Hermes, OpenClaw, NanoClaw and Prime already write to disk, or from the OTLP spans your own system emits. A CLI and an SDK.
 
 ![traces analyzing a real Claude Code session](https://raw.githubusercontent.com/tangle-network/traces/main/docs/demo.gif)
 

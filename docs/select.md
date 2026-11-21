@@ -19,7 +19,7 @@ A ref is sniffed, so no flag names its type:
 
 `file#<traceId>` and `file#branch=<id>` name one run of several. `--harness` with a file ref forces that reader.
 
-Use `traces facts 'recordings.sqlite#session=ses_example'` to read an exact native OpenCode session from that database, including a relocated copy. The same ref works with `analyze` and `watch`. A database with one session can be named directly. A database with several sessions reports the available IDs. A raw bundle includes the shared database and its available SQLite sidecars.
+Use `traces facts 'recordings.sqlite#session=ses_example'` to read an exact native session from an OpenCode, Hermes or OpenClaw database, including a relocated copy with its SQLite sidecars. The same ref works with `analyze` and `watch`. A multi-session database without the selector reports its harnesses and available IDs as `ambiguous`; conflicting or unrelated SQLite stores are refused rather than read as OpenCode. NanoClaw's inbound/outbound pair and a one-session database can be named directly. A raw bundle includes every required database and available SQLite sidecar.
 
 ## Selection
 
@@ -42,11 +42,15 @@ In a window, `--last` or a machine-wide selection, a session that cannot be read
 | `codex` | every Codex home: `~/.codex` and `~/.codex-*` siblings, `$CODEX_HOME`, and `~/.config/agent-accounts/codex/<account>`, each with `sessions/` and `archived_sessions/` |
 | `codex-exec` | a `codex exec --json` file or a Sandbox live stream (a file ref) |
 | `opencode` | `~/.local/share/opencode/opencode.db`, read in place, and older `storage/` JSON sessions |
+| `hermes` | `~/.hermes/state.db`: its multi-session catalog and messages |
+| `openclaw` | `~/.openclaw/agents/main/agent/openclaw-agent.sqlite`: its own multi-session transcript events, never Claude's store |
+| `nanoclaw` | `~/.nanoclaw/data/v2-sessions/*/<id>/{inbound,outbound}.db`: one metadata-only message session per pair, never Claude's store |
+| `prime` | `~/.prime-provider/prime-agent-dirs/**/sessions/*.jsonl`, in Prime's Pi record layout with Prime's own session identity |
 | `pi`, `kimi`, `factory`, `grok` | their session stores under the home |
 
-Native stores are read through [`@tangle-network/harness-sessions`](https://github.com/tangle-network/agent-sdk/tree/main/packages/harness-sessions); `--latest-turn` uses traces' own Claude Code and Codex readers until one parser lands (1.1), and `tests/dual-path.test.ts` holds the two equal.
-Claude Code subagent files fold into their parent trace; Codex workers are sessions of their own, joined by the session id or task path a child records.
-Unknown is null with its reason, never 0: Kimi's wire log has no served model, so its model stays unknown.
+Native stores are read through [`@tangle-network/harness-sessions`](https://github.com/tangle-network/agent-sdk/tree/main/packages/harness-sessions)' reader registry. Traces keeps the display names `kimi` and `factory` and the SDK's canonical names and aliases; a newly registered SDK reader needs no manual Traces alias. `--latest-turn` uses traces' own Claude Code and Codex readers until one parser lands (1.1), and `tests/dual-path.test.ts` holds the two equal.
+Claude Code subagent files fold into their parent trace; Codex workers are sessions of their own, joined by the session id or task path a child records. An older Claude-format file still reads as `claude-code` from its own records, independently of any app name.
+Unknown is null with its reason, never 0: Kimi's wire log and NanoClaw's message stores have no served model, so their models stay unknown.
 
 ## `traces list --help`
 

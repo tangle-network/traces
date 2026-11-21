@@ -11,7 +11,7 @@
  *      directory of OTLP files, a bundle directory, a Runtime run directory,
  *      or a store root: a directory that holds harness stores the way a home
  *      does (a trace archive's `<host>/home`, a fleet seat). `path#<trace id>`
- *      and `path#branch=<id>` pick one run from a span file. An OpenCode
+ *      and `path#branch=<id>` pick one run from a span file. A native
  *      SQLite database takes `path#session=<exact native id>`.
  *   2. Anything else is a session id, or a unique prefix or suffix of at least
  *      8 characters, looked up across every harness (in the store root named
@@ -22,10 +22,10 @@
  */
 
 import type { Stats } from 'node:fs'
-import { open, readFile, stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { CODEX_HOME_RULE, STORES, codexHomes, isCodexHome, opencodeSessionsInStore } from '@tangle-network/harness-sessions'
+import { CODEX_HOME_RULE, codexHomes, isCodexHome, isNativeStoreDatabase, nativeStoreSessions, type SessionRef as NativeRef } from '@tangle-network/harness-sessions'
 import { ATTR } from '@tangle-network/agent-trace-contract'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
@@ -104,13 +104,9 @@ const MAX_WHOLE_JSON_BYTES = 256 * 1024 * 1024
 const CODEX_ROLLOUT_TYPES = new Set(['session_meta', 'response_item', 'event_msg', 'turn_context'])
 
 /** Harness stores a session file can sit in, by the path segment that names the store. */
-const STORE_PATHS: ReadonlyArray<{ readonly harness: string; readonly root: string }> = [
-  { harness: 'claude-code', root: STORES['claude-code.projects-jsonl'].root },
-  { harness: 'pi', root: STORES['pi.session-jsonl'].root },
-  { harness: 'kimi', root: STORES['kimi.session-dir'].root },
-  { harness: 'factory', root: STORES['factory.session-jsonl'].root },
-  { harness: 'grok', root: STORES['grok.acp-session-dir'].root },
-]
+const STORE_PATHS: ReadonlyArray<{ readonly harness: string; readonly root: string }> = listAdapters().flatMap((adapter) =>
+  readsStoreRoots(adapter) ? adapter.nativeStores.map((store) => ({ harness: adapter.harness, root: store.root })) : [],
+)
 
 /** The harness whose store holds `path`, from the path alone. */
 function harnessOfStorePath(path: string): string | undefined {
@@ -211,50 +207,50 @@ function adapterFor(harness: string): HarnessTraceAdapter {
   return adapter
 }
 
-const SQLITE_HEADER = Buffer.from('SQLite format 3\0')
-
-async function isSqliteDatabase(path: string): Promise<boolean> {
-  const handle = await open(path, 'r')
-  try {
-    const head = Buffer.alloc(SQLITE_HEADER.length)
-    const { bytesRead } = await handle.read(head, 0, head.length, 0)
-    return bytesRead === head.length && head.equals(SQLITE_HEADER)
-  } finally {
-    await handle.close()
-  }
-}
-
-async function sqliteSessionRef(path: string, ref: string, selector: string | undefined): Promise<ResolvedRef> {
+async function sqliteSessionRef(path: string, ref: string, selector: string | undefined, options: ResolveRefOptions): Promise<ResolvedRef> {
   if (selector !== undefined && (!selector.startsWith('session=') || selector === 'session=')) {
-    throw new RefError(`${ref}: select an OpenCode session with #session=<exact native id>`, 'usage')
+    throw new RefError(`${ref}: select a native session with #session=<exact native id>`, 'usage')
   }
   const id = selector?.slice('session='.length)
   const absolute = resolve(path)
-  const native = await opencodeSessionsInStore(absolute, null, id ? { nativeSessionId: id } : {}).catch((error: unknown) => {
-    throw new RefError(`${path} is not a readable OpenCode SQLite store: ${errorText(error)}`, 'unreadable')
-  })
-  const row = native[0]
-  if (!row || (id !== undefined && row.nativeSessionId !== id)) {
-    throw new RefError(id ? `${path} has no exact native session ${id}` : `${path} contains no OpenCode sessions`, 'unreadable')
+  const selected = options.harness ? adapterFor(options.harness) : undefined
+  if (selected && (!readsStoreRoots(selected) || !selected.readsSqlite())) {
+    throw new RefError(`${ref}: --harness ${options.harness} does not read a SQLite session store`, 'usage')
   }
-  if (native.length > 1) {
-    throw new RefError(`${path} contains ${native.length} sessions; select one with #session=<exact native id>`, 'ambiguous',
-      native.map((entry) => ({ harness: 'opencode', sessionId: entry.nativeSessionId, path: absolute })))
+  let rows: NativeRef[]
+  try {
+    rows = await nativeStoreSessions(absolute, { harness: selected?.harness, nativeSessionId: id })
+  } catch (error) {
+    // The SDK requires a harness for a mixed schema. Resolve its choices for the CLI diagnostic.
+    if (!selected && error instanceof Error && !('code' in error)) {
+      const catalogs = await Promise.allSettled(listAdapters().filter(readsStoreRoots)
+        .filter(adapter => adapter.readsSqlite())
+        .map(adapter => nativeStoreSessions(absolute, { harness: adapter.nativeHarness })))
+      const choices = catalogs.flatMap(catalog => catalog.status === 'fulfilled' ? catalog.value : [])
+      if (new Set(choices.map(row => row.harness)).size > 1) {
+        throw new RefError(`${path} contains multiple native harnesses; select one with --harness`, 'ambiguous',
+          choices.map(row => ({ harness: row.harness, sessionId: row.nativeSessionId, path: absolute })))
+      }
+    }
+    throw new RefError(`${path}: ${errorText(error)}`, 'unreadable')
   }
-  const adapter = adapterFor('opencode')
-  if (!readsStoreRoots(adapter)) throw new RefError('OpenCode SQLite reader unavailable', 'unreadable')
+  if (!rows.length) {
+    throw new RefError(id ? `${path} has no exact native session ${id}` : `${path} is not a recognized native session SQLite store`, 'unreadable')
+  }
+  if (rows.length > 1) {
+    throw new RefError(`${path} contains ${rows.length} matching native sessions; select one with #session=<exact native id>`, 'ambiguous',
+      rows.map(row => ({ harness: row.harness, sessionId: row.nativeSessionId, path: absolute })))
+  }
+  const row = rows[0]!
+  const adapter = adapterFor(row.harness)
+  if (!readsStoreRoots(adapter)) throw new RefError(`${row.harness} has no native store reader`, 'unreadable')
   return { kind: 'session', ref, adapter, session: adapter.bindNativeRef(row) }
 }
 
 async function fileRef(path: string, ref: string, selector: string | undefined, options: ResolveRefOptions): Promise<ResolvedRef> {
   if (options.format) return { kind: 'spans', ref, path, reader: options.format, ...(selector ? { selector } : {}) }
   // A retained database can have any name, even inside another harness's inferred store root.
-  if (await isSqliteDatabase(path)) {
-    if (options.harness && adapterFor(options.harness).harness !== 'opencode') {
-      throw new RefError(`${ref}: this SQLite store requires --harness opencode`, 'usage')
-    }
-    return sqliteSessionRef(path, ref, selector)
-  }
+  if (await isNativeStoreDatabase(path)) return sqliteSessionRef(path, ref, selector, options)
   const sniffed = options.harness ? { kind: 'session' as const, harness: options.harness } : await sniffTraceFile(path)
   if (sniffed.kind === 'spans') return { kind: 'spans', ref, path, reader: sniffed.reader, ...(selector ? { selector } : {}) }
   if (selector) throw new RefError(`${ref}: a #selector picks a run from a span file; ${path} is a ${sniffed.harness} session`, 'usage')
@@ -275,14 +271,7 @@ async function fileRef(path: string, ref: string, selector: string | undefined, 
 // ── Directories ───────────────────────────────────────────────────────
 
 /** Session stores traces reads under a home, besides the Codex homes. */
-const HOME_STORES = [
-  STORES['claude-code.projects-jsonl'].root,
-  STORES['opencode.sqlite'].root,
-  STORES['pi.session-jsonl'].root,
-  STORES['kimi.session-dir'].root,
-  STORES['factory.session-jsonl'].root,
-  STORES['grok.acp-session-dir'].root,
-]
+const HOME_STORES = [...new Set(STORE_PATHS.map((store) => store.root))]
 
 /** True when `dir` holds harness stores the way a home does. */
 export async function isStoreRoot(dir: string): Promise<boolean> {

@@ -252,6 +252,7 @@ async function opencodeStore(path: string, cwd: string, updatedMs: number): Prom
   const db = new DatabaseSync(path)
   const created = Date.parse(at(50))
   db.exec(`PRAGMA journal_mode = WAL;
+    BEGIN;
     CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);`)
@@ -266,6 +267,7 @@ async function opencodeStore(path: string, cwd: string, updatedMs: number): Prom
   part.run('prt_2', 'msg_2', created + 1000, JSON.stringify({ type: 'step-start', time: { start: created + 1000 } }))
   part.run('prt_3', 'msg_2', created + 2000, JSON.stringify({ type: 'text', text: 'The plan is ready.' }))
   part.run('prt_4', 'msg_2', created + 5000, JSON.stringify({ type: 'step-finish', reason: 'stop', tokens: { input: 20, output: 6 } }))
+  db.exec('COMMIT')
   db.close()
 }
 
@@ -348,10 +350,10 @@ export async function makeFixtureHome(): Promise<FixtureHome> {
   const mtimeOf = (id: string): number => now - 60_000 * (5 + MTIME_ORDER.indexOf(id as (typeof MTIME_ORDER)[number]))
   await opencodeStore(opencode, repo, mtimeOf(IDS.opencode))
   files.set(IDS.opencode, opencode)
-  for (const [id, path] of files) {
+  await Promise.all([...files].map(([id, path]) => {
     const when = new Date(mtimeOf(id))
-    await utimes(path, when, when)
-  }
+    return utimes(path, when, when)
+  }))
 
   const storeRoot = join(root, 'archive', 'host-a', 'home')
   const remote = '/home/drew/w/discovery-lab'
