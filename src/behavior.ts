@@ -9,7 +9,7 @@
  */
 import { resolveSpanKind } from '@tangle-network/agent-trace-contract'
 import { isInheritedSpan, isRecordedToolCall, SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './adapters/provenance.js'
-import { sessionIdFromAttributes, TRACE_ID_MINTED_ATTR } from './attributes.js'
+import { recordedAgentName, recordedNodeLabel, sessionIdFromAttributes, TRACE_ID_MINTED_ATTR } from './attributes.js'
 import { distinctSpans } from './span-identity.js'
 import { dominantModel } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
@@ -325,7 +325,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     if (recordedParents && recordedParents.size > 1) unknowns.add(`session ${id} has several enclosing span owners`)
     const structuralParent = recordedParents?.size === 1 ? [...recordedParents][0]! : null
     const parent = str(a['tangle.harness_session.parent']) ?? str(a['traces.parent_session_id']) ?? structuralParent
-    nodes.push({ id, label: str(a['tangle.node.label']) ?? str(a['gen_ai.agent.name']) ?? id, parent,
+    nodes.push({ id, label: recordedNodeLabel(a, recordedAgentName(a)) ?? id, parent,
       depth: num(a['tangle.node.depth']) ?? 0, state: str(a['tangle.node.state']), profile: str(a['agent.profile.name']),
       ...identity(a, own), start: ts(own[0]!.start_time), end: own.reduce((max, s) => Math.max(max, endOf(s, now)), 0),
       span_id: root.span_id, spans: own, session: sessionIdFromAttributes(a) ?? id,
