@@ -2,7 +2,7 @@
 import { OPENINFERENCE_SPAN_KIND } from '@tangle-network/agent-eval/trace-attributes'
 import { authorOfTypedTurn, INTERRUPT_TEXT, isHarnessCommand } from './adapters/actor.js'
 import { ACTOR_ATTR, capText } from './adapters/conversation.js'
-import { INHERITED_SOURCE_ATTR, INHERITED_SPAN_ATTR, isSubagentSpan } from './adapters/provenance.js'
+import { INHERITED_SOURCE_ATTR, isInheritedSpan, isSubagentSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
 
 export function stringAttr(span: OtlpSpan, key: string): string | null {
@@ -175,14 +175,14 @@ function clipAnswered(raw: string): string {
 export function isOwnAgentMessage(span: OtlpSpan): boolean {
   return (
     span.name === 'message.assistant' &&
-    span.attributes[INHERITED_SPAN_ATTR] !== true &&
+    !isInheritedSpan(span.attributes) &&
     rawContent(span).trim().length > 0
   )
 }
 
 /** A tool call of this session's agent that the person refused. */
 function isRejectedTool(span: OtlpSpan): boolean {
-  if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'TOOL' || span.status.code !== 'ERROR' || span.attributes[INHERITED_SPAN_ATTR] === true) return false
+  if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'TOOL' || span.status.code !== 'ERROR' || isInheritedSpan(span.attributes)) return false
   const output = span.attributes['output.value']
   return REJECTED_TOOL_TEXT.test(`${span.status.message ?? ''}\n${typeof output === 'string' ? output.slice(0, 2000) : ''}`)
 }
@@ -260,6 +260,13 @@ export function typedTurnsOf(spans: readonly OtlpSpan[], start: TurnFoldState = 
       if (span.name === 'user.prompt') drop(SUBAGENT_TURN_REASON, stringAttr(span, ACTOR_ATTR) ?? 'unclassified', span)
       continue
     }
+    if (isInheritedSpan(span.attributes)) {
+      if (span.name === 'user.prompt') {
+        const source = stringAttr(span, INHERITED_SOURCE_ATTR)
+        drop(source === null ? INHERITED_TURN_REASON : `${INHERITED_TURN_REASON} (${source})`, stringAttr(span, ACTOR_ATTR) ?? 'unclassified', span)
+      }
+      continue
+    }
     if (span.name !== 'user.prompt') {
       if (isOwnAgentMessage(span)) {
         lastAgentMessage = span
@@ -275,11 +282,6 @@ export function typedTurnsOf(spans: readonly OtlpSpan[], start: TurnFoldState = 
       continue
     }
     const actor = stringAttr(span, ACTOR_ATTR) ?? 'unclassified'
-    if (span.attributes[INHERITED_SPAN_ATTR] === true) {
-      const source = stringAttr(span, INHERITED_SOURCE_ATTR)
-      drop(source === null ? INHERITED_TURN_REASON : `${INHERITED_TURN_REASON} (${source})`, actor, span)
-      continue
-    }
     const text = rawContent(span)
     if (INTERRUPT_TEXT.test(text.trim())) {
       pending.add('interrupt')

@@ -1,4 +1,5 @@
 import { sessionIdFromAttributes } from './attributes.js'
+import { isInheritedSpan } from './adapters/provenance.js'
 import type { OtlpSpan } from './otlp.js'
 import type { SessionRef } from './types.js'
 
@@ -104,6 +105,7 @@ export function describeSessionRelationship(
   const resumedChildSessionIds = new Set<string>()
   const unjoinedSpawnPaths = new Set<string>()
   for (const span of spans) {
+    if (isInheritedSpan(span.attributes)) continue
     const direct = parseSessionIds(span.attributes['traces.child_session_ids'], 'traces.child_session_ids')
     for (const id of direct) childSessionIds.add(id)
     const operation = span.attributes['traces.codex.agent_operation']

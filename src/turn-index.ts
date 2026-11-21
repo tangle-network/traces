@@ -148,8 +148,9 @@ interface FileEntry {
  * so a change to what a row holds bumps it. 2: command rows include the
  * commands a Codex code-mode script ran. 3: a code-mode loop over literals
  * gives one row per element. 4: a command row says whether it failed.
+ * 6: a native fork keeps only its own work in its indexed times and turns.
  */
-const INDEX_VERSION = 5
+const INDEX_VERSION = 6
 
 interface Store {
   version: typeof INDEX_VERSION

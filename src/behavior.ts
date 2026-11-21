@@ -241,11 +241,12 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     if (trace.some((span) => span.attributes[TRACE_ID_MINTED_ATTR] === true)) {
       unknowns.add(`trace ${traceId} has a file-local identity; cross-file ownership is unknown`)
     }
-    const native = new Set(trace.filter(s =>
+    const native = new Set(trace.filter(s => !isInheritedSpan(s.attributes) && (
       (s.name === 'session' && str(s.attributes['tangle.node.id'])) ||
-      (s.parent_span_id === null && s.attributes['traces.source_format'] === 'sandbox-events'),
+      (s.parent_span_id === null && s.attributes['traces.source_format'] === 'sandbox-events')),
     ).map(s => sessionIdFromAttributes(s.attributes)))
     const declaredSession = (s: OtlpSpan): string | null => {
+      if (isInheritedSpan(s.attributes)) return null
       const nativeId = sessionIdFromAttributes(s.attributes)
       return str(s.attributes['session.id']) ?? str(s.attributes['traces.session.id']) ??
         (nativeId && native.has(nativeId) ? nativeId : null)
@@ -295,6 +296,11 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
       for (const spanId of boundary.spanIds) {
         const span = byId.get(spanId)!
         const inherited = span !== root && span.parent_span_id ? owners.get(span.parent_span_id) : undefined
+        // Copied context can still be an ancestor of a live event. Carry its containing owner through it.
+        if (isInheritedSpan(span.attributes)) {
+          owners.set(spanId, inherited ?? id)
+          continue
+        }
         const declared = declaredSession(span)
         const session = sharesOuter && (!declared || declared === outerSession) ? null
           : declared ?? (inherited && named.has(inherited) ? inherited : null)
@@ -354,7 +360,7 @@ function mailOf(span: OtlpSpan, cls: BehaviorSpanClass, parent: string | null): 
 /** The node's own events: a span a fork or compaction carried in (`traces.session.inherited`) is the parent's work, as in facts. */
 function nodeEvents(n: RawNode): Event[] {
   const kinds = new Map(classifyLiveActions(n.spans).map((act) => [act.spanId, act.kind]))
-  return n.spans.filter((s) => s.name !== 'session' && !isInheritedSpan(s.attributes)).map((s): Event => {
+  return n.spans.filter((s) => s.name !== 'session').map((s): Event => {
     const cls = classifySpan(s, kinds.get(s.span_id) ?? 'other')
     return { ...cls, cat: cls.category, t: ts(s.start_time), e: ts(s.end_time || s.start_time), name: s.name, tool: toolKey(toolOf(s)), call: isRecordedToolCall(s), span: s.span_id, ok: !failed(s), llm: resolveSpanKind(s) === 'LLM',
       tokens_in: num(s.attributes['gen_ai.usage.input_tokens']), tokens_out: num(s.attributes['gen_ai.usage.output_tokens']), mail: mailOf(s, cls, n.parent) }
@@ -547,7 +553,7 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<stri
   return { node, n, segs, streaks, marks: ev.map(({ t, cat, span, call, ok }) => (call ? { t, cat, span, ok } : { t, cat, span })), turns: ev.filter((e) => e.llm).map((e) => e.t) }
 }
 
-/** The run's nodes, a session read on its own hung under the session that spawned it (`traces.parent_session_id`); then the windows on the run's clock. */
+/** The run's nodes and their recorded session lineage, then the windows on the run's clock. */
 function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanCount: number, coverage: NonNullable<BehaviorResult['coverage']>): BehaviorResult {
   const bySession = new Map<string, string>()
   const byId = new Map(read.map((r) => [r.node.id, r]))
@@ -556,7 +562,7 @@ function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanC
     if (n.session !== null) bySession.set(n.session, n.id)
   }
   const parents = new Map(read.map(({ n }) => [
-    n.id, (n.parentSession ? bySession.get(n.parentSession) : undefined) ?? n.parent,
+    n.id, n.parentSession ? bySession.get(n.parentSession) ?? n.parentSession : n.parent,
   ]))
   // Resolve once for the whole forest, including cross-session forks and
   // parents recorded in another file. A missing parent retains its declared depth.

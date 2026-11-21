@@ -2,7 +2,7 @@ import { basename } from 'node:path'
 import { INTERRUPT_TEXT, isFleetTurn } from './adapters/actor.js'
 import { ACTOR_ATTR } from './adapters/conversation.js'
 import { canonicalJson } from './adapters/tool-io.js'
-import { INHERITED_SOURCE_ATTR, INHERITED_SPAN_ATTR } from './adapters/provenance.js'
+import { INHERITED_SOURCE_ATTR, isInheritedSpan } from './adapters/provenance.js'
 import { modelCallContextTokens } from './execution.js'
 import type { OtlpSpan } from './otlp.js'
 import type { SessionFact } from './session-facts.js'
@@ -408,7 +408,7 @@ function timeOf(value: string): number | null {
 }
 
 /** History copied from a parent or kept by a compaction: the session carries it but did not do it. */
-const isInherited = (span: OtlpSpan): boolean => span.attributes[INHERITED_SPAN_ATTR] === true
+const isInherited = (span: OtlpSpan): boolean => isInheritedSpan(span.attributes)
 
 const promptText = (span: OtlpSpan): string =>
   span.name === 'user.prompt' && typeof span.attributes.content === 'string' ? span.attributes.content.trim() : ''

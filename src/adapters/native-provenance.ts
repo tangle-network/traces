@@ -1,7 +1,12 @@
 import type { HarnessSession } from '@tangle-network/harness-sessions'
 import type { OtlpSpan } from '../otlp.js'
+import { INHERITED_SPAN_COUNT_ATTR, isInheritedSpan } from './provenance.js'
 
 export function stampNativeProvenance(session: HarnessSession, spans: OtlpSpan[]): void {
+  if (session.fork && spans[0]) {
+    const inherited = spans.filter(span => isInheritedSpan(span.attributes)).length
+    if (inherited > 0) spans[0].attributes[INHERITED_SPAN_COUNT_ATTR] = inherited
+  }
   const prefix = session.harness === 'codex' ? 'traces.codex' : 'traces.claude'
   if (session.harness !== 'codex' && session.harness !== 'claude-code') return
   for (const item of spans) item.attributes[`${prefix}.source_trace_id`] = session.nativeSessionId

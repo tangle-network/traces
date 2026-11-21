@@ -30,16 +30,16 @@ import { type FirstFailure, ingestSpans, rankFirstFailure } from '@tangle-networ
 import { ACTOR_ATTR, capText } from './adapters/conversation.js'
 import { FACT_TEXT_CAP, rawContent, typedTurnsOf, isOwnAgentMessage, type SessionTurnFact, type TurnSignal, type TurnFoldState, type ExcludedTurn, stringAttr } from './session-turns.js'
 import {
-  INHERITED_SPAN_ATTR,
   SUBAGENT_SPAWN_ATTR,
   SUBAGENT_SPAWN_TASK_ATTR,
   SUBAGENT_TASK_ATTR,
+  isInheritedSpan,
   isSubagentSpan,
   isRecordedToolCall,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
 import { ATTR, isRecordSpan, isRuntimeJournalNode, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
-import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
+import { windowBounds, insideWindow, hasWorkInWindow, selectionRules, type WindowBounds } from './session-window.js'
 import { factScopes, groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
 import { childModelBySpawn, foldSubagentTokens, needsPrice, routerPrices, sessionCost, type SessionCost, type SessionTokens } from './execution.js'
@@ -56,7 +56,7 @@ import { commandTextFromInput, isCodeModeScript, simpleCommands } from './shell-
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
 /** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '9'
+export const SESSION_FACTS_MEASUREMENT_VERSION = '10'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
@@ -601,6 +601,7 @@ function toolCounts(spans: readonly OtlpSpan[]): SubagentToolCount[] {
 function finalMessagesOf(spans: readonly OtlpSpan[]): FinalMessageFact[] {
   const last = new Map<string | null, OtlpSpan>()
   for (const span of spans) {
+    if (isInheritedSpan(span.attributes)) continue
     let task: string | null | undefined
     if (span.name === 'message.assistant') {
       // A folded subagent's transcript carries the same span name; the message
@@ -728,7 +729,7 @@ function callCommands(span: OtlpSpan): CallCommands | undefined {
  * fact's `spanIds` are every call that ran a command.
  */
 function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCountFact[]> {
-  const own = tools.filter((span) => span.attributes[INHERITED_SPAN_ATTR] !== true)
+  const own = tools.filter((span) => !isInheritedSpan(span.attributes))
   if (own.length > 0 && !own.some((span) => inputValue(span) !== null)) {
     return { value: null, spanIds: [], unavailable: 'no tool call recorded its arguments, so which commands ran cannot be read' }
   }
@@ -873,6 +874,7 @@ function readSession(
   // Tools stay with this agent. Folded model calls join this sheet unless an
   // exclusive child sheet already carries them.
   const ownSpans = spans.filter((span) => !isSubagentSpan(span.attributes))
+  const executed = ownSpans.filter((span) => !isInheritedSpan(span.attributes))
   const subagentSpans = spans.filter((span) => isSubagentSpan(span.attributes))
   const toolSpans = spans.filter((span) => resolveSpanKind(span) === 'TOOL')
   const synthesized = toolSpans.filter(isSynthesizedSpan)
@@ -883,8 +885,8 @@ function readSession(
   const byName: Record<string, number> = {}
   for (const span of invoked) byName[toolName(span)] = (byName[toolName(span)] ?? 0) + 1
 
-  const subagents = subagentsOf(ownSpans, spans)
-  const pullRequests = readPullRequests(ownSpans)
+  const subagents = subagentsOf(executed, spans)
+  const pullRequests = readPullRequests(executed)
   // The turn facts honor the window; every other fact covers the whole session.
   const inWindow = (at: string): boolean => insideWindow(bounds, at)
   const promptSpans = spans.filter((span) => span.name === 'user.prompt' && inWindow(span.start_time))
@@ -900,10 +902,10 @@ function readSession(
   const typedCounts = new Map<string, number>()
   for (const turn of typedTurns) typedCounts.set(turn.author, (typedCounts.get(turn.author) ?? 0) + 1)
   const finalMessages = finalMessagesOf(spans)
-  const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, ownSpans)
+  const { files, truncatedInputs, unresolvedPaths } = changedFilesOf(invoked, executed)
 
-  const starts = ownSpans.filter((span) => Number.isFinite(Date.parse(span.start_time)))
-  const ends = ownSpans.filter((span) => Number.isFinite(Date.parse(span.end_time)))
+  const starts = executed.filter((span) => Number.isFinite(Date.parse(span.start_time)))
+  const ends = executed.filter((span) => Number.isFinite(Date.parse(span.end_time)))
   const firstSpan = starts.reduce<OtlpSpan | null>(
     (best, span) => (best === null || Date.parse(span.start_time) < Date.parse(best.start_time) ? span : best),
     null,
@@ -922,10 +924,10 @@ function readSession(
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
   const cwdSpan = spans.find((span) => stringAttr(span, SESSION_CWD_ATTR) !== null)
   const repoSpan = spans.find((span) => stringAttr(span, ATTR.GIT_REPOSITORY) !== null)
-  const firstFailure: SessionFirstFailure = ownSpans.length === 0
+  const firstFailure: SessionFirstFailure = executed.length === 0
     ? { status: 'unknown', traceId, unsetCount: 0, reason: "no span of this session's own records" }
-    : rankFirstFailure(ingestSpans(ownSpans, { contentIncluded: true }).spans)
-  const failedSpan = firstFailure.status === 'found' ? ownSpans.find((span) => span.span_id === firstFailure.spanId) : undefined
+    : rankFirstFailure(ingestSpans(executed, { contentIncluded: true }).spans)
+  const failedSpan = firstFailure.status === 'found' ? executed.find((span) => span.span_id === firstFailure.spanId) : undefined
   const agent = agentFact(spans, sessionId, harness, options.agentIdentity)
 
   const facts: SessionFacts = {
@@ -1120,15 +1122,6 @@ export interface SessionFactsReportBuilder {
   build(): SessionFactsReport
 }
 
-const WINDOW_SESSION_RULE =
-  'a session is selected when at least one of its records starts or ends inside [since, until)'
-const WINDOW_TURN_RULE =
-  'humanTurns, excludedTurns and turnsByActor keep only user.prompt turns that started inside [since, until); ' +
-  "every other fact, and each turn's answered text, covers the whole session"
-
-const SWEEP_SESSION_RULE = 'the sessions the selection named or found; one that could not be read is named here and skipped'
-const SWEEP_TURN_RULE = 'every turn of each selected session'
-
 export function createSessionFactsReportBuilder(options: SessionFactsReportOptions = {}): SessionFactsReportBuilder {
   const bounds = windowBounds(options.window)
   const sessions: SessionFacts[] = []
@@ -1146,7 +1139,7 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
     if (bounds !== null || options.nameUnread === true) {
       const records = group.spans.filter(isRecordSpan)
       if (!records.length) return skipUnread(group, bounds !== null)
-      if (bounds !== null && !records.some(span => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) {
+      if (bounds !== null && !hasWorkInWindow(records, bounds)) {
         outsideWindow.push(group.sessionId ?? group.traceId)
         return false
       }
@@ -1198,8 +1191,7 @@ export function createSessionFactsReportBuilder(options: SessionFactsReportOptio
           : {
               since: bounds?.since ?? null,
               until: bounds?.until ?? null,
-              sessionRule: bounds === null ? SWEEP_SESSION_RULE : WINDOW_SESSION_RULE,
-              turnRule: bounds === null ? SWEEP_TURN_RULE : WINDOW_TURN_RULE,
+              ...selectionRules(bounds),
               outsideWindow: [...outsideWindow].sort(compareIds),
               unreadSessions: [...unreadSessions],
             },
@@ -1338,7 +1330,10 @@ function sheetHeader(facts: SessionFacts): string {
   }
   const active = facts.measurements.activeMinutes.value
   if (active !== null) parts.push(`active ${minutesText(active)}`)
-  if (facts.parentSessionId) parts.push(`child of ${facts.parentSessionId.slice(0, 8)}`)
+  if (facts.parentSessionId) {
+    const relation = facts.measurements.relationship.role === 'operator' ? 'fork of' : 'child of'
+    parts.push(`${relation} ${facts.parentSessionId.slice(0, 8)}`)
+  }
   return parts.join(' · ')
 }
 
@@ -1519,7 +1514,7 @@ export function readSessionIndex(
   const groups = groupByTrace(spans)
   const group = groups.find((entry) => entry.sessionId === options.sessionId) ?? groups[0]
   const ordered = [...(group?.spans ?? [])].sort(byTraceOrder)
-  const own = ordered.filter((span) => !isSubagentSpan(span.attributes))
+  const own = ordered.filter((span) => !isSubagentSpan(span.attributes) && !isInheritedSpan(span.attributes))
   const typed = typedTurnsOf(ordered, options.state)
   const human = typed.turns.filter((turn) => turn.author === 'human')
   let firstAt: string | null = null
@@ -1817,7 +1812,7 @@ export function readSessionTurnGroups(spans: readonly OtlpSpan[], window?: Sessi
   const bounds = windowBounds(window)
   return groupByTrace(spans).flatMap((group) => {
     const records = group.spans.filter(isRecordSpan)
-    if (records.length > 0 && bounds !== null && !records.some((span) => insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time))) return []
+    if (records.length > 0 && bounds !== null && !hasWorkInWindow(records, bounds)) return []
     const ordered = [...group.spans].sort(byTraceOrder)
     return [{
       sessionId: group.sessionId,

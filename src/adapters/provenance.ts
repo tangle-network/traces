@@ -42,6 +42,7 @@ export const SYNTHESIZED_SOURCE_ATTR = 'traces.span.synthesized_from'
 
 /** `true` on a span carrying context from outside the parsed scope. */
 export const INHERITED_SPAN_ATTR = 'traces.session.inherited'
+export const NATIVE_INHERITED_SPAN_ATTR = 'tangle.harness_session.inherited'
 
 /** Where the inherited record came from: `pre-task-prefix` or `compacted`. */
 export const INHERITED_SOURCE_ATTR = 'traces.session.inherited_source'
@@ -79,7 +80,16 @@ export function isSynthesizedSpan(attributes: Readonly<Record<string, unknown>>)
 }
 
 export function isInheritedSpan(attributes: Readonly<Record<string, unknown>>): boolean {
-  return attributes[INHERITED_SPAN_ATTR] === true
+  return attributes[INHERITED_SPAN_ATTR] === true || attributes[NATIVE_INHERITED_SPAN_ATTR] === true
+}
+
+export function bridgeNativeSessionAttributes(attributes: Record<string, unknown>): void {
+  if (attributes[NATIVE_INHERITED_SPAN_ATTR] === true) {
+    attributes[INHERITED_SPAN_ATTR] = true
+    attributes[INHERITED_SOURCE_ATTR] ??= 'pre-task-prefix'
+  }
+  const role = attributes['tangle.harness_session.role']
+  if (role === 'operator' || role === 'child') attributes['traces.session.role'] ??= role
 }
 
 export function isSubagentSpan(attributes: Readonly<Record<string, unknown>>): boolean {
