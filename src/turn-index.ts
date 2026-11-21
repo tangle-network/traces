@@ -23,7 +23,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFile, link, mkdir, open, readFile, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises'
+import { appendFile, link, mkdir, open, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -435,11 +435,17 @@ export class TurnIndex {
   private async refreshOne(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<{ bytes: number; rows: number; whole: boolean } | null> {
     const key = TurnIndex.keyOf(adapter, ref)
     let info: { ino: number; size: number; mtimeMs: number }
+    let version: string
     try {
       info = await stat(ref.path)
+      // A native row or one of its sources can disappear after discovery.
+      version = readsStoreRoots(adapter) && adapter.readsSqlite()
+        ? await adapter.storeVersion(ref)
+        : `${info.ino}:${info.size}:${info.mtimeMs}`
     } catch (error) {
       const entry = this.blank({ ino: 0, size: 0, mtimeMs: 0 }, 'whole')
       entry.unread = errorText(error)
+      await rm(this.rowsPath(key), { force: true })
       this.files[key] = entry
       return { bytes: 0, rows: 0, whole: false }
     }
@@ -453,10 +459,6 @@ export class TurnIndex {
         // which decides whether it can be read at all.
       }
     }
-    // A shared store changes with every session in it; its own files say whether this one did.
-    const version = readsStoreRoots(adapter) && adapter.readsSqlite()
-      ? await adapter.storeVersion(ref)
-      : `${info.ino}:${info.size}:${info.mtimeMs}`
     if (previous?.mode === 'whole' && previous.version === version) return null
     return this.readWhole(key, adapter, ref, info, version)
   }
@@ -579,7 +581,7 @@ export class TurnIndex {
   async rows(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<SessionRow[]> {
     const key = TurnIndex.keyOf(adapter, ref)
     const entry = this.files[key]
-    if (!entry) return []
+    if (!entry || entry.unread !== null) return []
     let text = ''
     try {
       text = await readFile(this.rowsPath(key), 'utf8')

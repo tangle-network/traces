@@ -7,6 +7,7 @@ import { listReaders, readerFor } from '@tangle-network/harness-sessions'
 import { collectSessionSelection, parseSession } from '../src/index.js'
 import { listAdapters, resolveAdapter } from '../src/registry.js'
 import { resolveRefs } from '../src/refs.js'
+import { TurnIndex } from '../src/turn-index.js'
 import { claudeTranscript } from './fixtures/home.js'
 import { runCli } from './run-cli.js'
 
@@ -227,6 +228,42 @@ describe('native reader catalog', () => {
     expect(conflicting.code).toBe(2)
     expect(JSON.parse(conflicting.stderr)).toMatchObject({ code: 'ambiguous' })
   }, 120_000)
+
+  it('preserves other sessions when a selected SQLite row disappears and reads its replacement on recovery', async () => {
+    const device = join(root, 'changing-device')
+    const schema = await readFile(join(import.meta.dirname, 'fixtures/native-tools/hermes/hermes-example.sql'), 'utf8')
+    const db = await database(join(device, '.hermes', 'state.db'), schema)
+    try {
+      const add = db.prepare('INSERT INTO sessions (id, model, started_at) VALUES (?, ?, ?)')
+      add.run('changing', 'hermes-model', 1763642401)
+      db.exec("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (4, 'changing', 'user', 'original', 1763642402)")
+      const adapter = resolveAdapter('hermes')!
+      const refs = await adapter.locate({ home: device })
+      const stable = refs.find(ref => ref.sessionId === 'hermes-example')!
+      const changing = refs.find(ref => ref.sessionId === 'changing')!
+      const selection = refs.map(ref => ({ adapter, ref }))
+      await TurnIndex.with(async index => {
+        await index.refresh(selection)
+        const stableRows = await index.rows(adapter, stable)
+        expect(stableRows.length).toBeGreaterThan(0)
+        expect(await index.rows(adapter, changing)).toContainEqual(expect.objectContaining({ text: 'original' }))
+
+        db.exec("DELETE FROM sessions WHERE id = 'changing'")
+        await index.refresh(selection)
+        expect(index.session(adapter, changing)?.unread).toMatch(/0 matching sessions/)
+        expect(await index.rows(adapter, changing)).toEqual([])
+        expect(await index.rows(adapter, stable)).toEqual(stableRows)
+
+        add.run('changing', 'hermes-model', 1763642410)
+        db.exec("UPDATE messages SET content = 'replacement' WHERE session_id = 'changing'")
+        await index.refresh(selection)
+        expect(index.session(adapter, changing)?.unread).toBeNull()
+        expect((await index.rows(adapter, changing)).map(row => row.text)).toEqual(['replacement'])
+      }, join(root, 'changing-index'))
+    } finally {
+      db.close()
+    }
+  })
 
   it('reads Prime and paired NanoClaw files with their own identities and unknown behavior coverage', async () => {
     const prime = await facts(primePath, '--harness', 'prime')
