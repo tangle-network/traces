@@ -145,6 +145,14 @@ async function sqliteSessionRef(path: string, ref: string, selector: string | un
   return { kind: 'session', ref, adapter, session: adapter.bindNativeRef(row) }
 }
 
+// A Grok session is its updates log plus named companions, including events.jsonl in the 0.x store.
+function isGrokSessionFile(path: string, stored: string | undefined): boolean {
+  const name = basename(path)
+  if (name === 'events.jsonl') return stored === 'grok'
+  const grok = resolveAdapter('grok')
+  return grok !== undefined && readsStoreRoots(grok) && grok.nativeStores.some(store => store.files.some(file => basename(file) === name))
+}
+
 async function fileRef(path: string, ref: string, selector: string | undefined, options: ResolveRefOptions): Promise<ResolvedRef> {
   if (options.format) return { kind: 'spans', ref, path, reader: options.format, ...(selector ? { selector } : {}) }
   // A retained database can have any name, even inside another harness's inferred store root.
@@ -153,17 +161,15 @@ async function fileRef(path: string, ref: string, selector: string | undefined, 
   const stored = harnessOfStorePath(path)
   const sourceInfo = await stat(path)
   const recorded = await recordedFileFormat(path, stored, requested)
-  const fallback = stored ?? requested
+  const grokFile = isGrokSessionFile(path, stored)
+  const fallback = (stored === 'grok' && !grokFile ? undefined : stored) ?? requested
   const sniffed: FileFormat = recorded ?? (fallback ? { kind: 'session', harness: fallback } : { kind: 'spans', reader: 'otlp' })
   const mismatch = requested && incompatibleFile(sniffed, requested)
   if (mismatch) throw new RefError(`${path}: ${mismatch}`, 'unreadable')
   if (sniffed.kind === 'spans') return { kind: 'spans', ref, path, reader: sniffed.reader, ...(selector ? { selector } : {}) }
   if (selector) throw new RefError(`${ref}: a #selector picks a run from a span file; ${path} is a ${sniffed.harness} session`, 'usage')
   const adapter = adapterFor(sniffed.harness)
-  // Only the native catalog's named companion files can refer to the Grok updates beside them.
-  const companion = adapter.harness === 'grok' && readsStoreRoots(adapter)
-    && adapter.nativeStores.some(store => store.files.some(file => basename(file) === basename(path)))
-  const session = companion ? join(dirname(path), 'updates.jsonl') : path
+  const session = adapter.harness === 'grok' && grokFile ? join(dirname(path), 'updates.jsonl') : path
   const info = session === path ? sourceInfo : await stat(session)
   const selected = { harness: adapter.harness, sessionId: ref, path: session, cwd: null, mtimeMs: info.mtimeMs }
   if (session === path) rememberFileFormat(selected, info, recorded)

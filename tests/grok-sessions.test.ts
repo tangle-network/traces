@@ -29,6 +29,7 @@ async function grokHome(): Promise<{ home: string; dir: string }> {
 describe('Grok Build sessions', () => {
   it('answers facts for a Grok session named by id, by its directory files, and by its update log', async () => {
     const { home, dir } = await grokHome()
+    await writeFile(join(dir, 'notes.jsonl'), '{"note":"unrelated"}\n')
     for (const ref of [ID, dir, join(dir, 'events.jsonl'), join(dir, 'updates.jsonl')]) {
       const run = await runCli(['facts', ref, '--format', 'json'], { env: { HOME: home } })
       expect(run.code, `${ref}: ${run.stderr}${run.stdout}`).toBe(0)
@@ -38,6 +39,16 @@ describe('Grok Build sessions', () => {
       expect(report.spanCount).toBeGreaterThanOrEqual(3)
       expect(run.stdout).toContain('run_terminal_cmd')
     }
+  })
+
+  it('never substitutes neighboring updates for a conflicting native recording', async () => {
+    const { home, dir } = await grokHome()
+    const events = join(dir, 'events.jsonl')
+    await writeFile(events, JSON.stringify({ type: 'session_meta', payload: { id: ID }, timestamp: '2026-11-12T20:21:18.686Z' }) + '\n')
+    const crossed = await runCli(['watch', events, '--harness', 'grok', '--once', '--format', 'jsonl'], { env: { HOME: home } })
+    expect(crossed.code).toBe(2)
+    expect(crossed.stdout).toBe('')
+    expect(JSON.parse(crossed.stderr.trim())).toMatchObject({ code: 'unreadable' })
   })
 
   it('retains the update log as the session source when a sibling file names the session', async () => {
