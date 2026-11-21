@@ -18,6 +18,7 @@ Import other packages' names from their owners: `AnalystRegistry`, `makeFinding`
 | `writeOtlpFile` | `(spans, path) → Promise<string>` | `traces convert <ref> --out <file>` |
 | `computeSessionFacts` | `(spans, opts?) → SessionFacts[]` | `traces facts`: one sheet per session |
 | `buildSessionFactsReport` | `(spans, opts?) → SessionFactsReport` | `traces facts <ref> --format json` |
+| `priceReport` | `(SessionFactsReport) → Promise<SessionFactsReport>` | Applies the list prices used by `traces facts` to recorded token usage. |
 | `renderSessionFacts` | `(SessionFactsReport) → string` | `traces facts` text |
 | `analyzeSpans` | `(spans, AnalyzeOptions?) → Promise<AnalyzeResult>` | agent-eval's deterministic analyst, or yours through `{ registry }`; no model call |
 | `runTraceInvestigation` | `(TraceInvestigationOptions) → Promise<TraceInvestigationResult>` | `traces analyze <ref> --format json`: facts, finding packet, measures, conformance, `cannotAnswer` |

@@ -1,3 +1,5 @@
+import { isInheritedSpan } from './adapters/provenance.js'
+import type { OtlpSpan } from './otlp.js'
 import type { SessionFactsWindow } from './session-facts.js'
 
 /** Epoch bounds of a window; `null` when the window is absent or open on both sides. */
@@ -33,3 +35,19 @@ export function insideWindow(bounds: WindowBounds | null, time: string): boolean
   return Number.isFinite(ms) && ms >= bounds.sinceMs && ms < bounds.untilMs
 }
 
+
+export function selectionRules(bounds: WindowBounds | null): { sessionRule: string; turnRule: string } {
+  return bounds === null ? {
+    sessionRule: 'the sessions the selection named or found; one that could not be read is named here and skipped',
+    turnRule: 'every turn of each selected session',
+  } : {
+    sessionRule: 'a session is selected when at least one of its own records starts or ends inside [since, until)',
+    turnRule: 'humanTurns, excludedTurns and turnsByActor keep only user.prompt turns that started inside [since, until); ' +
+      "every other fact, and each turn's answered text, covers the whole session",
+  }
+}
+
+export function hasWorkInWindow(records: readonly OtlpSpan[], bounds: WindowBounds): boolean {
+  return records.some(span => !isInheritedSpan(span.attributes) &&
+    (insideWindow(bounds, span.start_time) || insideWindow(bounds, span.end_time)))
+}

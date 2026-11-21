@@ -30,6 +30,7 @@ const VALUES = [
   // facts
   'computeSessionFacts',
   'buildSessionFactsReport',
+  'priceReport',
   'renderSessionFacts',
   // analyze
   'analyzeSpans',
@@ -117,6 +118,7 @@ function readDeclarations(): { values: string[]; types: string[]; consumerErrors
     `import { ${VALUES.join(', ')} } from '../dist/index.js'`,
     `export type Types = [${TYPES.map((name) => (name === 'SessionFact' ? `T_${name}<unknown>` : `T_${name}`)).join(', ')}]`,
     `export const values = [${VALUES.join(', ')}] as const`,
+    "export const savedMeasurementVersion = (stored: string): T_SessionFactsReport['measurementVersion'] => stored",
     '',
   ].join('\n')
   const options: ts.CompilerOptions = {

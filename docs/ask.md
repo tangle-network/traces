@@ -30,6 +30,7 @@ An `answerSchema` makes the answer one JSON value a scorer can compare; it accep
 - Every question receives the [facts](facts.md) sheet before its first model call.
 - Every `trace://<trace>/span/<span>` citation is resolved; an unresolvable one fails that question. Findings pass the same evidence gate as the built-in kinds, and refusals are counted by reason.
 - A failed question never stops the others. Ctrl-C keeps the answers already bought.
+- A failed question keeps any measured model completions and trace-tool calls. Missing measurements appear as unknown. The provider call count includes failed attempts.
 - `answers.json` and `report.md` (under `--out`) are written before the exit code is decided. Some questions unanswered: exit 2 with `code: partial`.
 - Each cost carries its provenance (`observed`, `estimated` or `uncaptured`); an uncaptured cost stays null.
 - The ledger reserves each call's maximum before it runs, so a budget below one call is refused before any spend.

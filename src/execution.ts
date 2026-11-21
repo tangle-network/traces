@@ -29,6 +29,7 @@ import {
   sourceChannelUnavailable,
 } from './attributes.js'
 import type { OtlpSpan } from './otlp.js'
+import { isInheritedSpan } from './adapters/provenance.js'
 
 /** A session's tokens under one model, in the categories `priceTokens` takes. */
 export interface ModelTokens {
@@ -118,7 +119,7 @@ function wholePrompt(span: OtlpSpan, cacheRead: number, cacheWrite: number): num
 function callUsage(span: OtlpSpan): CallUsage | null {
   if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'LLM') return null
   // Its calls carry the usage; counting the turn too would double every total.
-  if (isUsageAggregate(span.attributes)) return null
+  if (isUsageAggregate(span.attributes) || isInheritedSpan(span.attributes)) return null
   const output = count(firstNumberAttr(span.attributes, LLM_OUTPUT_TOKEN_ATTR_KEYS))
   const cacheRead = count(firstNumberAttr(span.attributes, LLM_CACHED_TOKEN_ATTR_KEYS)) ?? 0
   const cacheWrite = count(firstNumberAttr(span.attributes, LLM_CACHE_WRITE_TOKEN_ATTR_KEYS)) ?? 0

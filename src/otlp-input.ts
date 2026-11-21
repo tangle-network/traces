@@ -1,6 +1,7 @@
 import { TRACE_ID_MINTED_ATTR } from './attributes.js'
 export { TRACE_ID_MINTED_ATTR } from './attributes.js'
 import { canonicalJson } from './adapters/tool-io.js'
+import { bridgeNativeSessionAttributes } from './adapters/provenance.js'
 import { spanKey } from './span-identity.js'
 import { stampUnreadableSourceRows } from './source-unreadable.js'
 /**
@@ -503,13 +504,9 @@ function readLinks(value: unknown, traceId: string): OtlpSpanLink[] {
   return links
 }
 
-/**
- * Fill the keys every reader here takes from the ones a conforming producer writes instead: agent-eval reads a tool's
- * name as `tool.name`, not the contract's `gen_ai.tool.name`, and OpenInference producers (harness-sessions,
- * sdk-telemetry) write a message's text as `input.value` or `output.value` and a child session's parent as
- * `tangle.harness_session.parent`. Without them a conforming span reads as an unnamed tool call or a silent message.
- */
+/** Map canonical tool names, message text and session provenance to the attributes Traces and agent-eval read. */
 function bridgeContractAttributes(name: string, attributes: Record<string, unknown>): void {
+  bridgeNativeSessionAttributes(attributes)
   const text = name === 'user.prompt' ? 'input.value' : name.startsWith('message.') ? 'output.value' : null
   const keys: Array<[string, string]> = [[TOOL_NAME, ATTR.toolName], ['traces.parent_session_id', 'tangle.harness_session.parent'], ...(text ? [['content', text] as [string, string]] : [])]
   for (const [key, from] of keys) if (nonEmptyString(attributes[key]) === null && nonEmptyString(attributes[from]) !== null) attributes[key] = attributes[from]

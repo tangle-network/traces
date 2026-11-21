@@ -38,9 +38,10 @@ import {
 import { ASK_QUESTION_HEADER, DEFAULT_ASK_CONCURRENCY, MAX_TRACE_QUESTION_CHARS, QUESTION_LABEL } from './ask-defaults.js'
 import type { OtlpSpan } from './otlp.js'
 import { appendAll } from './arrays.js'
+import { engineCallReservationFloorUsd, formatUsd, receiptActivity, sumOrNull } from './ask-accounting.js'
 import { createSessionFactsReportBuilder, renderSessionFactsContext } from './session-facts.js'
 
-export { DEFAULT_ASK_CONCURRENCY, MAX_TRACE_QUESTION_CHARS }
+export { DEFAULT_ASK_CONCURRENCY, MAX_TRACE_QUESTION_CHARS, engineCallReservationFloorUsd }
 
 /**
  * Signatures of engine↔bridge version skew (or a missing bridge install) —
@@ -105,9 +106,9 @@ export interface TraceQuestionAnswer {
   /** Findings the evidence gate refused, by reason. */
   readonly rejectedFindings: FindingRejectionReasons
   readonly model: string | null
-  /** Successful model completions the engine reported; null when the engine failed. */
+  /** Successful model completions. Null when the engine supplied no count. */
   readonly modelCalls: number | null
-  /** Trace-tool requests the engine reported; null when the engine failed. */
+  /** Admitted trace-tool requests. Null when the engine supplied no count. */
   readonly toolCalls: number | null
   /** Provider usage and cost for this question alone, from the shared ledger. */
   readonly usage: AnalystUsageReceipt | null
@@ -563,27 +564,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? `${error.constructor.name}: ${error.message}` : String(error)
 }
 
-/**
- * Smallest reservation one model call makes before it runs: its full output and
- * reasoning allowance at the output rate, before any input tokens. Undefined
- * when the engine does not describe its pricing and token caps.
- */
-export function engineCallReservationFloorUsd(engine: TraceAnalysisEngine): number | undefined {
-  const config = engine.executionConfig
-  const pricing = config.pricing as { outputUsdPerMillion?: unknown } | undefined
-  const outputRate = pricing?.outputUsdPerMillion
-  const maxOutput = config.max_output_tokens
-  const maxReasoning = config.max_reasoning_tokens ?? 0
-  if (typeof outputRate !== 'number' || typeof maxOutput !== 'number' || typeof maxReasoning !== 'number') {
-    return undefined
-  }
-  return ((maxOutput + maxReasoning) * outputRate) / 1_000_000
-}
-
-function formatUsd(value: number): string {
-  return `$${value < 0.01 && value > 0 ? value.toPrecision(2) : value.toFixed(2)}`
-}
-
 /** A question the pool never reached, recorded so the run still accounts for it. */
 function unrunAnswer(
   question: TraceQuestion & { id: string },
@@ -609,10 +589,6 @@ function unrunAnswer(
     endedAt: at,
     latencyMs: 0,
   }
-}
-
-function sumOrNull(values: ReadonlyArray<number | null>): number | null {
-  return values.some((value) => value === null) ? null : values.reduce<number>((sum, value) => sum + (value ?? 0), 0)
 }
 
 /**
@@ -766,6 +742,7 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
         }
       }
     }
+    const activity = completed ?? receiptActivity(usage)
     const endedAt = new Date()
     return {
       id: question.id,
@@ -779,8 +756,8 @@ export async function runTraceQuestions(opts: TraceQuestionsOptions): Promise<Tr
       findings: completed?.findings ?? [],
       rejectedFindings: rejections.counts()[question.id] ?? {},
       model: opts.engine.model ?? null,
-      modelCalls: completed?.modelCalls ?? null,
-      toolCalls: completed?.toolCalls ?? null,
+      modelCalls: activity?.modelCalls ?? null,
+      toolCalls: activity?.toolCalls ?? null,
       usage,
       startedAt: startedAt.toISOString(),
       endedAt: endedAt.toISOString(),

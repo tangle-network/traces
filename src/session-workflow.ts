@@ -1,4 +1,5 @@
 import type { OtlpSpan } from './otlp.js'
+import { isInheritedSpan } from './adapters/provenance.js'
 import {
   describeSessionRelationship,
   type SessionRelationship,
@@ -204,7 +205,9 @@ function relationshipIssues(sessions: readonly SessionWorkflowSession[]): Sessio
     const referenced = [...(referencedParents.get(session.relationship.sessionId) ?? [])].sort()
     const declared = session.relationship.parentSessionId
     const mismatched = referenced.filter((parent) => parent !== declared)
-    const missingReverseLink = Boolean(declared && byId.has(declared) && !referenced.includes(declared))
+    // An operator can fork a saved session after it ended. Only the new session witnesses that lineage.
+    const missingReverseLink = session.relationship.role !== 'operator' &&
+      Boolean(declared && byId.has(declared) && !referenced.includes(declared))
     if (referenced.length > 1 || mismatched.length > 0 || missingReverseLink) {
       issues.push({
         kind: 'parent-conflict',
@@ -254,10 +257,11 @@ function orderSessions(sessions: readonly SessionWorkflowSession[]): SessionWork
   return ordered
 }
 
-/** When a session began: its earliest span start. */
+/** The earliest start among the session's own spans. */
 function startedAt(session: SessionWorkflowSession): number {
   let first = Number.POSITIVE_INFINITY
   for (const span of session.spans) {
+    if (isInheritedSpan(span.attributes)) continue
     const at = Date.parse(span.start_time)
     if (Number.isFinite(at) && at < first) first = at
   }

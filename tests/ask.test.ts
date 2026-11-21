@@ -27,6 +27,9 @@ interface Answers {
     id: string
     status: string
     answer: string | null
+    modelCalls: number | null
+    toolCalls: number | null
+    usage: { activity?: { modelCalls: number; toolCalls: number } } | null
     failure?: { kind: string; message: string }
     citations: Array<{ uri: string; resolved: boolean }>
     parsedAnswer?: unknown
@@ -224,6 +227,10 @@ describe('traces ask: answers', () => {
       ['q3', 'failed', 'error'],
     ])
     expect(answers.questions[1]!.citations).toEqual([expect.objectContaining({ uri: missing, resolved: false })])
+    const interrupted = answers.questions[2]!
+    const measured = interrupted.usage?.activity
+    if (measured) expect(measured).toEqual({ modelCalls: 0, toolCalls: 0 })
+    expect([interrupted.modelCalls, interrupted.toolCalls]).toEqual([measured?.modelCalls ?? null, measured?.toolCalls ?? null])
     expect(await readFile(join(out, 'report.md'), 'utf8')).toContain(`**Unresolved:** ${missing}`)
   })
 })

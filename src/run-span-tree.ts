@@ -276,21 +276,22 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
     placed++
     const key = spanKey(span.trace_id, span.span_id)
     const agent = recordedAgentName(span.attributes) ?? enclosingAgent
+    const inherited = isInheritedSpan(span.attributes)
     let nodeId = enclosingNodeId
     let nodeAgent = enclosingAgent
     let childDepth = depth
 
-    if (!grouped && isNodeBoundary(span, enclosingNodeId, enclosingAgent)) {
+    if (!inherited && !grouped && isNodeBoundary(span, enclosingNodeId, enclosingAgent)) {
       nodeId = openNode(span, enclosingNodeId, depth, agent)
       nodeAgent = agent
       childDepth = depth + 1
     }
 
     const host = nodeId === null ? undefined : building.get(nodeId)
-    if (host !== undefined) {
-      host.spanIds.push(span.span_id)
+    host?.spanIds.push(span.span_id)
+    if (host !== undefined && !inherited) {
       const kind = spanKind(span)
-      if (kind === 'LLM' && !isUsageAggregate(span.attributes) && !isInheritedSpan(span.attributes)) {
+      if (kind === 'LLM' && !isUsageAggregate(span.attributes)) {
         host.driver = addSpend(host.driver, spanSpend(span))
         if (firstNumberAttr(span.attributes, LLM_INPUT_TOKEN_ATTR_KEYS) === null &&
           firstNumberAttr(span.attributes, LLM_OUTPUT_TOKEN_ATTR_KEYS) === null) {
@@ -312,8 +313,8 @@ export function buildSpanRunTree(input: readonly OtlpSpan[], source: string): Sp
     // In-stream workers can share the caller's session and agent name. Their native
     // parent_tool_use_id binds their first model call and prompt to the spawning tool.
     // Keep that tool in the caller and anchor the worker at its first recorded event.
-    const embedded = span.attributes[SUBAGENT_SPAWN_ATTR] === true
-      ? children.filter((child) => child.attributes['agent.parent.confidence'] === 'explicit' &&
+    const embedded = !inherited && span.attributes[SUBAGENT_SPAWN_ATTR] === true
+      ? children.filter((child) => !isInheritedSpan(child.attributes) && child.attributes['agent.parent.confidence'] === 'explicit' &&
         (spanKind(child) === 'LLM' || child.name === 'user.prompt' || child.name.startsWith('message.')))
       : []
     const anchor = embedded[0]

@@ -17,7 +17,7 @@ export { buildSpanRunTree } from './run-span-tree.js'
 export type { SpanRunSnapshot, SpanRunNode } from './run-span-tree.js'
 
 // ── facts: what happened, exactly, for $0 ─────────────────────────────────
-export { buildSessionFactsReport, computeSessionFacts, renderSessionFacts } from './session-facts.js'
+export { buildSessionFactsReport, computeSessionFacts, priceReport, renderSessionFacts } from './session-facts.js'
 export type { SessionFact, SessionFacts, SessionFactsReport } from './session-facts.js'
 export type { SessionTurnFact } from './session-turns.js'
 

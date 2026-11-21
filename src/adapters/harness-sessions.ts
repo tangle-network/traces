@@ -18,7 +18,6 @@ import {
 } from '@tangle-network/harness-sessions'
 import { nativePresentation, storedSession } from './native-stores.js'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
-import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
 import {
   isRecordSpan,
   SESSION_CWD_ATTR,
@@ -30,7 +29,6 @@ import {
   SESSION_TOTAL_TOKENS_ATTR,
 } from '../attributes.js'
 import type { OtlpSpan } from '../otlp.js'
-import { statusCode } from '../otlp-input.js'
 import { takeJsonl } from '../jsonl.js'
 import { checkNativeFile, isClaudeStreamJson, nativeFormat, stringTooLong } from '../session-file-format.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
@@ -38,67 +36,11 @@ import { codexActor } from './actor.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
 import { stampNativeProvenance } from './native-provenance.js'
 import { SUBAGENT_SPAWN_ATTR, SUBAGENT_SPAWN_TASK_ATTR } from './provenance.js'
+import { asTracesSpan, messageText, presentationSpans } from './harness-presentation.js'
 import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath, userTurnKey } from './codex.js'
 import { codexCompletedItem, type CodexLine, contentTextBlocks, multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
-
-function asTracesSpan(item: ReturnType<typeof toOtlpSpans>[number]): OtlpSpan {
-  const attributes: Record<string, unknown> = { ...item.attributes }
-  if (item.kind === 'LLM') {
-    applyLlmSpanOtlpAttributes(attributes, {
-      model: typeof attributes['gen_ai.request.model'] === 'string' ? attributes['gen_ai.request.model'] : undefined,
-      inputTokens: typeof attributes['gen_ai.usage.input_tokens'] === 'number' ? attributes['gen_ai.usage.input_tokens'] : undefined,
-      outputTokens: typeof attributes['gen_ai.usage.output_tokens'] === 'number' ? attributes['gen_ai.usage.output_tokens'] : undefined,
-      reasoningTokens: typeof attributes['gen_ai.usage.reasoning_tokens'] === 'number' ? attributes['gen_ai.usage.reasoning_tokens'] : undefined,
-      cachedTokens: typeof attributes['gen_ai.usage.cache_read.input_tokens'] === 'number' ? attributes['gen_ai.usage.cache_read.input_tokens'] : undefined,
-      cacheWriteTokens: typeof attributes['gen_ai.usage.cache_creation.input_tokens'] === 'number' ? attributes['gen_ai.usage.cache_creation.input_tokens'] : undefined,
-    })
-  }
-  if (item.kind === 'TOOL' && typeof attributes['gen_ai.tool.name'] === 'string') {
-    attributes['tool.name'] = attributes['gen_ai.tool.name']
-  }
-  return {
-    trace_id: item.trace_id,
-    span_id: item.span_id,
-    parent_span_id: item.parent_span_id,
-    name: item.name,
-    start_time: item.start_time,
-    end_time: item.end_time,
-    status: { code: statusCode(item.status.code), ...(item.status.message ? { message: item.status.message } : {}) },
-    attributes,
-    ...(item.links ? { links: [...item.links] } : {}),
-  }
-}
-
-function messageText(message: HarnessSession['messages'][number]): string {
-  return message.parts.filter((part) => part.type === 'text').map((part) => part.text).join('\n')
-}
-
-function presentationSpans(session: HarnessSession, root: OtlpSpan): OtlpSpan[] {
-  const spans = new Map<string, OtlpSpan>()
-  for (const message of session.messages) {
-    if (message.role === 'tool' || !message.at) continue
-    const text = messageText(message)
-    if (!text) continue
-    // A system message is context the harness put in front of the model; its size is the uncut text's.
-    const context = message.role === 'system' ? { 'traces.context.source': message.source ?? 'system', 'traces.context.bytes': Buffer.byteLength(text), 'traces.context.lines': text.split('\n').length } : {}
-    const item = contractSpan({
-      traceId: root.trace_id,
-      spanId: deriveHexId(`${session.harness}:${session.nativeSessionId}:message:${message.id}`, 8),
-      parentSpanId: root.span_id,
-      name: message.role === 'user' ? 'user.prompt' : `message.${message.role}`,
-      kind: 'CHAIN',
-      startTime: message.at,
-      endTime: message.at,
-      attributes: { 'service.name': session.harness, 'tangle.actor': message.actor, content: text.slice(0, 8000), ...context },
-    })
-    // Claude can re-emit a message with the same native ID after a resumed
-    // subagent turn. The later copy can carry stronger actor attribution.
-    spans.set(item.span_id, asTracesSpan(item))
-  }
-  return [...spans.values()]
-}
 
 /** Codex's `exec` is a JavaScript envelope around one or more actual tools. */
 function nestedToolName(input: string | null): string | null {
@@ -820,7 +762,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     const spans = toOtlpSpans(session).map(asTracesSpan)
     const root = spans[0]!
     root.attributes['service.name'] = this.harness
-    root.attributes['traces.session.role'] = session.parentNativeSessionId ? 'child' : 'operator'
+    root.attributes['traces.session.role'] ??= session.parentNativeSessionId ? 'child' : 'operator'
     // The directory the shared reader read from the session's own records.
     if (session.cwd) root.attributes[SESSION_CWD_ATTR] = session.cwd
     if (session.parentNativeSessionId) root.attributes['traces.parent_session_id'] = session.parentNativeSessionId

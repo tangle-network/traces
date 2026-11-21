@@ -1,7 +1,7 @@
 import type { Stats } from 'node:fs'
 import { open, readFile, stat } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
-import { CODEX_HOME_RULE, isCodexHome, listReaders } from '@tangle-network/harness-sessions'
+import { CODEX_HOME_RULE, isCodexHome, isPrimeSessionHeader, listReaders } from '@tangle-network/harness-sessions'
 import { nativePresentation } from './adapters/native-stores.js'
 import type { SessionRef } from './types.js'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
@@ -66,7 +66,7 @@ export function nativeFormat(row: unknown): string | undefined {
   if ((typeof row.sessionId === 'string' || typeof row.session_id === 'string')
     && typeof row.type === 'string' && ('message' in row || 'uuid' in row || 'subtype' in row)) return 'claude-code'
   if (CODEX_ROLLOUT_TYPES.has(String(row.type)) && isObject(row.payload)) return 'codex'
-  if (row.type === 'session' && typeof row.id === 'string') return 'pi'
+  if (row.type === 'session' && typeof row.id === 'string') return isPrimeSessionHeader(row) ? 'prime' : 'pi'
   if (row.type === 'session_start') return 'factory'
   const update = isObject(row.params) && isObject(row.params.update) ? row.params.update : isObject(row.update) ? row.update : row
   if (typeof update.sessionUpdate === 'string') return 'grok'
@@ -94,7 +94,7 @@ export async function recordedFileFormat(path: string, store?: string, requested
     for (const row of rows) {
       const format = nativeFormat(row)
       if (format) {
-        // Prime writes Pi records but owns the session ID in its filename.
+        // Earlier Prime writers share Pi's unmarked header and need store or caller context.
         const harness = format === 'pi' && (store ?? requested) === 'prime' ? 'prime' : format
         return { kind: 'session', harness }
       }
