@@ -35,6 +35,8 @@ An `answerSchema` makes the answer one JSON value a scorer can compare; it accep
 - Each cost carries its provenance (`observed`, `estimated` or `uncaptured`); an uncaptured cost stays null.
 - The ledger reserves each call's maximum before it runs, so a budget below one call is refused before any spend.
 
+For an OpenCode model route (`opencode/<model>`), the nested model request explicitly disables native coding tools. The analyst can still search the trace and read original spans through its interpreter.
+
 ## Setup and refusals
 
 `ask` needs `TANGLE_API_KEY` (or `OPENAI_API_KEY` with `OPENAI_BASE_URL`) and the DSPy bridge: with `uv` installed it runs `uvx --from agent-eval-rpc[dspy]==<version>`, or `TRACES_PYTHON` names a Python that has it. Traces selects a compatible bridge for the installed JS engine. Its planner uses the reasoning settings from the execution profile. A missing key or bridge exits 2 with `code: setup` before anything is read or spent.
