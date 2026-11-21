@@ -17,9 +17,10 @@ PRs and branch pushes run no CI. The corpus checks real trace fixtures; `check:p
 
 `main` is protected, and nothing publishes until a `v*` tag:
 
-1. Change `package.json` (and `pnpm-lock.yaml`) to the version, and its notes to `docs/release-<version>.md`, through a pull request.
-2. Tag the merge commit `vX.Y.Z` and push the tag.
-3. The Publish workflow checks the tag is on `main` and matches `package.json`, builds, publishes to npm with provenance, and creates the GitHub release from `docs/release-<version>.md`.
+1. Check the packed candidate against the latest npm release with the Agent Runtime admission script pinned in [the publish workflow](../.github/workflows/publish.yml). Run `node scripts/check-version-bump.mjs --archive <package.tgz> --as <version>` from that policy checkout. The check reads public types as well as exports and package metadata.
+2. Change `package.json` and its notes in `docs/release-<version>.md` through a pull request. Refresh the lockfile when dependency resolution changes.
+3. Tag the merge commit `vX.Y.Z` and push the tag.
+4. The Publish workflow checks the tag is on `main` and matches `package.json`, builds, publishes to npm with provenance, and creates the GitHub release from `docs/release-<version>.md`.
 
 `pnpm check:package` proves the tarball ships the `traces` binary and the skill. To retry a failed publish, run the Publish workflow with the existing tag.
 
