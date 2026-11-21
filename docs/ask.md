@@ -35,7 +35,7 @@ An `answerSchema` makes the answer one JSON value a scorer can compare; it accep
 - Each cost carries its provenance (`observed`, `estimated` or `uncaptured`); an uncaptured cost stays null.
 - The ledger reserves each call's maximum before it runs, so a budget below one call is refused before any spend.
 
-For an OpenCode model route (`opencode/<model>`), the nested model request explicitly disables native coding tools. The analyst can still search the trace and read original spans through its interpreter.
+For an OpenCode model route (`opencode/<model>`), the analyst sends `tool_choice: "none"`. Use a bridge that honors this field to keep the nested model from editing files or running a shell. The analyst still searches the trace and reads original spans through its interpreter.
 
 ## Setup and refusals
 
