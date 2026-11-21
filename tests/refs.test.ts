@@ -3,7 +3,7 @@
  * case spawns the built CLI with HOME pointed at a synthetic home
  * (`fixtures/home.ts`) and asserts stdout, stderr and the exit code.
  */
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
@@ -191,6 +191,13 @@ describe('refs: files and directories are read by their content', () => {
       const result = await run(['analyze', file, '--harness', 'codex', '--format', 'json'])
       expect(result.code).toBe(2)
       expect(result.stdout).toBe('')
+      const adapter = resolveAdapter('codex')!
+      const ref = { harness: adapter.harness, sessionId: file, path: file, cwd: null, mtimeMs: 0 }
+      await expect(parseSession(adapter, ref, { captureSources: true })).rejects.toThrow('no spans')
+      const bundle = join(fx.root, 'empty-source-bundle')
+      const resultBundle = await run(['bundle', file, '--harness', 'codex', '--out', bundle])
+      expect(resultBundle.code).toBe(2)
+      await expect(stat(join(bundle, 'manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     }
     await writeFile(file, [
       { type: 'thread.started', thread_id: IDS.codex },

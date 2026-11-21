@@ -38,7 +38,7 @@ import {
   isRecordedToolCall,
   isSynthesizedSpan as isSynthesizedByProvenance,
 } from './adapters/provenance.js'
-import { ATTR, hasRuntimeDriverMeter, isRuntimeJournalNode, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
+import { ATTR, isRecordSpan, isRuntimeJournalNode, SESSION_CWD_ATTR, sourceChannelUnavailable } from './attributes.js'
 import { windowBounds, insideWindow, type WindowBounds } from './session-window.js'
 import { factScopes, groupByTrace, selectSourceSpans, unreadTraceGroup, type TraceGroup } from './session-scopes.js'
 import { buildSpanRunTree } from './run-span-tree.js'
@@ -97,7 +97,6 @@ export { LEGACY_SYNTHESIZED_SPAN_ATTR as SPAN_SYNTHESIZED_ATTR } from './adapter
 const CORRUPTION_COUNT_ATTR = 'traces.session.corruption_count'
 
 /** Present on a per-record integrity receipt span, which is not a session record. */
-const CORRUPTION_RECEIPT_VERSION_ATTR = 'traces.session.corruption.receipt_version'
 
 /** Entries kept per list field before the sheet reports the rest as omitted. */
 export const FACT_LIST_CAP = 200
@@ -814,10 +813,6 @@ function excludedTurnFacts(
     .map(({ reason, author, spanIds }) => ({ reason, author, turns: spanIds.length, spanIds }))
 }
 
-function isRecordSpan(span: OtlpSpan): boolean {
-  return (span.parent_span_id !== null || hasRuntimeDriverMeter(span)) && span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] === undefined
-}
-
 /**
  * Compute the facts sheet for every trace in `spans`. One trace is one session.
  * Deterministic and free: the same spans always produce the same sheet, and no
@@ -922,7 +917,7 @@ function readSession(
     && buildSpanRunTree(spans, 'session-facts').nodes.length > 1
   const tokens = foldSubagentTokens(ownSpans, subagentSpans, apart)
   const operating = operatingOf(ownSpans, subagentSpans, invoked, subagentTools, apart)
-  const receipts = spans.filter((span) => span.attributes[CORRUPTION_RECEIPT_VERSION_ATTR] !== undefined)
+  const receipts = spans.filter((span) => span.attributes[ATTR.CORRUPTION_RECEIPT_VERSION] !== undefined)
   const recordSpans = spans.filter(isRecordSpan).length
   const corruptionSpan = spans.find((span) => typeof span.attributes[CORRUPTION_COUNT_ATTR] === 'number')
   const cwdSpan = spans.find((span) => stringAttr(span, SESSION_CWD_ATTR) !== null)

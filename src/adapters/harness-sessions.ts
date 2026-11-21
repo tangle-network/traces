@@ -20,6 +20,7 @@ import { nativePresentation, storedSession } from './native-stores.js'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
 import {
+  isRecordSpan,
   SESSION_CWD_ATTR,
   SESSION_TOTAL_CACHE_WRITE_ATTR,
   SESSION_TOTAL_CACHED_INPUT_ATTR,
@@ -29,8 +30,9 @@ import {
   SESSION_TOTAL_TOKENS_ATTR,
 } from '../attributes.js'
 import type { OtlpSpan } from '../otlp.js'
+import { statusCode } from '../otlp-input.js'
 import { takeJsonl } from '../jsonl.js'
-import { checkNativeFile, hasDecodedEvent, isClaudeStreamJson, nativeFormat } from '../session-file-format.js'
+import { checkNativeFile, isClaudeStreamJson, nativeFormat, stringTooLong } from '../session-file-format.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { codexActor } from './actor.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
@@ -40,14 +42,6 @@ import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath,
 import { codexCompletedItem, type CodexLine, contentTextBlocks, multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
-
-function status(code: string): OtlpSpan['status']['code'] {
-  return code === 'STATUS_CODE_OK' ? 'OK' : code === 'STATUS_CODE_ERROR' ? 'ERROR' : 'UNSET'
-}
-
-function stringTooLong(error: unknown): boolean {
-  return error instanceof Error && /Cannot create a string longer than/u.test(error.message)
-}
 
 function asTracesSpan(item: ReturnType<typeof toOtlpSpans>[number]): OtlpSpan {
   const attributes: Record<string, unknown> = { ...item.attributes }
@@ -71,7 +65,7 @@ function asTracesSpan(item: ReturnType<typeof toOtlpSpans>[number]): OtlpSpan {
     name: item.name,
     start_time: item.start_time,
     end_time: item.end_time,
-    status: { code: status(item.status.code), ...(item.status.message ? { message: item.status.message } : {}) },
+    status: { code: statusCode(item.status.code), ...(item.status.message ? { message: item.status.message } : {}) },
     attributes,
     ...(item.links ? { links: [...item.links] } : {}),
   }
@@ -719,10 +713,16 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
-    if (this.legacyOpencode && await legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.parse(ref, options)
-    // SQLite validates its own schema. A physical transcript must agree with the requested
-    // reader before either the native fold or the scoped projection can stamp its identity.
     const fileFormat = this.readsSqlite() ? undefined : await checkNativeFile(ref, this.harness)
+    const spans = await this.parseSource(ref, options)
+    // Both legacy and shared readers can project a root from a foreign timestamp. If the
+    // bytes did not identify the format, require an actual record or a recorded root failure.
+    if (this.readsSqlite() || fileFormat || spans.some(s => isRecordSpan(s) || s.parent_span_id === null && s.status.code === 'ERROR')) return spans
+    return []
+  }
+
+  private async parseSource(ref: SessionRef, options: ParseOptions): Promise<OtlpSpan[]> {
+    if (this.legacyOpencode && await legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.parse(ref, options)
     // Scoped/cited reads retain their existing projection; ordinary sessions use the shared fold.
     if (this.scopedAdapter && (options.taskScope === 'latest' || options.taskScope === 'turn' || options.captureSources)) {
       return this.scopedAdapter.parse(ref, options)
@@ -759,7 +759,6 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     // A missing timestamp is not epoch work. Exclude it rather than allowing the
     // projection's display fallback to enter measured totals.
     if (!session.startedAt) return []
-    if (!this.readsSqlite() && !fileFormat && !hasDecodedEvent(session)) return []
     let codex: CodexDecoration | undefined
     if (session.harness === 'codex') {
       const head = await takeJsonl<CodexHead>(ref.path, 40, { mode: 'recover', onCorruption: () => {} })

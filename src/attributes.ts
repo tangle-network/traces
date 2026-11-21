@@ -102,6 +102,11 @@ export function hasRuntimeDriverMeter(span: OtlpSpan): boolean {
       .some((key) => typeof span.attributes[key] === 'number')
 }
 
+/** Source-backed work, including a metered root. A corruption receipt describes unread bytes. */
+export function isRecordSpan(span: OtlpSpan): boolean {
+  return (span.parent_span_id !== null || hasRuntimeDriverMeter(span)) && span.attributes[ATTR.CORRUPTION_RECEIPT_VERSION] === undefined
+}
+
 export const SESSION_TOTAL_CACHED_INPUT_ATTR = 'traces.session.total_cached_input_tokens'
 export const SESSION_TOTAL_CACHE_WRITE_ATTR = 'traces.session.total_cache_write_input_tokens'
 export const SESSION_TOTAL_REASONING_ATTR = 'traces.session.total_reasoning_tokens'

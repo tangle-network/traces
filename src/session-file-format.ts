@@ -1,7 +1,7 @@
 import type { Stats } from 'node:fs'
 import { open, readFile, stat } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
-import { CODEX_HOME_RULE, isCodexHome, listReaders, type HarnessSession } from '@tangle-network/harness-sessions'
+import { CODEX_HOME_RULE, isCodexHome, listReaders } from '@tangle-network/harness-sessions'
 import { nativePresentation } from './adapters/native-stores.js'
 import type { SessionRef } from './types.js'
 import { isCodexExecRecord } from './adapters/codex-exec.js'
@@ -119,14 +119,6 @@ export function incompatibleFile(format: FileFormat | undefined, requested: stri
   return actual === requested ? undefined : `expected ${requested}, found ${actual} records`
 }
 
-// Several native folds observe timestamps before examining the row type. For an
-// unidentified recording, look for evidence that this decoder understood at least one event.
-export function hasDecodedEvent(session: HarnessSession): boolean {
-  return session.messages.length > 0 || session.modelCalls.length > 0 || session.toolCalls.length > 0
-    || session.children.length > 0 || Boolean(session.turnReceipts?.length) || session.usage !== null
-    || session.ending.status !== 'open'
-}
-
 // A file ref is normally resolved and read in the same call. Recheck the bytes if a writer
 // changes or replaces the file between reads. The entry's lifetime is the caller's reference.
 const inspected = new WeakMap<SessionRef, { stamp: string; format: FileFormat | undefined }>()
@@ -166,4 +158,8 @@ export async function isClaudeStreamJson(path: string): Promise<boolean> {
   } finally {
     await file.close()
   }
+}
+
+export function stringTooLong(error: unknown): boolean {
+  return error instanceof Error && /Cannot create a string longer than/u.test(error.message)
 }

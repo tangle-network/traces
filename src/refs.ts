@@ -164,7 +164,8 @@ async function fileRef(path: string, ref: string, selector: string | undefined, 
   const grokFile = isGrokSessionFile(path, stored)
   const fallback = (stored === 'grok' && !grokFile ? undefined : stored) ?? requested
   const sniffed: FileFormat = recorded ?? (fallback ? { kind: 'session', harness: fallback } : { kind: 'spans', reader: 'otlp' })
-  const mismatch = requested && incompatibleFile(sniffed, requested)
+  const mismatch = requested && (recorded ? incompatibleFile(recorded, requested)
+    : stored && stored !== requested ? `expected ${requested}, found a ${stored} store with unidentified records` : undefined)
   if (mismatch) throw new RefError(`${path}: ${mismatch}`, 'unreadable')
   if (sniffed.kind === 'spans') return { kind: 'spans', ref, path, reader: sniffed.reader, ...(selector ? { selector } : {}) }
   if (selector) throw new RefError(`${ref}: a #selector picks a run from a span file; ${path} is a ${sniffed.harness} session`, 'usage')
