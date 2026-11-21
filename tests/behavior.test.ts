@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { behaviorFromSpans, renderBehaviorText, type BehaviorResult } from '../src/behavior.js'
 import { readOtlpInput } from '../src/otlp-input.js'
+import { buildSpanRunTree } from '../src/run-span-tree.js'
 import { runCli } from './run-cli.js'
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'behavior')
@@ -58,6 +59,13 @@ describe('traces behavior', () => {
   it('through the module: three nodes, the s2:s0 streak as a looping window, idle windows, steers with read latency, the calibration table', async () => {
     const input = await readOtlpInput(FIXTURE)
     const result = behaviorFromSpans(input.spans)
+    const tree = buildSpanRunTree(input.spans, FIXTURE)
+    for (const session of input.spans.filter((span) => span.name === 'session')) {
+      const display = session.attributes['tangle.node.label']
+      expect(typeof display).toBe('string')
+      expect(result.nodes.find((node) => node.span_id === session.span_id)?.label).toBe(display)
+      expect(tree.nodes.find((node) => node.traceId === session.trace_id && node.spanId === session.span_id)?.label).toBe(display)
+    }
     expect(result.policy).toEqual({ id: 'dl-ui-behavior-windows', version: 1, window_s: 300 })
     expect(result.nodes.map((n) => n.id).sort()).toEqual([ROOT, S2, LOOPER])
     expect(result.nodes).toHaveLength(input.spans.filter((s) => s.name === 'session').length)

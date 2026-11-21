@@ -1,3 +1,4 @@
+import { ATTR as CONTRACT_ATTR } from '@tangle-network/agent-trace-contract'
 import type { OtlpSpan } from './otlp.js'
 /**
  * Span-attribute keys the upload path stamps. The CLI is the producer; the
@@ -101,6 +102,11 @@ export function hasRuntimeDriverMeter(span: OtlpSpan): boolean {
       .some((key) => typeof span.attributes[key] === 'number')
 }
 
+/** Source-backed work, including a metered root. A corruption receipt describes unread bytes. */
+export function isRecordSpan(span: OtlpSpan): boolean {
+  return (span.parent_span_id !== null || hasRuntimeDriverMeter(span)) && span.attributes[ATTR.CORRUPTION_RECEIPT_VERSION] === undefined
+}
+
 export const SESSION_TOTAL_CACHED_INPUT_ATTR = 'traces.session.total_cached_input_tokens'
 export const SESSION_TOTAL_CACHE_WRITE_ATTR = 'traces.session.total_cache_write_input_tokens'
 export const SESSION_TOTAL_REASONING_ATTR = 'traces.session.total_reasoning_tokens'
@@ -154,6 +160,23 @@ export function stampEnvironmentAttrs(
       if (span.attributes[key] === undefined) span.attributes[key] = attrs[key]
     }
   }
+}
+
+const AGENT_NAME_KEYS = ['agent.name', 'inference.agent.name', 'inference.agent_name', CONTRACT_ATTR.agentName] as const
+
+/** The agent a span names. A display label can be shared by several agents. */
+export function recordedAgentName(attributes: Readonly<Record<string, unknown>>): string | null {
+  for (const key of AGENT_NAME_KEYS) {
+    const value = attributes[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return null
+}
+
+/** A producer may give the same agent different display labels in different plays. */
+export function recordedNodeLabel(attributes: Readonly<Record<string, unknown>>, agent: string | null): string | null {
+  const label = attributes['tangle.node.label']
+  return typeof label === 'string' && label.length > 0 ? label : agent
 }
 
 const SESSION_ID_ATTRIBUTE_KEYS = [ATTR.SESSION_ID, 'session.id', 'traces.session.id'] as const

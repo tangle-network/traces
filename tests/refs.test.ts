@@ -3,12 +3,14 @@
  * case spawns the built CLI with HOME pointed at a synthetic home
  * (`fixtures/home.ts`) and asserts stdout, stderr and the exit code.
  */
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { serializeSpans, span } from '../src/otlp.js'
 import { resolveRefs } from '../src/refs.js'
+import { resolveAdapter } from '../src/registry.js'
+import { parseSession } from '../src/index.js'
 import { claudeStreamJson, codexRollout, IDS, makeFixtureHome, type FixtureHome } from './fixtures/home.js'
 import { runCli } from './run-cli.js'
 
@@ -157,6 +159,53 @@ describe('refs: files and directories are read by their content', () => {
       const facts = await factsOf(ref)
       expect({ ref, harness: facts.harness }).toEqual({ ref, harness })
     }
+  })
+
+  it('requires the declared reader to match the recording in every reading command and the SDK', async () => {
+    const relocated = join(fx.root, 'retained', '.codex', 'sessions', `${IDS.claude}.jsonl`)
+    await mkdir(dirname(relocated), { recursive: true })
+    await copyFile(fx.paths.claude, relocated)
+    for (const [path, declared, recorded] of [[relocated, 'codex', 'claude-code'], [fx.paths.codex, 'claude', 'codex']] as const) {
+      for (const verb of ['facts', 'analyze', 'behavior', 'watch']) {
+        const format = verb === 'watch' ? ['--once', '--format', 'jsonl'] : ['--format', 'json']
+        const result = await run([verb, path, '--harness', declared, ...format])
+        expect(result.code, verb).toBe(2)
+        expect(result.stdout, verb).toBe('')
+        expect(JSON.parse(result.stderr.trim().split('\n').at(-1)!)).toMatchObject({
+          code: 'unreadable', error: expect.stringContaining(`found ${recorded} records`),
+        })
+      }
+      const adapter = resolveAdapter(declared)!
+      await expect(parseSession(adapter, { harness: adapter.harness, sessionId: path, path, cwd: null, mtimeMs: 0 }))
+        .rejects.toThrow(`found ${recorded} records`)
+    }
+    const actual = await factsOf(relocated, '--harness', 'claude')
+    expect(actual.sessions[0]).toMatchObject({ sessionId: IDS.claude, harness: 'claude-code', recordSpans: expect.any(Number) })
+    expect((await factsOf(relocated)).harness).toBe('claude-code')
+  })
+
+  it('distinguishes an unrecognized timestamp from a failed native run with no model call', async () => {
+    const file = join(fx.root, 'no-native-records.jsonl')
+    for (const contents of ['', '{"timestamp":"2026-01-01T00:00:00Z","type":"unrelated"}\n']) {
+      await writeFile(file, contents)
+      const result = await run(['analyze', file, '--harness', 'codex', '--format', 'json'])
+      expect(result.code).toBe(2)
+      expect(result.stdout).toBe('')
+      const adapter = resolveAdapter('codex')!
+      const ref = { harness: adapter.harness, sessionId: file, path: file, cwd: null, mtimeMs: 0 }
+      await expect(parseSession(adapter, ref, { captureSources: true })).rejects.toThrow('no spans')
+      const bundle = join(fx.root, 'empty-source-bundle')
+      const resultBundle = await run(['bundle', file, '--harness', 'codex', '--out', bundle])
+      expect(resultBundle.code).toBe(2)
+      await expect(stat(join(bundle, 'manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    await writeFile(file, [
+      { type: 'thread.started', thread_id: IDS.codex },
+      { type: 'turn.started' },
+      { type: 'turn.failed', error: { message: 'request failed' } },
+    ].map(row => JSON.stringify(row)).join('\n'))
+    const failed = await factsOf(file, '--harness', 'codex-exec')
+    expect(failed.sessions[0]).toMatchObject({ harness: 'codex-exec', firstFailure: { status: 'found' } })
   })
 
   it('reads a harness store in a retained tree over the event stream recorded beside it', async () => {

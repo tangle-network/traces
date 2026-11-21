@@ -337,7 +337,7 @@ function nonEmptyString(value: unknown): string | null {
  * would be inventing a verdict, and refusing the whole span would throw away
  * work that was recorded.
  */
-function statusCode(value: unknown): OtlpStatusCode {
+export function statusCode(value: unknown): OtlpStatusCode {
   if (value === 'OK' || value === 'STATUS_CODE_OK') return 'OK'
   if (value === 'ERROR' || value === 'STATUS_CODE_ERROR') return 'ERROR'
   return 'UNSET'

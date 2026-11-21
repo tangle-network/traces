@@ -4,7 +4,7 @@
 import { homedir } from 'node:os'
 import { legacyOpencodeFile, nativeRef, sessionRefKey, tracesRef } from './harness-refs.js'
 import { createReadStream } from 'node:fs'
-import { open, stat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
@@ -20,6 +20,7 @@ import { nativePresentation, storedSession } from './native-stores.js'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
 import {
+  isRecordSpan,
   SESSION_CWD_ATTR,
   SESSION_TOTAL_CACHE_WRITE_ATTR,
   SESSION_TOTAL_CACHED_INPUT_ATTR,
@@ -29,7 +30,9 @@ import {
   SESSION_TOTAL_TOKENS_ATTR,
 } from '../attributes.js'
 import type { OtlpSpan } from '../otlp.js'
+import { statusCode } from '../otlp-input.js'
 import { takeJsonl } from '../jsonl.js'
+import { checkNativeFile, isClaudeStreamJson, nativeFormat, stringTooLong } from '../session-file-format.js'
 import type { HarnessTraceAdapter, LocateOptions, ParentTaskResolution, ParseOptions, SessionRef, SpawnedChildResolution } from '../types.js'
 import { codexActor } from './actor.js'
 import { ClaudeAdapter, spawnsSubagent, spawnTaskName } from './claude.js'
@@ -39,34 +42,6 @@ import { agentOperationFailed, classifyNestedTool, CodexAdapter, spawnAgentPath,
 import { codexCompletedItem, type CodexLine, contentTextBlocks, multiAgentOperation, spawnedSessionIds, targetedSessionIds } from './codex-format.js'
 import { uuidV7TimestampMs } from './codex-task-scope.js'
 import { OpencodeAdapter } from './opencode.js'
-
-async function isClaudeStreamJson(path: string): Promise<boolean> {
-  const file = await open(path, 'r')
-  try {
-    const buffer = Buffer.alloc(65536)
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
-    for (const line of buffer.toString('utf8', 0, bytesRead).split('\n').slice(0, 20)) {
-      if (!line || line.length > 60000) continue
-      try {
-        const row = JSON.parse(line) as { type?: string; subtype?: string }
-        if (row.type === 'system' && row.subtype === 'init') return true
-      } catch {
-        // A torn head is the shared reader's integrity decision.
-      }
-    }
-    return false
-  } finally {
-    await file.close()
-  }
-}
-
-function status(code: string): OtlpSpan['status']['code'] {
-  return code === 'STATUS_CODE_OK' ? 'OK' : code === 'STATUS_CODE_ERROR' ? 'ERROR' : 'UNSET'
-}
-
-function stringTooLong(error: unknown): boolean {
-  return error instanceof Error && /Cannot create a string longer than/u.test(error.message)
-}
 
 function asTracesSpan(item: ReturnType<typeof toOtlpSpans>[number]): OtlpSpan {
   const attributes: Record<string, unknown> = { ...item.attributes }
@@ -90,7 +65,7 @@ function asTracesSpan(item: ReturnType<typeof toOtlpSpans>[number]): OtlpSpan {
     name: item.name,
     start_time: item.start_time,
     end_time: item.end_time,
-    status: { code: status(item.status.code), ...(item.status.message ? { message: item.status.message } : {}) },
+    status: { code: statusCode(item.status.code), ...(item.status.message ? { message: item.status.message } : {}) },
     attributes,
     ...(item.links ? { links: [...item.links] } : {}),
   }
@@ -738,6 +713,15 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   }
 
   async parse(ref: SessionRef, options: ParseOptions = {}): Promise<OtlpSpan[]> {
+    const fileFormat = this.readsSqlite() ? undefined : await checkNativeFile(ref, this.harness)
+    const spans = await this.parseSource(ref, options)
+    // Both legacy and shared readers can project a root from a foreign timestamp. If the
+    // bytes did not identify the format, require an actual record or a recorded root failure.
+    if (this.readsSqlite() || fileFormat || spans.some(s => isRecordSpan(s) || s.parent_span_id === null && s.status.code === 'ERROR')) return spans
+    return []
+  }
+
+  private async parseSource(ref: SessionRef, options: ParseOptions): Promise<OtlpSpan[]> {
     if (this.legacyOpencode && await legacyOpencodeFile(ref, this.refs)) return this.legacyOpencode.parse(ref, options)
     // Scoped/cited reads retain their existing projection; ordinary sessions use the shared fold.
     if (this.scopedAdapter && (options.taskScope === 'latest' || options.taskScope === 'turn' || options.captureSources)) {
@@ -901,6 +885,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     if (this.nativeHarness !== 'claude-code' && this.nativeHarness !== 'codex') return false
     if (first === undefined) return true
     const records = first.filter((record): record is Record<string, unknown> => record !== null)
+    if (!records.some(record => nativeFormat(record) === this.harness)) return false
     if (this.nativeHarness === 'claude-code') return !records.some((record) => record.type === 'system' && record.subtype === 'init')
     // A forked child is read whole by traces' own reader (`parse`), so the index reads it whole too.
     const head = records.slice(0, 40) as CodexHead[]

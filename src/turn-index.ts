@@ -149,7 +149,7 @@ interface FileEntry {
  * commands a Codex code-mode script ran. 3: a code-mode loop over literals
  * gives one row per element. 4: a command row says whether it failed.
  */
-const INDEX_VERSION = 4
+const INDEX_VERSION = 5
 
 interface Store {
   version: typeof INDEX_VERSION

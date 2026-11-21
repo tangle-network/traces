@@ -65,7 +65,7 @@ Exit 0 pass, 1 any gate fails, 2 a gate could not decide: a bad contract, a rule
   --last N            the N newest sessions by file mtime, never the caller's own
   --since T           every session with a record since T: 30m, 2h, 7d or an ISO time
   --cwd DIR           sessions recorded in DIR or under it, or in a worktree of its repo
-  --harness ID        force the reader of a file ref (claude-code, codex, …)
+  --harness ID        select a compatible file reader (claude-code, codex, …)
   --format text|json|junit|github text (default), json, junit or github: the verdict, on stdout
   --out DIR           write evidence for each gate that did not pass under DIR
 

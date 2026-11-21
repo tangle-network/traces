@@ -28,6 +28,8 @@ Calibrated: implementing, verifying, exploring, communicating, idle. Not: review
 The JSON is `{ policy: { id, version, window_s }, run: { t0, t1, n_windows, spans }, nodes[], windows[], flags[], streaks[], stalls[], anomalies[], drift[], mail: { edges[], summary }, calibration }`; times are epoch seconds.
 Exit 0 when it answered, 2 when no span is a tool call (`no tool spans; categories unavailable`) or the selection cannot be read; it never exits 1, since a flag is a record, not a verdict.
 
+The behavior report and span tree show the producer’s node label when available. Two sessions can share a display label. Use their recorded IDs to follow parent links and attribute calls.
+
 ## `traces behavior --help`
 
 ```text

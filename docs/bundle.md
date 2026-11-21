@@ -30,7 +30,7 @@ Keep one session's evidence beyond log rotation: session/, spans, facts, git log
 A bundle directory is a ref: traces facts DIR reads it.
 
   --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
-  --harness ID        force the reader of a file ref
+  --harness ID        select a compatible file reader
   --out DIR           a new or empty directory for the bundle
 
 Examples:

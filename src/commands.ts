@@ -401,7 +401,7 @@ const COMMANDS = [
     ],
     flags: [
       '--contract', '--share-safe', '--known-secret-env',
-      ...SELECT.slice(0, 4), { flag: '--harness', help: 'force the reader of a file ref (claude-code, codex, …)' },
+      ...SELECT.slice(0, 4), { flag: '--harness', help: 'select a compatible file reader (claude-code, codex, …)' },
       { flag: '--format', help: 'text (default), json, junit or github: the verdict, on stdout' },
       { flag: '--out', value: 'DIR', help: 'write evidence for each gate that did not pass under DIR' },
     ],
@@ -476,7 +476,7 @@ const COMMANDS = [
     usage: 'bundle <ref> | --current --out DIR      (then: traces bundle verify DIR)',
     job: "Keep one session's evidence beyond log rotation: session/, spans, facts, git log, sha256 manifest.",
     notes: ['A bundle directory is a ref: traces facts DIR reads it.'],
-    flags: ['--current', { flag: '--harness', help: 'force the reader of a file ref' }, { flag: '--out', value: 'DIR', help: 'a new or empty directory for the bundle' }],
+    flags: ['--current', { flag: '--harness', help: 'select a compatible file reader' }, { flag: '--out', value: 'DIR', help: 'a new or empty directory for the bundle' }],
     refs: [0, 1],
     select: 'required',
     examples: ['traces bundle 019a3c7e --out evidence/019a3c7e', 'traces bundle --current --out evidence/now', 'traces bundle verify evidence/019a3c7e'],
