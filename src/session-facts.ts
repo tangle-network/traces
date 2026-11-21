@@ -55,8 +55,7 @@ import {
 import { commandTextFromInput, isCodeModeScript, simpleCommands } from './shell-commands.js'
 export type { AgentIdentityFact, AgentIdentityLookup, AgentIdentitySource, AgentIdentitySourceName } from './session-identity.js'
 
-/** Cache invalidation key for deterministic measurements and prepared analyst context. */
-export const SESSION_FACTS_MEASUREMENT_VERSION = '10'
+const SESSION_FACTS_MEASUREMENT_VERSION = '10'
 
 /**
  * A half-open time window: a time `t` is inside when `since <= t < until`.
@@ -336,7 +335,8 @@ export interface SessionFactsReport {
   readonly schemaVersion: 1
   readonly kind: 'traces.session_facts_report'
   readonly generatedAt: string
-  readonly measurementVersion: typeof SESSION_FACTS_MEASUREMENT_VERSION
+  /** Opaque cache key. Recompute measurements when this value changes for the same evidence. */
+  readonly measurementVersion: string
   /**
    * SHA-256 over the selected sessions in trace-id order, each contributing the
    * SHA-256 of its canonical spans (content, attributes, links and timing).
