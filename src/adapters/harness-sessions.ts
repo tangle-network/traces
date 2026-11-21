@@ -16,7 +16,7 @@ import {
   type HarnessSession,
   type SessionRef as NativeRef,
 } from '@tangle-network/harness-sessions'
-import { nativePresentation, nativeStoreVersion, storedSession } from './native-stores.js'
+import { nativePresentation, storedSession } from './native-stores.js'
 import { contractSpan, deriveHexId } from '@tangle-network/agent-trace-contract'
 import { applyLlmSpanOtlpAttributes } from '@tangle-network/agent-eval/trace-attributes'
 import {
@@ -648,7 +648,7 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
 
   get nativeStores(): ReturnType<typeof readerFor>['stores'] { return this.reader.stores }
   readsSqlite(): boolean { return this.reader.sqlite !== undefined }
-  async storeVersion(ref: SessionRef): Promise<string> { return nativeStoreVersion(await this.sourcePaths(ref)) }
+  get knownNativeRefs(): Iterable<NativeRef> { return this.refs.values() }
 
   /**
    * Sessions under `home` through the shared reader, which reads the recorded

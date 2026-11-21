@@ -34,6 +34,7 @@ import {
   type SessionMatchKind,
   type SessionRow,
 } from './session-facts.js'
+import { indexStoreVersions } from './adapters/native-stores.js'
 import { TURN_FOLD_START, type TurnFoldState } from './session-turns.js'
 import { readSessionSpans, validateOtlpSpans } from './session-source.js'
 import { stampSessionIdentity } from './attributes.js'
@@ -415,11 +416,20 @@ export class TurnIndex {
    */
   async refresh(sessions: ReadonlyArray<{ readonly adapter: HarnessTraceAdapter; readonly ref: SessionRef }>): Promise<TurnIndexStats> {
     const stats = { path: this.dir, sessions: sessions.length, sessionsRead: 0, bytesRead: 0, wholeReads: 0, rowsAdded: 0 }
+    const stores = new Map<HarnessSessionsAdapter, SessionRef[]>()
+    for (const { adapter, ref } of sessions) {
+      if (!readsStoreRoots(adapter) || !adapter.readsSqlite()) continue
+      const refs = stores.get(adapter)
+      if (refs) refs.push(ref)
+      else stores.set(adapter, [ref])
+    }
+    const versions = new Map<SessionRef, () => Promise<string>>()
+    for (const [adapter, refs] of stores) indexStoreVersions(adapter, refs, versions)
     let next = 0
     const worker = async (): Promise<void> => {
       while (next < sessions.length) {
         const { adapter, ref } = sessions[next++]!
-        const read = await this.refreshOne(adapter, ref)
+        const read = await this.refreshOne(adapter, ref, versions.get(ref))
         if (read === null) continue
         this.changed = true
         stats.sessionsRead += 1
@@ -432,16 +442,16 @@ export class TurnIndex {
     return stats
   }
 
-  private async refreshOne(adapter: HarnessTraceAdapter, ref: SessionRef): Promise<{ bytes: number; rows: number; whole: boolean } | null> {
+  private async refreshOne(
+    adapter: HarnessTraceAdapter, ref: SessionRef, sharedVersion?: () => Promise<string>,
+  ): Promise<{ bytes: number; rows: number; whole: boolean } | null> {
     const key = TurnIndex.keyOf(adapter, ref)
     let info: { ino: number; size: number; mtimeMs: number }
     let version: string
     try {
       info = await stat(ref.path)
       // A native row or one of its sources can disappear after discovery.
-      version = readsStoreRoots(adapter) && adapter.readsSqlite()
-        ? await adapter.storeVersion(ref)
-        : `${info.ino}:${info.size}:${info.mtimeMs}`
+      version = sharedVersion ? await sharedVersion() : `${info.ino}:${info.size}:${info.mtimeMs}`
     } catch (error) {
       const entry = this.blank({ ino: 0, size: 0, mtimeMs: 0 }, 'whole')
       entry.unread = errorText(error)
