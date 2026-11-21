@@ -24,17 +24,17 @@ afterEach(async () => {
   if (running) await new Promise<void>((resolve) => running.close(() => resolve()))
 })
 
-function owner(baseUrl: string) {
+function owner(baseUrl: string, model = 'test-model') {
   return createAnalystModelOwner({
     apiKey: 'test-key',
     baseUrl,
-    model: 'test-model',
+    model,
     provider: 'test-provider',
   })
 }
 
 describe('analyst model owner', () => {
-  it('uses Runtime to translate the analyst profile into one exact streamed provider request', async () => {
+  it.each([['test-model', false], ['opencode/test-model', true], ['OpenCode', true]] as const)('sends the analyst profile and tool policy for %s to the streamed endpoint', async (model, modelOnly) => {
     let body: Record<string, unknown> | undefined
     let idempotencyKey: string | undefined
     const baseUrl = await startGateway((req, res) => {
@@ -45,17 +45,17 @@ describe('analyst model owner', () => {
         body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         const frame = (chunk: unknown) => `data: ${JSON.stringify(chunk)}\n\n`
-        res.write(frame({ model: 'test-model', choices: [{ index: 0, delta: { reasoning_content: 'look' } }] }))
-        res.write(frame({ model: 'test-model', choices: [{ index: 0, delta: { content: 'o' } }] }))
+        res.write(frame({ model, choices: [{ index: 0, delta: { reasoning_content: 'look' } }] }))
+        res.write(frame({ model, choices: [{ index: 0, delta: { content: 'o' } }] }))
         res.write(
           frame({
-            model: 'test-model',
+            model,
             choices: [{ index: 0, delta: { content: 'k' }, finish_reason: 'stop' }],
           }),
         )
         res.write(
           frame({
-            model: 'test-model',
+            model,
             choices: [],
             usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18, cost: 0.002 },
           }),
@@ -63,11 +63,11 @@ describe('analyst model owner', () => {
         res.end('data: [DONE]\n\n')
       })
     })
-    const configured = owner(baseUrl)
+    const configured = owner(baseUrl, model)
     const result = await configured.call({
       callId: 'call-abc123',
       request: {
-        model: 'test-model',
+        model,
         messages: [{ role: 'user', content: 'why did this run fail?' }],
         maxTokens: ANALYST_MAX_OUTPUT_TOKENS,
         thinking: 'disabled',
@@ -77,8 +77,11 @@ describe('analyst model owner', () => {
     })
 
     expect(result.succeeded).toBe(true)
+    expect(body).not.toHaveProperty('tools')
+    if (modelOnly) expect(body).toHaveProperty('tool_choice', 'none')
+    else expect(body).not.toHaveProperty('tool_choice')
     expect(body).toMatchObject({
-      model: 'test-model',
+      model,
       max_tokens: ANALYST_MAX_OUTPUT_TOKENS,
       reasoning_effort: 'none',
       // Streamed so a long thinking-model step is not cut off by the Router's request deadline.
@@ -93,7 +96,7 @@ describe('analyst model owner', () => {
     if (!result.succeeded) return
     expect(result.response.content).toBe('ok')
     expect(result.receipt).toMatchObject({
-      model: 'test-model',
+      model,
       inputTokens: 11,
       outputTokens: 7,
       actualCostUsd: 0.002,
@@ -103,7 +106,7 @@ describe('analyst model owner', () => {
       callId: 'call-abc123',
       executed: true,
       succeeded: true,
-      model: 'test-model',
+      model,
     })
   })
 

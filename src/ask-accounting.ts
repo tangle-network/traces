@@ -1,4 +1,4 @@
-import type { AnalystUsageReceipt, TraceAnalysisEngine, TraceAnalysisEngineResult } from '@tangle-network/agent-eval/analyst'
+import type { AnalystUsageReceipt, TraceAnalysisEngine } from '@tangle-network/agent-eval/analyst'
 
 /**
  * Smallest reservation one model call makes before it runs: its full output and
@@ -26,8 +26,6 @@ export function sumOrNull(values: ReadonlyArray<number | null>): number | null {
 }
 
 // Older analyst engines provide only provider usage. Failed attempts do not imply completions.
-export function receiptActivity(
-  receipt: (AnalystUsageReceipt & { activity?: Pick<TraceAnalysisEngineResult, 'modelCalls' | 'toolCalls'> }) | null,
-) {
+export function receiptActivity(receipt: AnalystUsageReceipt | null) {
   return receipt?.activity
 }

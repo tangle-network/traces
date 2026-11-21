@@ -253,6 +253,8 @@ export function createAnalystModelOwner(opts: {
         // ends when response headers are sent, and a thinking model's long recursive step outlives
         // it (`request_deadline_exceeded`). A streamed response sends headers at the first byte.
         stream: true,
+        // OpenCode exposes native editing and shell tools by default. DSPy owns this observer's trace tools.
+        ...(/^opencode(?:\/|$)/iu.test(opts.model) ? { toolChoice: 'none' } : {}),
         // One attempt per call: `retryingModelCall` decides what to retry from the endpoint's
         // status and code, because Runtime's retry reads the status alone.
         retry: { maxAttempts: 1 },

@@ -228,9 +228,8 @@ describe('traces ask: answers', () => {
     ])
     expect(answers.questions[1]!.citations).toEqual([expect.objectContaining({ uri: missing, resolved: false })])
     const interrupted = answers.questions[2]!
-    const measured = interrupted.usage?.activity
-    if (measured) expect(measured).toEqual({ modelCalls: 0, toolCalls: 0 })
-    expect([interrupted.modelCalls, interrupted.toolCalls]).toEqual([measured?.modelCalls ?? null, measured?.toolCalls ?? null])
+    expect(interrupted.usage?.activity).toEqual({ modelCalls: 0, toolCalls: 0 })
+    expect([interrupted.modelCalls, interrupted.toolCalls]).toEqual([0, 0])
     expect(await readFile(join(out, 'report.md'), 'utf8')).toContain(`**Unresolved:** ${missing}`)
   })
 })
