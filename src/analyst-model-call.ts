@@ -52,8 +52,9 @@ function bridgeRunner(env: NodeJS.ProcessEnv) {
   if (env.TRACES_PYTHON) return { command: env.TRACES_PYTHON }
   const uv: Record<string, string> = {}
   if (env.UV_OFFLINE !== undefined) uv.UV_OFFLINE = env.UV_OFFLINE
-  // Eval starts the interpreter in a temporary directory. Resolve the caller's cache here.
-  if (env.UV_CACHE_DIR) uv.UV_CACHE_DIR = resolve(env.UV_CACHE_DIR)
+  // Eval changes directories. Resolve the caller's path and let uv validate an empty value.
+  const cache = env.UV_CACHE_DIR
+  if (cache !== undefined) uv.UV_CACHE_DIR = cache && resolve(cache)
   return {
     command: 'uvx',
     args: ['--from', `agent-eval-rpc[dspy]==${bridgeVersion()}`, 'python', '-m', BRIDGE_MODULE],
