@@ -562,7 +562,7 @@ function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanC
     if (n.session !== null) bySession.set(n.session, n.id)
   }
   const parents = new Map(read.map(({ n }) => [
-    n.id, n.parentSession ? bySession.get(n.parentSession) ?? n.parentSession : n.parent,
+    n.id, (n.parentSession ? bySession.get(n.parentSession) : undefined) ?? n.parent ?? n.parentSession,
   ]))
   // Resolve once for the whole forest, including cross-session forks and
   // parents recorded in another file. A missing parent retains its declared depth.
