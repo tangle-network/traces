@@ -362,7 +362,7 @@ function orderOf(span: OtlpSpan): [number, number] {
   return [typeof step === 'number' ? step : Number.MAX_SAFE_INTEGER, Number.isFinite(start) ? start : 0]
 }
 
-function byTraceOrder(left: OtlpSpan, right: OtlpSpan): number {
+export function byTraceOrder(left: OtlpSpan, right: OtlpSpan): number {
   const [leftStep, leftStart] = orderOf(left)
   const [rightStep, rightStart] = orderOf(right)
   if (leftStart !== rightStart) return leftStart - rightStart
@@ -490,7 +490,7 @@ function recordRecoveredPath(
   return true
 }
 
-function changedFilesOf(toolSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]): {
+export function changedFilesOf(toolSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]): {
   files: ChangedFileFact[]
   truncatedInputs: number
   unresolvedPaths: number
@@ -541,7 +541,7 @@ function changedFilesOf(toolSpans: readonly OtlpSpan[], spans: readonly OtlpSpan
  * that subagent's, not this session's. `spans` is the whole trace, because the
  * lifecycle span a spawn joins to lives in the child's scope.
  */
-function subagentsOf(ownSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]): SubagentSpawnFact[] {
+export function subagentsOf(ownSpans: readonly OtlpSpan[], spans: readonly OtlpSpan[]): SubagentSpawnFact[] {
   // A lifecycle span joins its spawn call by the child's path, or, for a folded child, by hanging under the
   // call itself: an exact join that needs no name, since two spawns may carry the same task name.
   const lifecycleByPath = new Map<string, string[]>()
@@ -728,7 +728,7 @@ function callCommands(span: OtlpSpan): CallCommands | undefined {
  * program can run hundreds of times, and `--match` gives each run's span. The
  * fact's `spanIds` are every call that ran a command.
  */
-function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCountFact[]> {
+export function commandsOf(tools: readonly OtlpSpan[]): SessionFact<readonly CommandCountFact[]> {
   const own = tools.filter((span) => !isInheritedSpan(span.attributes))
   if (own.length > 0 && !own.some((span) => inputValue(span) !== null)) {
     return { value: null, spanIds: [], unavailable: 'no tool call recorded its arguments, so which commands ran cannot be read' }
@@ -1807,19 +1807,3 @@ function compactFirstFailure(failure: FirstFailure): Record<string, unknown> {
   }
 }
 
-/** Only the typed turns and selection evidence, from the same fold as the full facts sheet. */
-export function readSessionTurnGroups(spans: readonly OtlpSpan[], window?: SessionFactsWindow) {
-  const bounds = windowBounds(window)
-  return groupByTrace(spans).flatMap((group) => {
-    const records = group.spans.filter(isRecordSpan)
-    if (records.length > 0 && bounds !== null && !hasWorkInWindow(records, bounds)) return []
-    const ordered = [...group.spans].sort(byTraceOrder)
-    return [{
-      sessionId: group.sessionId,
-      records: records.length,
-      harness: ordered.map((span) => stringAttr(span, 'service.name')).find((value) => value !== null) ?? null,
-      cwd: ordered.map((span) => stringAttr(span, SESSION_CWD_ATTR)).find((value) => value !== null) ?? null,
-      turns: typedTurnsOf(ordered).turns.filter((turn) => insideWindow(bounds, turn.at)),
-    }]
-  })
-}

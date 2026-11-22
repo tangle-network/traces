@@ -123,11 +123,33 @@ describe('facts --format jsonl', () => {
     expect(new Set(rows.map((row) => `${row.host} ${row.session}`))).toEqual(new Set([`host-b ${CONVERSATION.claude}`]))
   })
 
-  it('refuses --no-content, whose rows would carry no text', async () => {
+  it("states each turn's work since the person's previous turn, and what the last reply in it did", async () => {
+    const run = await runCli(['facts', fx.paths.claude, '--format', 'jsonl'], { env: fx.env })
+    expect(run.code).toBe(0)
+    const [ask, , , correction, stop, relay] = run.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as { work: Record<string, unknown> })
+    expect(ask!.work).toMatchObject({ index: 0, toolCalls: 0, agentMessages: 0, reply: null, noToolCall: true })
+    // A fleet message does not end the person's turn: the correction answers the work since the ask.
+    expect(correction!.work).toMatchObject({
+      index: 1, durationMs: 40_000, toolCalls: 1, toolCallsByName: { Bash: 1 }, failedToolCalls: 0, checks: 0, agentMessages: 1,
+      reply: { words: 5, endsWithQuestion: false, asksPermission: false, claimsDone: true },
+      claimWithoutCheck: true,
+    })
+    // The person refused `rm -rf build`; the agent wrote nothing before the next turn.
+    expect(stop!.work).toMatchObject({ index: 2, toolCalls: 1, failedToolCalls: 1, rejectedToolCalls: 1, agentMessages: 0, reply: null, claimWithoutCheck: false })
+    expect(relay!.work).toMatchObject({ index: 3, toolCalls: 0, agentMessages: 1, reply: { words: 8, claimsDone: false } })
+  })
+
+  it('with --no-content, keeps each row and its work and drops the text, cwd and record', async () => {
     const run = await runCli(['facts', fx.paths.claude, '--format', 'jsonl', '--no-content'], { env: fx.env })
-    expect(run.code).toBe(2)
-    expect(run.stdout).toBe('')
-    expect(JSON.parse(run.stderr)).toMatchObject({ code: 'usage' })
+    expect(run.stderr).toBe('')
+    expect(run.code).toBe(0)
+    const rows = run.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(rows.map((row) => row.author)).toEqual(['human', 'fleet', 'fleet', 'human', 'human', 'relay'])
+    for (const row of rows) {
+      expect(Object.keys(row).sort()).toEqual(['at', 'author', 'harness', 'host', 'interrupted', 'session', 'signals', 'spanId', 'work'])
+    }
+    expect(run.stdout).not.toContain('sentinel-zebra')
+    expect(run.stdout).not.toContain(fx.cwd)
   })
 })
 

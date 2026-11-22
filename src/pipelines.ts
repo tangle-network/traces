@@ -241,7 +241,7 @@ function isTool(span: OtlpSpan): boolean {
 }
 
 /** The session's own act: not history copied from a parent, not an adapter's summary, not a subagent's. */
-function isOwnAct(span: OtlpSpan): boolean {
+export function isOwnAct(span: OtlpSpan): boolean {
   return !isInheritedSpan(span.attributes) && !isSynthesizedSpan(span.attributes) && !isSubagentSpan(span.attributes)
 }
 

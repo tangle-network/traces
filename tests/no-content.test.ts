@@ -188,6 +188,7 @@ describe('--no-content: no output carries content', () => {
         run(['convert', ref, '--no-content']),
         run(['convert', ref, '--no-content', '--out', converted, '--format', 'json']),
         run(['upload', ref, '--no-content', '--dry-run', '--out', preview]),
+        run(['facts', ref, '--no-content', '--format', 'jsonl']),
       ])
       for (const result of runs) {
         expect(result.code, result.stderr).toBe(0)
