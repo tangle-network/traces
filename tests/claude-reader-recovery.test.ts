@@ -43,10 +43,10 @@ function assistant(session: string, uuid: string, at: string, content: unknown[]
   }
 }
 
-function toolResult(session: string, uuid: string, at: string, toolUseId: string, content: string, extra: Row = {}): Row {
+function toolResult(session: string, uuid: string, at: string, toolUseId: string, content: string, extra: Row = {}, isError = false): Row {
   return {
     type: 'user', uuid, sessionId: session, timestamp: at, ...extra,
-    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content }] },
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content, ...(isError ? { is_error: true } : {}) }] },
   }
 }
 
@@ -119,7 +119,7 @@ function writeWorkflowSession(): string {
       { type: 'tool_use', id: 'use-refused', name: 'Workflow', input: { script: 'REDACTED' } },
     ]),
     toolResult(WORKFLOW_SESSION, 'refused-result', '2026-01-02T00:00:02Z', 'use-refused', 'PreToolUse:Workflow hook error: REDACTED',
-      { toolUseResult: 'Error: REDACTED' }),
+      { toolUseResult: 'Error: REDACTED' }, true),
     assistant(WORKFLOW_SESSION, 'bash-call', '2026-01-02T00:00:10Z', [
       { type: 'tool_use', id: 'use-bash', name: 'Bash', input: { command: 'REDACTED' } },
     ]),
@@ -179,10 +179,20 @@ describe('Claude sessions the reader used to refuse whole', () => {
     expect(top.every((item) => item.attributes[ATTR.parentConfidence] === 'unknown')).toBe(true)
     expect(top.every((item) => item.attributes['traces.claude.source_parent_span_id'] === `root:${WORKFLOW_SESSION}`)).toBe(true)
 
-    // The run a call did return still hangs under that call.
+    // The run a call did return still hangs under that call, through its lifecycle span; the orphan hangs under no call.
     const bound = spans.filter((item) => String(item.attributes['traces.claude.source_span_id']).startsWith('workflows:wf-journalled:'))
-    const call = spans.find((item) => item.attributes['tool.name'] === 'Workflow' && item.status.code !== 'ERROR')
-    expect(bound.some((item) => item.parent_span_id === call?.span_id)).toBe(true)
+    const calls = spans.filter((item) => item.attributes['tool.name'] === 'Workflow')
+    expect(calls.map((item) => item.status.code).sort()).toEqual(['ERROR', 'OK'])
+    const call = calls.find((item) => item.status.code === 'OK')!
+    const byId = new Map(spans.map((item) => [item.span_id, item]))
+    const under = (item: OtlpSpan, ancestor: string): boolean => {
+      for (let at: OtlpSpan | undefined = item, hops = 0; at && hops < 4; at = byId.get(at.parent_span_id ?? ''), hops++) {
+        if (at.parent_span_id === ancestor) return true
+      }
+      return false
+    }
+    expect(bound.some((item) => under(item, call.span_id))).toBe(true)
+    expect(orphan.some((item) => calls.some((workflow) => under(item, workflow.span_id)))).toBe(false)
     expect(bound.every((item) => item.attributes['traces.claude.workflow_run_unlinked'] === undefined)).toBe(true)
   })
 })
