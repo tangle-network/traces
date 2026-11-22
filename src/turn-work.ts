@@ -48,6 +48,32 @@ export interface ReplyShape {
   readonly bullets: number
   /** Markdown heading lines. */
   readonly headings: number
+  /** Sentences, and sentences that end in a question mark. */
+  readonly sentences: number
+  readonly questions: number
+  /** Words in its first line, and in its last paragraph. */
+  readonly firstLineWords: number
+  readonly lastParagraphWords: number
+  /** Its last paragraph offers more work or asks leave (the `asksPermission` phrases). */
+  readonly endsWithOffer: boolean
+  /** `**bold**` spans, markdown table rows, and inline code spans outside fenced blocks. */
+  readonly boldSpans: number
+  readonly tableRows: number
+  readonly inlineCode: number
+  /** Words that name a path (`src/a.ts`, `~/x/y`), and issue or pull request references (`#123`, `/pull/123`). */
+  readonly paths: number
+  readonly issueRefs: number
+  /** Status marks: ✅ ❌ ✓ ✗ ⚠ and the words PASS, FAIL, GREEN, RED. */
+  readonly statusMarks: number
+  /** Phrases of each kind, counted: see {@link PHRASES}. */
+  readonly hedges: number
+  readonly apologies: number
+  readonly intentions: number
+  readonly blockers: number
+  readonly recommendations: number
+  readonly options: number
+  readonly waiting: number
+  readonly verifications: number
 }
 
 /** The agent's work since the person's previous turn, or since the session's first record for its first turn. */
@@ -96,6 +122,24 @@ export interface TurnWork {
   readonly reply: ReplyShape | null
   /** That message claims completion, and no check ran in the interval. */
   readonly claimWithoutCheck: boolean
+  /** Tool calls after the agent's last message (all of them when it wrote none), and messages after its last tool call. */
+  readonly toolCallsAfterReply: number
+  readonly messagesAfterLastTool: number
+  /** The interval's last tool call ended in error; its last check ended in error. */
+  readonly lastToolFailed: boolean
+  readonly lastCheckFailed: boolean
+  /** Edits after the interval's last check (all of them when no check ran). */
+  readonly editsAfterLastCheck: number
+  /** Reads before the interval's first edit; null when it made none. */
+  readonly readsBeforeFirstEdit: number | null
+  /** Tool calls that repeat an earlier call of the interval exactly: the same tool with the same recorded arguments. */
+  readonly repeatedToolCalls: number
+  /** The longest gap between two consecutive acts of the agent in the interval. */
+  readonly longestPauseMs: number
+  /** The whole prompt of the interval's last model call minus its first's; null without a model call that reports one. */
+  readonly contextGrowth: number | null
+  /** How much `reply` repeats the last reply before the person's previous turn: Jaccard over words of 3+ letters; null without both. */
+  readonly replyOverlap: number | null
 }
 
 const PERMISSION =
@@ -110,6 +154,31 @@ const FENCE = /^\s*(?:```|~~~)/u
 const BULLET = /^\s*(?:[-*•+]|\d+[.)])\s+\S/u
 const HEADING = /^\s*#{1,6}\s+\S/u
 const CAPTURE_CUT = /… \[\+(\d+) chars\]$/u
+const SENTENCE_END = /[.!?](?=\s|$)/gu
+const QUESTION_END = /\?(?=[\s)*_]|$)/gu
+const BOLD = /\*\*[^*\n]+\*\*/gu
+const TABLE_ROW = /^\s*\|.*\|\s*$/u
+const INLINE_CODE = /`[^`\n]+`/gu
+const PATH = /^[`'"(]*(?:~|\.{1,2})?\/?[\w.@-]+\/[\w.@/-]+[`'",.:;)]*$/u
+const LETTER = /\p{L}/u
+const ISSUE_REF = /(?<![\w&])#\d+\b|\/pull\/\d+/gu
+const STATUS_MARK = /[✅❌✓✗⚠]|\b(?:PASS|FAIL|GREEN|RED)\b/gu
+
+/** Phrase families counted in a reply. Each is a plain-language marker of what the message does. */
+const PHRASES = {
+  hedges: /\b(?:might|maybe|perhaps|probably|likely|possibly|seems?|appears? to|I think|I believe|not sure|unclear)\b/giu,
+  apologies: /\b(?:sorry|apologi[sz]e|my mistake|my bad|you['’]re right|I was wrong)\b/giu,
+  intentions: /\b(?:I['’]ll|I will|I['’]m going to|let me|next,? I|now I)\b/giu,
+  blockers: /\b(?:blocked|cannot|can['’]t|unable|could not|couldn['’]t|failed|failing|not possible|denied|refused)\b/giu,
+  recommendations: /\b(?:recommend|suggest|propose|I['’]d)\b/giu,
+  options: /\b(?:option [a-d1-4]|alternatives?|either\b[^.?!\n]{1,80}\bor)\b/giu,
+  waiting: /\b(?:waiting|in the background|still running|running now|will (?:report|notify|update)|once it (?:finishes|completes|lands)|pending)\b/giu,
+  verifications: /\b(?:tests? pass(?:ed|es)?|verified|confirmed|green|exit 0|reproduced)\b/giu,
+} as const
+
+function count(text: string, pattern: RegExp): number {
+  return text.match(pattern)?.length ?? 0
+}
 
 function words(text: string): number {
   return text.split(/\s+/u).filter((word) => word.length > 0).length
@@ -122,6 +191,9 @@ export function replyShape(raw: string): ReplyShape {
   const text = cut ? trimmed.slice(0, cut.index) : trimmed
   const lines = text.split('\n').filter((line) => line.trim().length > 0)
   const last = (lines.at(-1) ?? '').replace(/[*_`>]/gu, '').trim()
+  const lastParagraph = text.split(/\n\s*\n/u).filter((part) => part.trim().length > 0).at(-1) ?? ''
+  // Prose: the text without its fenced blocks, where a path or inline code is something the reader is told.
+  const prose = text.replace(/^\s*(?:```|~~~)[\s\S]*?^\s*(?:```|~~~)\s*$/gmu, '')
   return {
     words: words(text),
     chars: text.length + (cut ? Number(cut[1]) : 0),
@@ -134,7 +206,38 @@ export function replyShape(raw: string): ReplyShape {
     codeBlocks: Math.floor(lines.filter((line) => FENCE.test(line)).length / 2),
     bullets: lines.filter((line) => BULLET.test(line)).length,
     headings: lines.filter((line) => HEADING.test(line)).length,
+    sentences: count(text, SENTENCE_END) + (/[.!?]\s*$/u.test(text) || text.length === 0 ? 0 : 1),
+    questions: count(text, QUESTION_END),
+    firstLineWords: words(lines[0] ?? ''),
+    lastParagraphWords: words(lastParagraph),
+    endsWithOffer: PERMISSION.test(lastParagraph),
+    boldSpans: count(text, BOLD),
+    tableRows: lines.filter((line) => TABLE_ROW.test(line)).length,
+    inlineCode: count(prose, INLINE_CODE),
+    paths: prose.split(/\s+/u).filter((word) => PATH.test(word) && LETTER.test(word) && !word.includes('://')).length,
+    issueRefs: count(text, ISSUE_REF),
+    statusMarks: count(text, STATUS_MARK),
+    hedges: count(text, PHRASES.hedges),
+    apologies: count(text, PHRASES.apologies),
+    intentions: count(text, PHRASES.intentions),
+    blockers: count(text, PHRASES.blockers),
+    recommendations: count(text, PHRASES.recommendations),
+    options: count(text, PHRASES.options),
+    waiting: count(text, PHRASES.waiting),
+    verifications: count(text, PHRASES.verifications),
   }
+}
+
+/** Lowercase words of three or more letters: what {@link TurnWork.replyOverlap} compares. */
+function wordSet(raw: string): Set<string> {
+  return new Set(raw.replace(CAPTURE_CUT, '').toLowerCase().match(/\p{L}{3,}/gu) ?? [])
+}
+
+function jaccard(left: Set<string>, right: Set<string>): number | null {
+  if (left.size === 0 || right.size === 0) return null
+  let shared = 0
+  for (const word of left) if (right.has(word)) shared += 1
+  return shared / (left.size + right.size - shared)
 }
 
 function time(iso: string): number | null {
@@ -151,10 +254,32 @@ interface Interval {
   readonly from: number | null
   readonly sessionStart: number | null
   readonly index: number
+  /** The words of the last reply before the person's previous turn. */
+  readonly previousReply: Set<string> | null
 }
 
-/** The work in one interval: `spans` are the session's records between its two turns, in trace order. */
-function measure(spans: readonly OtlpSpan[], interval: Interval): TurnWork {
+/** The position of each span in the interval's trace order, so "after" means what the trace says. */
+function positions(spans: readonly OtlpSpan[]): (span: OtlpSpan | undefined) => number {
+  const at = new Map(spans.map((span, index) => [span, index]))
+  return (span) => (span === undefined ? -1 : at.get(span) ?? -1)
+}
+
+/** The longest gap between consecutive acts, each act from its start to its end. */
+function longestPause(acts: readonly OtlpSpan[]): number {
+  const spans = acts.map((span) => [time(span.start_time), time(span.end_time) ?? time(span.start_time)] as const)
+    .filter((pair): pair is readonly [number, number] => pair[0] !== null && pair[1] !== null)
+    .sort((left, right) => left[0] - right[0])
+  let longest = 0
+  let reached = spans[0]?.[1] ?? 0
+  for (const [start, end] of spans) {
+    longest = Math.max(longest, start - reached)
+    reached = Math.max(reached, end)
+  }
+  return longest
+}
+
+/** The work in one interval, and the words of its reply: `spans` are the session's records between its two turns, in trace order. */
+function measure(spans: readonly OtlpSpan[], interval: Interval): { work: TurnWork; replyWords: Set<string> | null } {
   const own = spans.filter(isOwnAct)
   const actions = classifyLiveActions(own)
   const tools = actions.filter((action) => action.toolName !== undefined)
@@ -181,7 +306,26 @@ function measure(spans: readonly OtlpSpan[], interval: Interval): TurnWork {
   }, null)
   // A span that ends after the turn (a call still running when the person typed) stops the clock at the turn.
   const stopped = lastAct === null ? interval.from : Math.min(lastAct, interval.at ?? lastAct)
-  return {
+  const at = positions(own)
+  const last = <T extends { span: OtlpSpan }>(list: readonly T[]): T | undefined =>
+    list.reduce<T | undefined>((latest, item) => (latest === undefined || at(item.span) > at(latest.span) ? item : latest), undefined)
+  const lastTool = last(tools)
+  const lastCheck = last(checks)
+  const edits = tools.filter((tool) => tool.kind === 'edit')
+  const firstEdit = edits.reduce<number | null>((first, tool) => (first === null ? at(tool.span) : Math.min(first, at(tool.span))), null)
+  const seen = new Set<string>()
+  let repeated = 0
+  for (const tool of tools) {
+    // A call that kept no arguments cannot be told apart from another: it is never counted as a repeat.
+    const input = tool.span.attributes['input.value']
+    if (typeof input !== 'string') continue
+    const call = `${tool.toolName}\u0000${input}`
+    if (seen.has(call)) repeated += 1
+    seen.add(call)
+  }
+  const contexts = models.map(modelCallContextTokens).filter((value): value is number => value !== null)
+  const replyWords = lastMessage === undefined ? null : wordSet(rawContent(lastMessage))
+  const work: TurnWork = {
     index: interval.index,
     sessionMs: minus(interval.at, interval.sessionStart),
     durationMs: minus(interval.at, interval.from),
@@ -199,7 +343,7 @@ function measure(spans: readonly OtlpSpan[], interval: Interval): TurnWork {
     rejectedToolCalls: toolSpans.filter(isRejectedTool).length,
     longestFailingRun,
     reads: tools.filter((tool) => tool.kind === 'read').length,
-    edits: tools.filter((tool) => tool.kind === 'edit').length,
+    edits: edits.length,
     checks: checks.length,
     failedChecks: checks.filter((tool) => tool.errored).length,
     filesChanged: changedFilesOf(toolSpans, own).files.length,
@@ -210,7 +354,18 @@ function measure(spans: readonly OtlpSpan[], interval: Interval): TurnWork {
     noToolCall: tools.length === 0,
     reply,
     claimWithoutCheck: reply !== null && reply.claimsDone && checks.length === 0,
+    toolCallsAfterReply: toolSpans.filter((span) => at(span) > at(lastMessage)).length,
+    messagesAfterLastTool: messages.filter((span) => at(span) > at(lastTool?.span)).length,
+    lastToolFailed: lastTool?.errored ?? false,
+    lastCheckFailed: lastCheck?.errored ?? false,
+    editsAfterLastCheck: edits.filter((tool) => at(tool.span) > at(lastCheck?.span)).length,
+    readsBeforeFirstEdit: firstEdit === null ? null : tools.filter((tool) => tool.kind === 'read' && at(tool.span) < firstEdit).length,
+    repeatedToolCalls: repeated,
+    longestPauseMs: longestPause(own.filter(isAgentActivity)),
+    contextGrowth: contexts.length === 0 ? null : contexts.at(-1)! - contexts[0]!,
+    replyOverlap: replyWords === null || interval.previousReply === null ? null : jaccard(replyWords, interval.previousReply),
   }
+  return { work, replyWords }
 }
 
 /**
@@ -229,6 +384,7 @@ export function turnWorkOf(spans: readonly OtlpSpan[], turns: readonly SessionTu
   let interval: OtlpSpan[] = []
   let from = sessionStart
   let index = 0
+  let previousReply: Set<string> | null = null
   for (const span of records) {
     const turn = turnBySpan.get(span.span_id)
     if (turn === undefined) {
@@ -236,11 +392,13 @@ export function turnWorkOf(spans: readonly OtlpSpan[], turns: readonly SessionTu
       continue
     }
     const at = time(turn.at)
-    work.set(turn.spanId, measure(interval, { at, from, sessionStart, index }))
+    const measured = measure(interval, { at, from, sessionStart, index, previousReply })
+    work.set(turn.spanId, measured.work)
     if (turn.author === 'human') {
       interval = []
       from = at
       index += 1
+      previousReply = measured.replyWords ?? previousReply
     }
   }
   return work
