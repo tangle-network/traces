@@ -56,7 +56,23 @@ Three rules hold for every field. Tool, turn and command facts are about this se
 A turn is one a person typed into this session. History a fork or a compaction replays, harness-injected blocks (instructions, environment context, notifications, skill expansions) and a second record of the same turn are left out, each listed in `excludedTurns`. A turn the reader called human is checked once more by org convention: a fleet or session message, or a first turn over 1,500 characters, is `fleet`; a long markdown-heavy paste is `relay`; a harness command (`/model`) is left out.
 For Codex, the harness's own labels (`content_item_kinds`) decide: a message is the person's when every item is a `user.` kind. An answer to Codex's question tool (`<send_user_message_question_reply>`) is a turn, and so is a turn with an attached image, whose text is the report Codex wrote of it, without the `<image>` wrapper.
 
-`--format jsonl` prints one row per typed turn: `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals`, `spanId`, `recordFile` and `record` (native `{file, line}`, or `null` when unavailable). Window JSONL reads only the session's own records and uses the same turn classifier and reply fold as the full sheet; it does not compute costs, commands or other unused measurements.
+`--format jsonl` prints one row per typed turn: `host`, `harness`, `session`, `cwd`, `at`, `author`, `text`, `answered`, `reply`, `interrupted`, `signals`, `spanId`, `work`, `recordFile` and `record` (native `{file, line}`, or `null` when unavailable). Window JSONL reads only the session's own records and uses the same turn classifier and reply fold as the full sheet; it does not compute costs or other unused measurements. `interrupted` says the person interrupted the work that followed the turn; `signals` are about the work before it.
+
+`work` is what the session's own agent did since the person's previous turn (since the session's first record, for its first turn); a fleet or relay turn does not end the person's turn. It holds counts, durations and flags, never text, from the sheet's own classifiers:
+
+| Field | What it is |
+|---|---|
+| `index` | turns the person typed into this session before this one |
+| `sessionMs`, `durationMs`, `workingMs`, `waitingMs` | from the session's first record to the turn; from the previous turn to this one; to the end of the agent's last act; and from that act to the turn |
+| `modelCalls`, `tokensIn`, `tokensOut`, `contextTokens` | model calls and the tokens they report (`tokensIn` is the whole prompt); the whole prompt of the last call |
+| `agentMessages`, `agentWords` | messages the agent wrote with text, and their words |
+| `toolCalls`, `toolCallsByName`, `failedToolCalls`, `rejectedToolCalls`, `longestFailingRun`, `noToolCall` | tool calls, by name; those that ended in error; those the person refused; the longest run of failed calls in a row |
+| `reads`, `edits`, `checks`, `failedChecks` | tool calls that read, changed the work (scratch files aside), or ran a test, build, typecheck, lint or gate, and the checks that failed |
+| `filesChanged`, `commands`, `failedCommands`, `subagents`, `compactions` | distinct files changed; simple commands run and failed, by the `commands` rule (null when no call kept its arguments); subagents spawned; context compactions |
+| `reply` | the agent's last message before the turn, null when it wrote none: `words`, `chars`, `lines`, `endsWithQuestion`, `asksPermission` (offers more work or asks leave: "should I", "want me to", "let me know"), `claimsDone` (the `after-claim` rule), `numbers`, `links`, `codeBlocks`, `bullets`, `headings` |
+| `claimWithoutCheck` | `reply` claims completion and no check ran in the interval |
+
+With `--no-content` a row keeps `host`, `harness`, `session`, `at`, `author`, `interrupted`, `signals`, `spanId` and `work`, and drops the text, the messages around it, the cwd and the record.
 `--match RE` prints one row per matching human turn, agent message or shell command (`sessionId`, `kind`, `at`, `spanId`, `source`, text clipped to 300 characters). A command row of a named session also has `record` and `lastLine`, the last non-blank line of the command's whole output, which the row's text never shows. A command row's `failed` follows the `commands` rule; it is `null`, `?` in text, when its call's status is not its own. Commands match one simple command at a time, so `^traces ` matches `cd x && traces facts …` and never `tangle traces list`. Over a window it reads the turn index under `$XDG_STATE_HOME/traces/turn-index`, which reads only bytes appended since the last search. `--count` prints, instead of the rows, each value of RE's first capture group (else each hit) with its `count`, `first` and `last` time, most rows first: `--match '^fleet ([a-z-]+)' --count` counts fleet verbs.
 
 ## Pull requests
@@ -99,7 +115,7 @@ What happened, exactly, for $0: who acted, turns, tools, commands, PRs, first fa
   --match RE          one row per human turn, agent message or shell command matching RE (a command: ok, failed or ?)
   --count             with --match: per value of RE's first capture group (else per hit), how many rows and when first and last
   --no-content        omit conversation, commands, paths and assignments
-  --format text|json|jsonl text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn
+  --format text|json|jsonl text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn and the work before it
   --out PATH          write the sheet to PATH; stdout gets one summary line
 
 jq paths (--format json):

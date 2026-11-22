@@ -133,7 +133,7 @@ const REJECTED_TOOL_TEXT =
   /The user doesn't want to proceed with this tool use|tool use was rejected|rejected by (?:the )?user|user (?:rejected|declined|denied) (?:this|the)/iu
 
 /** Spans that mean the agent acted: a person cannot have typed twice across one. */
-function isAgentActivity(span: OtlpSpan): boolean {
+export function isAgentActivity(span: OtlpSpan): boolean {
   if (span.name === 'user.prompt') return false
   const kind = span.attributes[OPENINFERENCE_SPAN_KIND]
   return kind === 'TOOL' || kind === 'LLM' || span.name === 'message.assistant' || span.name.startsWith('message.agent.')
@@ -181,7 +181,7 @@ export function isOwnAgentMessage(span: OtlpSpan): boolean {
 }
 
 /** A tool call of this session's agent that the person refused. */
-function isRejectedTool(span: OtlpSpan): boolean {
+export function isRejectedTool(span: OtlpSpan): boolean {
   if (span.attributes[OPENINFERENCE_SPAN_KIND] !== 'TOOL' || span.status.code !== 'ERROR' || isInheritedSpan(span.attributes)) return false
   const output = span.attributes['output.value']
   return REJECTED_TOOL_TEXT.test(`${span.status.message ?? ''}\n${typeof output === 'string' ? output.slice(0, 2000) : ''}`)

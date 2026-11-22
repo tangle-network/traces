@@ -306,7 +306,7 @@ const COMMANDS = [
     job: 'What happened, exactly, for $0: who acted, turns, tools, commands, PRs, first failure, tokens, cost, time lost.',
     flags: [
       ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3), '--match', '--count', '--no-content',
-      { flag: '--format', help: 'text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn' },
+      { flag: '--format', help: 'text (default, 25 lines a session), json (the sheet), or jsonl: one row per typed turn and the work before it' },
       { flag: '--out', help: 'write the sheet to PATH; stdout gets one summary line' },
     ],
     formats: ['text', 'json', 'jsonl'],

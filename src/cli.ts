@@ -720,8 +720,8 @@ function hostOf(args: CliArgs): string {
 async function cmdFacts(args: CliArgs): Promise<void> {
   const format = args.format ?? 'text'
   const pattern = args.match === undefined ? undefined : new RegExp(args.match)
-  if (args.noContent && (pattern !== undefined || format === 'jsonl')) {
-    throw new UsageError(`${pattern ? '--match searches' : '--format jsonl rows carry'} turn text, which --no-content withholds; drop one of them`)
+  if (args.noContent && pattern !== undefined) {
+    throw new UsageError('--match searches turn text, which --no-content withholds; drop one of them')
   }
   if (args.count && pattern === undefined) throw new UsageError('--count counts the rows of --match RE; add one')
   const window = factsWindow(args)
@@ -860,7 +860,7 @@ async function writeTurnFacts(args: CliArgs, host: string, window?: SessionFacts
       yield { spans, source }
     }
   }
-  const result = await turnFactsJsonl(sources(), host, window)
+  const result = await turnFactsJsonl(sources(), host, window, !args.noContent)
   unread.push(...result.unread)
   if (named > 0 && result.unread.length > 0) throw new RefError(`no records could be read: ${result.unread.map((entry) => entry.sessionId).join(', ')}`, 'unreadable')
   warnUnread(args, unread)
