@@ -184,6 +184,7 @@ describe('--no-content: no output carries content', () => {
       const preview = join(dir, 'preview.otlp.jsonl')
       const runs = await Promise.all([
         run(['facts', ref, '--no-content', '--format', 'json']),
+        run(['facts', ref, '--no-content', '--format', 'jsonl']),
         run(['facts', ref, '--no-content']),
         run(['convert', ref, '--no-content']),
         run(['convert', ref, '--no-content', '--out', converted, '--format', 'json']),
