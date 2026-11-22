@@ -23,7 +23,6 @@
 import { subagentLifecycleSpan } from './claude-subagent-lifecycle.js'
 import { appendClaudeWorkflowJournals, workflowJournalPaths } from './claude-workflow-journal.js'
 import { foldedChildIdentity } from './native-provenance.js'
-import { createHash } from 'node:crypto'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, relative } from 'node:path'
@@ -60,6 +59,7 @@ import {
   type WorkflowRunBinding,
   type WorkflowRunReference,
 } from './claude-workflow.js'
+import { distinctClaudeEvent, type SeenClaudeEvents } from './claude-event-identity.js'
 import { ACTOR_ATTR, capText, userPromptSpan, type Actor } from './conversation.js'
 import {
   SUBAGENT_SPAN_COUNT_ATTR,
@@ -69,7 +69,7 @@ import {
   isSubagentSpan,
 } from './provenance.js'
 import { toolIoAttributes } from './tool-io.js'
-import { appendSourceAttributes, sourceOf, textSources, SOURCE_ATTRIBUTE_PREFIX, type SourceReferences } from '../source-location.js'
+import { appendSourceAttributes, sourceOf, textSources, type SourceReferences } from '../source-location.js'
 
 const SERVICE = 'claude-code'
 
@@ -326,34 +326,6 @@ function createClaudeStream(startStep: number): ClaudeStreamState {
   }
 }
 
-/** What {@link distinctClaudeEvent} decided about one transcript event. */
-type DistinctClaudeEvent =
-  | { readonly projection: ClaudeEventProjection; readonly uid: string }
-  /** A repeat of an already-consumed event whose only new information is the
-   * `origin` label Claude Code added when it re-emitted it. */
-  | { readonly originEnrichment: string; readonly uid: string }
-
-interface SeenClaudeEvent {
-  /** Fingerprint of the span-producing fields, origin attribution excluded. */
-  readonly fingerprint: string
-  /** `origin.kind` the first copy carried, null when it carried none. */
-  readonly originKind: string | null
-}
-
-type SeenClaudeEvents = Map<string, SeenClaudeEvent>
-
-class ClaudeEventConflictError extends Error {
-  readonly sourcePath: string
-  readonly eventId: string
-
-  constructor(sourcePath: string, eventId: string) {
-    super(`${sourcePath}: Claude transcript event ${JSON.stringify(eventId)} has conflicting payloads`)
-    this.name = 'ClaudeEventConflictError'
-    this.sourcePath = sourcePath
-    this.eventId = eventId
-  }
-}
-
 interface ToolResultProjection {
   toolUseId: string
   isError: boolean
@@ -362,7 +334,7 @@ interface ToolResultProjection {
   workflowRun?: WorkflowRunReference
 }
 
-type ClaudeEventProjection =
+export type ClaudeEventProjection =
   | {
       kind: 'assistant'
       timestamp: string
@@ -615,19 +587,6 @@ function indexWorkflowProjection(
   indexWorkflowResults(index, results)
 }
 
-function fingerprintClaudeEvent(event: ClaudeEventProjection): string {
-  // Duplicate events can occupy different byte ranges without changing their
-  // meaning, and a re-emission can ADD an origin label to an event that lacked
-  // one, so origin attribution is compared outside the fingerprint.
-  return createHash('sha256').update(JSON.stringify(event, (key, value: unknown) =>
-    key === 'contentSource'
-      || key === 'originKind'
-      || key.startsWith(SOURCE_ATTRIBUTE_PREFIX)
-      ? undefined
-      : value,
-  )).digest('hex')
-}
-
 function startsClaudeTask(projection: ClaudeEventProjection): boolean {
   if (projection.kind !== 'user' || projection.prompt === null) return false
   return claudePromptStartsTask({
@@ -635,52 +594,6 @@ function startsClaudeTask(projection: ClaudeEventProjection): boolean {
     isSidechain: projection.isSidechain,
     userType: projection.userType,
   })
-}
-
-/**
- * Claude occasionally persists the same event twice. A repeated UUID with the
- * same span-producing fields is one logical event; a changed emitted field is
- * corruption that must remain visible to callers.
- *
- * One repeat is NOT corruption: continuing a subagent under a later prompt
- * re-emits its earlier events with the `origin` label that the first copy
- * predates. The re-emission is the same logical event — its span-producing
- * fields match — so it is consumed once and only the origin attribution is
- * enriched ({@link applyOriginEnrichment}). A repeat whose origin label
- * conflicts with one already recorded remains an error.
- */
-function distinctClaudeEvent(
-  event: ClaudeEvent,
-  seen: SeenClaudeEvents,
-  sourcePath: string,
-  fallbackUid: string,
-): DistinctClaudeEvent | undefined {
-  const projection = projectClaudeEvent(event)
-  if (event.uuid) {
-    const uid = event.uuid
-    const fingerprint = fingerprintClaudeEvent(projection)
-    const originKind = (projection.kind === 'user' || projection.kind === 'queued-prompt'
-      ? projection.originKind
-      : null) ?? null
-    const previous = seen.get(uid)
-    if (previous) {
-      if (previous.fingerprint !== fingerprint) {
-        throw new ClaudeEventConflictError(sourcePath, uid)
-      }
-      if (previous.originKind === null && originKind !== null) {
-        // Record the enrichment on the seen entry, so a later copy that
-        // contradicts the now-recorded label conflicts instead of enriching.
-        seen.set(uid, { fingerprint, originKind })
-        return { originEnrichment: originKind, uid }
-      }
-      if (previous.originKind !== null && originKind !== null && previous.originKind !== originKind) {
-        throw new ClaudeEventConflictError(sourcePath, uid)
-      }
-      return undefined
-    }
-    seen.set(uid, { fingerprint, originKind })
-  }
-  return { projection, uid: event.uuid ?? fallbackUid }
 }
 
 /**
@@ -711,7 +624,7 @@ function consumeDistinctClaudeEvent(
   seen: SeenClaudeEvents,
   sourcePath: string,
 ): boolean {
-  const accepted = distinctClaudeEvent(event, seen, sourcePath, `step${state.step}`)
+  const accepted = distinctClaudeEvent(event.uuid, projectClaudeEvent(event), seen, sourcePath, `step${state.step}`)
   if (!accepted) return false
   if ('originEnrichment' in accepted) {
     applyOriginEnrichment(accepted.uid, accepted.originEnrichment, state)
@@ -1152,6 +1065,8 @@ interface ClaudeSubagentFile {
   parentToolUseId?: string
   /** How `parentToolUseId` was chosen; absent means the child recorded it. */
   parentConfidence?: ParentConfidence
+  /** The Workflow run this child belongs to when no call in the session returned it. */
+  unlinkedWorkflowRun?: string
   parsed?: ParsedStream
 }
 
@@ -1167,7 +1082,7 @@ async function readClaudeWorkflowBindings(
     sessionJsonlOptions(ref, options),
   )) {
     options.signal?.throwIfAborted()
-    const accepted = distinctClaudeEvent(event, seen, ref.path, `source${row}`)
+    const accepted = distinctClaudeEvent(event.uuid, projectClaudeEvent(event), seen, ref.path, `source${row}`)
     row += 1
     if (accepted && 'projection' in accepted) indexWorkflowProjection(accepted.projection, index)
   }
@@ -1344,7 +1259,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
       if (event.type === 'result' && typeof event.is_error === 'boolean') {
         runResult = { failed: event.is_error, subtype: event.subtype ?? 'unknown' }
       }
-      const accepted = distinctClaudeEvent(event, seen, ref.path, `step${state.step}`)
+      const accepted = distinctClaudeEvent(event.uuid, projectClaudeEvent(event), seen, ref.path, `step${state.step}`)
       if (!accepted || 'originEnrichment' in accepted) {
         if (accepted) applyOriginEnrichment(accepted.uid, accepted.originEnrichment, state)
         continue
@@ -1484,7 +1399,13 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         meta,
         ...(meta.toolUseId ? { parentToolUseId: meta.toolUseId } : {}),
       }
-      if (workflowRunId) {
+      if (workflowRunId && !workflowBindings.get(workflowRunId)?.length) {
+        // No Workflow call in this session returned the run (its call was
+        // refused, or it started outside one), so no call can be its parent.
+        // Its children hang off the root with unknown parentage, as a child
+        // whose parent call is missing does, instead of refusing the session.
+        agent.unlinkedWorkflowRun = workflowRunId
+      } else if (workflowRunId) {
         const runBindings = bindWorkflowSubagent(
           file,
           workflowRunId,
@@ -1594,6 +1515,7 @@ export class ClaudeAdapter implements HarnessTraceAdapter {
         // turns and record window from absorbing work the parent never did.
         Object.assign(item.attributes, foldedChildIdentity(traceId, agent.sourceKey))
         if (task) item.attributes[SUBAGENT_TASK_ATTR] = task
+        if (agent.unlinkedWorkflowRun) item.attributes['traces.claude.workflow_run_unlinked'] = agent.unlinkedWorkflowRun
         if (agent.parentToolUseId && !parentSpan) {
           item.attributes['traces.claude.parent_tool_missing'] = true
           item.attributes['traces.claude.parent_tool_use_id'] = agent.parentToolUseId
