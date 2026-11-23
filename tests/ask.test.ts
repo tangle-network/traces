@@ -146,7 +146,7 @@ describe('traces ask: answers', () => {
     })
     expect(run.code, run.stderr).toBe(0)
     expect(run.stdout).toMatch(new RegExp(`^answers → ${out} {2}\\(answers\\.json, report\\.md: 1/1 answered, \\$0\\.00040, \\d+\\.\\d s\\)\\n$`, 'u'))
-    expect(run.endpoint.requests).toEqual([{ model: 'gpt-5.6-luna', authorized: true }])
+    expect(run.endpoint.requests).toEqual([{ model: 'gpt-5.6-luna', authorized: true, maxTokens: 16_384 }])
     // The bridge's DSPy refuses an OpenAI reasoning model whose completion cap is below 16,000.
     const [bridged] = (await readFile(run.bridgeLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { modelProxy: { model: string; maxOutputTokens: number } })
     expect(bridged!.modelProxy.model).toBe('gpt-5.6-luna')
@@ -175,6 +175,16 @@ describe('traces ask: answers', () => {
     expect(rules.split('\n').map((line) => line.split(' ')[0])).toEqual(['TRACES', '1.', '2.', '3.', '4.', '5.', '6.'])
     expect(rules.length).toBeLessThanOrEqual(500)
     expect(sent!.instructions.slice(0, 500)).toContain(rules)
+  })
+
+  // GLM counts its reasoning inside max_tokens: at 16,384 a long analyst step was truncated before any content.
+  it('gives a GLM analyst step a larger output cap, the same at the bridge and the endpoint', async () => {
+    const run = await ask(['ask', session.path, '--model', 'zai/glm-5.3', '--question', 'Which command failed first?', '--budget', '5', '--format', 'json'])
+    expect(run.code, run.stderr).toBe(0)
+    const [bridged] = (await readFile(run.bridgeLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { modelProxy: { maxOutputTokens: number } })
+    expect(bridged!.modelProxy.maxOutputTokens).toBe(32_768)
+    expect(run.endpoint.requests).toEqual([{ model: 'zai/glm-5.3', authorized: true, maxTokens: 32_768 }])
+    expect((JSON.parse(run.stdout) as Answers).questions[0]).toMatchObject({ status: 'answered' })
   })
 
   it('prints every answer as JSON, and keeps a small budget small', async () => {

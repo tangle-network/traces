@@ -99,7 +99,7 @@ export interface FakeEndpoint {
   /** `OPENAI_BASE_URL` for the run. */
   readonly baseUrl: string
   /** Every chat completion request, in arrival order. */
-  readonly requests: Array<{ readonly model: string; readonly authorized: boolean }>
+  readonly requests: Array<{ readonly model: string; readonly authorized: boolean; readonly maxTokens: number }>
   close(): Promise<void>
 }
 
@@ -108,13 +108,13 @@ export interface FakeEndpoint {
  * `replies[n]`, and every later one with the last reply.
  */
 export async function startEndpoint(replies: readonly EndpointReply[]): Promise<FakeEndpoint> {
-  const requests: Array<{ model: string; authorized: boolean }> = []
+  const requests: Array<{ model: string; authorized: boolean; maxTokens: number }> = []
   const server = createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
     req.on('end', () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model: string }
-      requests.push({ model: body.model, authorized: req.headers.authorization === `Bearer ${ASK_KEY}` })
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model: string; max_tokens: number }
+      requests.push({ model: body.model, authorized: req.headers.authorization === `Bearer ${ASK_KEY}`, maxTokens: body.max_tokens })
       const reply = replies[Math.min(requests.length, replies.length) - 1]!
       if (reply === 'dropped' || reply === 'stream-rate-limit') {
         res.writeHead(200, { 'content-type': 'text/event-stream' })

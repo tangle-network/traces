@@ -19,12 +19,25 @@ const TANGLE_ROUTER_BASE_URL = 'https://router.tangle.tools/v1'
 const BRIDGE_MODULE = 'agent_eval_rpc.dspy_rlm_bridge'
 
 /**
- * The completion cap of every analyst call, for every model. The bridge's DSPy
- * refuses an OpenAI reasoning model (gpt-5 and o-series names) whose cap is
- * below 16,000 before any call, so a smaller cap for one family fails every
- * question that asks with it.
+ * The completion cap of every analyst call, for every model but GLM. The
+ * bridge's DSPy refuses an OpenAI reasoning model (gpt-5 and o-series names)
+ * whose cap is below 16,000 before any call, so a smaller cap for one family
+ * fails every question that asks with it.
  */
 export const ANALYST_MAX_OUTPUT_TOKENS = 16_384
+
+/**
+ * GLM's cap. GLM reasons even at reasoning_effort none and counts that
+ * reasoning inside max_tokens, so a long step at 16,384 was cut off before any
+ * visible content (finish_reason=length). Twice the cap, not more: ask holds
+ * back each call's worst case from the question budget.
+ */
+export const GLM_ANALYST_MAX_OUTPUT_TOKENS = 32_768
+
+/** The completion cap of an analyst call with `model`, bare or provider-qualified. */
+export function analystMaxOutputTokens(model: string): number {
+  return /^(?:[^/]+\/)?glm-/iu.test(model) ? GLM_ANALYST_MAX_OUTPUT_TOKENS : ANALYST_MAX_OUTPUT_TOKENS
+}
 
 /**
  * Select the Python bridge for the installed JS engine. The affected releases
@@ -256,7 +269,7 @@ export function createAnalystModelOwner(opts: {
       provider: opts.provider,
       default: opts.model,
       reasoningEffort: 'none',
-      maxVisibleOutputTokens: ANALYST_MAX_OUTPUT_TOKENS,
+      maxVisibleOutputTokens: analystMaxOutputTokens(opts.model),
       metadata: {
         // Stream every analyst call. The Tangle Router bounds a buffered request by a deadline that
         // ends when response headers are sent, and a thinking model's long recursive step outlives
@@ -360,7 +373,7 @@ export function analysisEngineFromEnv(opts: AnalysisEngineFromEnvOptions): Trace
         )
       },
       model: opts.model,
-      maxOutputTokens: ANALYST_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: analystMaxOutputTokens(opts.model),
       // The engine's own default ceiling is $1 per investigation, a proxy-side
       // ceiling separate from any shared ledger; the caller's allocation wins.
       ...(opts.maxCostUsd !== undefined && Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0
