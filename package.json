@@ -63,7 +63,7 @@
     "prepublishOnly": "pnpm check:source && pnpm build && pnpm check:package"
   },
   "dependencies": {
-    "@tangle-network/agent-eval": "^2.0.7",
+    "@tangle-network/agent-eval": "^2.0.11",
     "@tangle-network/agent-interface": "^5.10.28",
     "@tangle-network/agent-runtime": "^10.0.12",
     "@tangle-network/agent-trace-contract": "^2.2.2",
