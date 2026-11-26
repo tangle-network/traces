@@ -91,6 +91,8 @@ export interface BehaviorNode {
   readonly model: string | null; readonly harness: string | null; readonly start: number; readonly end: number; readonly hours: number; readonly by_cat: Readonly<Record<string, number>>
   readonly tool_calls: number; readonly failed: number; readonly fail_rate: number | null; readonly calls_per_hour: number; readonly idle_min: number; readonly streaks: number
   readonly llm_turns: number; readonly tokens_in: number | null; readonly tokens_out: number | null; readonly tokens_known_turns: number; readonly last_cat: BehaviorCategory | null
+  /** Epoch seconds the node's last own event ended, its session span excluded (a session span ends at teardown); null with no event. */
+  readonly last_act: number | null
   readonly span_id: string; readonly claims: number; readonly test_edits: number; readonly z: Record<string, number | null>
 }
 export interface BehaviorWindow { readonly node: string; readonly w: number; readonly from: number; readonly to: number; readonly category: BehaviorCategory; readonly span_ids: string[]; readonly calibrated: boolean }
@@ -547,7 +549,8 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<stri
     tool_calls: calls.length, failed: failedCalls.length, fail_rate: calls.length ? round(failedCalls.length / calls.length, 3) : null,
     calls_per_hour: round(calls.length / hours, 1), idle_min: round((byCat.idle || 0) / 60, 1), streaks: streaks.length, llm_turns: ev.filter((e) => e.llm).length,
     tokens_in: known.length ? known.reduce((a, e) => a + e.tokens_in!, 0) : null, tokens_out: known.length ? ev.reduce((a, e) => a + (e.tokens_out || 0), 0) : null,
-    tokens_known_turns: known.length, last_cat: lastActive ? lastActive.cat : null, span_id: n.span_id,
+    tokens_known_turns: known.length, last_cat: lastActive ? lastActive.cat : null,
+    last_act: ev.length ? ev.reduce((max, e) => Math.max(max, e.e), ev[0]!.e) : null, span_id: n.span_id,
     claims: ev.filter((e) => e.flags.includes('claim')).length, test_edits: ev.filter((e) => e.flags.includes('test_edit')).length, z: {},
   }
   return { node, n, segs, streaks, marks: ev.map(({ t, cat, span, call, ok }) => (call ? { t, cat, span, ok } : { t, cat, span })), turns: ev.filter((e) => e.llm).map((e) => e.t) }
@@ -663,6 +666,9 @@ export function behaviorFromSpans(all: readonly OtlpSpan[], options: BehaviorOpt
 const iso = (t: number): string => new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 const hhmm = (t: number): string => iso(t).slice(11, 16)
 const oneLine = (s: string): string => s.replace(/\s+/g, ' ').slice(0, 80)
+const tokenCount = (n: number): string => (n >= 1e6 ? `${round(n / 1e6, 2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
+/** The longest stalls the text names on its one stall line; the JSON holds every one. */
+const STALLS_NAMED = 6
 
 /** One line per node with its category minutes, then flags, anomalies, streaks, the mail summary and the calibration table. */
 export function renderBehaviorText(r: BehaviorResult): string {
@@ -673,7 +679,14 @@ export function renderBehaviorText(r: BehaviorResult): string {
   }
   for (const n of r.nodes) {
     const cats = Object.entries(n.by_cat).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}m`).join(', ')
-    lines.push(`${n.label} (${n.id}) ${n.state ?? 'running'} ${n.model ?? '?'}: ${cats || 'no activity'} | ${n.tool_calls} calls, ${n.failed} failed, ${n.streaks} streaks`)
+    const tokens = n.tokens_in === null ? '' : `, tokens in ${tokenCount(n.tokens_in)} out ${tokenCount(n.tokens_out ?? 0)}`
+    lines.push(`${n.label} (${n.id}) ${n.state ?? 'running'} ${n.model ?? '?'}: ${cats || 'no activity'} | ${n.tool_calls} calls, ${n.failed} failed, ${n.streaks} streaks${tokens}`)
+  }
+  const labels = new Map(r.nodes.map((n) => [n.id, n.label]))
+  const stalls = [...r.stalls].sort((a, b) => b.minutes - a.minutes)
+  if (stalls.length > 0) {
+    const named = stalls.slice(0, STALLS_NAMED).map((s) => `${labels.get(s.node) ?? s.node} ${s.minutes}m at ${hhmm(s.at)}`)
+    lines.push(`stalls (no span for 10m or more, longest first): ${named.join('; ')}${stalls.length > STALLS_NAMED ? `; and ${stalls.length - STALLS_NAMED} more` : ''}`)
   }
   lines.push(`flags (uncalibrated, record only): ${r.flags.length}`, ...r.flags.map((f) => `  ${f.kind} ${f.node} ${hhmm(f.at)} ${f.span} ${oneLine(f.detail)}`))
   lines.push(`anomalies (|z| >= ${Z_BAR}): ${r.anomalies.length}`, ...r.anomalies.map((a) => `  ${a.node} ${a.metric}=${a.value} z=${a.z}`))

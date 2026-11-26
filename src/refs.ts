@@ -13,9 +13,12 @@
  *      does (a trace archive's `<host>/home`, a fleet seat). `path#<trace id>`
  *      and `path#branch=<id>` pick one run from a span file. A native
  *      SQLite database takes `path#session=<exact native id>`.
- *   2. Anything else is a session id, or a unique prefix or suffix of at least
+ *   2. A bare name is a run id when a configured run root (`TRACES_RUN_ROOTS`,
+ *      or the install's config) holds a Runtime run directory of that name.
+ *   3. Anything else is a session id, or a unique prefix or suffix of at least
  *      8 characters, looked up across every harness (in the store root named
- *      beside it, when there is one).
+ *      beside it, when there is one). A bare ref that names nothing here is
+ *      marked `unresolvedRef`, so the CLI can ask a configured remote host.
  *
  * `--harness` requires a compatible file reader and narrows an id lookup; an
  * input format named on the command line forces how a file ref is read.
@@ -28,6 +31,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { CODEX_HOME_RULE, codexHomes, isNativeStoreDatabase, nativeStoreSessions, type SessionRef as NativeRef } from '@tangle-network/harness-sessions'
 import { ATTR } from '@tangle-network/agent-trace-contract'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
+import { readTracesConfig } from './run-config.js'
 import { exportTraceEvidenceFile, type TraceEvidenceInputFormat } from './file-export.js'
 import { harnessOfStorePath, incompatibleFile, recordedFileFormat, rememberFileFormat, STORE_PATHS, type FileFormat } from './session-file-format.js'
 import type { OtlpSpan } from './otlp.js'
@@ -52,12 +56,15 @@ export interface RefCandidate {
 export class RefError extends Error {
   readonly code: RefErrorCode
   readonly candidates: readonly RefCandidate[]
+  /** A bare ref that named no path, run and session on this machine: another host may hold it. */
+  readonly unresolvedRef: string | undefined
 
-  constructor(message: string, code: RefErrorCode, candidates: readonly RefCandidate[] = []) {
+  constructor(message: string, code: RefErrorCode, candidates: readonly RefCandidate[] = [], unresolvedRef?: string) {
     super(message)
     this.name = 'RefError'
     this.code = code
     this.candidates = candidates
+    this.unresolvedRef = unresolvedRef
   }
 }
 
@@ -393,6 +400,30 @@ async function pathRef(ref: string, options: ResolveRefOptions): Promise<Resolve
   return fileRef(path, ref, selector, options)
 }
 
+// ── Run ids ───────────────────────────────────────────────────────────
+
+/** A bare name is a run id when a configured run root holds a Runtime run directory of that name. */
+async function runRootRef(ref: string, runRoots: readonly string[]): Promise<ResolvedRef | undefined> {
+  if (runRoots.length === 0 || looksLikePath(ref) || ref.includes(sep) || ref === '..') return undefined
+  const { isRuntimeSupervisorRunDir } = await import('@tangle-network/agent-eval/supervisor-run')
+  for (const root of runRoots) {
+    const path = join(root, ref)
+    if (await isDirectory(path) && await isRuntimeSupervisorRunDir(path)) return { kind: 'run-dir', ref, path }
+  }
+  return undefined
+}
+
+/** A session lookup that found nothing for a bare ref: named as unresolved, with the run roots it was also looked for under. */
+async function lookupBare(ref: string, options: ResolveRefOptions, runRoots: readonly string[]): Promise<ResolvedRef> {
+  try {
+    return await lookupSession(ref, options, undefined)
+  } catch (error) {
+    if (!(error instanceof RefError) || error.code !== 'unreadable' || error.candidates.length > 0 || looksLikePath(ref)) throw error
+    const roots = runRoots.length > 0 ? `no run "${ref}" under ${runRoots.join(', ')}, and ` : ''
+    throw new RefError(`${roots}${error.message}`, 'unreadable', [], ref)
+  }
+}
+
 /**
  * Resolve each ref. Paths are read first, so an id is looked up in the store
  * root named beside it; a command reads at most one store root.
@@ -404,8 +435,13 @@ export async function resolveRefs(refs: readonly string[], options: ResolveRefOp
     throw new RefError(`name one store root per command, not ${roots.length}: ${roots.map((root) => root.ref).join(', ')}`, 'usage')
   }
   const resolved: ResolvedRef[] = []
+  const unnamed = refs.some((_, index) => byPath[index] === undefined)
+  const { runRoots } = unnamed && roots.length === 0 ? readTracesConfig() : { runRoots: [] }
   for (const [index, ref] of refs.entries()) {
-    resolved.push(...[byPath[index] ?? await lookupSession(ref, options, roots[0]?.path)].flat())
+    const named = byPath[index] ?? (roots[0]
+      ? await lookupSession(ref, options, roots[0].path)
+      : options.harness === undefined ? await runRootRef(ref, runRoots) ?? await lookupBare(ref, options, runRoots) : await lookupBare(ref, options, []))
+    resolved.push(...[named].flat())
   }
   return resolved
 }

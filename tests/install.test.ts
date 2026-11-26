@@ -8,7 +8,7 @@
  * records every call, and plays the install by linking the package.
  */
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -46,11 +46,11 @@ async function installer(): Promise<Installer> {
     '',
   ].join('\n'))
   await chmod(join(stubs, 'npm'), 0o755)
-  return { prefix, calls, env: { ...process.env, PATH: `${stubs}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root } }
+  return { prefix, calls, env: { ...process.env, PATH: `${stubs}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, XDG_CONFIG_HOME: join(root, '.config') } }
 }
 
-async function install(at: Installer): Promise<{ code: number; stdout: string; stderr: string; npm: string }> {
-  const result = await run('bash', [INSTALL, '--prefix', at.prefix], { env: at.env }).then(
+async function install(at: Installer, ...args: string[]): Promise<{ code: number; stdout: string; stderr: string; npm: string }> {
+  const result = await run('bash', [INSTALL, '--prefix', at.prefix, ...args], { env: at.env }).then(
     ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
     (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }),
   )
@@ -92,5 +92,26 @@ describe('install.sh', () => {
     expect(result.code).toBe(0)
     expect(result.npm).toContain(`install -g @tangle-network/traces@latest --prefix ${at.prefix}`)
     expect(result.stdout).toContain('traces 1.0.0 (stub)')
+  })
+
+  it('writes the run roots and remotes the CLI reads, and keeps a list the next install does not name', async () => {
+    const at = await installer()
+    const runs = join(at.prefix, '..', 'runs')
+    await mkdir(runs, { recursive: true })
+    const config = join(at.env.HOME!, '.config', 'traces', 'config.json')
+
+    const first = await install(at, '--run-root', runs, '--remote', 'build-host', '--remote', 'lab-host')
+    expect(first.stderr).toBe('')
+    expect(first.code).toBe(0)
+    expect(JSON.parse(await readFile(config, 'utf8'))).toEqual({ runRoots: [await realpath(runs)], remotes: ['build-host', 'lab-host'] })
+    expect(first.stdout).toContain(`traces config: ${config}`)
+
+    const second = await install(at, '--remote', 'other-host')
+    expect(second.code).toBe(0)
+    expect(JSON.parse(await readFile(config, 'utf8'))).toEqual({ runRoots: [await realpath(runs)], remotes: ['other-host'] })
+
+    const refused = await install(at, '--run-root', join(runs, 'missing'))
+    expect(refused.code).toBe(2)
+    expect(refused.stderr).toContain('is not a directory')
   })
 })

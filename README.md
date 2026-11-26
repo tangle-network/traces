@@ -71,7 +71,7 @@ Start here for one session: traces facts <ref> (25 lines); one field: add --form
   Which skills are used?                           traces skills [--unused]
   Serve span tools over MCP                        traces mcp <ref>|--last N
 
-ref: session id, or 8+ char unique prefix or suffix; session file; OTLP file/dir; bundle dir; run dir; store root
+ref: session id, or 8+ char unique prefix or suffix; session file; OTLP file/dir; bundle dir; run dir or run id; store root
 Select: --current  --last N  --since/--until 2h|1d|ISO  --cwd DIR  --harness ID  --latest-turn
 Output: --format text|json|jsonl|junit|github  --out PATH  --no-content
 Exit: 0 yes · 1 no (fail, diverged, unsafe) · 2 could not answer (stderr says why)

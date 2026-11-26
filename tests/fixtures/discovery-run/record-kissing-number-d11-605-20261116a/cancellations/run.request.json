@@ -1,0 +1,7 @@
+{
+ "operationId": "disco-cancel-0f85122f-bfbb-44af-8644-6f2b2e5a1388",
+ "at": "2026-11-17T01:53:54.016Z",
+ "source": "discovery-lab/operator",
+ "operator": "op-research:boards-vs-world",
+ "reason": "operator choice: the root's turn stream went silent (fixture text)"
+}

@@ -1,0 +1,68 @@
+{
+ "kind": "no-winner",
+ "reason": "cancelled",
+ "cancellationReason": "operator choice: the root's turn stream went silent (fixture text)",
+ "source": "discovery-lab/operator",
+ "operator": "op-research:boards-vs-world",
+ "operationId": "disco-cancel-0f85122f-bfbb-44af-8644-6f2b2e5a1388",
+ "teardownUnconfirmed": [
+  {
+   "detail": "retained owner environment cleanup was not confirmed: destroy still running after 90000 ms",
+   "environments": [
+    {
+     "environmentId": "sandbox-69a595371d00",
+     "provider": "tangle-sandbox"
+    }
+   ],
+   "id": "record-kissing-number-d11-605-20261116a",
+   "label": "scope owner",
+   "runtime": "tangle-sandbox",
+   "status": "done"
+  },
+  {
+   "attempts": 0,
+   "detail": "Prior admitted execution has no confirmed teardown; source custody remains unverified.",
+   "id": "record-kissing-number-d11-605-20261116a:s1",
+   "kept": [
+    {
+     "environmentId": "sandbox-39697e07cbe6",
+     "keptFor": "evidence",
+     "provider": "tangle-sandbox"
+    }
+   ],
+   "label": "perturb-relax",
+   "runtime": "tangle-sandbox",
+   "status": "acquiring"
+  },
+  {
+   "attempts": 0,
+   "detail": "Prior admitted execution has no confirmed teardown; source custody remains unverified.",
+   "id": "record-kissing-number-d11-605-20261116a:s3",
+   "kept": [
+    {
+     "environmentId": "sandbox-25ed6c6a23d1",
+     "keptFor": "evidence",
+     "provider": "tangle-sandbox"
+    }
+   ],
+   "label": "slp-newton",
+   "runtime": "driver",
+   "status": "acquiring"
+  },
+  {
+   "attempts": 0,
+   "detail": "Prior admitted execution has no confirmed teardown; source custody remains unverified.",
+   "id": "record-kissing-number-d11-605-20261116a:s4",
+   "kept": [
+    {
+     "environmentId": "sandbox-1c81746253fa",
+     "keptFor": "evidence",
+     "provider": "tangle-sandbox"
+    }
+   ],
+   "label": "cluster-opt",
+   "runtime": "driver",
+   "status": "acquiring"
+  }
+ ]
+}

@@ -37,6 +37,7 @@ Usage: traces behavior <ref…> | --current | --last N | --since T [--window 5m]
 What each agent did per five-minute window: categories with a calibration certificate, failing streaks, stalls, gaming flags (record-only), anomalies against the run's own baseline, and who messaged whom.
 One node per session id (else per agent boundary). A window is implementing on a code edit, else verifying on a check, else its longest category;
 a failing streak makes it looping, a 10-minute gap idle. Exit 2 when no span is a tool call: categories need acts.
+A Runtime run dir or run id adds its own records: who stopped it and why, its last check, each agent's quiet before the stop.
 
   --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
   --last N            the N newest sessions by file mtime, never the caller's own
@@ -52,6 +53,7 @@ jq paths (--format json):
   .windows[] | select(.category == "looping") | {node, from, span_ids}   where an agent looped (or "idle"), with the spans
   .flags[] | {kind, node, at, span, detail}                              the gaming flags: record-only, never a severity
   .mail.summary                                                          who messaged whom: edges by kind, steers, read latency
+  .run_record | {stop, checks: .checks[-1:], quiet}                      a run's stop, its last check, each agent's last act
 
 Examples:
   traces behavior run/otlp/

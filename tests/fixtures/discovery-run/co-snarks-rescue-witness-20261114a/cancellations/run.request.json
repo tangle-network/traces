@@ -1,0 +1,7 @@
+{
+ "operationId": "disco-cancel-9198d72a-6d8c-4306-8617-9a92b1b4597f",
+ "at": "2026-11-14T03:25:11.908Z",
+ "source": "discovery-lab/operator",
+ "operator": "crypto-repro",
+ "reason": "operator choice: pressed from a stale Lab (fixture text)"
+}

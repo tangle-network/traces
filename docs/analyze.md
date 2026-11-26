@@ -52,7 +52,7 @@ A Runtime run directory as the ref reports its supervision tree. Your own analys
 ```text
 Usage: traces analyze <ref…> | --current | --last N | --since T [flags]
 What went wrong, ranked, for $0: failing commands, stalls, interrupts, findings, and what the trace cannot answer.
-At most 40 lines; several sessions get a table of the 15 with the most waste. A Runtime run dir reports its tree.
+At most 40 lines; several sessions get a table of the 15 with the most waste. A Runtime run dir reports its record and tree.
 
   --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
   --last N            the N newest sessions by file mtime, never the caller's own

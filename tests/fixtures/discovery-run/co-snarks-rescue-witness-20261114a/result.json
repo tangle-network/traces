@@ -1,0 +1,8 @@
+{
+ "kind": "no-winner",
+ "reason": "cancelled",
+ "cancellationReason": "operator choice: pressed from a stale Lab (fixture text)",
+ "source": "discovery-lab/operator",
+ "operator": "crypto-repro",
+ "operationId": "disco-cancel-9198d72a-6d8c-4306-8617-9a92b1b4597f"
+}

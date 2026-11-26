@@ -1,0 +1,8 @@
+{"seq":1,"at":"2026-11-17T02:18:12.000Z","entity":"run","from":null,"to":"open","event":"press","actor":"press","evidence":{}}
+{"seq":2,"at":"2026-11-17T02:58:05.965Z","entity":"rc1","from":null,"to":"submitted","event":"submit","actor":"wrapup","evidence":{"commit":"64f200533421a8c5212bc81e353b0ae4243f7eda"}}
+{"seq":3,"at":"2026-11-17T03:00:27.660Z","entity":"rc1","from":"submitted","to":"failed","event":"check.fail","actor":"check","evidence":{}}
+{"seq":4,"at":"2026-11-17T03:28:06.885Z","entity":"rc2","from":null,"to":"submitted","event":"submit","actor":"wrapup","evidence":{"commit":"e375347e0ee1c6e4a26ba9b71e996c08837547f5"}}
+{"seq":5,"at":"2026-11-17T03:31:26.647Z","entity":"rc2","from":"submitted","to":"failed","event":"check.fail","actor":"check","evidence":{}}
+{"seq":6,"at":"2026-11-17T04:43:47.481Z","entity":"run","from":"open","to":"settling","event":"runtime.settled","actor":"settle","evidence":{}}
+{"seq":18,"at":"2026-11-17T04:47:45.966Z","entity":"run","from":"settling","to":"settled","event":"settle","actor":"settle","evidence":{"outcome":"stopped","reason":"operator choice: the play's registered Sandbox cap: $0.50 billed against $0.50 (Platform ledger, read at 2026-11-17T04:11:13.049Z)"}}
+{"seq":21,"at":"2026-11-17T04:49:58.217Z","entity":"run","from":"settled","to":"settled","event":"evidence","actor":"settle","evidence":{}}

@@ -1,0 +1,8 @@
+{"seq":1,"at":"2026-11-17T00:59:52.052Z","entity":"run","from":null,"to":"open","event":"press","actor":"press","evidence":{}}
+{"seq":2,"at":"2026-11-17T01:55:04.085Z","entity":"rc1","from":null,"to":"submitted","event":"submit","actor":"wrapup","evidence":{"commit":"4a96d16d89b2dc5fdc8d132eccf9be1afa88b1d3"}}
+{"seq":3,"at":"2026-11-17T02:01:40.746Z","entity":"rc1","from":"submitted","to":"failed","event":"check.fail","actor":"check","evidence":{}}
+{"seq":4,"at":"2026-11-17T02:27:34.613Z","entity":"rc2","from":null,"to":"submitted","event":"submit","actor":"wrapup","evidence":{"commit":"b6afab7ea1bc1782bbddf539343d4ea80cd2f773"}}
+{"seq":5,"at":"2026-11-17T02:30:54.909Z","entity":"rc2","from":"submitted","to":"failed","event":"check.fail","actor":"check","evidence":{}}
+{"seq":6,"at":"2026-11-17T04:20:50.739Z","entity":"run","from":"open","to":"settling","event":"runtime.settled","actor":"settle","evidence":{}}
+{"seq":18,"at":"2026-11-17T04:43:16.337Z","entity":"run","from":"settling","to":"settled","event":"settle","actor":"settle","evidence":{"outcome":"stopped","reason":"operator choice: account reserve stop (fixture text)"}}
+{"seq":21,"at":"2026-11-17T04:45:14.813Z","entity":"run","from":"settled","to":"settled","event":"evidence","actor":"settle","evidence":{}}
