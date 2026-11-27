@@ -1,6 +1,6 @@
 {
   "name": "@tangle-network/traces",
-  "version": "4.0.4",
+  "version": "4.0.5",
   "description": "What your coding agents did, where they wasted time, and whether a run passes: exact facts, ranked findings, one CI gate and a live view over Claude Code, Codex, OpenCode, Pi, Kimi, Factory, Grok, Hermes, OpenClaw, NanoClaw and Prime sessions and any OTLP spans. CLI and SDK.",
   "type": "module",
   "license": "MIT",
@@ -54,6 +54,7 @@
     "bench:parity": "tsx bench/parity/score.ts",
     "build": "tsup",
     "check:package": "node scripts/check-package-bin.mjs",
+    "check:release": "node scripts/check-release-admission.mjs",
     "check:source": "node scripts/check-source-text.mjs",
     "prepare": "node scripts/check-source-text.mjs",
     "test": "vitest run",

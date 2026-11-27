@@ -9,6 +9,8 @@ import { ATTR, RUNTIME_INPUT_FLOOR_ATTR, RUNTIME_OUTPUT_FLOOR_ATTR, SOURCE_MISSI
 import { span, type OtlpSpan } from '../otlp.js'
 import { SUBSTITUTED_FIELDS_ATTR, type OtlpInput } from '../otlp-input.js'
 import { readConsistentOtlpInput } from '../otlp-measurement.js'
+import type { RunContextNode } from '../supervisor-run-context.js'
+import { readRuntimeLiveStreams } from './runtime-live-streams.js'
 import { spanKey } from '../span-identity.js'
 
 export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string): Promise<{
@@ -23,7 +25,18 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
     return { spans: [...retained.spans], retained, unknowns: [...unbound, 'Retained OTLP selected; journal nodes cannot be joined to its spans and their usage is excluded.'] }
   }
   const journal = await readRuntimeJournalSpans(runDir, expectedRunId, unbound)
-  if (!selected && !retained.files.length) return journal
+  if (!selected && !retained.files.length) {
+    // Nothing is exported yet, as while the run runs: its live stream holds each agent's acts.
+    const live = await liveStreamSpans(runDir, journal, () => null)
+    if (!live.spans.length) return { spans: journal.spans, unknowns: [...journal.unknowns, ...live.unknowns] }
+    const unknowns = [...new Set([...journal.unknowns, ...live.unknowns])]
+    const spans = [...journal.spans.filter((item) => !live.nodes.has(String(item.attributes['traces.runtime.node_id']))), ...live.spans]
+    // The journal's coverage rides its first span, which a live root replaces.
+    const coverage = journal.spans[0]?.attributes ?? {}
+    for (const attr of [ATTR.CORRUPTION_COUNT, 'traces.source.partial_tail']) if (coverage[attr] !== undefined) spans[0]!.attributes[attr] = coverage[attr]
+    spans[0]!.attributes['traces.source.unknowns'] = JSON.stringify(unknowns)
+    return { spans, unknowns }
+  }
   const nodes = new Set(journal.spans.map((item) => String(item.attributes['traces.runtime.node_id'])))
   const runId = journal.spans[0]?.attributes['traces.runtime.run_id'] ?? expectedRunId
   // A native session spanning several nodes has no per-node placement. Keep
@@ -56,6 +69,21 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
     }
     spans.push(item)
   }
+  // A reopen's executions start after the settle that exported a node's sessions: its live stream holds them.
+  const exportedUntil = new Map<string, number>()
+  const exportedSessions = new Map<string, string>()
+  for (const item of retained.spans) {
+    const owner = owners.get(spanKey(item.trace_id, item.span_id))
+    const end = Date.parse(item.end_time)
+    if (typeof owner !== 'string') continue
+    if (Number.isFinite(end)) exportedUntil.set(owner, Math.max(exportedUntil.get(owner) ?? end, end))
+    const session = item.parent_span_id ? undefined : sessionIdFromAttributes(item.attributes)
+    if (session && !exportedSessions.has(owner)) exportedSessions.set(owner, session)
+  }
+  const live = await liveStreamSpans(runDir, journal, (node) => (selected?.nodes.has(node) ? Infinity : exportedUntil.get(node) ?? null), exportedSessions)
+  spans.push(...live.spans)
+  for (const node of live.nodes) included.add(node)
+  for (const issue of live.unknowns) unknowns.add(issue)
   if (!selected && included.size === 0) return {
     spans, retained, unknowns: [...unbound, 'Retained OTLP identities could not be joined to journal nodes; journal usage is excluded.'],
   }
@@ -89,7 +117,7 @@ export async function readRuntimeRunSpans(runDir: string, expectedRunId?: string
   }
   for (const issue of journal.unknowns) unknowns.add(issue)
   if (retained.issues.length) unknowns.add(`${retained.issues.length} retained OTLP ingestion issues; see the original OTLP for details.`)
-  if (!selected && spans.length === selectedSpanCount) return { spans, retained, unknowns: [...unknowns] }
+  if (!selected && !live.spans.length && spans.length === selectedSpanCount) return { spans, retained, unknowns: [...unknowns] }
   if (spans[0]) spans[0].attributes['traces.source.unknowns'] = JSON.stringify([...unknowns])
   return { spans, unknowns: [...unknowns] }
 }
@@ -161,14 +189,15 @@ async function readRuntimeJournalSpans(runDir: string, expectedRunId: string | u
     'Human messages, tool calls and workflow phases are unavailable from the supervisor journal.',
     ...unbound,
   ]
-  if (!snapshot.present) return { spans: [], unknowns: ['Runtime supervisor journal unavailable at catalog location'] }
-  if (snapshot.treeError) return { spans: [], unknowns: ['Runtime supervisor journal could not be folded by its owner'] }
-  if (snapshot.runId && expectedRunId && snapshot.runId !== expectedRunId) return { spans: [], unknowns: ['Catalog run ID disagrees with Runtime journal root'] }
+  const none: RunContextNode[] = []
+  if (!snapshot.present) return { spans: [], nodes: none, unknowns: ['Runtime supervisor journal unavailable at catalog location'] }
+  if (snapshot.treeError) return { spans: [], nodes: none, unknowns: ['Runtime supervisor journal could not be folded by its owner'] }
+  if (snapshot.runId && expectedRunId && snapshot.runId !== expectedRunId) return { spans: [], nodes: none, unknowns: ['Catalog run ID disagrees with Runtime journal root'] }
   if (snapshot.invalidJournalRows || snapshot.partialTail || snapshot.retiredWaitRows) {
     unknowns.push(`Journal coverage: ${snapshot.invalidJournalRows} invalid rows, ${snapshot.retiredWaitRows} retired wait rows, partial tail ${snapshot.partialTail}`)
   }
   const runId = snapshot.runId ?? expectedRunId
-  if (!runId) return { spans: [], unknowns: ['Runtime journal has no recorded run identity'] }
+  if (!runId) return { spans: [], nodes: none, unknowns: ['Runtime journal has no recorded run identity'] }
   const traceId = deriveHexId(`runtime-supervisor:${runId}`, 16)
   const spans: OtlpSpan[] = []
   for (const node of snapshot.nodes) {
@@ -205,7 +234,17 @@ async function readRuntimeJournalSpans(runDir: string, expectedRunId: string | u
     }))
   }
   if (spans[0]) Object.assign(spans[0].attributes, { [ATTR.CORRUPTION_COUNT]: snapshot.invalidJournalRows, 'traces.source.partial_tail': snapshot.partialTail, 'traces.source.unknowns': JSON.stringify([...new Set(unknowns)]) })
-  return { spans, unknowns: [...new Set(unknowns)] }
+  return { spans, runId, nodes: snapshot.nodes, unknowns: [...new Set(unknowns)] }
+}
+
+/** The run's agents its live stream records beyond what `coveredUntil` says other sources hold. */
+async function liveStreamSpans(
+  runDir: string, journal: Awaited<ReturnType<typeof readRuntimeJournalSpans>>, coveredUntil: (nodeId: string) => number | null,
+  exportedSessions?: ReadonlyMap<string, string>,
+) {
+  if (!journal.runId) return { spans: [], nodes: new Set<string>(), unknowns: [] }
+  const byNode = new Map(journal.spans.map((item) => [String(item.attributes['traces.runtime.node_id']), item]))
+  return readRuntimeLiveStreams(runDir, journal.runId, journal.nodes, byNode, coveredUntil, exportedSessions)
 }
 
 interface RuntimeNativeCapture {

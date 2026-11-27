@@ -1,0 +1,86 @@
+{
+ "schema": "disco.live-stream.v1",
+ "runId": "record-kissing-number-d11-605-20261116a",
+ "at": "2026-11-27T08:58:20.094Z",
+ "executions": {
+  "retained-execution-6ea27b00985872c804cd65a98707095659fdc9970aa434aeebf678275e909276": {
+   "nodeId": "record-kissing-number-d11-605-20261116a",
+   "environmentId": "sandbox-69a595371d00",
+   "events": 44156,
+   "done": true,
+   "lastEventId": "44108",
+   "lastAt": "2026-11-16T23:01:14.575Z"
+  },
+  "retained-execution-a043fd6cd1c262b311e6a6d84fbc2f6b221aa836479814ff1dbd56bb763da2cb": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s0",
+   "environmentId": "sandbox-05cdbe0ed88b",
+   "events": 8014,
+   "done": true,
+   "lastEventId": "8002",
+   "lastAt": "2026-11-16T22:54:43.563Z"
+  },
+  "retained-execution-6b6d08af5209bdae68b884d6f0d9926e18b465456fd0a65cc8ad7deab25c44c0": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s2",
+   "environmentId": "sandbox-bfd6364f6cd5",
+   "events": 27,
+   "done": true,
+   "lastEventId": "25",
+   "lastAt": "2026-11-16T22:51:01.199Z"
+  },
+  "retained-execution-924a420d907a2094d764e273517c5d96e7e6153854aab1c101e7415d557d0f10": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s3",
+   "environmentId": "sandbox-25ed6c6a23d1",
+   "events": 83317,
+   "done": true,
+   "lastEventId": "106468",
+   "lastAt": "2026-11-16T23:40:08.193Z"
+  },
+  "retained-execution-3b5f8a6e7b17ce79083f3ae54a5fb92e0054e209367d826b5d1cb8450121937a": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s1",
+   "environmentId": "sandbox-39697e07cbe6",
+   "events": 27,
+   "done": true,
+   "lastEventId": "25",
+   "lastAt": "2026-11-16T22:51:07.258Z"
+  },
+  "retained-execution-a30294fda76614b176741a254e126e6919af723119c9a67a245264ec8b62fe16": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s2",
+   "environmentId": "sandbox-bfd6364f6cd5",
+   "events": 8179,
+   "done": true,
+   "lastEventId": "8186",
+   "lastAt": "2026-11-16T23:02:27.357Z"
+  },
+  "retained-execution-e65b6296e8f4f4f0f0e51a1b7d4fc426dea6ffa7b02f086037229272bdff34d1": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s1",
+   "environmentId": "sandbox-39697e07cbe6",
+   "events": 15754,
+   "done": true,
+   "lastEventId": "15689",
+   "lastAt": "2026-11-16T23:40:06.180Z"
+  },
+  "retained-execution-6d128d70b488a81aca11ce6f80dd31cd10c8b7a34848c3308fb6f2d7ffdc54e0": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s4",
+   "environmentId": "sandbox-1c81746253fa",
+   "events": 30995,
+   "done": true,
+   "lastEventId": "31229",
+   "lastAt": "2026-11-16T23:40:05.849Z"
+  },
+  "retained-execution-eb24a9ecc41e76b6d1abe6fe4b45ebb376fdd39d7916d2527e3fbc8334007414": {
+   "nodeId": "record-kissing-number-d11-605-20261116a:s2",
+   "environmentId": "sandbox-bfd6364f6cd5",
+   "events": 2392,
+   "done": true,
+   "lastEventId": "10560",
+   "lastAt": "2026-11-16T23:27:37.695Z"
+  },
+  "retained-execution-7e693ef57dce4b8177b68bc1a754a026859d1c3904057adfb83e9599ee50d731": {
+   "nodeId": "record-kissing-number-d11-605-20261116a",
+   "environmentId": "sandbox-69a595371d00",
+   "events": 0,
+   "done": true,
+   "lastEventId": "66728"
+  }
+ }
+}

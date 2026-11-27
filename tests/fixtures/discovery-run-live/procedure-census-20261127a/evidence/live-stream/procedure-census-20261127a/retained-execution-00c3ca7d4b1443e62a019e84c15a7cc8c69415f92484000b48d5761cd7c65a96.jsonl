@@ -1,0 +1,3 @@
+{"at":"2026-11-27T09:15:35.422Z","type":"start","id":"110522"}
+{"at":"2026-11-27T09:15:35.422Z","type":"execution.started","data":{"effectiveBackend":{"provider":"openai-compat","model":"glm-5.3","source":"profile","profile":{"name":"procedure-census-20261127a-root"}}}}
+{"at":"2026-11-27T09:15:35.422Z","type":"raw","data":{"backend":"opencode"}}

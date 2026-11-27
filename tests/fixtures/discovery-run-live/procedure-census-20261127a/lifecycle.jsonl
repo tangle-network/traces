@@ -1,0 +1,3 @@
+{"seq":1,"at":"2026-11-27T08:41:14.888Z","entity":"run","from":null,"to":"open","event":"press","actor":"press"}
+{"seq":2,"at":"2026-11-27T09:37:40.413Z","entity":"rc1","from":null,"to":"submitted","event":"submit","actor":"wrapup"}
+{"seq":3,"at":"2026-11-27T09:38:41.249Z","entity":"rc1","from":"submitted","to":"failed","event":"check.fail","actor":"check"}

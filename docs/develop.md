@@ -8,21 +8,21 @@ The gate fetches the pushed revision and installs frozen dependencies. Build bef
 
 ```bash
 beelink-gate auto https://github.com/tangle-network/traces.git <full-commit-sha> -- bash -euc \
-  'pnpm check:source && pnpm typecheck && pnpm build && pnpm test && pnpm run verify:contracts-corpus && pnpm check:package'
+  'pnpm check:source && pnpm typecheck && pnpm build && pnpm test && pnpm run verify:contracts-corpus && pnpm check:package && pnpm check:release'
 ```
 
-PRs and branch pushes run no CI. The corpus checks real trace fixtures; `check:package` checks the packed CLI. Use the package's Node engine range; tag publication retains its own runtime and qualification.
+PRs and branch pushes run no CI. The corpus checks real trace fixtures; `check:package` checks the packed CLI; `check:release` runs npm admission when `package.json` names an unpublished version. Use the package's Node engine range; tag publication retains its own runtime and qualification.
 
 ## Release
 
 `main` is protected, and nothing publishes until a `v*` tag:
 
-1. Check the packed candidate against the latest npm release with the Agent Runtime admission script pinned in [the publish workflow](../.github/workflows/publish.yml). Run `node scripts/check-version-bump.mjs --archive <package.tgz> --as <version>` from that policy checkout. The check reads public types as well as exports and package metadata.
-2. Change `package.json` and its notes in `docs/release-<version>.md` through a pull request. Refresh the lockfile when dependency resolution changes.
-3. Tag the merge commit `vX.Y.Z` and push the tag.
-4. The Publish workflow checks the tag is on `main` and matches `package.json`, builds, publishes to npm with provenance, and creates the GitHub release from `docs/release-<version>.md`.
+1. Change `package.json` and its notes in `docs/release-<version>.md` through a pull request. Refresh the lockfile when dependency resolution changes.
+2. The gate's `pnpm check:release` packs the candidate and runs the Agent Runtime admission script at the commit [the publish workflow](../.github/workflows/publish.yml) pins, against the latest npm release; it reads public types as well as exports and package metadata. A refused candidate fails the gate: change the version or the change until it passes.
+3. Tag the merge commit `vX.Y.Z` only once that gate passed, and push the tag.
+4. The Publish workflow checks the tag is on `main` and matches `package.json`, builds, admits the packed artifact again, publishes to npm with provenance, and creates the GitHub release from `docs/release-<version>.md`.
 
-`pnpm check:package` proves the tarball ships the `traces` binary and the skill. To retry a failed publish, run the Publish workflow with the existing tag.
+`pnpm check:package` proves the tarball ships the `traces` binary and the skill. To retry a failed publish, run the Publish workflow with the existing tag. A tag that admission refused at publish published nothing: delete it (`git push origin :refs/tags/vX.Y.Z`), so the newest tag is again a version npm serves, and release the fix as the next version.
 
 ## How quality is measured
 

@@ -354,7 +354,7 @@ function relabelLaunched(meta: NonNullable<CodexHead['payload']>, spans: OtlpSpa
 }
 
 /** What a Codex session's own records say about it, beside what the shared reader reads. */
-interface CodexDecoration {
+export interface CodexDecoration {
   readonly meta: NonNullable<CodexHead['payload']> | undefined
   /** When each user-role message of the session was written, and which are the person's. */
   readonly typedTimes: () => Promise<CodexTypedTimes>
@@ -546,6 +546,58 @@ function addLegacyPrompts(head: readonly CodexHead[], session: HarnessSession, r
 }
 
 /** The compatibility boundary between traces' session selection and the shared native reader. */
+/**
+ * The shared reader's session as traces' spans, before any subagent is
+ * folded in: the one projection a whole read, a piece read and a Runtime
+ * run's live stream all take. `harness` is the service the spans name.
+ */
+export async function projectHarnessSession(session: HarnessSession, harness: string, codex?: CodexDecoration): Promise<{ spans: OtlpSpan[]; root: OtlpSpan; promptSeen: boolean }> {
+  const spans = toOtlpSpans(session).map(asTracesSpan)
+  const root = spans[0]!
+  root.attributes['service.name'] = harness
+  root.attributes['traces.session.role'] ??= session.parentNativeSessionId ? 'child' : 'operator'
+  // The directory the shared reader read from the session's own records.
+  if (session.cwd) root.attributes[SESSION_CWD_ATTR] = session.cwd
+  if (session.parentNativeSessionId) root.attributes['traces.parent_session_id'] = session.parentNativeSessionId
+  // Children a selection joins as their own sessions. Claude Code subagent
+  // transcripts are folded into this trace instead, so they are not.
+  if (session.children.length > 0 && session.harness !== 'claude-code') {
+    root.attributes['traces.child_session_ids'] = JSON.stringify(session.children.map((child) => child.nativeSessionId))
+  }
+  root.attributes['traces.session.corruption_count'] = session.integrity.unparsedRecords
+  root.attributes['traces.session.integrity'] = session.integrity.unparsedRecords > 0
+    || session.integrity.truncated || session.integrity.gaps.length > 0
+    ? 'degraded_not_lossless' : 'complete'
+  if (session.integrity.unparsedRecords > 0) {
+    root.attributes['traces.source.unreadable_rows'] = session.integrity.unparsedRecords
+  }
+  // The session-total counter is distinct from a sum of individual calls.
+  // The shared reader's input excludes the cache; the counter's input is the
+  // whole prompt, as traces' own Codex reader and `execution.ts` read it.
+  const usage = session.usage
+  if ((session.harness === 'codex' || session.harness === 'factory-droids') && usage?.input != null && usage.output != null) {
+    const input = usage.input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
+    root.attributes[SESSION_TOTAL_TOKENS_ATTR] = input + usage.output
+    root.attributes[SESSION_TOTAL_INPUT_ATTR] = input
+    root.attributes[SESSION_TOTAL_OUTPUT_ATTR] = usage.output
+    if (usage.cacheRead != null) root.attributes[SESSION_TOTAL_CACHED_INPUT_ATTR] = usage.cacheRead
+    if (usage.cacheWrite != null) root.attributes[SESSION_TOTAL_CACHE_WRITE_ATTR] = usage.cacheWrite
+    if (usage.reasoning != null) root.attributes[SESSION_TOTAL_REASONING_ATTR] = usage.reasoning
+    root.attributes['traces.session.total_tokens_source'] = '@tangle-network/harness-sessions'
+  }
+  spans.push(...presentationSpans(session, root))
+  let promptSeen = false
+  if (session.harness === 'codex' && codex) {
+    decorateCodexTools(session, spans)
+    promptSeen = await decorateCodexMeta(codex, root, spans)
+    if (codex.legacyHead) addLegacyPrompts(codex.legacyHead, session, root, spans)
+  }
+  if (session.harness === 'claude-code') decorateClaudeSpawns(session, spans)
+  stampNativeProvenance(session, spans)
+  spans.push(...lifecycleSpans(session, root, spans))
+  return { spans, root, promptSeen }
+}
+
 export class HarnessSessionsAdapter implements HarnessTraceAdapter {
   readonly harness: string
   readonly aliases: readonly string[]
@@ -754,55 +806,8 @@ export class HarnessSessionsAdapter implements HarnessTraceAdapter {
     return this.finish(session, spans)
   }
 
-  /**
-   * The shared reader's session as traces' spans, before any subagent is
-   * folded in: the one projection a whole read and a piece read both take.
-   */
-  private async project(session: HarnessSession, codex?: CodexDecoration): Promise<{ spans: OtlpSpan[]; root: OtlpSpan; promptSeen: boolean }> {
-    const spans = toOtlpSpans(session).map(asTracesSpan)
-    const root = spans[0]!
-    root.attributes['service.name'] = this.harness
-    root.attributes['traces.session.role'] ??= session.parentNativeSessionId ? 'child' : 'operator'
-    // The directory the shared reader read from the session's own records.
-    if (session.cwd) root.attributes[SESSION_CWD_ATTR] = session.cwd
-    if (session.parentNativeSessionId) root.attributes['traces.parent_session_id'] = session.parentNativeSessionId
-    // Children a selection joins as their own sessions. Claude Code subagent
-    // transcripts are folded into this trace instead, so they are not.
-    if (session.children.length > 0 && session.harness !== 'claude-code') {
-      root.attributes['traces.child_session_ids'] = JSON.stringify(session.children.map((child) => child.nativeSessionId))
-    }
-    root.attributes['traces.session.corruption_count'] = session.integrity.unparsedRecords
-    root.attributes['traces.session.integrity'] = session.integrity.unparsedRecords > 0
-      || session.integrity.truncated || session.integrity.gaps.length > 0
-      ? 'degraded_not_lossless' : 'complete'
-    if (session.integrity.unparsedRecords > 0) {
-      root.attributes['traces.source.unreadable_rows'] = session.integrity.unparsedRecords
-    }
-    // The session-total counter is distinct from a sum of individual calls.
-    // The shared reader's input excludes the cache; the counter's input is the
-    // whole prompt, as traces' own Codex reader and `execution.ts` read it.
-    const usage = session.usage
-    if ((session.harness === 'codex' || session.harness === 'factory-droids') && usage?.input != null && usage.output != null) {
-      const input = usage.input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
-      root.attributes[SESSION_TOTAL_TOKENS_ATTR] = input + usage.output
-      root.attributes[SESSION_TOTAL_INPUT_ATTR] = input
-      root.attributes[SESSION_TOTAL_OUTPUT_ATTR] = usage.output
-      if (usage.cacheRead != null) root.attributes[SESSION_TOTAL_CACHED_INPUT_ATTR] = usage.cacheRead
-      if (usage.cacheWrite != null) root.attributes[SESSION_TOTAL_CACHE_WRITE_ATTR] = usage.cacheWrite
-      if (usage.reasoning != null) root.attributes[SESSION_TOTAL_REASONING_ATTR] = usage.reasoning
-      root.attributes['traces.session.total_tokens_source'] = '@tangle-network/harness-sessions'
-    }
-    spans.push(...presentationSpans(session, root))
-    let promptSeen = false
-    if (session.harness === 'codex' && codex) {
-      decorateCodexTools(session, spans)
-      promptSeen = await decorateCodexMeta(codex, root, spans)
-      if (codex.legacyHead) addLegacyPrompts(codex.legacyHead, session, root, spans)
-    }
-    if (session.harness === 'claude-code') decorateClaudeSpawns(session, spans)
-    stampNativeProvenance(session, spans)
-    spans.push(...lifecycleSpans(session, root, spans))
-    return { spans, root, promptSeen }
+  private project(session: HarnessSession, codex?: CodexDecoration): Promise<{ spans: OtlpSpan[]; root: OtlpSpan; promptSeen: boolean }> {
+    return projectHarnessSession(session, this.harness, codex)
   }
 
   private finish(session: HarnessSession, spans: OtlpSpan[]): OtlpSpan[] {
