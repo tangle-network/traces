@@ -1,7 +1,9 @@
 /**
  * `traces behavior`: what each agent did per window, read a session at a time; exit 2 when no span is a tool call.
  * A Runtime run directory adds its own records (`src/run-record.ts`): who stopped it and why, its checks,
- * and each agent's quiet before the stop. Those records answer even when no span is a tool call.
+ * and each agent's quiet before the stop. Those records answer even when no span is a tool call. A node
+ * still open in an ended run ends when the run did, not now; in a reopened run, an agent's quiet is read
+ * from its acts before the reopen.
  */
 import { BEHAVIOR_POLICY, behaviorReader, renderBehaviorText } from './behavior.js'
 import type { CollectedSpans } from './cli-span-input.js'
@@ -9,7 +11,7 @@ import type { CliArgs } from './cli-selection-types.js'
 import { workflowIssueText } from './session-workflow.js'
 import { CliError } from './commands.js'
 import type { OtlpSpan } from './otlp.js'
-import { quietBeforeStop, readRunRecord, renderRunRecordLines, type RunRecord } from './run-record.js'
+import { quietBeforeStop, readRunRecord, renderRunRecordLines, reopenSeconds, runEndSeconds, type RunRecord } from './run-record.js'
 
 /** The one Runtime run directory the selection names, when it names nothing else. */
 export function selectedRunDir(args: CliArgs): string | null {
@@ -21,7 +23,11 @@ export function selectedRunDir(args: CliArgs): string | null {
 export async function cmdBehavior(args: CliArgs, forEachBatch: (onBatch: (spans: readonly OtlpSpan[]) => Promise<void>) => Promise<Pick<CollectedSpans, 'sourceGaps' | 'unread' | 'workflow'> & { spanCount: number }>): Promise<void> {
   const runDir = selectedRunDir(args)
   const record: RunRecord | null = runDir === null ? null : await readRunRecord(runDir)
-  const reader = behaviorReader(args.window === undefined ? {} : { windowMs: args.window })
+  const now = record === null ? undefined : runEndSeconds(record)
+  const actsBefore = record === null ? undefined : reopenSeconds(record)
+  const reader = behaviorReader({
+    ...(args.window === undefined ? {} : { windowMs: args.window }), ...(now === undefined ? {} : { now }), ...(actsBefore === undefined ? {} : { actsBefore }),
+  })
   const selection = await forEachBatch(async (spans) => reader.add(spans))
   const gaps = [
     ...(selection.sourceGaps ?? []),
@@ -57,7 +63,7 @@ export async function cmdBehavior(args: CliArgs, forEachBatch: (onBatch: (spans:
     process.stdout.write(args.format === 'json' ? `${JSON.stringify(result)}\n` : `${renderBehaviorText(result)}\n`)
     return
   }
-  const quiet = quietBeforeStop(record, result.nodes.map((node) => ({ id: node.id, label: node.label, state: node.state, lastActivity: node.last_act })))
+  const quiet = quietBeforeStop(record, result.nodes.map((node) => ({ id: node.id, label: node.label, state: node.state, lastActivity: actsBefore === undefined ? node.last_act : node.last_act_before ?? null })))
   process.stdout.write(args.format === 'json'
     ? `${JSON.stringify({ ...result, run_record: { ...record, quiet } })}\n`
     : `${[...renderRunRecordLines(record, quiet), renderBehaviorText(result)].join('\n')}\n`)
