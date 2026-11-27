@@ -572,6 +572,24 @@ export function reopenSeconds(record: RunRecord): number | undefined {
   return next === undefined ? undefined : epoch(next.at) / 1000
 }
 
+/**
+ * The times the run was stopped between generations, in epoch seconds: from each generation's end (its Runtime
+ * settle, else its stop) to the reopen that started the next. A generation with neither has no end to cut at.
+ */
+export function stoppedBetweenGenerations(record: RunRecord): { stopped: Array<{ generation: number; from: number; to: number }>; unknowns: string[] } {
+  const stopped: Array<{ generation: number; from: number; to: number }> = []
+  const unknowns: string[] = []
+  for (const generation of record.generations) {
+    const next = record.generations.find((candidate) => candidate.generation === generation.generation + 1)
+    if (next?.reopen == null) continue
+    const ended = epoch(generation.runtime?.settledAt ?? generation.stoppedAt?.at ?? null)
+    const reopened = epoch(next.reopen.at)
+    if (!Number.isFinite(ended)) unknowns.push(`generation ${generation.generation} has no recorded end; its idle time runs on to the reopen`)
+    else if (reopened > ended) stopped.push({ generation: generation.generation, from: ended / 1000, to: reopened / 1000 })
+  }
+  return { stopped, unknowns }
+}
+
 /** Epoch seconds the run last ended, for a reader that would otherwise run an unfinished node to now. */
 export function runEndSeconds(record: RunRecord): number | undefined {
   const ended = epoch(record.endedAt)

@@ -1,0 +1,11 @@
+{
+ "operator": "value-audit",
+ "reason": "operator choice: continue after the stop (fixture text)",
+ "operationId": "disco-reopen-record-kissing-number-d11-605-20261116a-1",
+ "settles": 0,
+ "at": "2026-11-27T08:56:01.277Z",
+ "budget": {
+  "deadlineMs": 925200000
+ },
+ "labCommit": "06cdab947c40a9a7e6353633753788547d8d45fe"
+}

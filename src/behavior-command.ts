@@ -11,7 +11,7 @@ import type { CliArgs } from './cli-selection-types.js'
 import { workflowIssueText } from './session-workflow.js'
 import { CliError } from './commands.js'
 import type { OtlpSpan } from './otlp.js'
-import { quietBeforeStop, readRunRecord, renderRunRecordLines, reopenSeconds, runEndSeconds, type RunRecord } from './run-record.js'
+import { quietBeforeStop, readRunRecord, renderRunRecordLines, reopenSeconds, runEndSeconds, stoppedBetweenGenerations, type RunRecord } from './run-record.js'
 
 /** The one Runtime run directory the selection names, when it names nothing else. */
 export function selectedRunDir(args: CliArgs): string | null {
@@ -25,14 +25,18 @@ export async function cmdBehavior(args: CliArgs, forEachBatch: (onBatch: (spans:
   const record: RunRecord | null = runDir === null ? null : await readRunRecord(runDir)
   const now = record === null ? undefined : runEndSeconds(record)
   const actsBefore = record === null ? undefined : reopenSeconds(record)
+  // A reopened run was stopped between its generations: that time is neither idle nor active.
+  const between = record === null ? undefined : stoppedBetweenGenerations(record)
   const reader = behaviorReader({
     ...(args.window === undefined ? {} : { windowMs: args.window }), ...(now === undefined ? {} : { now }), ...(actsBefore === undefined ? {} : { actsBefore }),
+    ...(between === undefined ? {} : { stopped: between.stopped }),
   })
   const selection = await forEachBatch(async (spans) => reader.add(spans))
   const gaps = [
     ...(selection.sourceGaps ?? []),
     ...(selection.unread?.length ? [`${selection.unread.length} selected session(s) were unreadable`] : []),
     ...(selection.workflow?.issues.map(workflowIssueText) ?? []),
+    ...(between?.unknowns ?? []),
   ]
   let result: ReturnType<typeof reader.result> | undefined
   let unavailable: string | null = null

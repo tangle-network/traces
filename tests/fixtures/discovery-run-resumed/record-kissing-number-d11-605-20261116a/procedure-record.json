@@ -1,0 +1,40 @@
+{
+ "schema": "disco.procedure-record.v1",
+ "runId": "record-kissing-number-d11-605-20261116a",
+ "settledAt": "2026-11-27T08:58:17.855Z",
+ "outcome": {
+  "status": "stopped",
+  "known": false,
+  "reason": "operator choice: the play's registered Sandbox cap: $2.61 billed against $1.80 (Platform ledger, read at 2026-11-27T08:56:32.567Z)"
+ },
+ "tokens": {
+  "known": false,
+  "total": null,
+  "floor": 2090525,
+  "input": 115143,
+  "output": 41366,
+  "cached": 1934016,
+  "status": "lower-bound",
+  "reason": "Runtime counted only the attempts that reported usage"
+ },
+ "usd": {
+  "basis": "subscription",
+  "known": true,
+  "value": null,
+  "listUsd": 0.846055,
+  "reason": "every model call ran on a subscription seat or a free route, and neither bills per call"
+ },
+ "compute": {
+  "known": true,
+  "value": 2.60923593
+ },
+ "wallMs": 901050735,
+ "model": {
+  "provider": "zai-coding-plan",
+  "id": "glm-5.3",
+  "harness": "opencode",
+  "routes": [
+   "seat"
+  ]
+ }
+}

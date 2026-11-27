@@ -1,0 +1,3 @@
+{"seq":21175,"at":"2026-11-17T00:10:53.220Z","attempt":2,"event":{"kind":"text_delta"}}
+{"seq":21176,"at":"2026-11-17T00:10:53.221Z","attempt":2,"event":{"kind":"tool_call"}}
+{"seq":21177,"at":"2026-11-17T00:10:53.221Z","attempt":2,"event":{"kind":"tool_result"}}

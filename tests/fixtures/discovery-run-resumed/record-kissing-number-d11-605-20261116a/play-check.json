@@ -1,0 +1,8 @@
+{
+ "checkedAt": "2026-11-27T09:28:26.714Z",
+ "solved": false,
+ "known": false,
+ "detail": "the check could not start: the check's declared interpreter /home/lab/.local/state/agent-work/discovery-lab/live-boards-20261031/jailpy/bin/python is missing or not executable on this host; provision it with `python3 acceptance/jail.py provision <host>` before pressing or calibrating",
+ "commit": "ddb1d5ec0e95da39669333f5f2549be797972e11",
+ "check": "rerun"
+}

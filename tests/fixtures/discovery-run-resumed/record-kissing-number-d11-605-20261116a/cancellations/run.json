@@ -1,0 +1,11 @@
+{
+ "operationId": "spend-cap:record-kissing-number-d11-605-20261116a",
+ "requestedAt": "2026-11-27T08:57:29.152Z",
+ "observedAt": "2026-11-27T08:58:16.441Z",
+ "path": "observer",
+ "appliedAfterMs": 7448,
+ "reason": "operator choice: the play's registered Sandbox cap: $2.61 billed against $1.80 (Platform ledger, read at 2026-11-27T08:56:32.567Z)",
+ "operator": "discovery-lab",
+ "effect": "unknown",
+ "detail": "run aborted but teardown remains unconfirmed for: record-kissing-number-d11-605-20261116a:s1, record-kissing-number-d11-605-20261116a:s3, record-kissing-number-d11-605-20261116a:s4"
+}

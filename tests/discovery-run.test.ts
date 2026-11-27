@@ -19,6 +19,9 @@
  * - discovery-run-reopened/record-kissing-number-d11-605-20261116a: the kissing run reopened ten days later
  *   and stopped again a minute after by its spend cap, which counted the first generation's spend; its root
  *   never acted in the second generation, and its settle check could not start.
+ * - discovery-run-resumed/record-kissing-number-d11-605-20261116a: the kissing run after its second settle, when
+ *   the reopen's steer had reached the root's first session and three workers' sessions ended at the second stop,
+ *   so those sessions span the ten days the run was stopped; each agent keeps its last 60 spans.
  * - discovery-run-live/procedure-census-20261127a: a run read while it ran, before any settle exported its
  *   agents' sessions; its root's live stream records the Sandbox dropping events when its buffer overflowed.
  * - discovery-run-live/record-kissing-number-d11-605-20261116a: the kissing run's journal and live stream with
@@ -37,6 +40,7 @@ import { CLI, runCli } from './run-cli.js'
 const RUNS = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'discovery-run')
 const REOPENED = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'discovery-run-reopened')
 const LIVE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'discovery-run-live')
+const RESUMED = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'discovery-run-resumed')
 const CENSUS = 'procedure-census-20261127a'
 const QUEENS = 'claim-queens-cube-20261117a'
 const APN = 'claim-apn-flat-balance-20261117a'
@@ -181,6 +185,41 @@ describe('a Discovery run by its id', () => {
     expect(lines[3]).toBe("stop: requested 2026-11-27 08:57Z by discovery-lab/spend-cap (operator discovery-lab): operator choice: the play's registered Sandbox cap: $2.61 billed against $1.80 (Platform ledger, read at 2026-11-27T08:56:32.567Z)")
     expect(text.stdout).toMatch(/^quiet before the stop request 08:57Z: root \[[a-z]+\] no act since the reopen \(last act 2026-11-17 02:08Z\);.* Runtime root stream: no event since the reopen \(last event 2026-11-17 00:10Z tool_result, seq 21177\)$/mu)
     expect(text.stdout).toContain("failed: the check could not start: the check's declared interpreter /home/lab/")
+  }, 120_000)
+
+  it('counts neither idle time nor hours while a reopened run was stopped, for sessions that span the stop', async () => {
+    const at = { env: { ...env, TRACES_RUN_ROOTS: RESUMED } }
+    const json = await runCli(['behavior', KISSING, '--format', 'json'], at)
+    expect(json.code, json.stderr).toBe(0)
+    const result = JSON.parse(json.stdout)
+    // From the first generation's Runtime settle to the reopen.
+    const pause = { generation: 1, from: Date.parse('2026-11-17T02:11:54.352Z') / 1000, to: Date.parse('2026-11-27T08:56:01.277Z') / 1000 }
+    expect(result.run.stopped).toEqual([pause])
+    interface Node { label: string; start: number; end: number; hours: number; idle_min: number; stopped_min: number }
+    const nodes = result.nodes as Node[]
+    const spanning = nodes.filter((node) => node.start < pause.from && node.end > pause.to)
+    expect(spanning.map((node) => node.label)).toEqual(expect.arrayContaining(['cluster-opt', 'perturb-relax', 'root', 'slp-newton']))
+    for (const node of nodes) {
+      const stopped = Math.max(0, Math.min(node.end, pause.to) - Math.max(node.start, pause.from))
+      expect(Math.abs(node.stopped_min - stopped / 60), node.label).toBeLessThanOrEqual(0.051)
+      const live = (node.end - node.start - stopped) / 60
+      expect(node.idle_min, node.label).toBeLessThanOrEqual(live + 0.1)
+      expect(Math.abs(node.hours - Math.max(live / 60, 1 / 60)), node.label).toBeLessThanOrEqual(0.0051)
+    }
+    // The root ran three and a half hours before the stop and a minute and a half after the reopen.
+    const root = nodes.find((node) => node.label === 'root')!
+    expect(root.hours).toBeLessThan(3.6)
+    for (const stall of result.stalls as Array<{ node: string; at: number; minutes: number }>) {
+      expect(stall.at + stall.minutes * 60 <= pause.from + 3 || stall.at >= pause.to, `${stall.node} ${stall.minutes}m at ${stall.at}`).toBe(true)
+    }
+    for (const window of result.windows as Array<{ from: number; to: number; category: string }>) {
+      if (window.from >= pause.from && window.to <= pause.to) expect(window.category).not.toBe('idle')
+    }
+
+    const text = await runCli(['behavior', KISSING], at)
+    expect(text.code, text.stderr).toBe(0)
+    expect(text.stdout).toContain('stopped after generation 1: 2026-11-17T02:11:54Z to 2026-11-27T08:56:01Z, counted as neither idle nor active')
+    expect(text.stdout).toMatch(new RegExp(`^root \\(ses_e197ab5f2ffeeM5SqRyzOZOAku\\) .*, stopped ${root.stopped_min}m \\|`, 'mu'))
   }, 120_000)
 
   it('answers with the run record when no agent made a tool call', async () => {
