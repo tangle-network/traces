@@ -1,7 +1,7 @@
-# Traces 4.1.0
+# Traces 4.0.3
 
 `traces facts`, `traces behavior` and `traces analyze` read a Runtime run by its run id. A run id resolves under the run roots that `install.sh --run-root DIR` records (or `TRACES_RUN_ROOTS`). A ref that names nothing on this machine is asked of each host that `install.sh --remote HOST` records (or `TRACES_REMOTES`) over SSH, and the first host that holds it answers from its own records; `--out` is refused there, because it would write on the other host.
 
 A run directory, or its run id, adds the run's own records beside its sessions: who requested the stop and why, and when Runtime acknowledged it; Runtime's terminal kind and reason; every play check with its stage score and failing stage; each submission; the settle record's wall time, tokens, compute and list dollars and model; and each agent's last act against the stop, beside the root stream's last event. JSON output carries them as `run_record` (behavior) and `runRecord` (facts). A run whose agents made no tool call still answers from these records, and `traces behavior` exits 0 with `categories: null`.
 
-A reopened run is read up to the reopen that followed its last stop: the stop that ended that generation, its progress, quiet and root-stream lines, and then each reopen with what has happened since. A behavior node that its journal never settled now ends with the run, not when the command ran.
+A reopened run is read up to the reopen that followed its last stop: the stop that ended that generation, its progress, quiet and root-stream lines, and then each reopen with what has happened since. A behavior node that its journal never settled now ends with the run, not when the command ran. Each behavior node carries `last_act`, when its own last event ended; it is optional in the SDK type, because reports saved before this release omit it.

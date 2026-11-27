@@ -63,7 +63,7 @@ export async function cmdBehavior(args: CliArgs, forEachBatch: (onBatch: (spans:
     process.stdout.write(args.format === 'json' ? `${JSON.stringify(result)}\n` : `${renderBehaviorText(result)}\n`)
     return
   }
-  const quiet = quietBeforeStop(record, result.nodes.map((node) => ({ id: node.id, label: node.label, state: node.state, lastActivity: actsBefore === undefined ? node.last_act : node.last_act_before ?? null })))
+  const quiet = quietBeforeStop(record, result.nodes.map((node) => ({ id: node.id, label: node.label, state: node.state, lastActivity: (actsBefore === undefined ? node.last_act : node.last_act_before) ?? null })))
   process.stdout.write(args.format === 'json'
     ? `${JSON.stringify({ ...result, run_record: { ...record, quiet } })}\n`
     : `${[...renderRunRecordLines(record, quiet), renderBehaviorText(result)].join('\n')}\n`)
