@@ -1,11 +1,11 @@
 {
- "path": "observer",
- "appliedAfterMs": 273,
  "operationId": "disco-cancel-9198d72a-6d8c-4306-8617-9a92b1b4597f",
- "effect": "cancelled",
  "requestedAt": "2026-11-14T03:25:11.908Z",
  "observedAt": "2026-11-14T03:25:18.246Z",
+ "path": "observer",
+ "appliedAfterMs": 273,
  "reason": "operator choice: pressed from a stale Lab (fixture text)",
  "operator": "crypto-repro",
+ "effect": "cancelled",
  "detail": "the run reached its terminal cancelled state"
 }

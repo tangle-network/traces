@@ -1,10 +1,109 @@
 {
- "kind": "no-winner",
- "reason": "cancelled",
  "cancellationReason": "operator choice: the play's registered Sandbox cap: $0.50 billed against $0.50 (Platform ledger, read at 2026-11-17T04:11:13.049Z)",
- "source": "discovery-lab/spend-cap",
- "operator": "discovery-lab",
+ "downCount": 0,
+ "fleetYield": {
+  "cancelled": 0,
+  "done": 1,
+  "down": 0,
+  "neverSettled": 0,
+  "releaseUnconfirmed": 0,
+  "releasedUnrecovered": 0,
+  "spawned": 1
+ },
+ "kind": "no-winner",
  "operationId": "spend-cap:claim-queens-cube-20261117a",
+ "operator": "discovery-lab",
+ "providerModel": {
+  "attempts": [
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   }
+  ],
+  "models": [
+   "glm-5.3"
+  ],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "reason": "cancelled",
+ "rootProviderModel": {
+  "attempts": [],
+  "models": [],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "source": "discovery-lab/spend-cap",
+ "spendGaps": [
+  {
+   "channels": [
+    "usd"
+   ],
+   "id": "claim-queens-cube-20261117a:s0",
+   "kind": "unreported",
+   "label": "claim-queens-cube-20261117a-communicator"
+  },
+  {
+   "channels": [
+    "usd"
+   ],
+   "id": "claim-queens-cube-20261117a",
+   "kind": "unreported",
+   "label": "root"
+  }
+ ],
+ "spentSplit": {
+  "children": {
+   "iterations": 0,
+   "ms": 6657285,
+   "tokens": {
+    "cacheBreakdownKnown": false,
+    "cacheRead": 484160,
+    "cacheWrite": 0,
+    "freshInput": 45131,
+    "input": 529291,
+    "output": 19644
+   },
+   "tokensKnown": true,
+   "usd": 0,
+   "usdKnown": false
+  },
+  "root": {
+   "iterations": 0,
+   "ms": 6094655,
+   "tokens": {
+    "cacheBreakdownKnown": false,
+    "cacheRead": 7844096,
+    "cacheWrite": 0,
+    "freshInput": 165355,
+    "input": 8009451,
+    "output": 94403
+   },
+   "usd": 0,
+   "usdKnown": false
+  }
+ },
+ "spentTotal": {
+  "iterations": 0,
+  "ms": 8140558,
+  "tokens": {
+   "cacheBreakdownKnown": false,
+   "cacheRead": 8328256,
+   "cacheWrite": 0,
+   "freshInput": 210486,
+   "input": 8538742,
+   "output": 114047
+  },
+  "tokensKnown": true,
+  "usd": 0,
+  "usdKnown": false
+ },
  "teardownUnconfirmed": [
   {
    "detail": "retained owner environment cleanup was not confirmed: destroy still running after 90000 ms",
@@ -34,5 +133,116 @@
    "runtime": "tangle-sandbox",
    "status": "done"
   }
- ]
+ ],
+ "tree": {
+  "inFlight": 0,
+  "nodes": [
+   {
+    "assignmentId": "ordinal:0",
+    "budget": {
+     "maxTokens": 6000000
+    },
+    "executionBindings": [
+     {
+      "attemptId": "claim-queens-cube-20261117a:s0:attempt:b79c315e-bf57-40a2-a832-ca732155d303",
+      "bindingDigest": "sha256:04cb79b3497cc721b5f9d4fedc7f0bc4b6baf06fc9a4cad4fff6590e9a71a48c",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:9184fe629c3c2e0850d4f3c8f049b3dd92e87b284518b1ccdc1c39f90cac4a69",
+      "status": "known"
+     }
+    ],
+    "id": "claim-queens-cube-20261117a:s0",
+    "identity": {
+     "profileDigest": "sha256:5ab91171297aa049939f187a29143b5fcfb887e31d8709d88a5abbd79b6784e7",
+     "taskDigest": "sha256:2e8b67744ca939573b61b202e71c65fbdbb7fa80552452434724b545b4f7e93d"
+    },
+    "label": "claim-queens-cube-20261117a-communicator",
+    "materialization": {
+     "authoredProfileDigest": "sha256:5ab91171297aa049939f187a29143b5fcfb887e31d8709d88a5abbd79b6784e7",
+     "backend": "tangle-sandbox",
+     "effectiveProfileDigest": "sha256:b59e614102869c641d81e3b7a10af6843f9197334f09b63b11862a2dc3873aee",
+     "execution": {
+      "id": "sandbox-8789b0d41b3e",
+      "kind": "environment"
+     },
+     "materializationPlanDigest": "sha256:f29b19343d4b911c27f9819c6abc5766ce5a7a6ab8217c45ac88adb9f5684b7a",
+     "materializer": "environment-provider-create",
+     "model": {
+      "id": "glm-5.3",
+      "status": "known"
+     },
+     "platformAttachmentsDigest": "sha256:95d23b454c99ec6bf4f037e6b895c2ff2dd3849e5924e69b11f1d2c6e388753d",
+     "resources": {
+      "memoryMb": 16384,
+      "observedAt": "2026-11-17T02:49:51.139Z",
+      "origin": "measured",
+      "status": "known"
+     },
+     "runtime": "tangle-sandbox",
+     "status": "known"
+    },
+    "outRef": "sha256:14eb3ee871f81332085d9192fe6e5305c57e5740ddf3dc3b5c353dfee72b497d",
+    "ownSpent": {
+     "iterations": 0,
+     "ms": 562630,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 484160,
+      "cacheWrite": 0,
+      "freshInput": 45131,
+      "input": 529291,
+      "output": 19644
+     },
+     "usd": 0,
+     "usdKnown": false
+    },
+    "ownedTreeRoot": "claim-queens-cube-20261117a/claim-queens-cube-20261117a:s0",
+    "parent": "claim-queens-cube-20261117a",
+    "runtime": "tangle-sandbox",
+    "settledAt": 1794885415171,
+    "spawnedAt": 1794883356549,
+    "spent": {
+     "iterations": 0,
+     "ms": 562630,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 484160,
+      "cacheWrite": 0,
+      "freshInput": 45131,
+      "input": 529291,
+      "output": 19644
+     },
+     "usd": 0,
+     "usdKnown": false
+    },
+    "status": "done",
+    "trace": {
+     "reason": "trace-source-unavailable",
+     "status": "unavailable"
+    }
+   }
+  ],
+  "root": "claim-queens-cube-20261117a"
+ },
+ "usage": {
+  "observedModels": [
+   "glm-5.3"
+  ],
+  "requestedModel": {
+   "harness": "opencode",
+   "id": "glm-5.3",
+   "provider": "zai-coding-plan"
+  },
+  "tokens": {
+   "input": 8538742,
+   "output": 114047,
+   "status": "known",
+   "unknownAttempts": 0
+  }
+ }
 }

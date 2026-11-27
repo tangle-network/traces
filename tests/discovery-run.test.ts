@@ -3,11 +3,12 @@
  * who stopped it and why, how far its checks got, and how long each agent and the root stream had been
  * quiet when it stopped. Asked on a host that does not hold the run, the command runs on one that does.
  *
- * The fixtures are four open-research runs stopped on drew-gtr-pro in November 2026, cut by an allow
- * list to the fields traces reads: the Runtime records, the lifecycle and check logs, the settle record,
- * the last three root-stream events with their payloads dropped, and per agent its session spans and
- * last 60 others, with no tool input, output or message text. Each operator's free-text reason is
- * replaced by a neutral line; the spend-cap controller's reason and the checkers' output are verbatim.
+ * The fixtures are four open-research runs stopped on drew-gtr-pro in November 2026. Runtime's journal,
+ * result and cancel records are kept whole but for error stacks; the lifecycle, check and settle records
+ * are cut to the fields traces reads; the root stream keeps its last three events without payloads; and
+ * each agent keeps its session spans and last 60 others, with no tool input, output, status message or
+ * message text. Each operator's free-text reason is replaced by a neutral line; the spend-cap
+ * controller's reason and the checkers' output are verbatim.
  * - claim-queens-cube-20261117a: stopped by its spend cap, two submissions, each failing the claim stage.
  * - claim-apn-flat-balance-20261117a: Runtime settled it on its deadline before the operator's request came.
  * - record-kissing-number-d11-605-20261116a: stopped when the root's stream went quiet; its root still acted after.

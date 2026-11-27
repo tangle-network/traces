@@ -1,11 +1,11 @@
 {
- "path": "fallback",
- "appliedAfterMs": 8290,
  "operationId": "spend-cap:claim-queens-cube-20261117a",
- "effect": "unknown",
  "requestedAt": "2026-11-17T04:12:09.957Z",
  "observedAt": "2026-11-17T04:43:34.807Z",
+ "path": "fallback",
+ "appliedAfterMs": 8290,
  "reason": "operator choice: the play's registered Sandbox cap: $0.50 billed against $0.50 (Platform ledger, read at 2026-11-17T04:11:13.049Z)",
  "operator": "discovery-lab",
+ "effect": "unknown",
  "detail": "run aborted but teardown remains unconfirmed for: claim-queens-cube-20261117a (tangle-sandbox:sandbox-9779933b4c9c), claim-queens-cube-20261117a:s0"
 }
