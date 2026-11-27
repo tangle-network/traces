@@ -263,8 +263,9 @@ describe('a Discovery run whose sessions are not exported yet', () => {
     const result = JSON.parse(json.stdout)
     const streamed = (await streamedCalls(CENSUS)).get(CENSUS)!
     expect(streamed.calls).toBeGreaterThan(0)
-    const [root, ...others] = result.nodes as LiveNode[]
-    expect(others).toEqual([])
+    const nodes = result.nodes as LiveNode[]
+    expect(nodes).toHaveLength(1)
+    const root = nodes[0]!
     expect(root).toMatchObject({ id: 'ses_de3d4440bffe1yDixdggIbw5SX', label: 'root', parent: null, tool_calls: streamed.calls, failed: streamed.failed })
     // A running agent's record runs at least to the stream's last write, and not to when the command ran.
     const state = JSON.parse(await readFile(join(LIVE, CENSUS, 'evidence', 'live-stream', 'state.json'), 'utf8'))
