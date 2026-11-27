@@ -607,7 +607,10 @@ export function renderRunRecordLines(record: RunRecord, quiet: readonly RunQuiet
   const runtimeText = runtime?.settledAt || runtime?.kind
     ? `Runtime settled ${runtime.settledAt ? `${hhmm(runtime.settledAt)} ` : ''}${runtime.kind ? `${runtime.kind}${runtime.reason ? `/${runtime.reason}` : ''}` : '(result not retained)'}`
     : 'no Runtime settle'
-  const state = record.state ? `; now ${record.state.value ?? 'state unrecorded'} since ${clock(record.state.at)}` : ''
+  // A settled run that was never reopened is where its settle record says; any other state is news.
+  const state = record.state && (record.state.value !== 'settled' || record.reopens.length > 0)
+    ? `; now ${record.state.value ?? 'in a state not recorded'} since ${clock(record.state.at)}`
+    : ''
   lines.push(`run ${record.runId}: pressed ${clock(record.pressedAt)}; ${runtimeText}; ${settle ? `settle record ${clock(settle.at)} ${settle.status ?? 'status unknown'}` : 'no settle record'}${state}`)
   // The stop read, with what came before it (earlier stops and reopens) and what came after (later reopens).
   const stopS = stoppedAt === null ? Number.NaN : epoch(stoppedAt.at)

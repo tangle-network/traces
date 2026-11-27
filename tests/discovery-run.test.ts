@@ -66,6 +66,9 @@ describe('a Discovery run by its id', () => {
     const latest = quiet.reduce((a, b) => ((a.minutesBeforeStop ?? Infinity) <= (b.minutesBeforeStop ?? Infinity) ? a : b))
     expect(latest.lastActivity).toBe('2026-11-17T02:08:01.924Z')
     expect(latest.minutesBeforeStop).toBe(-14.1)
+    // A node the journal never settled ends with the run, not when the command ran.
+    expect(record.endedAt).toBe('2026-11-17T02:11:54.352Z')
+    for (const node of result.nodes as Array<{ end: number }>) expect(node.end).toBeLessThanOrEqual(Date.parse(record.endedAt) / 1000)
 
     const text = await runCli(['behavior', KISSING], { env })
     expect(text.code, text.stderr).toBe(0)
