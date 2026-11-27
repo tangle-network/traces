@@ -1,0 +1,12 @@
+{"seq":1,"at":"2026-11-16T22:40:29.507Z","entity":"run","from":null,"to":"open","event":"press","actor":"press"}
+{"seq":2,"at":"2026-11-16T23:12:00.818Z","entity":"rc1","from":null,"to":"submitted","event":"submit","actor":"wrapup"}
+{"seq":3,"at":"2026-11-16T23:19:45.236Z","entity":"rc1","from":"submitted","to":"failed","event":"check.fail","actor":"check"}
+{"seq":4,"at":"2026-11-17T00:06:51.973Z","entity":"rc2","from":null,"to":"submitted","event":"submit","actor":"wrapup"}
+{"seq":5,"at":"2026-11-17T00:09:30.762Z","entity":"rc2","from":"submitted","to":"failed","event":"check.fail","actor":"check"}
+{"seq":6,"at":"2026-11-17T02:11:54.352Z","entity":"run","from":"open","to":"settling","event":"runtime.settled","actor":"settle"}
+{"seq":18,"at":"2026-11-17T02:34:47.277Z","entity":"run","from":"settling","to":"settled","event":"settle","actor":"settle"}
+{"seq":21,"at":"2026-11-17T02:51:47.675Z","entity":"run","from":"settled","to":"settled","event":"evidence","actor":"settle"}
+{"seq":22,"at":"2026-11-27T08:56:01.277Z","entity":"run","from":"settled","to":"open","event":"reopen","actor":"operator:value-audit"}
+{"seq":23,"at":"2026-11-27T08:58:22.035Z","entity":"run","from":"open","to":"settling","event":"runtime.settled","actor":"settle"}
+{"seq":37,"at":"2026-11-27T09:31:31.100Z","entity":"run","from":"settling","to":"settled","event":"settle","actor":"settle"}
+{"seq":39,"at":"2026-11-27T09:31:43.573Z","entity":"run","from":"settled","to":"settled","event":"evidence","actor":"settle"}

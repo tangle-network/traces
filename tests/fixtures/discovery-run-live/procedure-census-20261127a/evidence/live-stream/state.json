@@ -1,0 +1,47 @@
+{
+ "schema": "disco.live-stream.v1",
+ "runId": "procedure-census-20261127a",
+ "at": "2026-11-27T10:04:27.872Z",
+ "executions": {
+  "retained-execution-4a614ad1485b34d2283d7b5e1b604ce25a9fcea1a012e7346c9a8f4b2a2b7916": {
+   "nodeId": "procedure-census-20261127a",
+   "environmentId": "sandbox-8142a3364da2",
+   "events": 30307,
+   "done": true,
+   "lastEventId": "30289",
+   "lastAt": "2026-11-27T08:48:47.519Z"
+  },
+  "retained-execution-013de59e0f7914479beb15dd5eaa9d9c3c845bf8387aa36017387a382135b06d": {
+   "nodeId": "procedure-census-20261127a",
+   "environmentId": "sandbox-8142a3364da2",
+   "events": 80275,
+   "done": true,
+   "lastEventId": "110518",
+   "lastAt": "2026-11-27T09:10:38.820Z"
+  },
+  "retained-execution-00c3ca7d4b1443e62a019e84c15a7cc8c69415f92484000b48d5761cd7c65a96": {
+   "nodeId": "procedure-census-20261127a",
+   "environmentId": "sandbox-8142a3364da2",
+   "events": 27,
+   "done": true,
+   "lastEventId": "110546",
+   "lastAt": "2026-11-27T09:16:44.391Z"
+  },
+  "retained-execution-0c5a8db913391c9197bc8fac60936e839a81dd260348377ed935b1c38514d388": {
+   "nodeId": "procedure-census-20261127a",
+   "environmentId": "sandbox-8142a3364da2",
+   "events": 16688,
+   "done": true,
+   "lastEventId": "127223",
+   "lastAt": "2026-11-27T09:25:26.276Z"
+  },
+  "retained-execution-115b985d3f704cdbeb14f6de679153b9391c0b1dc92578661da85687d92f6ecc": {
+   "nodeId": "procedure-census-20261127a",
+   "environmentId": "sandbox-8142a3364da2",
+   "events": 50879,
+   "done": true,
+   "lastEventId": "178741",
+   "lastAt": "2026-11-27T10:04:23.465Z"
+  }
+ }
+}

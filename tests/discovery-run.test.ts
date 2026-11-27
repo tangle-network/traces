@@ -19,8 +19,15 @@
  * - discovery-run-reopened/record-kissing-number-d11-605-20261116a: the kissing run reopened ten days later
  *   and stopped again a minute after by its spend cap, which counted the first generation's spend; its root
  *   never acted in the second generation, and its settle check could not start.
+ * - discovery-run-live/procedure-census-20261127a: a run read while it ran, before any settle exported its
+ *   agents' sessions; its root's live stream records the Sandbox dropping events when its buffer overflowed.
+ * - discovery-run-live/record-kissing-number-d11-605-20261116a: the kissing run's journal and live stream with
+ *   no exported sessions, as it stood before its settle, with its five workers.
+ *   Each live stream keeps the newest copy of each message part and the stream's overflow counts; reply,
+ *   reasoning and tool output text is replaced, and a tool input keeps only paths, patterns and a shell
+ *   command's first 160 characters.
  */
-import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,6 +36,8 @@ import { CLI, runCli } from './run-cli.js'
 
 const RUNS = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'discovery-run')
 const REOPENED = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'discovery-run-reopened')
+const LIVE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'discovery-run-live')
+const CENSUS = 'procedure-census-20261127a'
 const QUEENS = 'claim-queens-cube-20261117a'
 const APN = 'claim-apn-flat-balance-20261117a'
 const KISSING = 'record-kissing-number-d11-605-20261116a'
@@ -225,4 +234,78 @@ describe('a Discovery run by its id', () => {
     expect(error.error).toContain('asked bare, lab, gone: no answer from bare (traces is not installed on')
     expect(error.error).toContain('gone (ssh: Could not resolve hostname gone)')
   }, 180_000)
+})
+
+/** Each node's tool calls as its live stream recorded them: one per message part, failed when the part did. */
+async function streamedCalls(run: string): Promise<Map<string, { calls: number; failed: number }>> {
+  const base = join(LIVE, run, 'evidence', 'live-stream')
+  const out = new Map<string, { calls: number; failed: number }>()
+  for (const folder of (await readdir(base)).filter((name) => name !== 'state.json')) {
+    const parts = new Map<string, string>()
+    for (const file of await readdir(join(base, folder))) {
+      for (const line of (await readFile(join(base, folder, file), 'utf8')).split('\n').filter(Boolean)) {
+        const part = JSON.parse(line).data?.part
+        if (part?.type === 'tool') parts.set(`${part.messageID}:${part.id}`, part.state?.status)
+      }
+    }
+    out.set(decodeURIComponent(folder), { calls: parts.size, failed: [...parts.values()].filter((status) => status === 'failed' || status === 'error').length })
+  }
+  return out
+}
+
+describe('a Discovery run whose sessions are not exported yet', () => {
+  interface LiveNode { id: string; label: string; parent: string | null; state: string | null; tool_calls: number; failed: number; end: number }
+  const live = () => ({ HOME: env.HOME!, XDG_STATE_HOME: env.XDG_STATE_HOME!, TRACES_RUN_ROOTS: LIVE })
+
+  it('reads a running run from its live stream: the root\'s tool calls, its open state, and the events the stream dropped', async () => {
+    const json = await runCli(['behavior', CENSUS, '--format', 'json'], { env: live() })
+    expect(json.code, json.stderr).toBe(0)
+    const result = JSON.parse(json.stdout)
+    const streamed = (await streamedCalls(CENSUS)).get(CENSUS)!
+    expect(streamed.calls).toBeGreaterThan(0)
+    const nodes = result.nodes as LiveNode[]
+    expect(nodes).toHaveLength(1)
+    const root = nodes[0]!
+    expect(root).toMatchObject({ id: 'ses_de3d4440bffe1yDixdggIbw5SX', label: 'root', parent: null, tool_calls: streamed.calls, failed: streamed.failed })
+    // A running agent's record runs at least to the stream's last write, and not to when the command ran.
+    const state = JSON.parse(await readFile(join(LIVE, CENSUS, 'evidence', 'live-stream', 'state.json'), 'utf8'))
+    expect(root.end).toBeGreaterThanOrEqual(Date.parse(state.at) / 1000)
+    expect(root.end).toBeLessThan(Date.parse('2026-11-27T12:00:00Z') / 1000)
+    expect(result.run_record).toMatchObject({ runId: CENSUS, stop: null, endedAt: null })
+    expect(result.coverage.unknowns).toEqual(expect.arrayContaining([
+      'live stream: tool calls, no model calls until the sessions are exported',
+      'root: live stream dropped 724 events; its tool calls are a lower bound',
+    ]))
+
+    const facts = JSON.parse((await runCli(['facts', CENSUS, '--format', 'json'], { env: live() })).stdout)
+    expect(facts.sessions.map((session: { sessionId: string; toolCalls: { value: number } }) => [session.sessionId, session.toolCalls.value]))
+      .toEqual([['ses_de3d4440bffe1yDixdggIbw5SX', streamed.calls]])
+    const text = await runCli(['behavior', CENSUS], { env: live() })
+    expect(text.code, text.stderr).toBe(0)
+    expect(text.stdout).toMatch(new RegExp(`^root \\(ses_de3d4440bffe1yDixdggIbw5SX\\) \\S+ glm-5\\.3: .*\\| ${streamed.calls} calls, ${streamed.failed} failed`, 'mu'))
+  }, 120_000)
+
+  it('reads every worker from its live stream under the root that spawned it, as complete as each stream is', async () => {
+    const json = await runCli(['behavior', KISSING, '--format', 'json'], { env: live() })
+    expect(json.code, json.stderr).toBe(0)
+    const nodes = JSON.parse(json.stdout).nodes as LiveNode[]
+    const streamed = await streamedCalls(KISSING)
+    const root = nodes.find((node) => node.label === 'root')!
+    expect(root.id).toBe('ses_e197ab5f2ffeeM5SqRyzOZOAku')
+    const byLabel = Object.fromEntries(nodes.map((node) => [node.label, node]))
+    expect(Object.keys(byLabel).sort()).toEqual(['anneal-smooth', 'cluster-opt', 'communicator-r1', 'perturb-relax', 'root', 'slp-newton'])
+    for (const [label, worker] of [['communicator-r1', 's0'], ['perturb-relax', 's1'], ['anneal-smooth', 's2'], ['slp-newton', 's3'], ['cluster-opt', 's4']] as const) {
+      const node = byLabel[label]!
+      expect(node.parent, label).toBe(root.id)
+      expect({ calls: node.tool_calls, failed: node.failed }, label).toEqual(streamed.get(`${KISSING}:${worker}`))
+    }
+    // A complete stream reads as the exported session did: traces 4.0.4 read communicator-r1's export as 23 calls, 3 failed.
+    expect(byLabel['communicator-r1']).toMatchObject({ state: 'done', tool_calls: 23, failed: 3 })
+    const unknowns = JSON.parse(json.stdout).coverage.unknowns as string[]
+    expect(unknowns).toEqual(expect.arrayContaining([
+      'slp-newton: live stream dropped 23295 events; its tool calls are a lower bound',
+      'cluster-opt: live stream dropped 298 events; its tool calls are a lower bound',
+    ]))
+    expect(unknowns.some((line) => line.startsWith('communicator-r1:'))).toBe(false)
+  }, 120_000)
 })
