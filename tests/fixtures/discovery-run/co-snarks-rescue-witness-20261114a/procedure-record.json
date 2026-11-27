@@ -1,0 +1,40 @@
+{
+ "schema": "disco.procedure-record.v1",
+ "runId": "co-snarks-rescue-witness-20261114a",
+ "settledAt": "2026-11-14T03:25:18.379Z",
+ "outcome": {
+  "status": "stopped",
+  "known": false,
+  "reason": "operator choice: pressed from a stale Lab (fixture text)"
+ },
+ "tokens": {
+  "known": false,
+  "total": null,
+  "floor": 0,
+  "input": 0,
+  "output": 0,
+  "cached": 0,
+  "status": "unknown",
+  "reason": "Runtime reports the usage unknown"
+ },
+ "usd": {
+  "basis": "free",
+  "known": true,
+  "value": 0,
+  "listUsd": null,
+  "reason": "every model call ran on a free route, which is priced at nothing"
+ },
+ "compute": {
+  "known": true,
+  "value": 0.00239352
+ },
+ "wallMs": 42873,
+ "model": {
+  "provider": "opencode",
+  "id": "glm-5.3-flash-free",
+  "harness": "opencode",
+  "routes": [
+   "free"
+  ]
+ }
+}

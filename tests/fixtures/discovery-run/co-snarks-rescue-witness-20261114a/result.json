@@ -1,0 +1,128 @@
+{
+ "cancellationReason": "operator choice: pressed from a stale Lab (fixture text)",
+ "continuation": {
+  "attempts": 1,
+  "barrenReentries": 0,
+  "continuations": [],
+  "ended": "aborted",
+  "environmentReplacements": 0,
+  "failureRetries": 0,
+  "reprompts": 0,
+  "stopPauses": 0,
+  "unavailableMs": 0,
+  "unavailablePauses": 0,
+  "waitedMs": 0,
+  "wakes": 0,
+  "workspaceRestores": 0
+ },
+ "downCount": 0,
+ "fleetYield": {
+  "cancelled": 0,
+  "done": 0,
+  "down": 0,
+  "neverSettled": 0,
+  "releaseUnconfirmed": 0,
+  "releasedUnrecovered": 0,
+  "spawned": 0
+ },
+ "kind": "no-winner",
+ "operationId": "disco-cancel-9198d72a-6d8c-4306-8617-9a92b1b4597f",
+ "operator": "crypto-repro",
+ "providerModel": {
+  "attempts": [
+   {
+    "observations": [
+     "glm-5.3-flash-free"
+    ]
+   }
+  ],
+  "models": [
+   "glm-5.3-flash-free"
+  ],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "reason": "cancelled",
+ "rootHarnessTranscript": {
+  "reason": "enumeration-failed",
+  "status": "unavailable"
+ },
+ "rootProviderModel": {
+  "attempts": [],
+  "models": [],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "rootStream": {
+  "events": 0,
+  "ref": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+ },
+ "source": "discovery-lab/operator",
+ "spendGaps": [
+  {
+   "channels": [
+    "tokens",
+    "usd"
+   ],
+   "id": "co-snarks-rescue-witness-20261114a",
+   "kind": "unreported",
+   "label": "root"
+  }
+ ],
+ "spentSplit": {
+  "children": {
+   "iterations": 0,
+   "ms": 0,
+   "tokens": {
+    "input": 0,
+    "output": 0
+   },
+   "tokensKnown": false,
+   "usd": 0,
+   "usdKnown": false
+  },
+  "root": {
+   "iterations": 0,
+   "ms": 0,
+   "tokens": {
+    "input": 0,
+    "output": 0
+   },
+   "tokensKnown": false,
+   "usd": 0,
+   "usdKnown": false
+  }
+ },
+ "spentTotal": {
+  "iterations": 0,
+  "ms": 42873,
+  "tokens": {
+   "input": 0,
+   "output": 0
+  },
+  "tokensKnown": false,
+  "usd": 0,
+  "usdKnown": false
+ },
+ "tree": {
+  "inFlight": 0,
+  "nodes": [],
+  "root": "co-snarks-rescue-witness-20261114a"
+ },
+ "usage": {
+  "observedModels": [
+   "glm-5.3-flash-free"
+  ],
+  "requestedModel": {
+   "harness": "opencode",
+   "id": "glm-5.3-flash-free",
+   "provider": "opencode"
+  },
+  "tokens": {
+   "input": null,
+   "output": null,
+   "status": "unknown",
+   "unknownAttempts": 1
+  }
+ }
+}

@@ -4,6 +4,8 @@ set -euo pipefail
 PACKAGE="@tangle-network/traces"
 VERSION="${TRACES_VERSION:-latest}"
 PREFIX="${TRACES_PREFIX:-}"
+run_roots=()
+remotes=()
 
 usage() {
   cat <<'USAGE'
@@ -11,7 +13,11 @@ Install the traces CLI from npm.
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tangle-network/traces/main/install.sh | bash
-  ./install.sh [--version <version>] [--prefix <dir>]
+  ./install.sh [--version <version>] [--prefix <dir>] [--run-root <dir>]... [--remote <host>]...
+
+  --run-root DIR   a directory of Runtime run directories: `traces behavior <run id>` reads DIR/<run id>
+  --remote HOST    an SSH host whose traces answers a ref that names nothing here (its runs, its sessions)
+  Each list given replaces that list in ${XDG_CONFIG_HOME:-~/.config}/traces/config.json; one not given is kept.
 
 Environment:
   TRACES_VERSION   npm version or tag to install (default: latest)
@@ -29,6 +35,17 @@ while [ "$#" -gt 0 ]; do
     --prefix)
       [ "${2:-}" ] || { echo "missing value for --prefix" >&2; exit 2; }
       PREFIX="$2"
+      shift 2
+      ;;
+    --run-root)
+      [ "${2:-}" ] || { echo "missing value for --run-root" >&2; exit 2; }
+      [ -d "$2" ] || { echo "--run-root $2 is not a directory" >&2; exit 2; }
+      run_roots+=("$(cd "$2" && pwd -P)")
+      shift 2
+      ;;
+    --remote)
+      [ "${2:-}" ] || { echo "missing value for --remote" >&2; exit 2; }
+      remotes+=("$2")
       shift 2
       ;;
     -h|--help)
@@ -108,6 +125,26 @@ else
   echo "Installed ${PACKAGE}@${VERSION}, but the traces binary was not found at $bin_dir/traces or on PATH." >&2
   echo "Add this to PATH: $bin_dir" >&2
   exit 1
+fi
+
+# The run roots and remotes the CLI reads (src/run-config.ts); a list not named here is kept.
+if [ "${#run_roots[@]}" -gt 0 ] || [ "${#remotes[@]}" -gt 0 ]; then
+  config_file="${XDG_CONFIG_HOME:-$HOME/.config}/traces/config.json"
+  mkdir -p "$(dirname "$config_file")"
+  node -e '
+    const fs = require("node:fs")
+    const [file, count, ...rest] = process.argv.slice(1)
+    const roots = rest.slice(0, Number(count))
+    const remotes = rest.slice(Number(count))
+    let config = {}
+    try { config = JSON.parse(fs.readFileSync(file, "utf8")) } catch (error) {
+      if (error.code !== "ENOENT") { console.error(`${file} is not JSON; fix or remove it, then run this again`); process.exit(1) }
+    }
+    if (roots.length) config.runRoots = roots
+    if (remotes.length) config.remotes = remotes
+    fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`)
+    console.log(`traces config: ${file} (run roots: ${(config.runRoots ?? []).join(", ") || "none"}; remotes: ${(config.remotes ?? []).join(", ") || "none"})`)
+  ' "$config_file" "${#run_roots[@]}" ${run_roots[@]+"${run_roots[@]}"} ${remotes[@]+"${remotes[@]}"}
 fi
 
 version_output="$("$traces_cmd" --version 2>/dev/null || true)"

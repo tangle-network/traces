@@ -1,0 +1,12 @@
+{
+ "operator": "value-audit",
+ "reason": "operator choice: continue after the stop (fixture text)",
+ "operationId": "disco-reopen-claim-apn-flat-balance-20261117a-1",
+ "settles": 0,
+ "at": "2026-11-27T08:26:44.347Z",
+ "budget": {
+  "deadlineMs": 907200000,
+  "maxTokens": 24000000
+ },
+ "labCommit": "a584d693e60f1b0a27957eaac30db50f4fa62a98"
+}

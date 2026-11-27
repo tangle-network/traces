@@ -1,0 +1,24 @@
+{
+ "checkedAt": "2026-11-17T04:44:09.300Z",
+ "solved": false,
+ "known": true,
+ "detail": "SCORE {\"stages\": [\"claim\", \"checker\", \"novelty\"], \"of\": 3, \"reached\": 1}\nstage: contract\nFAIL {\"reason\": \"claim.json.md holds no fenced block\", \"stage\": \"claim\"}\nstage: contract\nNOT SOLVED: claim: claim.json.md holds no fenced block; the Deliverable is claim.json.md: one fenced JSON block holding ex",
+ "failing": [
+  {
+   "stage": "contract",
+   "line": "FAIL {\"reason\": \"claim.json.md holds no fenced block\", \"stage\": \"claim\"}"
+  },
+  {
+   "stage": "contract",
+   "line": "NOT SOLVED: claim: claim.json.md holds no fenced block; the Deliverable is claim.json.md: one fenced JSON block holding exactly the six keys program, field, instance, value (the integer 1), claims and artifact, for the program this play names"
+  }
+ ],
+ "commit": "d4cabc73ac3c3de85301bc20919dde00a0eda56c",
+ "score": {
+  "stage": null,
+  "reached": 1,
+  "of": 3,
+  "hidden": false
+ },
+ "check": "rerun"
+}

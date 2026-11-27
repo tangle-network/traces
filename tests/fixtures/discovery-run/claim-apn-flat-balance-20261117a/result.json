@@ -1,0 +1,218 @@
+{
+ "downCount": 0,
+ "fleetYield": {
+  "cancelled": 0,
+  "done": 1,
+  "down": 0,
+  "neverSettled": 0,
+  "releaseUnconfirmed": 0,
+  "releasedUnrecovered": 0,
+  "spawned": 1
+ },
+ "kind": "no-winner",
+ "providerModel": {
+  "attempts": [
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   }
+  ],
+  "models": [
+   "glm-5.3"
+  ],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "reason": "deadline",
+ "rootHarnessTranscript": {
+  "reason": "capture-did-not-run",
+  "status": "unavailable"
+ },
+ "rootProviderModel": {
+  "attempts": [],
+  "models": [],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "spendGaps": [
+  {
+   "channels": [
+    "usd"
+   ],
+   "id": "claim-apn-flat-balance-20261117a:s0",
+   "kind": "unreported",
+   "label": "communicator"
+  },
+  {
+   "channels": [
+    "usd"
+   ],
+   "id": "claim-apn-flat-balance-20261117a",
+   "kind": "unreported",
+   "label": "root"
+  }
+ ],
+ "spentSplit": {
+  "children": {
+   "iterations": 0,
+   "ms": 5103407,
+   "tokens": {
+    "cacheBreakdownKnown": false,
+    "cacheRead": 130816,
+    "cacheWrite": 0,
+    "freshInput": 24576,
+    "input": 155392,
+    "output": 7765
+   },
+   "tokensKnown": true,
+   "usd": 0,
+   "usdKnown": false
+  },
+  "root": {
+   "iterations": 0,
+   "ms": 4757606,
+   "tokens": {
+    "cacheBreakdownKnown": false,
+    "cacheRead": 8912512,
+    "cacheWrite": 0,
+    "freshInput": 84123,
+    "input": 9108163,
+    "output": 142420
+   },
+   "usd": 0,
+   "usdKnown": false
+  }
+ },
+ "spentTotal": {
+  "iterations": 0,
+  "ms": 11494326,
+  "tokens": {
+   "cacheBreakdownKnown": false,
+   "cacheRead": 9043328,
+   "cacheWrite": 0,
+   "freshInput": 108699,
+   "input": 9263555,
+   "output": 150185
+  },
+  "tokensKnown": true,
+  "usd": 0,
+  "usdKnown": false
+ },
+ "tree": {
+  "inFlight": 0,
+  "nodes": [
+   {
+    "assignmentId": "key:communicator-round1",
+    "budget": {
+     "maxTokens": 6000000
+    },
+    "executionBindings": [
+     {
+      "attemptId": "claim-apn-flat-balance-20261117a:s0:attempt:21534d79-46f6-41de-9d21-22ffe93c2ef0",
+      "bindingDigest": "sha256:0f80db541758208468d26e949090ba12e83999ceb38abcd3d49c6aeb778d0990",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:26804f786b0c8841a792344c81502e448dcb7c41169eb03d4041ad90b98cf6bd",
+      "status": "known"
+     }
+    ],
+    "id": "claim-apn-flat-balance-20261117a:s0",
+    "identity": {
+     "profileDigest": "sha256:0b850408a19d539a28323fe45ed0d12d2edd6495730c8589725debeaf71646b5",
+     "taskDigest": "sha256:c62191680000572ec8c4d0e253efe20cd36f5b9ff24861bc56ff33da80f52bf1"
+    },
+    "label": "communicator",
+    "materialization": {
+     "authoredProfileDigest": "sha256:0b850408a19d539a28323fe45ed0d12d2edd6495730c8589725debeaf71646b5",
+     "backend": "tangle-sandbox",
+     "effectiveProfileDigest": "sha256:caca3ae8f2c6a2dc6f8ef44aa7a592d919d369fd48304ea983f588c19144bfcf",
+     "execution": {
+      "id": "sandbox-9fe9b4d22aef",
+      "kind": "environment"
+     },
+     "materializationPlanDigest": "sha256:f29b19343d4b911c27f9819c6abc5766ce5a7a6ab8217c45ac88adb9f5684b7a",
+     "materializer": "environment-provider-create",
+     "model": {
+      "id": "glm-5.3",
+      "status": "known"
+     },
+     "platformAttachmentsDigest": "sha256:f21bd6d422203cb9b4f62f550cb733632bf7348d767061c591f3cb1894552f5f",
+     "resources": {
+      "memoryMb": 16384,
+      "observedAt": "2026-11-17T01:50:25.865Z",
+      "origin": "measured",
+      "status": "known"
+     },
+     "runtime": "tangle-sandbox",
+     "status": "known"
+    },
+    "outRef": "sha256:acfc214b7c7f778d78de0c114c2c872f4acacf903b0b5f686dd81afe0e7478b1",
+    "ownSpent": {
+     "iterations": 0,
+     "ms": 345801,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 130816,
+      "cacheWrite": 0,
+      "freshInput": 24576,
+      "input": 155392,
+      "output": 7765
+     },
+     "usd": 0,
+     "usdKnown": false
+    },
+    "ownedTreeRoot": "claim-apn-flat-balance-20261117a/claim-apn-flat-balance-20261117a:s0",
+    "parent": "claim-apn-flat-balance-20261117a",
+    "runtime": "tangle-sandbox",
+    "settledAt": 1794881113741,
+    "spawnedAt": 1794879882498,
+    "spent": {
+     "iterations": 0,
+     "ms": 345801,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 130816,
+      "cacheWrite": 0,
+      "freshInput": 24576,
+      "input": 155392,
+      "output": 7765
+     },
+     "usd": 0,
+     "usdKnown": false
+    },
+    "status": "done",
+    "trace": {
+     "reason": "trace-source-unavailable",
+     "status": "unavailable"
+    }
+   }
+  ],
+  "root": "claim-apn-flat-balance-20261117a"
+ },
+ "usage": {
+  "observedModels": [
+   "glm-5.3"
+  ],
+  "requestedModel": {
+   "harness": "opencode",
+   "id": "glm-5.3",
+   "provider": "zai-coding-plan"
+  },
+  "tokens": {
+   "input": 9263555,
+   "output": 150185,
+   "status": "known",
+   "unknownAttempts": 0
+  }
+ }
+}

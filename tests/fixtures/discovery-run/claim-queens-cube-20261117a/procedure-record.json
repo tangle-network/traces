@@ -1,0 +1,40 @@
+{
+ "schema": "disco.procedure-record.v1",
+ "runId": "claim-queens-cube-20261117a",
+ "settledAt": "2026-11-17T04:43:35.975Z",
+ "outcome": {
+  "status": "stopped",
+  "known": false,
+  "reason": "operator choice: the play's registered Sandbox cap: $0.50 billed against $0.50 (Platform ledger, read at 2026-11-17T04:11:13.049Z)"
+ },
+ "tokens": {
+  "known": true,
+  "total": 8652789,
+  "floor": 8652789,
+  "input": 210486,
+  "output": 114047,
+  "cached": 8328256,
+  "status": "known",
+  "reason": null
+ },
+ "usd": {
+  "basis": "subscription",
+  "known": true,
+  "value": null,
+  "listUsd": 2.961834,
+  "reason": "every model call ran on a subscription seat or a free route, and neither bills per call"
+ },
+ "compute": {
+  "known": true,
+  "value": 0.619942931
+ },
+ "wallMs": 8140558,
+ "model": {
+  "provider": "zai-coding-plan",
+  "id": "glm-5.3",
+  "harness": "opencode",
+  "routes": [
+   "seat"
+  ]
+ }
+}

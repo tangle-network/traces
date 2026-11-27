@@ -28,6 +28,14 @@ Calibrated: implementing, verifying, exploring, communicating, idle. Not: review
 The JSON is `{ policy: { id, version, window_s }, run: { t0, t1, n_windows, spans }, nodes[], windows[], flags[], streaks[], stalls[], anomalies[], drift[], mail: { edges[], summary }, calibration }`; times are epoch seconds.
 Exit 0 when it answered, 2 when no span is a tool call (`no tool spans; categories unavailable`) or the selection cannot be read; it never exits 1, since a flag is a record, not a verdict.
 
+## A run's own records
+
+A Runtime run directory, or its run id under a run root ([Refs](select.md#refs)), adds `run_record`, which is read from the run's records rather than its spans and printed above the windows:
+who stopped it (the cancel request's time, source, operator and reason, and Runtime's acknowledgement), Runtime's terminal kind and reason, every play check (stage score, failing stage and the checker's reason) and submission, the settle record (wall, tokens with their status, compute and list dollars, model), and `quiet[]`: each node's last act (its last span other than the session span) in minutes before the stop, negative when it acted after it, beside the root stream's last event.
+The stop is the first of the stop request, Runtime's settle and the settle record; a request that came after Runtime had settled the run is named. Values are printed as recorded, with no classification; a record that is present but unreadable is listed under `unread`.
+A reopened run is read up to the reopen that followed its last stop: `reopens[]` and `stops[]` hold every reopen and cancel request (a reopen keeps the request it lifts under `cancellations/reopened/` and the Runtime result it ends as `settles/<n>.json`), `stoppedAt` is when that generation stopped, and the progress, quiet and root-stream lines count only what came before the reopen; each reopen after the stop is printed with what has happened since. `state` is where the lifecycle log last moved the run. A node still open in a run that has ended ends at Runtime's settle (`endedAt`), not now.
+With no tool span, a run with records still exits 0: it prints the record and `categories: null` with the reason. `src/run-record.ts` names each record it reads.
+
 The behavior report and span tree show the producer’s node label when available. Two sessions can share a display label. Use their recorded IDs to follow parent links and attribute calls.
 
 ## `traces behavior --help`
@@ -37,6 +45,7 @@ Usage: traces behavior <ref…> | --current | --last N | --since T [--window 5m]
 What each agent did per five-minute window: categories with a calibration certificate, failing streaks, stalls, gaming flags (record-only), anomalies against the run's own baseline, and who messaged whom.
 One node per session id (else per agent boundary). A window is implementing on a code edit, else verifying on a check, else its longest category;
 a failing streak makes it looping, a 10-minute gap idle. Exit 2 when no span is a tool call: categories need acts.
+A Runtime run dir or run id adds its own records: who stopped it and why, its last check, each agent's quiet before the stop.
 
   --current           the caller's own session: CODEX_THREAD_ID, else CLAUDE_CODE_SESSION_ID
   --last N            the N newest sessions by file mtime, never the caller's own
@@ -52,6 +61,7 @@ jq paths (--format json):
   .windows[] | select(.category == "looping") | {node, from, span_ids}   where an agent looped (or "idle"), with the spans
   .flags[] | {kind, node, at, span, detail}                              the gaming flags: record-only, never a severity
   .mail.summary                                                          who messaged whom: edges by kind, steers, read latency
+  .run_record | {stop, checks: .checks[-1:], quiet}                      a run's stop, its last check, each agent's last act
 
 Examples:
   traces behavior run/otlp/

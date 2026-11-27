@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import { readRunRecord, renderRunRecordLines } from './run-record.js'
 
 /**
  * Supervision-tree view: what the TREE did (steers, spawn waves, concurrency,
@@ -7,7 +8,8 @@ import { dirname, resolve } from 'node:path'
  * this CLI, which reports what happened inside one harness session.
  *
  * Eval owns Runtime run discovery and analysis. Traces adds coordination-log
- * evidence through its reader, then prints a single report or a rollup.
+ * evidence through its reader, then prints a single report or a rollup. A
+ * single run's own records (`src/run-record.ts`) head its report.
  */
 export async function writeSupervisorReport(runDir: string, out?: string): Promise<void> {
   const { analyzeSupervisorRun, findSupervisorRunDirs, isRuntimeSupervisorRunDir, renderSupervisorRollupMarkdown, renderSupervisorRunMarkdown, rollupSupervisorRuns } = await import('@tangle-network/agent-eval/supervisor-run')
@@ -23,8 +25,11 @@ export async function writeSupervisorReport(runDir: string, out?: string): Promi
   const reports = await Promise.all(
     runDirs.map((dir) => analyzeSupervisorRun(fileRunContextSupervisorRunReader(dir))),
   )
+  // One run's own records come first: who stopped it and why, and how far its checks got.
+  const record = single ? await readRunRecord(runDir) : null
+  const recordSection = record === null ? '' : `# Run record — ${record.runId}\n\n\`\`\`\n${renderRunRecordLines(record).join('\n')}\n\`\`\`\n\n`
   const markdown = single
-    ? renderSupervisorRunMarkdown(reports[0]!)
+    ? `${recordSection}${renderSupervisorRunMarkdown(reports[0]!)}`
     : renderSupervisorRollupMarkdown(rollupSupervisorRuns(reports), `Supervisor rollup — ${runDir}`)
   if (out) {
     const path = resolve(out, 'report.md')

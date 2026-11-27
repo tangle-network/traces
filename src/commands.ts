@@ -328,7 +328,7 @@ const COMMANDS = [
     name: 'analyze',
     usage: 'analyze <ref…> | --current | --last N | --since T [flags]',
     job: 'What went wrong, ranked, for $0: failing commands, stalls, interrupts, findings, and what the trace cannot answer.',
-    notes: ['At most 40 lines; several sessions get a table of the 15 with the most waste. A Runtime run dir reports its tree.'],
+    notes: ['At most 40 lines; several sessions get a table of the 15 with the most waste. A Runtime run dir reports its record and tree.'],
     flags: [
       ...SELECT.slice(0, 3), '--until', ...SELECT.slice(3),
       { flag: '--format', help: 'text (default, at most 40 lines) or json: facts, packet, measures, conformance, cannotAnswer' },
@@ -353,6 +353,7 @@ const COMMANDS = [
     notes: [
       'One node per session id (else per agent boundary). A window is implementing on a code edit, else verifying on a check, else its longest category;',
       'a failing streak makes it looping, a 10-minute gap idle. Exit 2 when no span is a tool call: categories need acts.',
+      'A Runtime run dir or run id adds its own records: who stopped it and why, its last check, each agent\'s quiet before the stop.',
     ],
     flags: [...SELECT, '--window', { flag: '--format', help: 'text (default): a line per node, then flags, anomalies, streaks, mail and the calibration table; json: the result' }],
     formats: ['text', 'json'],
@@ -363,6 +364,7 @@ const COMMANDS = [
       ['.windows[] | select(.category == "looping") | {node, from, span_ids}', 'where an agent looped (or "idle"), with the spans'],
       ['.flags[] | {kind, node, at, span, detail}', 'the gaming flags: record-only, never a severity'],
       ['.mail.summary', 'who messaged whom: edges by kind, steers, read latency'],
+      ['.run_record | {stop, checks: .checks[-1:], quiet}', 'a run\'s stop, its last check, each agent\'s last act'],
     ],
     examples: ['traces behavior run/otlp/', 'traces behavior run.otlp.jsonl --window 10m --format json | jq \'.windows[] | select(.category == "looping")\''],
     overview: [['What was each agent doing, and when did it loop or idle? $0', 'traces behavior <ref>']],
@@ -607,7 +609,7 @@ export function renderGlobalHelp(): string {
     '',
     ...rows,
     '',
-    'ref: session id, or 8+ char unique prefix or suffix; session file; OTLP file/dir; bundle dir; run dir; store root',
+    'ref: session id, or 8+ char unique prefix or suffix; session file; OTLP file/dir; bundle dir; run dir or run id; store root',
     'Select: --current  --last N  --since/--until 2h|1d|ISO  --cwd DIR  --harness ID  --latest-turn',
     `Output: --format ${formats.join('|')}  --out PATH  --no-content`,
     'Exit: 0 yes · 1 no (fail, diverged, unsafe) · 2 could not answer (stderr says why)',

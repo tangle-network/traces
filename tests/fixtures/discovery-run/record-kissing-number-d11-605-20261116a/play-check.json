@@ -1,0 +1,20 @@
+{
+ "checkedAt": "2026-11-17T02:18:56.644Z",
+ "solved": false,
+ "known": true,
+ "detail": "SCORE {\"stages\":[\"certificate\"],\"of\":1,\"reached\":1}\nNOT SOLVED: invalid construction: supply construction.json or construction.json.gz",
+ "failing": [
+  {
+   "stage": "hidden",
+   "line": "NOT SOLVED: invalid construction: supply construction.json or construction.json.gz"
+  }
+ ],
+ "commit": "ddb1d5ec0e95da39669333f5f2549be797972e11",
+ "score": {
+  "stage": null,
+  "reached": 1,
+  "of": 1,
+  "hidden": false
+ },
+ "check": "rerun"
+}

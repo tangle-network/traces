@@ -35,6 +35,9 @@ owns:
   reviewable packet; it does not execute a candidate change.
 - This package's own job: adapt one more harness's on-disk format into spans (`src/adapters/`), read
   and validate OTLP from any producer, and render/report/gate over the result.
+- A run's own records (`src/run-record.ts`) are read, never interpreted: Runtime's through Runtime's
+  readers or layout, Discovery's retained lifecycle, check and settle records in the format they were
+  written. A stop's cause is the request's own source, operator and reason; traces adds no classifier.
 
 A harness adapter is the legacy edge, for a format this project does not control. A system you do
 control should emit the contract and pass its file as a ref, never get a new adapter.

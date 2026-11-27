@@ -1,0 +1,40 @@
+{
+ "schema": "disco.procedure-record.v1",
+ "runId": "claim-apn-flat-balance-20261117a",
+ "settledAt": "2026-11-17T04:16:44.271Z",
+ "outcome": {
+  "status": "stopped",
+  "known": false,
+  "reason": "operator choice: account reserve stop (fixture text)"
+ },
+ "tokens": {
+  "known": true,
+  "total": 9413740,
+  "floor": 9413740,
+  "input": 220227,
+  "output": 150185,
+  "cached": 9043328,
+  "status": "known",
+  "reason": null
+ },
+ "usd": {
+  "basis": "subscription",
+  "known": true,
+  "value": null,
+  "listUsd": 3.320397,
+  "reason": "every model call ran on a subscription seat or a free route, and neither bills per call"
+ },
+ "compute": {
+  "known": true,
+  "value": 0.481879141
+ },
+ "wallMs": 11494326,
+ "model": {
+  "provider": "zai-coding-plan",
+  "id": "glm-5.3",
+  "harness": "opencode",
+  "routes": [
+   "seat"
+  ]
+ }
+}

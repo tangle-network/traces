@@ -13,7 +13,7 @@ export interface CliRun {
 }
 
 export interface CliOptions {
-  /** The whole environment of the run, beside PATH and TMPDIR: no variable of the caller's leaks in. */
+  /** The whole environment of the run, beside PATH, TMPDIR and the empty run roots and remotes: no variable of the caller's leaks in. */
   readonly env?: Readonly<Record<string, string>>
   readonly cwd?: string
   readonly timeoutMs?: number
@@ -49,8 +49,9 @@ export function runCli(argv: readonly string[], options: CliOptions = {}): Promi
   })
 }
 
+/** No run root and no remote unless a test names them: the test host's own traces config never applies. */
 function cliEnv(options: CliOptions): Record<string, string> {
-  return { PATH: process.env.PATH ?? '', TMPDIR: process.env.TMPDIR ?? '/tmp', NO_COLOR: '1', ...options.env }
+  return { PATH: process.env.PATH ?? '', TMPDIR: process.env.TMPDIR ?? '/tmp', NO_COLOR: '1', TRACES_RUN_ROOTS: '', TRACES_REMOTES: '', ...options.env }
 }
 
 /**

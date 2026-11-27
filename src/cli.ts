@@ -55,10 +55,12 @@ import type { ReportSource } from './report.js'
 import { parseSince, parseTimeBound, relativeBoundMs } from './time.js'
 import { readsStoreRoots } from './adapters/harness-sessions.js'
 import { errorText, RefError, resolveRefs, shortestRefs, type ResolvedRef } from './refs.js'
+import { readTracesConfig } from './run-config.js'
 import type { HarnessTraceAdapter, SessionRef } from './types.js'
 import type { RefusedSession, UploadPlan } from './upload.js'
 import { cmdSkills } from './skills-command.js'
-import { cmdBehavior } from './behavior-command.js'
+import { cmdBehavior, selectedRunDir } from './behavior-command.js'
+import { readRunRecord, renderRunRecordLines } from './run-record.js'
 import { collectImportedSpans, collectOtlpSpans, collectRuntimeSpans, mergeCollected, type CollectedSpans } from './cli-span-input.js'
 import type { CliArgs, RefSelection } from './cli-selection-types.js'
 
@@ -719,6 +721,9 @@ function hostOf(args: CliArgs): string {
  */
 async function cmdFacts(args: CliArgs): Promise<void> {
   const format = args.format ?? 'text'
+  // A named Runtime run directory brings its own records (`src/run-record.ts`) beside its sessions' sheets.
+  const runDir = format === 'jsonl' ? null : selectedRunDir(args)
+  const record = runDir === null ? null : await readRunRecord(runDir)
   const pattern = args.match === undefined ? undefined : new RegExp(args.match)
   if (args.noContent && pattern !== undefined) {
     throw new UsageError('--match searches turn text, which --no-content withholds; drop one of them')
@@ -781,7 +786,14 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   } else {
     const runTraceIds = new Set<string>()
     const collected = await collectSpans(args, runTraceIds)
-    if (collected.spans.length === 0 && (collected.unread ?? []).length === 0) throw new Error('no spans found for the given selection')
+    if (collected.spans.length === 0 && (collected.unread ?? []).length === 0) {
+      // A run that recorded no agent span still has its own records: who stopped it, and its checks.
+      if (record === null) throw new Error('no spans found for the given selection')
+      const rendered = format === 'json'
+        ? `${JSON.stringify({ generatedAt: new Date().toISOString(), runRecord: record, sessions: [] })}\n`
+        : `${[...renderRunRecordLines(record), 'sessions: no agent records in this run'].join('\n')}\n`
+      return writeOutput(args, rendered, `session facts → ${args.out}  (0 sessions, the run's own records, $0, no model call)`)
+    }
     warnIncompleteWorkflow(collected.workflow)
     for (const source of collected.sources) sourceOf.set(source.sessionId, source.path)
     const files = args.selection?.spans ?? []
@@ -802,12 +814,16 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   if (named > 0 && window === undefined && report.sessions.length === 0) {
     for (const session of report.selection?.unreadSessions ?? []) unread.push(`${session.sessionId ?? session.traceId} (${session.reason})`)
   }
-  if (unread.length > 0) {
+  if (unread.length > 0 && record === null) {
     throw new RefError(
       `no records could be read from ${unread.length} selected session(s): ${unread.join(', ')}` +
         '. The facts sheet would state zeros the spans cannot support.',
       'unreadable',
     )
+  }
+  // A run's own records answer beside the sessions; a session with no record is named, never a sheet of zeros.
+  if (record !== null && unread.length > 0) {
+    report = { ...report, sessions: report.sessions.filter((facts) => !(facts.recordSpans === 0 && facts.firstFailure.status !== 'found')) }
   }
   if (pattern !== undefined) {
     return writeMatches(args, format, {
@@ -819,9 +835,11 @@ async function cmdFacts(args: CliArgs): Promise<void> {
   }
   // Rows and matches carry no cost, so only the sheet is priced.
   report = await priceReport(report)
-  const rendered = format === 'json'
-    ? `${JSON.stringify({ ...report, sessions: (await citeFacts(report.sessions, [], citings)).sessions })}\n`
+  const sheet = format === 'json'
+    ? `${JSON.stringify({ ...report, ...(record ? { runRecord: record } : {}), sessions: (await citeFacts(report.sessions, [], citings)).sessions })}\n`
     : renderSessionFacts(report)
+  const recordText = record === null || format === 'json' ? '' : `${[...renderRunRecordLines(record), ...(unread.length ? [`sessions with no records: ${unread.join(', ')}`] : [])].join('\n')}\n\n`
+  const rendered = `${recordText}${sheet}`
   const summary = `session facts → ${args.out}  (${report.sessions.length} session(s), $0, no model call)`
   await writeOutput(args, rendered, summary)
 }
@@ -1360,9 +1378,40 @@ function prepare(args: Args): CliArgs {
   return validateLatestTurn(applyCurrentSessionSelection(args))
 }
 
-/** A command that reads its refs: they are resolved once, before it runs. */
+/**
+ * A command that reads its refs: they are resolved once, before it runs. A bare ref that names
+ * nothing on this machine is asked of the configured remotes (`src/remote.ts`), argv unchanged.
+ */
 function reading(handler: (args: CliArgs) => Promise<void>): Handler {
-  return async (args) => handler(await withSelection(prepare(args)))
+  return async (args) => {
+    let selected: CliArgs
+    try {
+      selected = await withSelection(prepare(args))
+    } catch (error) {
+      if (error instanceof RefError && error.unresolvedRef !== undefined && await askedRemotes(error, error.unresolvedRef)) return
+      throw error
+    }
+    return handler(selected)
+  }
+}
+
+/** True when a remote answered for `ref` (its exit code is this command's); throws when none holds it. */
+async function askedRemotes(error: RefError, ref: string): Promise<boolean> {
+  const { forwardToRemotes, isForwarded } = await import('./remote.js')
+  if (isForwarded()) return false
+  const { remotes } = readTracesConfig()
+  if (remotes.length === 0) return false
+  const argv = process.argv.slice(2)
+  if (argv.some((arg) => arg === '--out' || arg.startsWith('--out='))) {
+    throw new UsageError(`${ref} names nothing on this machine, and --out writes here: run the command on the host that holds it (${remotes.join(', ')}), or drop --out`)
+  }
+  const outcome = await forwardToRemotes(remotes, argv, ref)
+  if ('code' in outcome) {
+    process.exitCode = outcome.code
+    return true
+  }
+  const asked = outcome.unanswered.length > 0 ? `no answer from ${outcome.unanswered.join('; ')}` : 'none holds it'
+  throw new RefError(`${error.message}; asked ${remotes.join(', ')}: ${asked}`, 'unreadable')
 }
 
 /**
