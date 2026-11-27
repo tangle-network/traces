@@ -98,6 +98,8 @@ export interface BehaviorNode {
   readonly last_act?: number | null
   /** With `actsBefore`: the end of its last own event that ended before then, such as a run's reopen; null with none. */
   readonly last_act_before?: number | null
+  /** With `stopped`: minutes of the node's span while the run was stopped, counted in neither `idle_min` nor `hours`. */
+  readonly stopped_min?: number
   readonly span_id: string; readonly claims: number; readonly test_edits: number; readonly z: Record<string, number | null>
 }
 export interface BehaviorWindow { readonly node: string; readonly w: number; readonly from: number; readonly to: number; readonly category: BehaviorCategory; readonly span_ids: string[]; readonly calibrated: boolean }
@@ -110,15 +112,22 @@ export interface BehaviorMailEdge { readonly kind: string; readonly from: string
 export interface BehaviorMailSummary { readonly edges: number; readonly by_kind: Record<string, number>; readonly steers: number; readonly read: number; readonly p50_min: number | null; readonly p90_min: number | null; readonly max_min: number | null }
 export interface BehaviorResult {
   readonly policy: { readonly id: string; readonly version: number; readonly window_s: number }
-  readonly run: { readonly t0: number; readonly t1: number; readonly n_windows: number; readonly spans: number }
+  /** `stopped`, with the option of that name: each time the run was stopped between two generations, within t0 to t1. */
+  readonly run: { readonly t0: number; readonly t1: number; readonly n_windows: number; readonly spans: number; readonly stopped?: readonly BehaviorStoppedInterval[] }
   readonly nodes: BehaviorNode[]; readonly windows: BehaviorWindow[]; readonly flags: BehaviorFlag[]; readonly streaks: BehaviorStreak[]; readonly stalls: BehaviorStall[]
   readonly anomalies: BehaviorAnomaly[]; readonly drift: BehaviorDrift[]; readonly mail: { readonly edges: BehaviorMailEdge[]; readonly summary: BehaviorMailSummary }
   /** Present on newly measured reports. Older saved reports may omit source coverage. */
   readonly coverage?: { readonly input_spans: number; readonly tool_calls: number; readonly unknowns: readonly string[] }
   readonly calibration: typeof BEHAVIOR_CALIBRATION
 }
-/** `now` is epoch seconds: the end of a node still running. `actsBefore` (epoch seconds) adds each node's `last_act_before`. */
-export interface BehaviorOptions { readonly windowMs?: number; readonly now?: number; readonly actsBefore?: number }
+/** A time the run was stopped, in epoch seconds: from the end of one generation to the reopen that started the next. */
+export interface BehaviorStoppedInterval { readonly generation: number; readonly from: number; readonly to: number }
+/**
+ * `now` is epoch seconds: the end of a node still running. `actsBefore` (epoch seconds) adds each node's `last_act_before`.
+ * `stopped` are the times the run was stopped between generations: no idle time, stall or node hour is counted inside one,
+ * and a node left open when one began ends there unless it acted after the reopen.
+ */
+export interface BehaviorOptions { readonly windowMs?: number; readonly now?: number; readonly actsBefore?: number; readonly stopped?: readonly BehaviorStoppedInterval[] }
 
 const ts = (iso: string): number => Date.parse(iso) / 1000
 const cut = (s: unknown, n: number): string => [...String(s)].slice(0, n).join('')
@@ -190,6 +199,11 @@ export function classifySpan(span: Pick<OtlpSpan, 'name' | 'attributes'>, kind?:
 const failed = (s: OtlpSpan): boolean => String(s.status?.code).endsWith('ERROR') || s.attributes['tangle.tool.status'] === 'failed'
 /** A span whose end the reader substituted is still running: its end is now. */
 const endOf = (s: OtlpSpan, now: number): number => (String(s.attributes[SUBSTITUTED_FIELDS_ATTR] ?? '').split(',').includes('end_time') ? now : ts(s.end_time))
+/** Where a node's open spans end: now, or the first stop after its last span began, when the node did nothing after the reopen. */
+function openEnd(own: readonly OtlpSpan[], now: number, stopped: readonly BehaviorStoppedInterval[]): number {
+  const lastStart = own.reduce((max, s) => Math.max(max, ts(s.start_time)), -Infinity)
+  return stopped.find((pause) => pause.from >= lastStart && pause.from < now)?.from ?? now
+}
 const byStart = (x: OtlpSpan, y: OtlpSpan): number =>
   ts(x.start_time) - ts(y.start_time) || x.trace_id.localeCompare(y.trace_id) || x.span_id.localeCompare(y.span_id)
 
@@ -226,7 +240,7 @@ function recordedAgentId(id: string, spans: readonly OtlpSpan[], unknowns: Set<s
 /** A supervisor can name the native session only on its session boundary. Other
  * producers describe nested agents by span containment. Resolve both per trace,
  * including a tool without a session tag below an explicitly identified parent. */
-function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<string>): RawNode[] {
+function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<string>, stopped: readonly BehaviorStoppedInterval[]): RawNode[] {
   const traces = new Map<string, OtlpSpan[]>()
   const sessions = new Map<string, OtlpSpan[]>()
   const nodes: RawNode[] = []
@@ -325,7 +339,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
       const a = root.attributes
       nodes.push({ id, label: boundary.label, parent, depth: boundary.depth, state: boundary.status,
         profile: str(a['agent.profile.name']), ...identity(a, own), start: boundary.startMs / 1000,
-        end: Math.max(boundary.endMs / 1000, endOf(root, now)), span_id: root.span_id, spans: own,
+        end: Math.max(boundary.endMs / 1000, endOf(root, openEnd(own, now, stopped))), span_id: root.span_id, spans: own,
         session: parent === null ? sessionIdFromAttributes(a) ?? null : null,
         parentSession: str(a['traces.parent_session_id']), thread: str(a['traces.codex.subagent_thread_id']) })
     }
@@ -340,7 +354,7 @@ function groupNodes(spans: readonly OtlpSpan[], now: number, unknowns: Set<strin
     const parent = str(a['tangle.harness_session.parent']) ?? str(a['traces.parent_session_id']) ?? structuralParent
     nodes.push({ id, label: recordedNodeLabel(a, recordedAgentName(a)) ?? id, parent,
       depth: num(a['tangle.node.depth']) ?? 0, state: str(a['tangle.node.state']), profile: str(a['agent.profile.name']),
-      ...identity(a, own), start: ts(own[0]!.start_time), end: own.reduce((max, s) => Math.max(max, endOf(s, now)), 0),
+      ...identity(a, own), start: ts(own[0]!.start_time), end: own.reduce((max, s) => Math.max(max, endOf(s, openEnd(own, now, stopped))), 0),
       span_id: root.span_id, spans: own, session: sessionIdFromAttributes(a) ?? id,
       parentSession: parent, thread: str(a['traces.codex.subagent_thread_id']) })
   }
@@ -376,18 +390,37 @@ function nodeEvents(n: RawNode): Event[] {
 
 interface Segment { readonly a: number; readonly b: number; readonly cat: BehaviorCategory; readonly span: string }
 
-/** An event explains the time until the next event (capped); a longer gap is idle, and a stall. */
-function segments(ev: readonly Event[], n: Pick<RawNode, 'id' | 'end'>, stalls: BehaviorStall[]): Segment[] {
+/**
+ * An event explains the time until the next event (capped); a longer gap is idle, and a stall. A time the run was
+ * stopped is neither: the gap is cut there, and each part on either side is idle when it is long enough.
+ */
+function segments(ev: readonly Event[], n: Pick<RawNode, 'id' | 'end'>, stalls: BehaviorStall[], stopped: readonly BehaviorStoppedInterval[]): Segment[] {
   const segs: Segment[] = []
+  const idle = (a: number, b: number, span: string): void => {
+    if (b - a < IDLE_S) return
+    segs.push({ a, b, cat: 'idle', span })
+    stalls.push({ node: n.id, at: a, minutes: round((b - a) / 60, 1), after: span })
+  }
   ev.forEach((e, i) => {
     const nxt = i + 1 < ev.length ? ev[i + 1]!.t : n.end
-    const end = e.cat !== 'thinking' ? Math.min(nxt, e.t + SEG_CAP_S) : Math.min(Math.max(e.e, e.t + 1), nxt)
+    const explained = e.cat !== 'thinking' ? Math.min(nxt, e.t + SEG_CAP_S) : Math.min(Math.max(e.e, e.t + 1), nxt)
+    // An act explains nothing past the stop that followed it.
+    const end = stopped.find((pause) => pause.from > e.t && pause.from < explained)?.from ?? explained
     if (end > e.t) segs.push({ a: e.t, b: end, cat: e.cat, span: e.span })
-    if (nxt - end < IDLE_S) return
-    segs.push({ a: end, b: nxt, cat: 'idle', span: e.span })
-    stalls.push({ node: n.id, at: end, minutes: round((nxt - end) / 60, 1), after: e.span })
+    let from = end
+    for (const pause of stopped) {
+      if (pause.to <= from || pause.from >= nxt) continue
+      idle(from, Math.max(from, pause.from), e.span)
+      from = Math.max(from, pause.to)
+    }
+    idle(from, nxt, e.span)
   })
   return segs
+}
+
+/** Seconds of `[a, b)` inside the times the run was stopped. */
+function stoppedWithin(a: number, b: number, stopped: readonly BehaviorStoppedInterval[]): number {
+  return stopped.reduce((sum, pause) => sum + Math.max(0, Math.min(b, pause.to) - Math.max(a, pause.from)), 0)
 }
 
 /** One command failing {@link STREAK_RUNS} times in a row, ended only by its own success. */
@@ -534,9 +567,9 @@ interface Mark { readonly t: number; readonly cat: BehaviorCategory; readonly sp
 interface ReadNode { readonly node: BehaviorNode; readonly n: Omit<RawNode, 'spans'>; readonly marks: Mark[]; readonly segs: Segment[]; readonly streaks: BehaviorStreak[]; readonly turns: number[] }
 interface Accumulator { flags: BehaviorFlag[]; streaks: BehaviorStreak[]; stalls: BehaviorStall[]; edges: BehaviorMailEdge[]; spawned: Map<string, Spawn> }
 
-function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<string>, actsBefore: number | undefined): ReadNode {
+function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<string>, actsBefore: number | undefined, stopped: readonly BehaviorStoppedInterval[] | undefined): ReadNode {
   const ev = nodeEvents({ ...n, spans })
-  const segs = segments(ev, n, acc.stalls)
+  const segs = segments(ev, n, acc.stalls, stopped ?? [])
   const streaks = failingStreaks(ev, n.id)
   acc.streaks.push(...streaks); acc.flags.push(...gamingFlags(ev, n.id)); acc.edges.push(...mailEdges(ev, n))
   for (const [worker, spawn] of spawnsOf(spans)) acc.spawned.set(worker, spawn)
@@ -544,7 +577,8 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<stri
   for (const s of segs) byCat[s.cat] = (byCat[s.cat] || 0) + (s.b - s.a)
   const calls = ev.filter((e) => e.call)
   const failedCalls = calls.filter((e) => !e.ok)
-  const hours = Math.max((n.end - n.start) / 3600, 1 / 60)
+  const stoppedS = stopped === undefined ? 0 : stoppedWithin(n.start, n.end, stopped)
+  const hours = Math.max((n.end - n.start - stoppedS) / 3600, 1 / 60)
   const known = ev.filter((e) => e.tokens_in != null)
   const lastActive = [...segs].reverse().find((s) => s.cat !== 'idle')
   const node: BehaviorNode = {
@@ -557,6 +591,7 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<stri
     tokens_known_turns: known.length, last_cat: lastActive ? lastActive.cat : null,
     last_act: ev.length ? ev.reduce((max, e) => Math.max(max, e.e), ev[0]!.e) : null,
     ...(actsBefore === undefined ? {} : { last_act_before: ev.reduce<number | null>((max, e) => (e.e < actsBefore && (max === null || e.e > max) ? e.e : max), null) }),
+    ...(stopped === undefined ? {} : { stopped_min: round(stoppedS / 60, 1) }),
     span_id: n.span_id,
     claims: ev.filter((e) => e.flags.includes('claim')).length, test_edits: ev.filter((e) => e.flags.includes('test_edit')).length, z: {},
   }
@@ -564,7 +599,7 @@ function readNode({ spans, ...n }: RawNode, acc: Accumulator, unknowns: Set<stri
 }
 
 /** The run's nodes and their recorded session lineage, then the windows on the run's clock. */
-function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanCount: number, coverage: NonNullable<BehaviorResult['coverage']>): BehaviorResult {
+function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanCount: number, coverage: NonNullable<BehaviorResult['coverage']>, stopped: readonly BehaviorStoppedInterval[] | undefined): BehaviorResult {
   const bySession = new Map<string, string>()
   const byId = new Map(read.map((r) => [r.node.id, r]))
   for (const { n } of read) {
@@ -618,15 +653,18 @@ function runResult(read: readonly ReadNode[], acc: Accumulator, W: number, spanC
   }
   readLatency(acc.edges, new Map(read.map((r) => [r.node.id, r.turns])))
   return {
-    policy: { ...BEHAVIOR_POLICY, window_s: W }, run: { t0, t1, n_windows: nwin, spans: spanCount }, nodes: outNodes, windows,
+    policy: { ...BEHAVIOR_POLICY, window_s: W },
+    run: { t0, t1, n_windows: nwin, spans: spanCount, ...(stopped === undefined ? {} : { stopped: stopped.filter((pause) => pause.to > t0) }) },
+    nodes: outNodes, windows,
     flags: acc.flags, streaks: acc.streaks, stalls: acc.stalls, anomalies: anomalies(outNodes), drift: drift(read, cats, t0, W, nwin),
     mail: { edges: acc.edges, summary: mailSummary(acc.edges) }, coverage: { ...coverage, unknowns: [...unknowns].sort() }, calibration: BEHAVIOR_CALIBRATION,
   }
 }
 
 /** Behavior over spans handed in a session at a time: each `add` reads its nodes and keeps only what the run-wide pass needs, so a week of sessions is never held at once. */
-export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000, actsBefore }: BehaviorOptions = {}): { add(spans: readonly OtlpSpan[]): void; result(sourceGaps?: readonly string[]): BehaviorResult } {
+export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000, actsBefore, stopped: given }: BehaviorOptions = {}): { add(spans: readonly OtlpSpan[]): void; result(sourceGaps?: readonly string[]): BehaviorResult } {
   const acc: Accumulator = { flags: [], streaks: [], stalls: [], edges: [], spawned: new Map() }
+  const stopped = given === undefined ? undefined : [...given].filter((pause) => pause.to > pause.from).sort((a, b) => a.from - b.from)
   const read: ReadNode[] = []
   let spanCount = 0
   let inputSpans = 0
@@ -643,9 +681,9 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000, ac
       observedCalls += distinct.filter(isRecordedToolCall).length
       // A Codex lifecycle span stands for another session's thread (a child it spawned, or the parent it answered),
       // whose records are in that session's file: that session is the node, never a callless stand-in.
-      for (const n of groupNodes(spans, now, topologyGaps)) {
+      for (const n of groupNodes(spans, now, topologyGaps, stopped ?? [])) {
         if (n.thread === null || n.spans.some(isRecordedToolCall)) {
-          read.push(readNode(n, acc, topologyGaps, actsBefore))
+          read.push(readNode(n, acc, topologyGaps, actsBefore, stopped))
         }
       }
     },
@@ -658,7 +696,7 @@ export function behaviorReader({ windowMs = 300_000, now = Date.now() / 1000, ac
       if (!attributed) throw Object.assign(new Error('no tool spans; categories unavailable'), { code: 'no-outcome' })
       const unknowns = [...new Set([...sourceGaps, ...topologyGaps])]
       if (unplaced) unknowns.push(`${unplaced} span(s) have no usable start time and cannot be placed in a window`)
-      return runResult(read, acc, windowMs / 1000, spanCount, { input_spans: inputSpans, tool_calls: attributed, unknowns })
+      return runResult(read, acc, windowMs / 1000, spanCount, { input_spans: inputSpans, tool_calls: attributed, unknowns }, stopped)
     },
   }
 }
@@ -680,6 +718,7 @@ const STALLS_NAMED = 6
 /** One line per node with its category minutes, then flags, anomalies, streaks, the mail summary and the calibration table. */
 export function renderBehaviorText(r: BehaviorResult): string {
   const lines = [`behavior ${r.calibration.policy}, window ${r.policy.window_s / 60}m, ${r.nodes.length} nodes, ${r.run.n_windows} windows, ${iso(r.run.t0)} to ${iso(r.run.t1)}`]
+  for (const pause of r.run.stopped ?? []) lines.push(`stopped after generation ${pause.generation}: ${iso(pause.from)} to ${iso(pause.to)}, counted as neither idle nor active`)
   if (r.coverage) {
     lines.push(`coverage: ${r.coverage.tool_calls} attributed tool calls in ${r.coverage.input_spans} unique input spans`)
     for (const gap of r.coverage.unknowns) lines.push(`  incomplete: ${oneLine(gap)}`)
@@ -687,7 +726,8 @@ export function renderBehaviorText(r: BehaviorResult): string {
   for (const n of r.nodes) {
     const cats = Object.entries(n.by_cat).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}m`).join(', ')
     const tokens = n.tokens_in === null ? '' : `, tokens in ${tokenCount(n.tokens_in)} out ${tokenCount(n.tokens_out ?? 0)}`
-    lines.push(`${n.label} (${n.id}) ${n.state ?? 'running'} ${n.model ?? '?'}: ${cats || 'no activity'} | ${n.tool_calls} calls, ${n.failed} failed, ${n.streaks} streaks${tokens}`)
+    const stoppedText = n.stopped_min ? `, stopped ${n.stopped_min}m` : ''
+    lines.push(`${n.label} (${n.id}) ${n.state ?? 'running'} ${n.model ?? '?'}: ${cats || 'no activity'}${stoppedText} | ${n.tool_calls} calls, ${n.failed} failed, ${n.streaks} streaks${tokens}`)
   }
   const labels = new Map(r.nodes.map((n) => [n.id, n.label]))
   const stalls = [...r.stalls].sort((a, b) => b.minutes - a.minutes)

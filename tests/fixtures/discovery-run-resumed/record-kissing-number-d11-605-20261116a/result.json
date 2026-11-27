@@ -1,0 +1,690 @@
+{
+ "cancellationReason": "operator choice: the play's registered Sandbox cap: $2.61 billed against $1.80 (Platform ledger, read at 2026-11-27T08:56:32.567Z)",
+ "continuation": {
+  "attempts": 1,
+  "barrenReentries": 0,
+  "continuations": [],
+  "ended": "aborted",
+  "environmentReplacements": 0,
+  "failureRetries": 0,
+  "reprompts": 0,
+  "stopPauses": 0,
+  "unavailableMs": 0,
+  "unavailablePauses": 0,
+  "waitedMs": 0,
+  "wakes": 0,
+  "workspaceRestores": 0
+ },
+ "downCount": 0,
+ "fleetYield": {
+  "cancelled": 0,
+  "done": 2,
+  "down": 3,
+  "neverSettled": 0,
+  "releaseUnconfirmed": 0,
+  "releasedUnrecovered": 3,
+  "spawned": 5
+ },
+ "kind": "no-winner",
+ "operationId": "spend-cap:record-kissing-number-d11-605-20261116a",
+ "operator": "discovery-lab",
+ "providerModel": {
+  "attempts": [
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": []
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": []
+   },
+   {
+    "observations": [
+     "glm-5.3"
+    ]
+   },
+   {
+    "observations": []
+   }
+  ],
+  "models": [
+   "glm-5.3"
+  ],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "reason": "cancelled",
+ "rootHarnessTranscript": {
+  "reason": "capture-did-not-run",
+  "status": "unavailable"
+ },
+ "rootProviderModel": {
+  "attempts": [],
+  "models": [],
+  "reason": "provider-model-missing",
+  "status": "unknown"
+ },
+ "source": "discovery-lab/spend-cap",
+ "spendGaps": [
+  {
+   "channels": [
+    "usd"
+   ],
+   "id": "record-kissing-number-d11-605-20261116a:s0",
+   "kind": "unreported",
+   "label": "communicator-r1"
+  },
+  {
+   "channels": [
+    "tokens",
+    "usd"
+   ],
+   "id": "record-kissing-number-d11-605-20261116a",
+   "kind": "unreported",
+   "label": "root"
+  },
+  {
+   "channels": [
+    "tokens",
+    "usd"
+   ],
+   "id": "record-kissing-number-d11-605-20261116a:s2",
+   "kind": "unreported",
+   "label": "anneal-smooth"
+  },
+  {
+   "channels": [
+    "tokens",
+    "usd"
+   ],
+   "id": "record-kissing-number-d11-605-20261116a:s1",
+   "kind": "unreported",
+   "label": "perturb-relax"
+  },
+  {
+   "channels": [
+    "tokens",
+    "usd"
+   ],
+   "id": "record-kissing-number-d11-605-20261116a:s3",
+   "kind": "unreported",
+   "label": "slp-newton"
+  },
+  {
+   "channels": [
+    "tokens",
+    "usd"
+   ],
+   "id": "record-kissing-number-d11-605-20261116a:s4",
+   "kind": "unreported",
+   "label": "cluster-opt"
+  }
+ ],
+ "spentSplit": {
+  "children": {
+   "iterations": 0,
+   "ms": 2705417834,
+   "tokens": {
+    "cacheBreakdownKnown": false,
+    "cacheRead": 718656,
+    "cacheWrite": 0,
+    "freshInput": 57069,
+    "input": 775725,
+    "output": 12897
+   },
+   "tokensKnown": false,
+   "usd": 0,
+   "usdKnown": false
+  },
+  "root": {
+   "iterations": 0,
+   "ms": 3213840,
+   "tokens": {
+    "cacheRead": 1215360,
+    "cacheWrite": 0,
+    "freshInput": 58074,
+    "input": 1273434,
+    "output": 28469
+   },
+   "tokensKnown": false,
+   "usd": 0,
+   "usdKnown": false
+  }
+ },
+ "spentTotal": {
+  "iterations": 0,
+  "ms": 901050735,
+  "tokens": {
+   "cacheBreakdownKnown": false,
+   "cacheRead": 1934016,
+   "cacheWrite": 0,
+   "freshInput": 115143,
+   "input": 2049159,
+   "output": 41366
+  },
+  "tokensKnown": false,
+  "usd": 0,
+  "usdKnown": false
+ },
+ "teardownUnconfirmed": [
+  {
+   "attempts": 0,
+   "detail": "Prior admitted execution has no confirmed teardown; source custody remains unverified.",
+   "id": "record-kissing-number-d11-605-20261116a:s1",
+   "kept": [
+    {
+     "environmentId": "sandbox-39697e07cbe6",
+     "keptFor": "evidence",
+     "provider": "tangle-sandbox"
+    }
+   ],
+   "label": "perturb-relax",
+   "runtime": "tangle-sandbox",
+   "status": "failed"
+  },
+  {
+   "attempts": 0,
+   "detail": "Prior admitted execution has no confirmed teardown; source custody remains unverified.",
+   "id": "record-kissing-number-d11-605-20261116a:s3",
+   "kept": [
+    {
+     "environmentId": "sandbox-25ed6c6a23d1",
+     "keptFor": "evidence",
+     "provider": "tangle-sandbox"
+    }
+   ],
+   "label": "slp-newton",
+   "runtime": "driver",
+   "status": "failed"
+  },
+  {
+   "attempts": 0,
+   "detail": "Prior admitted execution has no confirmed teardown; source custody remains unverified.",
+   "id": "record-kissing-number-d11-605-20261116a:s4",
+   "kept": [
+    {
+     "environmentId": "sandbox-1c81746253fa",
+     "keptFor": "evidence",
+     "provider": "tangle-sandbox"
+    }
+   ],
+   "label": "cluster-opt",
+   "runtime": "driver",
+   "status": "failed"
+  }
+ ],
+ "tree": {
+  "inFlight": 0,
+  "nodes": [
+   {
+    "assignmentId": "key:communicator-r1",
+    "budget": {},
+    "executionBindings": [
+     {
+      "attemptId": "record-kissing-number-d11-605-20261116a:s0:attempt:670d413a-1f45-4177-bacd-c86eb73bfeb8",
+      "bindingDigest": "sha256:44248fe7b9e1d7cc5cce4f9a98c297289b82a1145de1a17092627327c4fde662",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:1101bc38ecf200fdfff33b419766645cee0cf367992372f78db20b49f2398fec",
+      "status": "known"
+     }
+    ],
+    "id": "record-kissing-number-d11-605-20261116a:s0",
+    "identity": {
+     "profileDigest": "sha256:541aad342decb55ad5e06f01f19f11cefc86dd113d389ec968a19391d36aff6f",
+     "taskDigest": "sha256:11cb863f5240ab5cb360d003ba5eae1576aa5589b244a480250177fac4366b15"
+    },
+    "label": "communicator-r1",
+    "materialization": {
+     "authoredProfileDigest": "sha256:541aad342decb55ad5e06f01f19f11cefc86dd113d389ec968a19391d36aff6f",
+     "backend": "tangle-sandbox",
+     "effectiveProfileDigest": "sha256:eac36b022f69a17a89e1267798ec8fd744e5adc3591149ed00ad6b36a5c1b733",
+     "execution": {
+      "id": "sandbox-05cdbe0ed88b",
+      "kind": "environment"
+     },
+     "materializationPlanDigest": "sha256:f29b19343d4b911c27f9819c6abc5766ce5a7a6ab8217c45ac88adb9f5684b7a",
+     "materializer": "environment-provider-create",
+     "model": {
+      "id": "glm-5.3",
+      "status": "known"
+     },
+     "platformAttachmentsDigest": "sha256:836b906f5c3549c775cd1c57ec5bc77238390cc966bfa1bdb05a629b25d8164d",
+     "resources": {
+      "memoryMb": 16384,
+      "observedAt": "2026-11-16T22:49:53.058Z",
+      "origin": "measured",
+      "status": "known"
+     },
+     "runtime": "tangle-sandbox",
+     "status": "known"
+    },
+    "outRef": "sha256:2a9e2f1d6a5a0bb1e1aec0805fbe00e1b15e48b2b8c695b34cb8e7a97c540bdd",
+    "ownSpent": {
+     "iterations": 0,
+     "ms": 341958,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 405632,
+      "cacheWrite": 0,
+      "freshInput": 33779,
+      "input": 439411,
+      "output": 5405
+     },
+     "usd": 0,
+     "usdKnown": false
+    },
+    "ownedTreeRoot": "record-kissing-number-d11-605-20261116a/record-kissing-number-d11-605-20261116a:s0",
+    "parent": "record-kissing-number-d11-605-20261116a",
+    "runtime": "tangle-sandbox",
+    "settledAt": 1794870357509,
+    "spawnedAt": 1794869353966,
+    "spent": {
+     "iterations": 0,
+     "ms": 341958,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 405632,
+      "cacheWrite": 0,
+      "freshInput": 33779,
+      "input": 439411,
+      "output": 5405
+     },
+     "usd": 0,
+     "usdKnown": false
+    },
+    "status": "done",
+    "trace": {
+     "reason": "trace-source-unavailable",
+     "status": "unavailable"
+    }
+   },
+   {
+    "assignmentId": "key:perturb-relax",
+    "budget": {},
+    "budgetViolation": {
+     "overspent": [
+      {
+       "channel": "deadline",
+       "reserved": 13884420,
+       "spent": 900468674
+      }
+     ]
+    },
+    "executionBindings": [
+     {
+      "attemptId": "record-kissing-number-d11-605-20261116a:s1:attempt:7a1a49d2-69cd-481d-8025-f2cebd9f653c",
+      "bindingDigest": "sha256:7bca37ba439f1b59608908503b2c89c9bfa65aba32923c873fa8e10b55407cf8",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:00df0c7931d99915b2a87b4948d8ebcb81bdaf8d4ef7a65f309f29fa1c4971a4",
+      "status": "known"
+     },
+     {
+      "attemptId": "record-kissing-number-d11-605-20261116a:s1:attempt:918744dc-43d3-4df0-b931-70f31bb8cc98",
+      "bindingDigest": "sha256:cdfd6f2f74477e212b638d6a93768dfcf2edf0176d97ea54475ae25e2a6e748e",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:00df0c7931d99915b2a87b4948d8ebcb81bdaf8d4ef7a65f309f29fa1c4971a4",
+      "status": "known"
+     }
+    ],
+    "failure": {
+     "cause": "child deadline exceeded",
+     "code": "unknown",
+     "owner": "unknown"
+    },
+    "id": "record-kissing-number-d11-605-20261116a:s1",
+    "identity": {
+     "profileDigest": "sha256:4a28f5b3284f6c83913fc7e7f22cdc1f18909750442be09b89e2a042fe74ce65",
+     "taskDigest": "sha256:68f449f5eac9de2d427888fddc6e9db5eb6fb900773127830e755799b07f9353"
+    },
+    "label": "perturb-relax",
+    "materialization": {
+     "authoredProfileDigest": "sha256:4a28f5b3284f6c83913fc7e7f22cdc1f18909750442be09b89e2a042fe74ce65",
+     "backend": "tangle-sandbox",
+     "effectiveProfileDigest": "sha256:65bea8c387ed948b81ea6a5a8c0b47ce2551b46f1bdb0c7f83afdbb796e07bc5",
+     "execution": {
+      "id": "sandbox-39697e07cbe6",
+      "kind": "environment"
+     },
+     "materializationPlanDigest": "sha256:f29b19343d4b911c27f9819c6abc5766ce5a7a6ab8217c45ac88adb9f5684b7a",
+     "materializer": "environment-provider-create",
+     "model": {
+      "id": "glm-5.3",
+      "status": "known"
+     },
+     "platformAttachmentsDigest": "sha256:836b906f5c3549c775cd1c57ec5bc77238390cc966bfa1bdb05a629b25d8164d",
+     "resources": {
+      "memoryMb": 16384,
+      "observedAt": "2026-11-16T22:49:57.051Z",
+      "origin": "measured",
+      "status": "known"
+     },
+     "runtime": "tangle-sandbox",
+     "status": "known"
+    },
+    "ownSpent": {
+     "iterations": 0,
+     "ms": 900474408,
+     "tokens": {
+      "input": 0,
+      "output": 0
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "ownedTreeRoot": "record-kissing-number-d11-605-20261116a/record-kissing-number-d11-605-20261116a:s1",
+    "parent": "record-kissing-number-d11-605-20261116a",
+    "retainedExecution": "released",
+    "retainedPendingCause": "unobservable",
+    "runtime": "tangle-sandbox",
+    "settledAt": 1795769829945,
+    "spawnedAt": 1794869355534,
+    "spent": {
+     "iterations": 0,
+     "ms": 900474408,
+     "tokens": {
+      "input": 0,
+      "output": 0
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "status": "failed",
+    "trace": {
+     "reason": "execution-did-not-start",
+     "status": "unavailable"
+    }
+   },
+   {
+    "assignmentId": "key:anneal-smooth",
+    "budget": {},
+    "executionBindings": [
+     {
+      "attemptId": "record-kissing-number-d11-605-20261116a:s2:attempt:c6bac715-2dd2-4dec-b199-bda530e329ff",
+      "bindingDigest": "sha256:e8d1d3a82ae76ac716d5da04710cb22d2f3c692fcc74182bab8aebcd9fd19e8a",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:cdecc11b0c8b771a184745309e1cc3e88d03b27a5240b457561f4db83c3b9160",
+      "status": "known"
+     },
+     {
+      "attemptId": "record-kissing-number-d11-605-20261116a:s2:attempt:b5705210-92f1-4f4c-a498-8f08a75a000e",
+      "bindingDigest": "sha256:d8560cf5075539eb872b5dc3e2310f86b6bfc53b4fe271fb31abe79d535a00c8",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:cdecc11b0c8b771a184745309e1cc3e88d03b27a5240b457561f4db83c3b9160",
+      "status": "known"
+     },
+     {
+      "attemptId": "record-kissing-number-d11-605-20261116a:s2:attempt:1039b814-fadc-450f-876c-01bc35f752b0",
+      "bindingDigest": "sha256:5189a6dd708175cf781156667fc1a2cc6141a1814d50061f7779b08239944cd5",
+      "descriptor": {
+       "backend": "tangle-sandbox",
+       "coordination": true,
+       "kind": "agent-environment",
+       "transport": "provider"
+      },
+      "materializationReceiptDigest": "sha256:cdecc11b0c8b771a184745309e1cc3e88d03b27a5240b457561f4db83c3b9160",
+      "status": "known"
+     }
+    ],
+    "id": "record-kissing-number-d11-605-20261116a:s2",
+    "identity": {
+     "profileDigest": "sha256:ff53003e14f9112a8bdbadb72c8322e63ef4d56120b89447c9c9a41fdb6baa05",
+     "taskDigest": "sha256:503351ef06324d40a82f5ae0cdd276ddb9f419ead9380b357d556c899283e3c5"
+    },
+    "label": "anneal-smooth",
+    "materialization": {
+     "authoredProfileDigest": "sha256:ff53003e14f9112a8bdbadb72c8322e63ef4d56120b89447c9c9a41fdb6baa05",
+     "backend": "tangle-sandbox",
+     "effectiveProfileDigest": "sha256:3fa9c81d537c30ecbffd503e6346e4420b2234ba64a146ca949a9d7f1890b64b",
+     "execution": {
+      "id": "sandbox-bfd6364f6cd5",
+      "kind": "environment"
+     },
+     "materializationPlanDigest": "sha256:f29b19343d4b911c27f9819c6abc5766ce5a7a6ab8217c45ac88adb9f5684b7a",
+     "materializer": "environment-provider-create",
+     "model": {
+      "id": "glm-5.3",
+      "status": "known"
+     },
+     "platformAttachmentsDigest": "sha256:836b906f5c3549c775cd1c57ec5bc77238390cc966bfa1bdb05a629b25d8164d",
+     "resources": {
+      "memoryMb": 16384,
+      "observedAt": "2026-11-16T22:49:54.269Z",
+      "origin": "measured",
+      "status": "known"
+     },
+     "runtime": "tangle-sandbox",
+     "status": "known"
+    },
+    "outRef": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "ownSpent": {
+     "iterations": 0,
+     "ms": 432955,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 313024,
+      "cacheWrite": 0,
+      "freshInput": 23290,
+      "input": 336314,
+      "output": 7492
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "ownedTreeRoot": "record-kissing-number-d11-605-20261116a/record-kissing-number-d11-605-20261116a:s2",
+    "parent": "record-kissing-number-d11-605-20261116a",
+    "runtime": "tangle-sandbox",
+    "settledAt": 1794872539361,
+    "spawnedAt": 1794869356155,
+    "spent": {
+     "iterations": 0,
+     "ms": 432955,
+     "tokens": {
+      "cacheBreakdownKnown": false,
+      "cacheRead": 313024,
+      "cacheWrite": 0,
+      "freshInput": 23290,
+      "input": 336314,
+      "output": 7492
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "status": "done",
+    "trace": {
+     "reason": "trace-source-unavailable",
+     "status": "unavailable"
+    }
+   },
+   {
+    "assignmentId": "key:slp-newton",
+    "budget": {},
+    "budgetViolation": {
+     "overspent": [
+      {
+       "channel": "deadline",
+       "reserved": 13879551,
+       "spent": 900467021
+      }
+     ]
+    },
+    "failure": {
+     "cause": "child deadline exceeded",
+     "code": "unknown",
+     "owner": "unknown"
+    },
+    "id": "record-kissing-number-d11-605-20261116a:s3",
+    "identity": {
+     "profileDigest": "sha256:ccdb3b3dd27d065fbccd806d0a53113ac812c67f02a4103aed202dc0f584c112",
+     "taskDigest": "sha256:d694e44725544300fedc192a35a574b697bc5f6ba7beeb3a8188b4ab129a9fc2"
+    },
+    "label": "slp-newton",
+    "ownSpent": {
+     "iterations": 0,
+     "ms": 900476244,
+     "tokens": {
+      "input": 0,
+      "output": 0
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "ownedTreeRoot": "record-kissing-number-d11-605-20261116a/record-kissing-number-d11-605-20261116a:s3",
+    "parent": "record-kissing-number-d11-605-20261116a",
+    "retainedExecution": "released",
+    "retainedPendingCause": "unobservable",
+    "runtime": "driver",
+    "settledAt": 1795769833158,
+    "spawnedAt": 1794869356914,
+    "spent": {
+     "iterations": 0,
+     "ms": 900476244,
+     "tokens": {
+      "input": 0,
+      "output": 0
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "status": "failed",
+    "trace": {
+     "reason": "execution-did-not-start",
+     "status": "unavailable"
+    }
+   },
+   {
+    "assignmentId": "key:cluster-opt",
+    "budget": {},
+    "budgetViolation": {
+     "overspent": [
+      {
+       "channel": "deadline",
+       "reserved": 12888179,
+       "spent": 899478103
+      }
+     ]
+    },
+    "failure": {
+     "cause": "child deadline exceeded",
+     "code": "unknown",
+     "owner": "unknown"
+    },
+    "id": "record-kissing-number-d11-605-20261116a:s4",
+    "identity": {
+     "profileDigest": "sha256:a51cdad8e9d531ebb9710ab0210e3cd2cfec6d7c0dcbb024c476f948bd3f5b2e",
+     "taskDigest": "sha256:ade5f2baac2106b42a97869c6cdc4abdc927598ef74ce884aff200576928c091"
+    },
+    "label": "cluster-opt",
+    "ownSpent": {
+     "iterations": 0,
+     "ms": 900478429,
+     "tokens": {
+      "input": 0,
+      "output": 0
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "ownedTreeRoot": "record-kissing-number-d11-605-20261116a/record-kissing-number-d11-605-20261116a:s4",
+    "parent": "record-kissing-number-d11-605-20261116a",
+    "retainedExecution": "released",
+    "retainedPendingCause": "unobservable",
+    "runtime": "driver",
+    "settledAt": 1795769835613,
+    "spawnedAt": 1794869357183,
+    "spent": {
+     "iterations": 0,
+     "ms": 900478429,
+     "tokens": {
+      "input": 0,
+      "output": 0
+     },
+     "tokensKnown": false,
+     "usd": 0,
+     "usdKnown": false
+    },
+    "status": "failed",
+    "trace": {
+     "reason": "execution-did-not-start",
+     "status": "unavailable"
+    }
+   }
+  ],
+  "root": "record-kissing-number-d11-605-20261116a"
+ },
+ "usage": {
+  "observedModels": [
+   "glm-5.3"
+  ],
+  "requestedModel": {
+   "harness": "opencode",
+   "id": "glm-5.3",
+   "provider": "zai-coding-plan"
+  },
+  "tokens": {
+   "input": 2049159,
+   "output": 41366,
+   "status": "lower-bound",
+   "unknownAttempts": null
+  }
+ }
+}

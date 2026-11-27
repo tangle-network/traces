@@ -1,0 +1,7 @@
+{
+ "operationId": "spend-cap:record-kissing-number-d11-605-20261116a",
+ "at": "2026-11-27T08:57:29.152Z",
+ "source": "discovery-lab/spend-cap",
+ "reason": "operator choice: the play's registered Sandbox cap: $2.61 billed against $1.80 (Platform ledger, read at 2026-11-27T08:56:32.567Z)",
+ "operator": "discovery-lab"
+}

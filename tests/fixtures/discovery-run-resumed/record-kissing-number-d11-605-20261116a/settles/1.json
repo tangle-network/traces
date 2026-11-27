@@ -1,0 +1,8 @@
+{
+ "kind": "no-winner",
+ "reason": "cancelled",
+ "cancellationReason": "operator choice: the root's turn stream went silent (fixture text)",
+ "source": "discovery-lab/operator",
+ "operator": "op-research:boards-vs-world",
+ "operationId": "disco-cancel-0f85122f-bfbb-44af-8644-6f2b2e5a1388"
+}
