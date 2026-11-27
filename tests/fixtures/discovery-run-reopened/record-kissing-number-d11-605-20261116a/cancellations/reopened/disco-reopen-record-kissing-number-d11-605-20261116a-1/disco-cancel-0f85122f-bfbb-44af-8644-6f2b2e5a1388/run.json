@@ -1,0 +1,11 @@
+{
+ "operationId": "disco-cancel-0f85122f-bfbb-44af-8644-6f2b2e5a1388",
+ "requestedAt": "2026-11-17T01:53:54.016Z",
+ "observedAt": "2026-11-17T02:10:54.245Z",
+ "path": "observer",
+ "appliedAfterMs": 769848,
+ "reason": "operator choice: the root's turn stream went silent (fixture text)",
+ "operator": "op-research:boards-vs-world",
+ "effect": "unknown",
+ "detail": "run aborted but teardown remains unconfirmed for: record-kissing-number-d11-605-20261116a (tangle-sandbox:sandbox-69a595371d00), record-kissing-number-d11-605-20261116a:s1, record-kissing-number-d11-605-20261116a:s3, record-kissing-number-d11-605-20261116a:s4"
+}
