@@ -45,7 +45,7 @@ The first three are the rules `traces watch` runs live, so a finding means the s
 
 `--format json` prints `facts`, `packet` (the finding packet ADC's Intelligence API reads), `measures`, `conformance` and `cannotAnswer` (every question the trace cannot answer, with the reason). `measures.operating` pools the sheets' `modelCalls`, `guardRefusals` (per 1,000 tool calls) and `limitStop` (with how many terminal failures were limit stops). A `--since` sweep reads one session at a time, so a week of a busy host fits in a few gigabytes.
 `--out DIR` writes exactly `report.md` (every finding and every cannot-answer reason) and `findings.json` (the packet).
-A Runtime run directory as the ref reports its supervision tree. Your own analysts run through the SDK: `analyzeSpans(spans, { registry })` ([sdk](sdk.md)).
+A Runtime run directory, or its run id ([Refs](select.md#refs)), as the ref reports the run's own records ([behavior](behavior.md#a-runs-own-records)) and then its supervision tree. Your own analysts run through the SDK: `analyzeSpans(spans, { registry })` ([sdk](sdk.md)).
 
 ## `traces analyze --help`
 

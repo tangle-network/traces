@@ -467,6 +467,10 @@ const minutesBetween = (from: string | null, to: string | null): number | null =
   const ms = epoch(to) - epoch(from)
   return Number.isFinite(ms) ? Math.round(ms / 6000) / 10 : null
 }
+/** A wall time as a person reads it: seconds, minutes or hours. */
+const wall = (ms: number | null): string => (ms === null ? '?' : ms < 60_000 ? `${Math.round(ms / 1000)} s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 360_000) / 10} h`)
+/** Dollars to the cent, or to a hundredth of a cent below one. */
+const usd = (value: number): string => `$${value > 0 && value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`
 /** `12.5m` before the stop, or how long after it. */
 const sinceStop = (minutes: number | null): string => (minutes === null ? '?' : minutes < 0 ? `${-minutes}m after it` : `${minutes}m`)
 
@@ -531,10 +535,9 @@ export function renderRunRecordLines(record: RunRecord, quiet: readonly RunQuiet
   }
   if (parts.length > 0 && stopAt) lines.push(`quiet before the ${stopAt.what} ${hhmm(stopAt.at)}: ${parts.join('; ')}`)
   if (settle && settle.from === 'procedure-record.json') {
-    lines.push(`settle record: wall ${settle.wallMs === null ? '?' : `${Math.round(settle.wallMs / 360_000) / 10} h`}` +
-      ` · ${tokensText(settle.tokens)}` +
-      ` · compute ${settle.computeUsd === null ? 'unknown' : `$${settle.computeUsd.toFixed(2)}`}` +
-      `${settle.listUsd === null ? '' : ` · list $${settle.listUsd.toFixed(2)}`}${settle.usdBasis ? ` (${settle.usdBasis})` : ''}` +
+    lines.push(`settle record: wall ${wall(settle.wallMs)} · ${tokensText(settle.tokens)}` +
+      ` · compute ${settle.computeUsd === null ? 'unknown' : usd(settle.computeUsd)}` +
+      `${settle.listUsd === null ? '' : ` · list ${usd(settle.listUsd)}`}${settle.usdBasis ? ` (${settle.usdBasis})` : ''}` +
       `${settle.model ? ` · ${settle.model}` : ''}`)
   }
   for (const gap of record.unread) lines.push(`  unread: ${gap.record}: ${oneLine(gap.reason, 160)}`)

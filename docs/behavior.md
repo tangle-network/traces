@@ -28,6 +28,13 @@ Calibrated: implementing, verifying, exploring, communicating, idle. Not: review
 The JSON is `{ policy: { id, version, window_s }, run: { t0, t1, n_windows, spans }, nodes[], windows[], flags[], streaks[], stalls[], anomalies[], drift[], mail: { edges[], summary }, calibration }`; times are epoch seconds.
 Exit 0 when it answered, 2 when no span is a tool call (`no tool spans; categories unavailable`) or the selection cannot be read; it never exits 1, since a flag is a record, not a verdict.
 
+## A run's own records
+
+A Runtime run directory, or its run id under a run root ([Refs](select.md#refs)), adds `run_record`, which is read from the run's records rather than its spans and printed above the windows:
+who stopped it (the cancel request's time, source, operator and reason, and Runtime's acknowledgement), Runtime's terminal kind and reason, every play check (stage score, failing stage and the checker's reason) and submission, the settle record (wall, tokens with their status, compute and list dollars, model), and `quiet[]`: each node's last act (its last span other than the session span) in minutes before the stop, negative when it acted after it, beside the root stream's last event.
+The stop is the first of the stop request, Runtime's settle and the settle record; a request that came after Runtime had settled the run is named. Values are printed as recorded, with no classification; a record that is present but unreadable is listed under `unread`.
+With no tool span, a run with records still exits 0: it prints the record and `categories: null` with the reason. `src/run-record.ts` names each record it reads.
+
 The behavior report and span tree show the producer’s node label when available. Two sessions can share a display label. Use their recorded IDs to follow parent links and attribute calls.
 
 ## `traces behavior --help`
