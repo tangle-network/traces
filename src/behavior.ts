@@ -91,8 +91,11 @@ export interface BehaviorNode {
   readonly model: string | null; readonly harness: string | null; readonly start: number; readonly end: number; readonly hours: number; readonly by_cat: Readonly<Record<string, number>>
   readonly tool_calls: number; readonly failed: number; readonly fail_rate: number | null; readonly calls_per_hour: number; readonly idle_min: number; readonly streaks: number
   readonly llm_turns: number; readonly tokens_in: number | null; readonly tokens_out: number | null; readonly tokens_known_turns: number; readonly last_cat: BehaviorCategory | null
-  /** Epoch seconds the node's last own event ended, its session span excluded (a session span ends at teardown); null with no event. */
-  readonly last_act: number | null
+  /**
+   * Epoch seconds the node's last own event ended, its session span excluded (a session span ends at teardown); null with no event.
+   * Present on newly measured reports; a report saved before traces 4.0.3 omits it.
+   */
+  readonly last_act?: number | null
   /** With `actsBefore`: the end of its last own event that ended before then, such as a run's reopen; null with none. */
   readonly last_act_before?: number | null
   readonly span_id: string; readonly claims: number; readonly test_edits: number; readonly z: Record<string, number | null>
