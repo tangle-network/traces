@@ -16,6 +16,9 @@
  * - discovery-run-reopened/claim-apn-flat-balance-20261117a: the same apn run ten days later, reopened by an
  *   operator, its cancel request and Runtime result set aside, and running again; its root stream keeps the
  *   last three events before the reopen as well as its last three.
+ * - discovery-run-reopened/record-kissing-number-d11-605-20261116a: the kissing run reopened ten days later
+ *   and stopped again a minute after by its spend cap, which counted the first generation's spend; its root
+ *   never acted in the second generation, and its settle check could not start.
  */
 import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -139,6 +142,36 @@ describe('a Discovery run by its id', () => {
     expect(text.stdout).toContain('reopened 2026-11-27 08:26Z by value-audit: operator choice: continue after the stop (fixture text)')
     expect(text.stdout).toMatch(/^ {2}since: \d+ check\(s\), [1-9]\d* submission\(s\); last 2026-11-27 /mu)
     expect(text.stdout.indexOf('progress at stop')).toBeLessThan(text.stdout.indexOf('reopened 2026-11-27'))
+  }, 120_000)
+
+  it('reads each generation of a run reopened and stopped again: the first stop on a line, the second in full', async () => {
+    const at = { env: { ...env, TRACES_RUN_ROOTS: REOPENED } }
+    const json = await runCli(['behavior', KISSING, '--format', 'json'], at)
+    expect(json.code, json.stderr).toBe(0)
+    const record = JSON.parse(json.stdout).run_record
+    expect(record.generations.map((g: { generation: number; stop: { source: string } | null }) => [g.generation, g.stop?.source])).toEqual([
+      [1, 'discovery-lab/operator'], [2, 'discovery-lab/spend-cap'],
+    ])
+    // The first generation's Runtime result was set aside by the reopen; the second's is the run's result.
+    expect(record.generations[0].runtime).toEqual({ kind: 'no-winner', reason: 'cancelled', settledAt: '2026-11-17T02:11:54.352Z' })
+    expect(record.generations[0].submissions).toHaveLength(2)
+    expect(record.generations[1]).toMatchObject({ startedAt: '2026-11-27T08:56:01.277Z', submissions: [], stoppedAt: { at: '2026-11-27T08:57:29.152Z', what: 'stop request' } })
+    expect(record.stop).toMatchObject({ source: 'discovery-lab/spend-cap', from: 'cancellations/run.request.json' })
+    expect(record.endedAt).toBe('2026-11-27T08:58:22.035Z')
+
+    const text = await runCli(['behavior', KISSING], at)
+    expect(text.code, text.stderr).toBe(0)
+    const lines = text.stdout.split('\n')
+    expect(lines[0]).toMatch(/; now settling since 2026-11-27 08:58Z$/u)
+    expect(lines[1]).toBe(
+      "generation 1, pressed 2026-11-16 22:40Z: stop requested 2026-11-17 01:53Z by discovery-lab/operator (operator op-research:boards-vs-world): operator choice: the root's turn stream went silent (fixture text);" +
+      ' 3 check(s), 2 submission(s); last 2026-11-17 02:18Z settle: reached 1 of 1 (certificate) on ddb1d5e; failed: invalid construction: supply construction.json or construction.json.gz;' +
+      ' Runtime settled 2026-11-17 02:11Z no-winner/cancelled; root stream last event 2026-11-17 00:10Z',
+    )
+    expect(lines[2]).toBe('generation 2: reopened 2026-11-27 08:56Z by value-audit: operator choice: continue after the stop (fixture text)')
+    expect(lines[3]).toBe("stop: requested 2026-11-27 08:57Z by discovery-lab/spend-cap (operator discovery-lab): operator choice: the play's registered Sandbox cap: $2.61 billed against $1.80 (Platform ledger, read at 2026-11-27T08:56:32.567Z)")
+    expect(text.stdout).toMatch(/^quiet before the stop request 08:57Z: root \[[a-z]+\] no act since the reopen \(last act 2026-11-17 02:08Z\);.* Runtime root stream: no event since the reopen \(last event 2026-11-17 00:10Z tool_result, seq 21177\)$/mu)
+    expect(text.stdout).toContain("failed: the check could not start: the check's declared interpreter /home/lab/")
   }, 120_000)
 
   it('answers with the run record when no agent made a tool call', async () => {

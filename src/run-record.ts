@@ -86,6 +86,22 @@ export interface RunReopen {
   readonly reason: string | null
 }
 
+/** One generation of a run: from its press or a reopen to its stop, and the next reopen. */
+export interface RunGeneration {
+  /** From one: the press starts the first generation, each reopen the next. */
+  readonly generation: number
+  readonly startedAt: string | null
+  /** The reopen that started it; null for the first. */
+  readonly reopen: RunReopen | null
+  readonly stop: RunStopRecord | null
+  readonly stoppedAt: RunStopTime | null
+  readonly runtime: { readonly kind: string | null; readonly reason: string | null; readonly settledAt: string | null } | null
+  readonly checks: readonly RunCheckRecord[]
+  readonly submissions: RunRecord['submissions']
+  /** The root stream's last event before the next reopen, which can come before this generation started. */
+  readonly rootStream: RunRecord['rootStream']
+}
+
 export interface RunRecord {
   readonly runId: string
   /** The records read, by their path in the run directory. */
@@ -108,6 +124,8 @@ export interface RunRecord {
   /** Every cancel request, earlier generations' first, in time order. */
   readonly stops: readonly RunStopRecord[]
   readonly reopens: readonly RunReopen[]
+  /** Each generation, the first first; the fields above describe the latest one that stopped. */
+  readonly generations: readonly RunGeneration[]
   /** When the agents were stopped: the first of the stopped generation's request, Runtime settle and settle record. */
   readonly stoppedAt: RunStopTime | null
   /** When the run last ended: Runtime's settle, unless a reopen came after it; null while it is open. */
@@ -463,57 +481,75 @@ export async function readRunRecord(dir: string): Promise<RunRecord | null> {
     const evidence = isObject(row.evidence) ? row.evidence : {}
     return [{ at: at(row)!, operator: str(evidence.actor) ?? str(row.actor), reason: str(row.reason) ?? str(evidence.reason) }]
   }).sort((a, b) => epoch(a.at) - epoch(b.at))
-  // The reopens split the run into generations; the stop read is the first stop moment of the latest generation that stopped.
-  const generation = (time: string | null): number => reopens.filter((reopen) => epoch(reopen.at) <= epoch(time)).length
-  const moments: Array<RunStopTime & { readonly generation: number }> = [
-    ...stops.flatMap((stop) => (stop.requestedAt ? [{ at: stop.requestedAt, what: 'stop request' as const }] : [])),
-    ...events('runtime.settled').map((time) => ({ at: time, what: 'Runtime settle' as const })),
-    ...(settle?.at ? [{ at: settle.at, what: 'settle record' as const }] : []),
-  ].filter((moment) => Number.isFinite(epoch(moment.at))).map((moment) => ({ ...moment, generation: generation(moment.at) }))
-  const stoppedGeneration = moments.reduce((latest, moment) => Math.max(latest, moment.generation), -1)
-  const inStopped = moments.filter((moment) => moment.generation === stoppedGeneration).sort((a, b) => epoch(a.at) - epoch(b.at))
-  const stoppedAt = inStopped[0] ? { at: inStopped[0].at, what: inStopped[0].what } : null
-  const stop = [...stops].reverse().find((candidate) => candidate.requestedAt !== null && generation(candidate.requestedAt) === stoppedGeneration) ??
-    stops.find((candidate) => candidate.requestedAt === null) ?? null
-  const runtimeSettledAt = inStopped.find((moment) => moment.what === 'Runtime settle')?.at ?? null
-  const nextReopen = reopens[stoppedGeneration] ?? null
+  const submissions = lifecycle.flatMap((row) => {
+    if (row.event !== 'submit' || at(row) === null) return []
+    const evidence = isObject(row.evidence) ? row.evidence : {}
+    return [{ at: at(row)!, entity: str(row.entity), commit: str(evidence.commit) }]
+  })
+  const pressedAt = events('press')[0] ?? null
+  // The reopens split the run into generations, numbered from one: the press starts the first, each reopen the next.
+  const generationOf = (time: string | null): number => 1 + reopens.filter((reopen) => epoch(reopen.at) <= epoch(time)).length
+  const generations: RunGeneration[] = []
+  for (let n = 1; n <= reopens.length + 1; n++) {
+    const opened = n === 1 ? null : reopens[n - 2]!
+    const closedBy = reopens[n - 1] ?? null
+    const within = (time: string | null): boolean => time !== null && Number.isFinite(epoch(time)) && generationOf(time) === n
+    const stop = [...stops].reverse().find((candidate) => within(candidate.requestedAt)) ??
+      (closedBy === null ? stops.find((candidate) => candidate.requestedAt === null) ?? null : null)
+    const runtimeSettledAt = events('runtime.settled').find(within) ?? null
+    const moments: RunStopTime[] = [
+      ...(stop?.requestedAt && within(stop.requestedAt) ? [{ at: stop.requestedAt, what: 'stop request' as const }] : []),
+      ...(runtimeSettledAt ? [{ at: runtimeSettledAt, what: 'Runtime settle' as const }] : []),
+      ...(settle?.at && within(settle.at) ? [{ at: settle.at, what: 'settle record' as const }] : []),
+    ].sort((a, b) => epoch(a.at) - epoch(b.at))
+    // A reopen sets the Runtime result of the generation it ends aside as settles/<n>.json.
+    const runtimeResult = closedBy === null ? result : await reader.json(`settles/${n}.json`)
+    const last = await reader.lastLine('root-stream.jsonl', closedBy === null ? null : epoch(closedBy.at))
+    generations.push({
+      generation: n,
+      startedAt: opened?.at ?? pressedAt,
+      reopen: opened,
+      stop,
+      stoppedAt: moments[0] ?? null,
+      runtime: runtimeResult || runtimeSettledAt ? { kind: str(runtimeResult?.kind), reason: str(runtimeResult?.reason), settledAt: runtimeSettledAt } : null,
+      checks: checks.filter((check) => within(check.at)),
+      submissions: submissions.filter((submission) => within(submission.at)),
+      rootStream: last ? { lastAt: str(last.at), lastSeq: num(last.seq), lastKind: isObject(last.event) ? str(last.event.kind) ?? str(last.event.type) : null } : null,
+    })
+  }
+  if (reader.read.length === 0 && reader.unread.length === 0) return null
+  // The stop read is that of the latest generation that stopped.
+  const stopped = [...generations].reverse().find((candidate) => candidate.stoppedAt !== null) ?? null
   const lastRuntimeSettle = events('runtime.settled').at(-1) ?? null
   const lastReopen = reopens.at(-1) ?? null
   const endedAt = lastRuntimeSettle !== null && (lastReopen === null || epoch(lastRuntimeSettle) > epoch(lastReopen.at))
     ? lastRuntimeSettle
     : lastReopen === null ? settle?.at ?? null : null
-  const last = await reader.lastLine('root-stream.jsonl', nextReopen === null ? null : epoch(nextReopen.at))
-  // A reopen sets the Runtime result of the generation it ends aside, numbered from one.
-  const stoppedResult = stoppedGeneration >= 0 && stoppedGeneration < reopens.length ? await reader.json(`settles/${stoppedGeneration + 1}.json`) : result
-  if (reader.read.length === 0 && reader.unread.length === 0) return null
   const failureError = failure && isObject(failure.error) ? failure.error : null
-  const runRows = lifecycle.filter((row) => row.entity === 'run' && at(row) !== null)
-  const lastRun = runRows.at(-1)
+  const lastRun = lifecycle.filter((row) => row.entity === 'run' && at(row) !== null).at(-1)
+  const shown = stopped ?? generations[0]!
   return {
     runId: str(procedure?.runId) ?? str(failure?.runId) ?? basename(dir),
     read: [...new Set(reader.read)],
     unread: reader.unread,
-    pressedAt: events('press')[0] ?? null,
+    pressedAt,
     state: lastRun ? { value: str(lastRun.to), at: at(lastRun)! } : null,
-    runtime: stoppedResult || failure || runtimeSettledAt ? {
-      kind: stoppedResult ? str(stoppedResult.kind) : null,
-      reason: stoppedResult ? str(stoppedResult.reason) : null,
-      settledAt: runtimeSettledAt,
+    runtime: shown.runtime || failure ? {
+      kind: shown.runtime?.kind ?? null,
+      reason: shown.runtime?.reason ?? null,
+      settledAt: shown.runtime?.settledAt ?? null,
       failure: failure ? { at: str(failure.at), message: failureError ? str(failureError.message) : null } : null,
     } : null,
-    rootStream: last ? { lastAt: str(last.at), lastSeq: num(last.seq), lastKind: isObject(last.event) ? str(last.event.kind) ?? str(last.event.type) : null } : null,
-    stop,
+    rootStream: shown.rootStream,
+    stop: shown.stop,
     stops,
     reopens,
-    stoppedAt,
+    generations,
+    stoppedAt: stopped?.stoppedAt ?? null,
     endedAt,
     settle,
     checks,
-    submissions: lifecycle.flatMap((row) => {
-      if (row.event !== 'submit' || at(row) === null) return []
-      const evidence = isObject(row.evidence) ? row.evidence : {}
-      return [{ at: at(row)!, entity: str(row.entity), commit: str(evidence.commit) }]
-    }),
+    submissions,
   }
 }
 
@@ -595,6 +631,20 @@ function stopLines(stop: RunStopRecord, runtimeSettledAt: string | null, runtime
   return lines
 }
 
+/** An earlier generation on one line: how it started, its stop, its progress, Runtime's settle and the root stream. */
+function generationLine(generation: RunGeneration): string {
+  const started = generation.reopen
+    ? `reopened ${clock(generation.reopen.at)} by ${generation.reopen.operator ?? 'an unnamed operator'}`
+    : `pressed ${clock(generation.startedAt)}`
+  const { stop, stoppedAt, runtime, rootStream } = generation
+  const stopText = stop
+    ? `stop requested ${clock(stop.requestedAt)} by ${stop.source ?? 'an unnamed source'}${stop.operator ? ` (operator ${stop.operator})` : ''}: ${oneLine(stop.reason ?? 'no reason recorded', 200)}`
+    : stoppedAt ? `stopped at its ${stoppedAt.what} ${clock(stoppedAt.at)}` : 'no stop recorded'
+  const settled = runtime?.settledAt || runtime?.kind ? `Runtime settled ${runtime.settledAt ? `${clock(runtime.settledAt)} ` : ''}${runtime.kind ?? 'result not retained'}${runtime.reason ? `/${runtime.reason}` : ''}` : 'no Runtime settle'
+  const stream = rootStream?.lastAt && epoch(rootStream.lastAt) >= epoch(generation.startedAt) ? `root stream last event ${clock(rootStream.lastAt)}` : 'no root stream event in it'
+  return `generation ${generation.generation}, ${started}: ${stopText}; ${progressText(generation.checks, generation.submissions)}; ${settled}; ${stream}`
+}
+
 function progressText(checks: readonly RunCheckRecord[], submissions: RunRecord['submissions']): string {
   const last = checks.at(-1)
   return `${checks.length} check(s), ${submissions.length} submission(s)${last ? `; last ${clock(last.at)} ${last.kind}: ${checkText(last)}` : ''}`
@@ -612,17 +662,16 @@ export function renderRunRecordLines(record: RunRecord, quiet: readonly RunQuiet
     ? `; now ${record.state.value ?? 'in a state not recorded'} since ${clock(record.state.at)}`
     : ''
   lines.push(`run ${record.runId}: pressed ${clock(record.pressedAt)}; ${runtimeText}; ${settle ? `settle record ${clock(settle.at)} ${settle.status ?? 'status unknown'}` : 'no settle record'}${state}`)
-  // The stop read, with what came before it (earlier stops and reopens) and what came after (later reopens).
+  // The generations before the one read, a line each; then the one read in full; then the reopens after it.
   const stopS = stoppedAt === null ? Number.NaN : epoch(stoppedAt.at)
+  const read = record.generations.find((candidate) => candidate.stoppedAt !== null && candidate.stoppedAt.at === stoppedAt?.at) ?? record.generations[0]
   const nextReopen = record.reopens.find((reopen) => epoch(reopen.at) > stopS) ?? null
   const boundary = nextReopen === null ? Number.POSITIVE_INFINITY : epoch(nextReopen.at)
-  const earlier = [
-    ...record.stops.filter((candidate) => candidate !== stop && epoch(candidate.requestedAt) < stopS)
-      .map((candidate) => ({ at: candidate.requestedAt, text: `stop requested ${clock(candidate.requestedAt)} by ${candidate.source ?? 'an unnamed source'}: ${oneLine(candidate.reason ?? 'no reason recorded', 120)}` })),
-    ...record.reopens.filter((reopen) => epoch(reopen.at) <= stopS)
-      .map((reopen) => ({ at: reopen.at, text: `reopened ${clock(reopen.at)} by ${reopen.operator ?? 'an unnamed operator'}: ${oneLine(reopen.reason ?? 'no reason recorded', 120)}` })),
-  ].sort((a, b) => epoch(a.at) - epoch(b.at))
-  if (earlier.length > 0) lines.push(`earlier: ${earlier.map((item) => item.text).join('; ')}`)
+  for (const earlier of record.generations) {
+    if (read === undefined || earlier.generation >= read.generation) break
+    lines.push(generationLine(earlier))
+  }
+  if (read?.reopen) lines.push(`generation ${read.generation}: reopened ${clock(read.reopen.at)} by ${read.reopen.operator ?? 'an unnamed operator'}: ${oneLine(read.reopen.reason ?? 'no reason recorded', 200)}`)
   if (stop) lines.push(...stopLines(stop, runtime?.settledAt ?? null, runtime?.reason ?? null))
   else lines.push(`stop: no stop request recorded${settle?.reason ? `; settle reason: ${oneLine(settle.reason)}` : ''}`)
   if (runtime?.failure) lines.push(`  Runtime failure record ${clock(runtime.failure.at)}: ${oneLine(runtime.failure.message ?? 'no message', 200)}`)
@@ -637,13 +686,20 @@ export function renderRunRecordLines(record: RunRecord, quiet: readonly RunQuiet
     const shown = submissions.slice(-4).map((submission) => `${submission.entity ?? 'candidate'} ${hhmm(submission.at)} (${short(submission.commit)})`)
     lines.push(`  submissions: ${submissions.length > shown.length ? `${submissions.length - shown.length} earlier, then ` : ''}${shown.join(', ')}`)
   }
+  // In a generation a reopen started, an act or event before that reopen belongs to an earlier one.
+  const reopenedAt = read?.reopen ? epoch(read.reopen.at) : Number.NEGATIVE_INFINITY
   const parts = quiet.map((q) => {
-    const when = q.lastActivity === null ? 'no act recorded' : `${sinceStop(q.minutesBeforeStop)} (last act ${hhmm(q.lastActivity)})`
+    const when = q.lastActivity === null ? 'no act recorded'
+      : epoch(q.lastActivity) < reopenedAt ? `no act since the reopen (last act ${clock(q.lastActivity)})`
+        : `${sinceStop(q.minutesBeforeStop)} (last act ${hhmm(q.lastActivity)})`
     return `${q.label}${q.state ? ` [${q.state}]` : ''} ${when}`
   })
   const stream = record.rootStream
   if (stream && stoppedAt) {
-    parts.push(`Runtime root stream ${sinceStop(minutesBetween(stream.lastAt, stoppedAt.at))} (last event ${hhmm(stream.lastAt)}${stream.lastKind ? ` ${stream.lastKind}` : ''}${stream.lastSeq === null ? '' : `, seq ${stream.lastSeq}`})`)
+    const event = `${stream.lastKind ? ` ${stream.lastKind}` : ''}${stream.lastSeq === null ? '' : `, seq ${stream.lastSeq}`}`
+    parts.push(epoch(stream.lastAt) < reopenedAt
+      ? `Runtime root stream: no event since the reopen (last event ${clock(stream.lastAt)}${event})`
+      : `Runtime root stream ${sinceStop(minutesBetween(stream.lastAt, stoppedAt.at))} (last event ${hhmm(stream.lastAt)}${event})`)
   }
   if (parts.length > 0 && stoppedAt) lines.push(`quiet before the ${stoppedAt.what} ${hhmm(stoppedAt.at)}: ${parts.join('; ')}`)
   if (settle && settle.from === 'procedure-record.json') {
